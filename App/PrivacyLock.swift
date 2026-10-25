@@ -113,10 +113,20 @@ private final class PrivacyLockController: NSObject {
         isAuthenticating = true
         updateShield()
         do {
-            let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthentication,
-                localizedReason: L10n.service("services.privacy.reason", defaultValue: "Unlock your private travel documents.")
-            )
+            // Keep the context on MainActor for invalidation on older SDKs.
+            // The framework callback returns only its result across actors.
+            let success = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+                context.evaluatePolicy(
+                    .deviceOwnerAuthentication,
+                    localizedReason: L10n.service("services.privacy.reason", defaultValue: "Unlock your private travel documents.")
+                ) { @Sendable success, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: success)
+                    }
+                }
+            }
             guard generation == authenticationGeneration, !isBackgrounded else { return }
             isAuthenticating = false
             authenticationContext = nil

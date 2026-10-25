@@ -193,13 +193,23 @@ enum ReminderService {
                     // Older SDKs do not mark UNNotificationSettings Sendable.
                     // Read its value inside the callback before crossing actors.
                     await withCheckedContinuation { continuation in
-                        center.getNotificationSettings { settings in
+                        center.getNotificationSettings { @Sendable settings in
                             continuation.resume(returning: settings.authorizationStatus)
                         }
                     }
                 },
                 requestAuthorization: { try await center.requestAuthorization(options: [.alert, .sound]) },
-                add: { try await center.add($0) },
+                add: { request in
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                        center.add(request) { @Sendable error in
+                            if let error {
+                                continuation.resume(throwing: error)
+                            } else {
+                                continuation.resume()
+                            }
+                        }
+                    }
+                },
                 remove: {
                     center.removePendingNotificationRequests(withIdentifiers: $0)
                     center.removeDeliveredNotifications(withIdentifiers: $0)
