@@ -22,6 +22,26 @@ Settings entry too far below large text; the driver was simplified and the
 entry moved to the first section. Those initial failed runs are retained;
 only later passing results qualify the revised implementation.
 
+The published `ed32af0` [CI run](https://github.com/4alvit/travel-documents-ios/actions/runs/40161817332)
+was cancelled at the job's 25-minute limit. Core 38 tests, Release verification
+and its 22-file metadata scan passed. The logs show 82 hosted tests passed,
+including the three guidance tests and all seven StoreKit cases. UI logs show
+six passes, one failure, one expected opt-in skip, two incomplete guidance cases
+and ten cases not started. The uploaded result bundle was not finalized, so
+these are log-derived observations, not complete xcresult totals.
+
+The existing complete-backup-warning case crossed its 120-second allowance
+before completing its assertions around 125 seconds. English guidance crossed
+240 seconds before reaching the final return around 269 seconds. Russian
+maximum-type guidance was interrupted partway through the text. Neither a
+post-timeout attachment nor a partial walkthrough counts as a passing test.
+The follow-up test changes preserve full text/frame coverage and explicit
+cancellation checks, use larger overlapping slices for tall paragraphs, and
+allow 180 seconds for the backup-warning case and 360 for each guidance case.
+The ordinary default stays 180 seconds; the runner ceiling is 360 and the CI job
+budget is 35 minutes. These are finite validation budgets, not accepted runtime
+results; the current PR checks must establish the revised result.
+
 Use the [current PR checks](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
 for validation of the published revision. No physical-device, VoiceOver speech,
 actual external-app handoff, network-denial or live-purchase acceptance is

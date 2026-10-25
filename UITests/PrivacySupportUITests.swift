@@ -28,7 +28,7 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        executionTimeAllowance = 240
+        executionTimeAllowance = 360
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()
@@ -162,7 +162,8 @@ final class PrivacySupportUITests: XCTestCase {
         // This invocation cannot navigate or replace its List. Reuse its selected
         // container while still reading live geometry after every scroll.
         try await scrollTo(text, in: app, navigationTitle: title,
-                           description: name, preferWholeFrame: true, scrollContainer: container)
+                           description: name, preferWholeFrame: true, scrollContainer: container,
+                           readingPrefix: true)
         try require(!text.label.isEmpty, app: app, "Empty accessible text: " + name)
         let size = text.frame.size
         var covered: CGFloat = 0
@@ -180,7 +181,11 @@ final class PrivacySupportUITests: XCTestCase {
             try require(!visible.isNull && visible.height > 0, app: app, "Text left viewport: " + name)
             let first = max(0, visible.minY - frame.minY)
             let last = min(frame.height, visible.maxY - frame.minY)
-            if first <= covered + 1, last > covered {
+            // A later slice extends coverage only when it overlaps the already
+            // read region by at least 48 pt. Overshoot is repaired, never skipped.
+            let latestStart = covered > 0 ? max(0, covered - 48) : 1
+            print("TEXT_READ \(name): slice=\(slice + 1), frame=\(frame), viewport=\(viewport), first=\(first), last=\(last), covered=\(covered)")
+            if first <= latestStart, last > covered {
                 covered = last
                 attach(app, name: name + " readable slice " + String(slice + 1))
             }
@@ -189,18 +194,22 @@ final class PrivacySupportUITests: XCTestCase {
                 try require(abs(frame.minY - previous.minY) > 1,
                             app: app, "Reading drag made no progress: " + name)
             }
-            // Recover a missed prefix before advancing; preserve >=48 pt overlap.
-            let translation: CGFloat = first > covered + 1
-                ? min(viewport.height * 0.35, max(24, first - covered + 12))
-                : -min(160, max(24, visible.height - 48))
-            let start = container.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-                .withOffset(CGVector(dx: viewport.midX - containerFrame.minX,
-                                     dy: viewport.midY - containerFrame.minY))
+            // Aim for 64 pt overlap, leaving margin for the measured 48 pt
+            // requirement. The next observation still verifies the actual overlap.
+            let allowedStart = covered > 0 ? max(0, covered - 48) : 1
+            let translation: CGFloat
+            if first > allowedStart {
+                translation = max(24, first - max(0, covered - 64) + 12)
+            } else {
+                try require(visible.height > 64, app: app,
+                            "Insufficient visible text for an overlapping step: " + name)
+                translation = -(visible.height - 64)
+            }
             previous = frame
-            start.press(forDuration: 0.05,
-                        thenDragTo: start.withOffset(CGVector(dx: 0, dy: translation)),
-                        withVelocity: .slow, thenHoldForDuration: 0.2)
-            try await Task.sleep(for: .milliseconds(100))
+            try await dragWithinViewport(translation, container: container,
+                                         containerFrame: containerFrame,
+                                         viewport: viewport.insetBy(dx: 12, dy: 12),
+                                         app: app, name: name)
         }
         attach(app, name: "Incomplete text coverage — " + name)
         throw LayoutFailure(message: "Did not expose the entire text after 20 bounded slices: " + name)
@@ -216,7 +225,7 @@ final class PrivacySupportUITests: XCTestCase {
     private func scrollTo(
         _ target: XCUIElement, in app: XCUIApplication, navigationTitle: String,
         description: String, preferWholeFrame: Bool, searchDown: Bool = true,
-        scrollContainer: XCUIElement? = nil
+        scrollContainer: XCUIElement? = nil, readingPrefix: Bool = false
     ) async throws {
         guard let container = scrollContainer
             ?? activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
@@ -231,9 +240,14 @@ final class PrivacySupportUITests: XCTestCase {
             let containerFrame = container.frame
             let visibleBounds = visibleViewport(in: app, navigationTitle: navigationTitle)
                 .intersection(containerFrame)
+            let tallReadingText = readingPrefix && frame.height > visibleBounds.height
+            // Start tall text near the top with its whole prefix visible, not a
+            // 44 pt sliver at the bottom. Short text keeps full-frame acceptance.
+            let prefixAligned = frame.minY >= visibleBounds.minY + 1
+                && frame.minY <= visibleBounds.minY + 48
             if exists && target.isHittable && visiblePortion(
                 of: frame, in: visibleBounds, preferWholeFrame: preferWholeFrame
-            ) { return }
+            ) && (!tallReadingText || prefixAligned) { return }
             guard attempt < 10 else { break }
             // Keep both endpoints inside the visible List/Form. Full swipes
             // overshot partly visible rows and oscillated across the viewport.
@@ -244,6 +258,15 @@ final class PrivacySupportUITests: XCTestCase {
             }
             let hasFrame = !frame.isNull && !frame.isEmpty
                 && frame.minY.isFinite && frame.maxY.isFinite
+            if tallReadingText && hasFrame && !prefixAligned {
+                let correction = visibleBounds.minY + 24 - frame.minY
+                let distance = max(24, abs(correction))
+                try await dragWithinViewport(correction > 0 ? distance : -distance,
+                                             container: container, containerFrame: containerFrame,
+                                             viewport: viewport, app: app,
+                                             name: "Align text prefix — " + description)
+                continue
+            }
             let isNear = hasFrame && frame.intersects(viewport)
             let maximumStep = isNear ? min(160, viewport.height * 0.25)
                 : min(320, viewport.height * 0.45)
@@ -272,6 +295,31 @@ final class PrivacySupportUITests: XCTestCase {
         }
         attach(app, name: "Unreachable at maximum type — \(description)")
         throw LayoutFailure(message: "\(description) did not become safely hittable after bounded scrolling")
+    }
+
+    /// Long moves start near the corresponding edge, keeping both endpoints
+    /// within the live safe List viewport instead of dragging from its center.
+    private func dragWithinViewport(
+        _ requestedTranslation: CGFloat, container: XCUIElement,
+        containerFrame: CGRect, viewport: CGRect, app: XCUIApplication, name: String
+    ) async throws {
+        try require(!viewport.isNull && viewport.width > 24 && viewport.height > 80,
+                    app: app, "No safe text-drag viewport: " + name)
+        let distance = min(abs(requestedTranslation), viewport.height - 2)
+        let translation = requestedTranslation > 0 ? distance : -distance
+        let startPoint = CGPoint(x: viewport.midX,
+                                 y: translation > 0 ? viewport.minY + 1 : viewport.maxY - 1)
+        let endPoint = CGPoint(x: startPoint.x, y: startPoint.y + translation)
+        try require(distance > 0 && viewport.contains(startPoint) && viewport.contains(endPoint),
+                    app: app, "Text-drag endpoints leave the safe viewport: " + name)
+        let start = container.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            .withOffset(CGVector(dx: startPoint.x - containerFrame.minX,
+                                 dy: startPoint.y - containerFrame.minY))
+        print("TEXT_READ_SCROLL \(name): viewport=\(viewport), dy=\(translation)")
+        start.press(forDuration: 0.05,
+                    thenDragTo: start.withOffset(CGVector(dx: 0, dy: translation)),
+                    withVelocity: .slow, thenHoldForDuration: 0.2)
+        try await Task.sleep(for: .milliseconds(100))
     }
 
     private func activeScrollContainer(in app: XCUIApplication, navigationTitle: String) -> XCUIElement? {
