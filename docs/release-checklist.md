@@ -2,6 +2,12 @@
 
 Record exact commit, OS, Xcode and tests in release-evidence.md. Advance a release
 channel only after its evidence exists; never relabel an unverified build stable.
+Checked historical items below retain their recorded source/scope; they are not
+whole-suite acceptance of the current PR. The 25 October hosted baseline has
+four StoreKit failures; see [publication evidence](release-evidence.md#publication-baseline--25-october-2026).
+
+- [x] Public repository provisioned through Terraform; development preview in draft PR #1.
+- [ ] Fresh independent approval of the final PR push, with repository protection retained.
 
 - [x] Core tests: 38 passed, including atomic batches, cancellation, failed-restore
       preservation and exact originals.

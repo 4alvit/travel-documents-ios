@@ -419,10 +419,27 @@ final class PlatformTests: XCTestCase {
         try await session.setSimulatedError(nil, forAPI: .purchase)
         try await session.setSimulatedError(nil, forAPI: .loadProducts)
         try await session.setSimulatedError(nil, forAPI: .appStoreSync)
+        let flagsBeforeFinalReset = storeSessionFlags(session)
+        // Make the checked-in configuration the final setup mutation, after
+        // the asynchronous fault cleanup. Nil readback alone did not prevent
+        // ordinary purchases being cancelled by the hosted Xcode test server.
+        session.resetToDefaultState()
         let verificationError = await session.simulatedError(forAPI: .verification)
         let purchaseError = await session.simulatedError(forAPI: .purchase)
         let productError = await session.simulatedError(forAPI: .loadProducts)
         let syncError = await session.simulatedError(forAPI: .appStoreSync)
+        let attachment = XCTAttachment(string: [
+            "Before final configuration reset: \(flagsBeforeFinalReset)",
+            "After final configuration reset: \(storeSessionFlags(session))",
+            "verification: \(String(describing: verificationError))",
+            "purchase: \(String(describing: purchaseError))",
+            "loadProducts: \(String(describing: productError))",
+            "appStoreSync: \(String(describing: syncError))",
+            "Legacy failTransactionsEnabled is deprecated and is not authoritative for modern API fault state."
+        ].joined(separator: "\n"))
+        attachment.name = "Synthetic StoreKit configuration reset"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         guard verificationError == nil, purchaseError == nil, productError == nil, syncError == nil else {
             throw LocalStoreKitEnvironmentError(detail: "Simulated API errors remained after explicit reset.")
         }
@@ -443,6 +460,10 @@ final class PlatformTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         } while clock.now < deadline
         throw LocalStoreKitEnvironmentError(detail: "StoreKit history or entitlement records remained after explicit cleanup.")
+    }
+
+    private func storeSessionFlags(_ session: SKTestSession) -> String {
+        "askToBuy=\(session.askToBuyEnabled), interruptedPurchases=\(session.interruptedPurchasesEnabled), legacyFailTransactions=\(session.failTransactionsEnabled)"
     }
 
     private func eventually(_ condition: @MainActor () -> Bool) async throws -> Bool {

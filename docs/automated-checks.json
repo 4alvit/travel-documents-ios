@@ -1,6 +1,6 @@
 {
   "release_gate": "blocked",
-  "reason": "Cold-device StoreKit setup is not reproducible; no public CI, signed device validation or live App Store release.",
+  "reason": "Published CI baseline ddd9240 has four completed StoreKit purchase failures; cold-device routing, signed device validation and live App Store release remain unverified. See release-evidence.md and current draft PR1 checks for later commits.",
   "runs": [
     {
       "name": "existing-iphone-full",
