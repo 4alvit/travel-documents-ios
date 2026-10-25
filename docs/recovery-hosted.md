@@ -80,6 +80,24 @@ published artifacts. It does not replace the UI flows with direct service calls.
 The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
 reserved for owned cleanup, including a final 10-second receipt reserve. Each
 Xcode phase has at most 600 seconds including process stop; each test has 300.
+The initial runtime discovery and the two owned Files preparation commands
+(`launch` and the required final `terminate`) each have a 60-second command cap:
+52 seconds for work and the existing 8-second stop reserve. Other default
+command caps remain 30 seconds, including Files provider lookup. Global time,
+ownership and cancellation checks can shorten or prevent any command. Files
+termination is still attempted after an uncertain launch outcome when those
+checks permit it; a secondary termination failure cannot replace the original
+launch/provider failure. No command or Simulator creation is retried.
+
+The separate iPad guidance driver gives only its initial runtime query a
+60-second wait timeout. Its other defaults remain 30 seconds, with 1,440 seconds
+of work and 180 seconds reserved for cleanup. Each command leaves up to 7 seconds
+inside its phase budget for existing TERM/KILL handling. Stop receipts summarize
+the existing poll, group probe and signal calls in four bounded slots; an EPERM
+is a failure, and only ESRCH establishes group absence. A primary timeout remains
+visible alongside secondary stop or receipt-write errors. These are cooperative
+deadline checks between operations; they do not preempt a blocked OS syscall.
+
 The work free-space floor is 8 GiB, owned output limit 8 GiB, each xcresult limit
 2 GiB, each log stream 16 MiB and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation

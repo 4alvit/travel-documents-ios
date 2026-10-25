@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Two unchanged guidance cases on one new, owned iPad. No retries or purchases."""
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -199,35 +200,67 @@ class Driver:
         # Only handles registered immediately after our start_new_session spawn.
         # An exited leader is not proof that its descendants have stopped writing.
         require(process.pid > 0 and self.active.get(process.pid) is process, "Refusing to stop an unowned process group")
-        record = {"owned_process_group": process.pid, "started_at": self.now(), "signals": [], "group_absent": False}
+        limit = self.final_deadline if self.cleaning else self.work_deadline
+        deadline = min(limit, time.monotonic() + 7)
+        record = {"owned_process_group": process.pid, "started_at": self.now(), "signals": [], "group_absent": False,
+                  "deadline_monotonic": deadline, "observations": {}}
         self.report.setdefault("process_stops", []).append(record)
+        confirmed_stopped = False
+
+        def observed(operation, call):
+            # Four fixed slots; observe existing calls without adding probes.
+            started = time.monotonic()
+            require(started < deadline, "Owned process stop deadline expired")
+            slot = record["observations"].setdefault(operation, {"calls": 0, "first_start": started})
+            slot.update(calls=slot["calls"] + 1, last_start=started, operation=operation)
+            try:
+                value = call()
+                slot.update(outcome="returned", result=value)
+                slot.pop("exception_type", None)
+                slot.pop("errno", None)
+                return value
+            except BaseException as error:
+                slot.update(outcome="raised", exception_type=type(error).__name__, errno=getattr(error, "errno", None))
+                slot.pop("result", None)
+                raise
+            finally:
+                slot["last_finish"] = time.monotonic()
+                slot["last_duration_seconds"] = slot["last_finish"] - started
 
         def group_absent():
             if process.pid in self.confirmed_absent_groups:
                 return True  # Never signal that numeric PGID again without a new spawn.
             try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
+                observed("group_probe", lambda: os.killpg(process.pid, 0))
+            except ProcessLookupError as error:
+                if error.errno != errno.ESRCH:
+                    raise
                 self.confirmed_absent_groups.add(process.pid)
                 return True
             return False  # Permission errors remain failures, never proof of absence.
 
         def stopped():
-            leader_exited = process.poll() is not None  # Reap our child when possible.
+            nonlocal confirmed_stopped
+            if confirmed_stopped:
+                return True
+            leader_exited = observed("poll", process.poll) is not None  # Reap our child when possible.
             record["leader_returncode"] = process.returncode
             record["group_absent"] = group_absent()
-            return leader_exited and record["group_absent"]
+            confirmed_stopped = leader_exited and record["group_absent"]
+            return confirmed_stopped
 
-        # The same 5s TERM + 2s KILL bound now waits for the whole group.
-        deadline = time.monotonic() + 7
+        # Keep 5s TERM + 2s KILL inside this phase's existing global budget.
+        failure = None
         try:
             if not stopped():
                 for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
                     if not record["group_absent"]:
                         try:
-                            os.killpg(process.pid, sig)
+                            observed("signal_" + str(int(sig)), lambda: os.killpg(process.pid, sig))
                             record["signals"].append(int(sig))
-                        except ProcessLookupError:
+                        except ProcessLookupError as error:
+                            if error.errno != errno.ESRCH:
+                                raise
                             self.confirmed_absent_groups.add(process.pid)
                     phase_end = min(deadline, time.monotonic() + wait)
                     while not stopped() and time.monotonic() < phase_end:
@@ -237,25 +270,35 @@ class Driver:
             require(stopped(), "Owned process group disappearance not confirmed after SIGKILL")
             self.active.pop(process.pid)  # Retain the handle on any unconfirmed stop.
         except BaseException as error:
+            failure = error
             record["error"] = repr(error)
             raise
         finally:
             record["finished_at"] = self.now()
-            self.save()
+            try:
+                self.save()
+            except BaseException as error:
+                record["finalization_error"] = repr(error)
+                if failure is None:
+                    raise
 
     def command(self, argv, label, timeout=30, check=True, stream=False):
-        self.checkpoint()
-        deadline = min(self.final_deadline if self.cleaning else self.work_deadline, time.monotonic() + timeout)
+        limit = self.final_deadline if self.cleaning else self.work_deadline
+        deadline = min(limit - 7, time.monotonic() + timeout)
         prefix = f"commands/{len(self.report['commands']):03d}-{label}"
         stdout, stderr = self.out / (prefix + ".stdout"), self.out / (prefix + ".stderr")
         stdout.parent.mkdir(exist_ok=True)
         item = {"argv": [str(v) for v in argv], "label": label, "start": self.now(),
-                "timeout_seconds": timeout, "stdout": str(stdout.relative_to(self.out)), "stderr": str(stderr.relative_to(self.out))}
+                "timeout_seconds": timeout, "wait_deadline_monotonic": deadline, "phase_deadline_monotonic": limit,
+                "stdout": str(stdout.relative_to(self.out)), "stderr": str(stderr.relative_to(self.out))}
         self.report["commands"].append(item)
-        self.save()
-        process = None
+        process, failure, traceback = None, None, None
         try:
+            self.checkpoint()
+            self.save()
             with stdout.open("wb") as output, stderr.open("wb") as errors, stdout.open("rb") as reader, stderr.open("rb") as error_reader:
+                require(limit - time.monotonic() > 7, "Insufficient command/stop budget; cleanup reserve preserved")
+                require(time.monotonic() < deadline, label + " exceeded its finite timeout before spawn")
                 self.registering_process = True
                 try:
                     process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors, start_new_session=True)
@@ -282,13 +325,27 @@ class Driver:
                 item["returncode"] = process.returncode
         except BaseException as error:
             item["error"] = repr(error)
-            raise
+            failure, traceback = error, error.__traceback__
         finally:
-            if process is not None:
-                self.stop(process)  # Also reap descendants after the group leader exits.
-                item["returncode"] = process.returncode
-            item["finish"] = self.now()
-            self.save()
+            try:
+                if process is not None:
+                    self.stop(process)  # Also reap descendants after the group leader exits.
+            except BaseException as error:
+                item["stop_error"] = repr(error)
+                if failure is None:
+                    failure, traceback = error, error.__traceback__
+            finally:
+                if process is not None:
+                    item["returncode"] = process.returncode
+                item["finish"] = self.now()
+                try:
+                    self.save()
+                except BaseException as error:
+                    item["finalization_error"] = repr(error)
+                    if failure is None:
+                        failure, traceback = error, error.__traceback__
+        if failure is not None:
+            raise failure.with_traceback(traceback)
         require(not check or item["returncode"] == 0, label + " failed; see command stdout/stderr")
         return item["returncode"], stdout.read_text(errors="replace")
 
@@ -315,7 +372,7 @@ class Driver:
             self.command(argv, label)
         for kind in ("summary", "tests"):
             self.command(["xcrun", "xcresulttool", "help", "get", "test-results", kind], "xcresulttool-help-" + kind)
-        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"], "runtimes")
+        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"], "runtimes", timeout=60)
         dtypes = self.json_command(["xcrun", "simctl", "list", "devicetypes", "--json"], "device-types")
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
         pair = choose_pair(runtimes, dtypes, architecture)
