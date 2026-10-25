@@ -189,7 +189,15 @@ enum ReminderService {
         static var system: Self {
             let center = UNUserNotificationCenter.current()
             return Self(
-                authorizationStatus: { await center.notificationSettings().authorizationStatus },
+                authorizationStatus: {
+                    // Older SDKs do not mark UNNotificationSettings Sendable.
+                    // Read its value inside the callback before crossing actors.
+                    await withCheckedContinuation { continuation in
+                        center.getNotificationSettings { settings in
+                            continuation.resume(returning: settings.authorizationStatus)
+                        }
+                    }
+                },
                 requestAuthorization: { try await center.requestAuthorization(options: [.alert, .sound]) },
                 add: { try await center.add($0) },
                 remove: {
