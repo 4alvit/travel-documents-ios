@@ -4,7 +4,14 @@ These are unedited XCUITest captures of the development preview, using only
 fictional trips, people and generated documents. They are review evidence,
 not an App Store submission or proof of physical-device authentication.
 
-## Current TripDocket brand
+## Current App Store candidates
+
+The reviewed [English/Russian iPhone and 13-inch iPad set](app-store/README.md)
+uses application source `0e669da95eb4d241d2141c1456a94d4f9d91ae25`.
+It includes no paywall or local test price. See its manifest for raw image hashes,
+device dimensions, source and rebuilt Debug binary identities.
+
+## Earlier TripDocket evidence
 
 Source `f3b56885a1bd7ae721764389a2a7490778d5a31b`, existing iPhone 17 Pro
 Simulator, iOS 27.0 (24A434), 21 October 2026. All three selected nonpayment

@@ -1,0 +1,140 @@
+{
+  "verified_local_date": "2026-10-24",
+  "timezone": "America/Los_Angeles",
+  "sources": {
+    "app_information": {
+      "url": "https://developer.apple.com/help/app-store-connect/reference/app-information/app-information/",
+      "supports": [
+        "App name 2–30 characters",
+        "Subtitle up to 30 characters",
+        "Privacy policy URL"
+      ]
+    },
+    "platform_version_information": {
+      "url": "https://developer.apple.com/help/app-store-connect/reference/app-information/platform-version-information/",
+      "supports": [
+        "Promotional text up to 170 characters",
+        "Plain-text description up to 4000 characters",
+        "Keywords up to 100 bytes; each keyword longer than two characters",
+        "App Review Notes up to 4000 bytes",
+        "Support URL must reach actual contact information",
+        "Manual release after approval is an available setting"
+      ]
+    },
+    "iap_information": {
+      "url": "https://developer.apple.com/help/app-store-connect/reference/in-app-purchases-and-subscriptions/in-app-purchase-information/",
+      "supports": [
+        "IAP display name 2–30 characters",
+        "IAP description up to 45 characters",
+        "IAP review notes up to 4000 characters",
+        "Internal reference name up to 64 characters; product ID up to 100"
+      ]
+    },
+    "iap_promotion": {
+      "url": "https://developer.apple.com/app-store/promoting-in-app-purchases/",
+      "supports": [
+        "Confirms IAP display name 30 and description 45 characters"
+      ]
+    },
+    "product_page": {
+      "url": "https://developer.apple.com/app-store/product-page/",
+      "supports": [
+        "General product-page guidance"
+      ],
+      "discrepancy": "This overview currently says IAP 35/55. Use the stricter actual App Store Connect field reference 30/45, also confirmed by the dedicated IAP promotion page."
+    },
+    "app_privacy": {
+      "url": "https://developer.apple.com/help/app-store-connect/reference/app-information/app-privacy/",
+      "supports": [
+        "Privacy policy URL required for all apps"
+      ]
+    },
+    "privacy_details": {
+      "url": "https://developer.apple.com/app-store/app-privacy-details/",
+      "supports": [
+        "App Privacy answers must cover actual app and embedded third-party data practices; answers are not inferred only from an empty privacy manifest"
+      ]
+    },
+    "review_guidelines": {
+      "url": "https://developer.apple.com/app-store/review/guidelines/",
+      "supports": [
+        "2.3: accurate metadata and clear paid features",
+        "5.1.1(i): privacy link in metadata and easily accessible in app; policy covers retention/deletion"
+      ]
+    },
+    "review_preparation": {
+      "url": "https://developer.apple.com/app-store/review/",
+      "supports": [
+        "Functional support/privacy links and no unfinished placeholder content at submission"
+      ]
+    },
+    "submit_iap": {
+      "url": "https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase",
+      "supports": [
+        "First non-consumable must be submitted with a new app version"
+      ]
+    },
+    "iap_setup": {
+      "url": "https://developer.apple.com/help/app-store-connect/configure-in-app-purchase-settings/overview-for-configuring-in-app-purchases/",
+      "supports": [
+        "Non-consumable is bought once and does not expire or decrease with use"
+      ]
+    }
+  },
+  "limits": {
+    "name": {
+      "min": 2,
+      "max": 30,
+      "unit": "characters",
+      "source": "app_information"
+    },
+    "subtitle": {
+      "max": 30,
+      "unit": "characters",
+      "source": "app_information"
+    },
+    "promotional_text": {
+      "max": 170,
+      "unit": "characters",
+      "source": "platform_version_information"
+    },
+    "keywords": {
+      "max": 100,
+      "unit": "utf8_bytes",
+      "per_keyword_min_characters": 3,
+      "source": "platform_version_information"
+    },
+    "description": {
+      "max": 4000,
+      "unit": "characters",
+      "source": "platform_version_information"
+    },
+    "app_review_notes": {
+      "max": 4000,
+      "unit": "utf8_bytes",
+      "source": "platform_version_information"
+    },
+    "iap_name": {
+      "min": 2,
+      "max": 30,
+      "unit": "characters",
+      "source": "iap_information"
+    },
+    "iap_description": {
+      "max": 45,
+      "unit": "characters",
+      "source": "iap_information"
+    },
+    "iap_review_notes": {
+      "max": 4000,
+      "unit": "characters",
+      "source": "iap_information"
+    }
+  },
+  "counting": "NFC plain text. Report Unicode code points, UTF-16 code units and UTF-8 bytes. Drafts use no combining sequences, emoji, ZWJ or supplementary code points; character-count ambiguity therefore does not affect these limits. Final App Store Connect validation remains authoritative.",
+  "notes": [
+    "All text lengths include spaces and punctuation. Notes TXT file counts include their final newline.",
+    "StoreKit configuration locales en_US/ru_RU are not copied as authoring locale IDs; storefront drafts are labeled en-US and ru.",
+    "Review notes are one nonlocalized field: English is the proposed submitted variant; Russian is a translation/review alternative, not a second field to concatenate."
+  ]
+}

@@ -1,5 +1,8 @@
 # TripDocket support
 
+Expanded support drafts: [English](app-store/drafts/support-en-US.md) · [Russian](app-store/drafts/support-ru.md).
+These drafts still need real owner/contact details before App Store submission.
+
 For reproducible app problems use https://github.com/4alvit/travel-documents-ios/issues.
 Include the version, device/OS and
 steps with fictional data. Never attach passports, tickets, purchase receipts

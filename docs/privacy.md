@@ -1,5 +1,8 @@
 # TripDocket privacy policy
 
+Expanded privacy drafts: [English](app-store/drafts/privacy-en-US.md) · [Russian](app-store/drafts/privacy-ru.md).
+These drafts still need real owner/contact details before App Store submission.
+
 Effective for the development preview, 20 October 2026.
 
 TripDocket processes imported/scanned documents and OCR on the device. There is
