@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = 'e7b06d9622761293460be608c6d004c1cb3220e5b3acbd99fea570564116ad7e'
+HELPER_SHA = 'ce820e763ce57b0c7efb1ce510b0b24e736bf4df85d80e5fa359fed8d86dad65'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
@@ -184,7 +184,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
 
 
 class Recovery:
-    # Exact reviewed implementations: no new subprocess or signal framework.
+    # Shared owned-process primitives, including bounded operation diagnostics.
     command = base.Smoke.command
     pump = base.Smoke.pump
     stop = base.Smoke.stop

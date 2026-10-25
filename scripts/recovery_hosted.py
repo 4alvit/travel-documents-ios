@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'b118df958ac085b84d076df85cecd8bef619f41c5bfffb233b2b8457ecb37240'
+CORE_SHA = '8a3ed32c74f9e1957f82885a9e6affc8a01dd7af59ceeaf0ea444eaf04c7ff0c'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -143,6 +143,11 @@ def capability_result(normal, failed, observations, elapsed, actual):
                 'Capability group cleanup incomplete')
     require(failed.get('error')=="RuntimeError('Command timeout')"
             and failed['stop'].get('signals')==[int(signal.SIGTERM),int(signal.SIGKILL)],'Expected bounded timeout not observed')
+    for sig in [signal.SIGTERM,signal.SIGKILL]:
+        row=failed.get('process_observations',{}).get('stop.signal_'+str(int(sig)),{})
+        require(row.get('calls')==1 and row.get('outcome')=='returned'
+                and row.get('result')=='syscall_returned',
+                'Capability signal syscall outcome not established')
     require(0<=elapsed<=60 and 0<=failed['finish']-failed['start']<=20,'Capability exceeded cap')
     normal_rows,failed_rows=observations
     require(len(normal_rows)==1 and normal_rows[0]['kind']=='normal'
@@ -213,11 +218,23 @@ class HostedRecovery(core.Recovery):
         self.host['developer_dir']=str(developer);self.ops.env['DEVELOPER_DIR']=str(developer)
         version=self.command('xcode-version',[str(developer/'usr/bin/xcodebuild'),'-version'],20).strip()
         match=re.fullmatch(r'Xcode ([0-9]+)(?:\.[0-9]+){0,2}\nBuild version ([A-Za-z0-9]+)',version)
-        require(match and int(match[1])>=self.profile['xcode_minimum_major'],'Unsupported Xcode')
+        require(len(version)<=128 and match and int(match[1])>=self.profile['xcode_minimum_major'],'Unsupported Xcode')
         sdk=self.command('sdk-version',['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version'],20).strip()
         sdk_path=Path(self.command('sdk-path',['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-path'],20).strip()).resolve(strict=True)
         toolchain_paths(developer,sdk_path)
-        inventory=json.loads(self.sim('profile-runtimes','list','runtimes','--json'))
+        # Publish only bounded toolchain facts in the existing receipt allowlist.
+        # The first runtime query gets 52s work + 8s stop inside the same global
+        # budget. This is a finite diagnostic hypothesis, not a proven OS fix.
+        discovery={'xcode_version':version,'developer_dir':str(developer),
+                   'sdk_version':sdk if len(sdk)<=32 and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}',sdk) else 'INVALID_FORMAT',
+                   'sdk_path':str(sdk_path),'runtime_inventory_cap_seconds':60,
+                   'runtime_inventory_status':'pending'}
+        self.report['profile_discovery']=discovery
+        raw_inventory=self.sim('profile-runtimes','list','runtimes','--json',cap=60)
+        discovery.update(runtime_inventory_status='returned',
+                         runtime_inventory_utf8_bytes=len(raw_inventory.encode()),
+                         runtime_inventory_sha256=hashlib.sha256(raw_inventory.encode()).hexdigest())
+        inventory=json.loads(raw_inventory)
         runtime=select_runtime(sdk,inventory,self.profile)
         self.plan['runtime']=runtime['identifier'];self.intent['runtime']=runtime['identifier']
         paths=[Path(self.host['python']),Path('/usr/bin/git'),Path('/usr/bin/xcrun'),Path('/bin/ps'),
