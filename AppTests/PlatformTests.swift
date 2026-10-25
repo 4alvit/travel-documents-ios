@@ -155,128 +155,132 @@ final class PlatformTests: XCTestCase {
     }
 
     func testVerifiedPurchaseAndRestoreFromLocalHistory() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        let manager = PurchaseManager()
-        await manager.load()
-        XCTAssertFalse(manager.isPro)
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        await manager.purchase()
-        let purchased = try await eventually { manager.isPro }
-        XCTAssertTrue(purchased, diagnostics(manager))
-        XCTAssertFalse(manager.isBusy)
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            XCTAssertFalse(manager.isPro)
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            await manager.purchase()
+            let purchased = try await eventually { manager.isPro }
+            XCTAssertTrue(purchased, diagnostics(manager))
+            XCTAssertFalse(manager.isBusy)
 
-        // A new manager has no app-owned boolean cache to rely on.
-        let restored = PurchaseManager()
-        await restored.load()
-        XCTAssertTrue(restored.isPro, "Verified local StoreKit history must restore access on launch. \(diagnostics(restored))")
-        try await waitForLocalEntitlement(present: true)
-        await restored.restore()
-        XCTAssertTrue(restored.isPro, diagnostics(restored))
-        XCTAssertFalse(restored.isBusy)
+            // A new manager has no app-owned boolean cache to rely on.
+            let restored = PurchaseManager()
+            await restored.load()
+            XCTAssertTrue(restored.isPro, "Verified local StoreKit history must restore access on launch. \(diagnostics(restored))")
+            try await waitForLocalEntitlement(present: true)
+            await restored.restore()
+            XCTAssertTrue(restored.isPro, diagnostics(restored))
+            XCTAssertFalse(restored.isBusy)
+        }
     }
 
     func testRefundRevokesProThroughTransactionUpdates() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        await manager.purchase()
-        let purchased = try await eventually { manager.isPro }
-        XCTAssertTrue(purchased, diagnostics(manager))
-        let transaction = try XCTUnwrap(session.allTransactions().first(where: {
-            $0.productIdentifier == PurchaseManager.productID
-        }), diagnostics(manager))
-        try session.refundTransaction(identifier: transaction.identifier)
-        // Do not call load(): this must be delivered by the live listener.
-        let revoked = try await eventually { !manager.isPro }
-        XCTAssertTrue(revoked, "A refund must revoke access without relaunching. \(diagnostics(manager))")
-        let relaunched = PurchaseManager()
-        await relaunched.load()
-        XCTAssertFalse(relaunched.isPro)
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            await manager.purchase()
+            let purchased = try await eventually { manager.isPro }
+            XCTAssertTrue(purchased, diagnostics(manager))
+            let transaction = try XCTUnwrap(session.allTransactions().first(where: {
+                $0.productIdentifier == PurchaseManager.productID
+            }), diagnostics(manager))
+            try session.refundTransaction(identifier: transaction.identifier)
+            // Do not call load(): this must be delivered by the live listener.
+            let revoked = try await eventually { !manager.isPro }
+            XCTAssertTrue(revoked, "A refund must revoke access without relaunching. \(diagnostics(manager))")
+            let relaunched = PurchaseManager()
+            await relaunched.load()
+            XCTAssertFalse(relaunched.isPro)
+        }
     }
 
     func testAskToBuyStaysFreeUntilApproved() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        session.askToBuyEnabled = true
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        await manager.purchase()
-        XCTAssertFalse(manager.isPro)
-        XCTAssertFalse(manager.isBusy)
-        XCTAssertTrue(manager.statusMessage?.contains("awaiting approval") == true, diagnostics(manager))
-        let pending = try XCTUnwrap(session.allTransactions().first(where: \.pendingAskToBuyConfirmation), diagnostics(manager))
-        try session.approveAskToBuyTransaction(identifier: pending.identifier)
-        let approved = try await eventually { manager.isPro }
-        XCTAssertTrue(approved, "Approval must unlock through transaction updates. \(diagnostics(manager))")
+        try await withStoreSession { session in
+            session.askToBuyEnabled = true
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            await manager.purchase()
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+            XCTAssertTrue(manager.statusMessage?.contains("awaiting approval") == true, diagnostics(manager))
+            let pending = try XCTUnwrap(session.allTransactions().first(where: \.pendingAskToBuyConfirmation), diagnostics(manager))
+            let approvalStarted = Date()
+            try session.approveAskToBuyTransaction(identifier: pending.identifier)
+            let approvalReturned = Date()
+            let approved = try await eventually { manager.isPro }
+            XCTAssertTrue(approved, "Approval must unlock through transaction updates. \(diagnostics(manager))")
+            await attachStoreSnapshot(session, manager: manager, phase:
+                "Ask to Buy: pendingID=\(pending.identifier), approvalStarted=\(approvalStarted.timeIntervalSince1970), approvalReturned=\(approvalReturned.timeIntervalSince1970), checkpoint=\(Date().timeIntervalSince1970), observedApproved=\(approved)")
+        }
     }
 
     func testDeclinedAskToBuyDoesNotGrantAccess() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        session.askToBuyEnabled = true
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        await manager.purchase()
-        let pending = try XCTUnwrap(session.allTransactions().first(where: \.pendingAskToBuyConfirmation), diagnostics(manager))
-        try session.declineAskToBuyTransaction(identifier: pending.identifier)
-        await manager.load()
-        XCTAssertFalse(manager.isPro)
+        try await withStoreSession { session in
+            session.askToBuyEnabled = true
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            await manager.purchase()
+            let pending = try XCTUnwrap(session.allTransactions().first(where: \.pendingAskToBuyConfirmation), diagnostics(manager))
+            try session.declineAskToBuyTransaction(identifier: pending.identifier)
+            await manager.load()
+            XCTAssertFalse(manager.isPro)
+        }
     }
 
     func testPurchaseNetworkFailureReturnsToIdleWithoutGrantingPro() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        // Exercise an API failure here. Actual user cancellation is covered by
-        // PurchaseUITests through the system payment sheet.
-        try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
-        await manager.purchase()
-        XCTAssertFalse(manager.isPro)
-        XCTAssertFalse(manager.isBusy)
-        XCTAssertTrue(manager.statusMessage?.contains("purchase could not be completed") == true, diagnostics(manager))
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            // Exercise an API failure here. Actual user cancellation is covered by
+            // PurchaseUITests through the system payment sheet.
+            try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
+            await manager.purchase()
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+            XCTAssertTrue(manager.statusMessage?.contains("purchase could not be completed") == true, diagnostics(manager))
+        }
     }
 
     func testUnverifiedPurchaseDoesNotGrantPro() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        try await session.setSimulatedError(.verification(.invalidSignature), forAPI: .verification)
-        await manager.purchase()
-        XCTAssertFalse(manager.isPro)
-        XCTAssertFalse(manager.isBusy)
-        XCTAssertTrue(manager.statusMessage?.localizedCaseInsensitiveContains("verif") == true, diagnostics(manager))
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            try await session.setSimulatedError(.verification(.invalidSignature), forAPI: .verification)
+            await manager.purchase()
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+            XCTAssertTrue(manager.statusMessage?.localizedCaseInsensitiveContains("verif") == true, diagnostics(manager))
+        }
     }
 
     func testPriceAndSyncNetworkErrorsDoNotEraseVerifiedEntitlement() async throws {
-        let session = try await makeStoreSession()
-        defer { reset(session) }
-        let manager = PurchaseManager()
-        await manager.load()
-        _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-        await manager.purchase()
-        let purchased = try await eventually { manager.isPro }
-        XCTAssertTrue(purchased, diagnostics(manager))
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            await manager.purchase()
+            let purchased = try await eventually { manager.isPro }
+            XCTAssertTrue(purchased, diagnostics(manager))
 
-        // This simulates the API failures, not physical airplane mode.
-        try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .loadProducts)
-        let relaunched = PurchaseManager()
-        await relaunched.load()
-        XCTAssertTrue(relaunched.isPro, "Price fetch failure cannot revoke a verified cached transaction. \(diagnostics(relaunched))")
-        XCTAssertNil(relaunched.displayPrice, "Never invent a fallback price")
-        try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .appStoreSync)
-        try await waitForLocalEntitlement(present: true)
-        await relaunched.restore()
-        XCTAssertTrue(relaunched.isPro, diagnostics(relaunched))
-        XCTAssertFalse(relaunched.isBusy)
+            // This simulates the API failures, not physical airplane mode.
+            try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .loadProducts)
+            let relaunched = PurchaseManager()
+            await relaunched.load()
+            XCTAssertTrue(relaunched.isPro, "Price fetch failure cannot revoke a verified cached transaction. \(diagnostics(relaunched))")
+            XCTAssertNil(relaunched.displayPrice, "Never invent a fallback price")
+            try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .appStoreSync)
+            try await waitForLocalEntitlement(present: true)
+            await relaunched.restore()
+            XCTAssertTrue(relaunched.isPro, diagnostics(relaunched))
+            XCTAssertFalse(relaunched.isBusy)
+        }
     }
 
     private func makeStoreSession() async throws -> SKTestSession {
@@ -285,10 +289,9 @@ final class PlatformTests: XCTestCase {
             "Add App/Tripfolio.storekit to TripfolioTests Copy Bundle Resources"
         )
         let session = try SKTestSession(contentsOf: configuration)
-        session.resetToDefaultState()
-        session.clearTransactions()
-        session.disableDialogs = true
         do {
+            try await reset(session)
+            session.disableDialogs = true
             // Exercise the real local StoreKit server before the app under test.
             // SKTestSession construction alone does not prove that the host's
             // StoreKit APIs are connected to that same environment.
@@ -305,7 +308,8 @@ final class PlatformTests: XCTestCase {
             try await waitForLocalEntitlement(present: false)
             return session
         } catch {
-            reset(session)
+            do { try await reset(session) }
+            catch { XCTFail("StoreKit preflight cleanup failed: \(error)") }
             if let environmentError = error as? LocalStoreKitEnvironmentError { throw environmentError }
             throw LocalStoreKitEnvironmentError(detail: "Synthetic StoreKit purchase failed: \(error)")
         }
@@ -326,7 +330,7 @@ final class PlatformTests: XCTestCase {
                 case .unverified(let unverified, let error):
                     guard unverified.productID == PurchaseManager.productID else { continue }
                     throw LocalStoreKitEnvironmentError(detail:
-                        "The entitlement stream returned an unverified test product in \(unverified.environment.rawValue): \(error)")
+                        "The entitlement stream returned unverified transaction \(unverified.id), expected \(transactionID.map(String.init) ?? "any"), in \(unverified.environment.rawValue): \(error)")
                 }
                 guard transaction.productID == PurchaseManager.productID else { continue }
                 guard transaction.environment == .xcode else {
@@ -361,9 +365,84 @@ final class PlatformTests: XCTestCase {
         "isPro=\(manager.isPro), isBusy=\(manager.isBusy), displayPrice=\(manager.displayPrice ?? "nil"), statusMessage=\(manager.statusMessage ?? "nil")"
     }
 
-    private func reset(_ session: SKTestSession) {
-        session.clearTransactions()
+    /// Observe synthetic test state after the acceptance checkpoint; never refresh
+    /// the manager or grant access to make a failed live-update assertion pass.
+    private func attachStoreSnapshot(_ session: SKTestSession, manager: PurchaseManager, phase: String) async {
+        var lines = [phase, "manager at checkpoint: \(diagnostics(manager))"]
+        for transaction in session.allTransactions() where transaction.productIdentifier == PurchaseManager.productID {
+            lines.append("session: id=\(transaction.identifier), pending=\(transaction.pendingAskToBuyConfirmation)")
+        }
+        var count = 0
+        for await result in StoreKit.Transaction.currentEntitlements {
+            let transaction: StoreKit.Transaction
+            let verification: String
+            switch result {
+            case .verified(let value):
+                transaction = value
+                verification = "verified"
+            case .unverified(let value, let error):
+                transaction = value
+                verification = "unverified: \(error)"
+            }
+            guard transaction.productID == PurchaseManager.productID else { continue }
+            count += 1
+            lines.append("entitlement: id=\(transaction.id), environment=\(transaction.environment.rawValue), verification=\(verification), revoked=\(transaction.revocationDate != nil)")
+        }
+        lines.append("matching entitlement count: \(count)")
+        lines.append("injected verification: \(String(describing: await session.simulatedError(forAPI: .verification)))")
+        lines.append("injected purchase: \(String(describing: await session.simulatedError(forAPI: .purchase)))")
+        lines.append("injected loadProducts: \(String(describing: await session.simulatedError(forAPI: .loadProducts)))")
+        lines.append("injected appStoreSync: \(String(describing: await session.simulatedError(forAPI: .appStoreSync)))")
+        lines.append("snapshot finished: \(Date().timeIntervalSince1970); manager: \(diagnostics(manager))")
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
+        attachment.name = "Synthetic StoreKit state after acceptance checkpoint"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func withStoreSession(_ body: @MainActor (SKTestSession) async throws -> Void) async throws {
+        let session = try await makeStoreSession()
+        do {
+            try await body(session)
+        } catch {
+            do { try await reset(session) }
+            catch { XCTFail("StoreKit scenario cleanup failed: \(error)") }
+            throw error
+        }
+        try await reset(session)
+    }
+
+    private func reset(_ session: SKTestSession) async throws {
         session.resetToDefaultState()
+        // Error injection is asynchronous and must not leak into the next case.
+        try await session.setSimulatedError(nil, forAPI: .verification)
+        try await session.setSimulatedError(nil, forAPI: .purchase)
+        try await session.setSimulatedError(nil, forAPI: .loadProducts)
+        try await session.setSimulatedError(nil, forAPI: .appStoreSync)
+        let verificationError = await session.simulatedError(forAPI: .verification)
+        let purchaseError = await session.simulatedError(forAPI: .purchase)
+        let productError = await session.simulatedError(forAPI: .loadProducts)
+        let syncError = await session.simulatedError(forAPI: .appStoreSync)
+        guard verificationError == nil, purchaseError == nil, productError == nil, syncError == nil else {
+            throw LocalStoreKitEnvironmentError(detail: "Simulated API errors remained after explicit reset.")
+        }
+        session.clearTransactions()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        repeat {
+            var hasEntitlementRecord = false
+            for await result in StoreKit.Transaction.currentEntitlements {
+                // An unverified record is still stale state to remove, never a grant.
+                switch result {
+                case .verified(let transaction), .unverified(let transaction, _):
+                    if transaction.productID == PurchaseManager.productID { hasEntitlementRecord = true }
+                }
+            }
+            if session.allTransactions().isEmpty && !hasEntitlementRecord { return }
+            if clock.now >= deadline { break }
+            try await Task.sleep(for: .milliseconds(50))
+        } while clock.now < deadline
+        throw LocalStoreKitEnvironmentError(detail: "StoreKit history or entitlement records remained after explicit cleanup.")
     }
 
     private func eventually(_ condition: @MainActor () -> Bool) async throws -> Bool {
