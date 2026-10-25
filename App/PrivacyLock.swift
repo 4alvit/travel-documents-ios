@@ -44,6 +44,8 @@ private final class PrivacyLockController: NSObject {
     private(set) var message: String?
 
     @ObservationIgnored private weak var scene: UIWindowScene?
+    @ObservationIgnored private weak var contentWindow: UIWindow?
+    @ObservationIgnored private var contentAccessibilityWasHidden = false
     @ObservationIgnored private var shield: UIWindow?
     @ObservationIgnored private var shieldController: UIHostingController<PrivacyLockScreen>?
     @ObservationIgnored private var authenticationContext: LAContext?
@@ -66,8 +68,28 @@ private final class PrivacyLockController: NSObject {
         center.addObserver(self, selector: #selector(lockNow), name: .tripfolioLockNow, object: nil)
     }
 
-    func attach(to newScene: UIWindowScene) {
-        guard scene !== newScene else { return }
+    func attach(to newWindow: UIWindow?) {
+        if contentWindow !== newWindow {
+            contentWindow?.accessibilityElementsHidden = contentAccessibilityWasHidden
+            contentWindow = newWindow
+            contentAccessibilityWasHidden = newWindow?.accessibilityElementsHidden ?? false
+        }
+        guard let newScene = newWindow?.windowScene else {
+            invalidateAuthentication()
+            isUnlocked = false
+            isSceneActive = false
+            isBackgrounded = true
+            shouldAutomaticallyAuthenticate = true
+            scene = nil
+            shield?.isHidden = true
+            shield = nil
+            shieldController = nil
+            return
+        }
+        guard scene !== newScene else {
+            updateShield()
+            return
+        }
         scene = newScene
         isSceneActive = newScene.activationState == .foregroundActive
         isBackgrounded = newScene.activationState == .background
@@ -207,9 +229,13 @@ private final class PrivacyLockController: NSObject {
 
     private func updateShield() {
         shieldController?.rootView = screen()
+        let allowsContent = isSceneActive && isUnlocked
+        // Native presentations such as Quick Look are siblings of SwiftUI's
+        // root. Hide their accessibility tree along with the covered window.
+        contentWindow?.accessibilityElementsHidden = allowsContent ? contentAccessibilityWasHidden : true
         // Keep the native cover over all document sheets while locked. It is
         // opaque even before SwiftUI finishes rendering its text and controls.
-        shield?.isHidden = isSceneActive && isUnlocked
+        shield?.isHidden = allowsContent
     }
 }
 
@@ -219,18 +245,23 @@ private struct PrivacySceneAnchor: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SceneAnchorView {
         let view = SceneAnchorView()
-        view.didAttach = { [weak lock] scene in lock?.attach(to: scene) }
+        view.didAttach = { [weak lock] window in lock?.attach(to: window) }
         return view
     }
 
     func updateUIView(_ uiView: SceneAnchorView, context: Context) {}
 
+    static func dismantleUIView(_ uiView: SceneAnchorView, coordinator: ()) {
+        uiView.didAttach?(nil)
+        uiView.didAttach = nil
+    }
+
     final class SceneAnchorView: UIView {
-        var didAttach: ((UIWindowScene) -> Void)?
+        var didAttach: ((UIWindow?) -> Void)?
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            if let scene = window?.windowScene { didAttach?(scene) }
+            didAttach?(window)
         }
     }
 }

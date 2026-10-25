@@ -225,6 +225,10 @@ final class PrivacyTransitionUITests: XCTestCase {
         let end = origin.withOffset(CGVector(dx: app.frame.width / 2, dy: app.frame.height * 0.45))
         start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 1)
         try await attachSettled(app, name: "\(checkpoint) — App-switcher gesture — requires visual review")
+        try await require("Inactive privacy cover is absent: \(checkpoint)", app: app) {
+            self.lockTitle(in: app).exists
+        }
+        try assertPrivate(app, checkpoint: "\(checkpoint) — inactive covered window")
         // Home supplies the actual background transition even if the attempt
         // above did not enter the switcher on this device or system version.
         XCUIDevice.shared.press(.home)
