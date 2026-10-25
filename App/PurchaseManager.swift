@@ -15,6 +15,10 @@ final class PurchaseManager {
     private(set) var statusMessage: String?
     private(set) var isBusy = false
 
+    #if DEBUG && targetEnvironment(simulator)
+    private(set) var purchaseDiagnostics = PurchaseDiagnostics()
+    #endif
+
     @ObservationIgnored private var product: Product?
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
     @ObservationIgnored private var entitlementRevision: UInt64 = 0
@@ -38,54 +42,89 @@ final class PurchaseManager {
         await refreshEntitlements()
         guard !isBusy else { return }
         isBusy = true
+        #if DEBUG && targetEnvironment(simulator)
+        purchaseDiagnostics.beginCatalog()
+        #endif
         defer { isBusy = false }
         do {
             try await loadProduct()
         } catch {
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.recordCatalog(error)
+            #endif
             statusMessage = L10n.service("services.purchase.priceUnavailable", defaultValue: "The App Store price is unavailable. Try again when connected. Your existing documents remain available.")
         }
     }
 
-    func purchase() async {
-        guard !isBusy else { return }
+    @discardableResult
+    func purchase() async -> PurchaseFailure? {
+        guard !isBusy else { return nil }
         isBusy = true
         statusMessage = nil
+        #if DEBUG && targetEnvironment(simulator)
+        purchaseDiagnostics.beginPurchaseOrRestore()
+        var purchasePhase: PurchaseDiagnostic.Phase = .catalog
+        #endif
         defer { isBusy = false }
 
         guard AppStore.canMakePayments else {
-            statusMessage = L10n.service("services.purchase.notAllowed", defaultValue: "Purchases are not allowed on this device. Check its Screen Time or account restrictions.")
-            return
+            statusMessage = PurchaseFailure.notAllowed.message
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.recordPurchase(category: .notAllowed)
+            #endif
+            return .notAllowed
         }
 
         do {
             if product == nil { try await loadProduct() }
             guard let product else { throw PurchaseError.unavailable }
+            #if DEBUG && targetEnvironment(simulator)
+            purchasePhase = .purchase
+            #endif
             switch try await product.purchase() {
             case .success(let result):
                 guard case .verified(let transaction) = result,
                       transaction.productID == Self.productID,
                       transaction.productType == .nonConsumable else {
                     await refreshEntitlements()
-                    statusMessage = L10n.service("services.purchase.unverified", defaultValue: "The App Store could not verify this purchase. No new Pro access was granted. Try Restore Purchases.")
-                    return
+                    statusMessage = PurchaseFailure.unverified.message
+                    #if DEBUG && targetEnvironment(simulator)
+                    purchaseDiagnostics.recordPurchase(category: .verification)
+                    #endif
+                    return .unverified
                 }
                 await refreshEntitlements()
                 await transaction.finish()
                 statusMessage = isPro
                     ? L10n.service("services.purchase.ready", defaultValue: "TripDocket Pro is ready. Thank you!")
-                    : L10n.service("services.purchase.noEntitlement", defaultValue: "The purchase did not provide an active Pro entitlement. Try Restore Purchases.")
+                    : PurchaseFailure.noEntitlement.message
+                if !isPro {
+                    #if DEBUG && targetEnvironment(simulator)
+                    purchaseDiagnostics.recordPurchase(category: .noEntitlement)
+                    #endif
+                    return .noEntitlement
+                }
             case .pending:
                 statusMessage = L10n.service("services.purchase.pending", defaultValue: "Your purchase is awaiting approval. Pro unlocks when the App Store confirms it.")
             case .userCancelled:
                 statusMessage = L10n.service("services.purchase.cancelledFree", defaultValue: "Purchase cancelled. You can continue using the free features.")
             @unknown default:
-                statusMessage = L10n.service("services.purchase.unknownState", defaultValue: "The App Store returned an unknown purchase state. Try Restore Purchases before purchasing again.")
+                statusMessage = PurchaseFailure.unknownState.message
+                #if DEBUG && targetEnvironment(simulator)
+                purchaseDiagnostics.recordPurchase(category: .unknownResult)
+                #endif
+                return .unknownState
             }
         } catch StoreKitError.userCancelled {
             statusMessage = L10n.service("services.purchase.cancelled", defaultValue: "Purchase cancelled.")
         } catch {
-            statusMessage = L10n.service("services.purchase.failed", defaultValue: "The purchase could not be completed. Check your connection and App Store account, then try again.")
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.recordPurchase(phase: purchasePhase, error: error)
+            #endif
+            statusMessage = PurchaseFailure.failed.message
+            return .failed
         }
+        return nil
     }
 
     /// Explicit user action only: AppStore.sync can show an account prompt.
@@ -93,6 +132,9 @@ final class PurchaseManager {
         guard !isBusy else { return }
         isBusy = true
         statusMessage = nil
+        #if DEBUG && targetEnvironment(simulator)
+        purchaseDiagnostics.beginPurchaseOrRestore()
+        #endif
         defer { isBusy = false }
         do {
             try await AppStore.sync()
@@ -174,3 +216,136 @@ final class PurchaseManager {
         case unavailable
     }
 }
+
+/// A purchase failure is selected by the StoreKit branch, never by display text.
+enum PurchaseFailure: Equatable {
+    case notAllowed, unverified, noEntitlement, unknownState, failed
+
+    var message: String {
+        switch self {
+        case .notAllowed:
+            L10n.service("services.purchase.notAllowed", defaultValue: "Purchases are not allowed on this device. Check its Screen Time or account restrictions.")
+        case .unverified:
+            L10n.service("services.purchase.unverified", defaultValue: "The App Store could not verify this purchase. No new Pro access was granted. Try Restore Purchases.")
+        case .noEntitlement:
+            L10n.service("services.purchase.noEntitlement", defaultValue: "The purchase did not provide an active Pro entitlement. Try Restore Purchases.")
+        case .unknownState:
+            L10n.service("services.purchase.unknownState", defaultValue: "The App Store returned an unknown purchase state. Try Restore Purchases before purchasing again.")
+        case .failed:
+            L10n.service("services.purchase.failed", defaultValue: "The purchase could not be completed. Check your connection and App Store account, then try again.")
+        }
+    }
+}
+
+/// Owned by one paywall presentation. Late results cannot reopen a dismissed alert.
+struct PurchaseFeedback {
+    private(set) var failure: PurchaseFailure?
+    private var generation = UUID()
+
+    mutating func begin() -> UUID {
+        reset()
+        return generation
+    }
+
+    mutating func receive(_ failure: PurchaseFailure?, for generation: UUID) {
+        guard generation == self.generation else { return }
+        self.failure = failure
+    }
+
+    mutating func reset() {
+        failure = nil
+        generation = UUID()
+    }
+}
+
+#if DEBUG && targetEnvironment(simulator)
+/// Test-only, bounded fields. No error descriptions, userInfo, or identifiers.
+struct PurchaseDiagnostic: Equatable {
+    enum Phase: String { case catalog, purchase }
+    enum Category: String {
+        case network, system, storekit, other
+        case notAllowed, verification, noEntitlement, unknownResult
+    }
+
+    let phase: Phase
+    let category: Category
+    let domain: String
+    let code: Int?
+
+    init(phase: Phase, error: any Error) {
+        self.phase = phase
+        let detail: any Error
+        if let storeError = error as? StoreKitError {
+            switch storeError {
+            case .networkError(let underlying):
+                category = .network
+                detail = underlying
+            case .systemError(let underlying):
+                category = .system
+                detail = underlying
+            default:
+                category = .storekit
+                detail = storeError
+            }
+        } else {
+            category = .other
+            detail = error
+        }
+        // Inspect only this error (or one public StoreKit associated value).
+        let value = detail as NSError
+        if ["SKErrorDomain", "NSURLErrorDomain", "NSCocoaErrorDomain", "NSPOSIXErrorDomain"].contains(value.domain) {
+            domain = value.domain
+            code = value.code
+        } else {
+            domain = "other"
+            code = nil
+        }
+    }
+
+    init(phase: Phase, category: Category) {
+        self.phase = phase
+        self.category = category
+        domain = "none"
+        code = nil
+    }
+
+    var accessibilityValue: String {
+        "purchase-diagnostic phase=\(phase.rawValue) category=\(category.rawValue) domain=\(domain) code=\(code.map(String.init) ?? "none")"
+    }
+}
+
+/// Two latest failures at most; a background price load cannot erase a purchase failure.
+struct PurchaseDiagnostics {
+    private let enabled: Bool
+    private var catalog: PurchaseDiagnostic?
+    private var purchase: PurchaseDiagnostic?
+
+    init(arguments: [String] = ProcessInfo.processInfo.arguments) {
+        enabled = arguments.contains("--ui-testing-purchase-diagnostics")
+    }
+
+    mutating func beginCatalog() { catalog = nil }
+
+    mutating func beginPurchaseOrRestore() {
+        catalog = nil
+        purchase = nil
+    }
+
+    mutating func recordCatalog(_ error: any Error) {
+        guard enabled else { return }
+        catalog = PurchaseDiagnostic(phase: .catalog, error: error)
+    }
+
+    mutating func recordPurchase(phase: PurchaseDiagnostic.Phase, error: any Error) {
+        guard enabled else { return }
+        purchase = PurchaseDiagnostic(phase: phase, error: error)
+    }
+
+    mutating func recordPurchase(category: PurchaseDiagnostic.Category) {
+        guard enabled else { return }
+        purchase = PurchaseDiagnostic(phase: .purchase, category: category)
+    }
+
+    var accessibilityValue: String? { (purchase ?? catalog)?.accessibilityValue }
+}
+#endif

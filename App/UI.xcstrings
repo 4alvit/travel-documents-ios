@@ -3001,6 +3001,23 @@
         }
       }
     },
+    "pro.purchaseErrorTitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchase not completed"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось завершить покупку"
+          }
+        }
+      }
+    },
     "pro.reminders": {
       "extractionState": "manual",
       "localizations": {
