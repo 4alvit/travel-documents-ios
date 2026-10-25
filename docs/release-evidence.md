@@ -42,6 +42,23 @@ The ordinary default stays 180 seconds; the runner ceiling is 360 and the CI job
 budget is 35 minutes. These are finite validation budgets, not accepted runtime
 results; the current PR checks must establish the revised result.
 
+The subsequent `3540791` [CI run](https://github.com/4alvit/travel-documents-ios/actions/runs/40163641612)
+finished with a finalized result bundle: 102 unique tests, 94 passed, one failed
+and seven expected opt-in skips. The only failure was Russian maximum-type
+guidance exceeding 360 seconds. English guidance passed in 220.55 seconds;
+the complete-backup-warning case passed in 63.46 seconds, and all three
+guidance unit tests passed. Russian guidance reached its final return and
+attachments around 396.64 seconds, after its timeout. Its observed text slices
+covered all 24 blocks with overlap, but post-timeout coverage is diagnostic
+evidence and does not turn the failed case into a pass.
+
+Only that Russian maximum-type case now requests 480 seconds, with a matching
+runner ceiling. English guidance remains at 360 seconds, the ordinary default
+at 180 seconds, and the job at 35 minutes. The preceding job took 30m55s. The
+additional case margin is based on observed completion time; no assertion,
+scenario, attachment, retry policy or unrelated case allowance changed. The
+new published revision still requires its own successful CI result.
+
 Use the [current PR checks](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
 for validation of the published revision. No physical-device, VoiceOver speech,
 actual external-app handoff, network-denial or live-purchase acceptance is
