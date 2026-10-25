@@ -3,10 +3,10 @@ import StoreKit
 import StoreKitTest
 import XCTest
 
-/// Functional coverage at standard text size. The host seeds only the named
-/// synthetic PDFs into this dedicated simulator's real Files provider. Nothing
-/// is injected into the app library. The existing fixture flag bypasses device
-/// authentication only; Pro must come from the actual local StoreKit purchase.
+/// Functional coverage at standard text size. Batch import seeds named synthetic
+/// PDFs into real Files and obtains Pro through local StoreKit. Paired recovery
+/// phases use the existing demo fixture, remain Free, and export/restore through
+/// real Files. Authentication bypass is confined to the existing Debug fixture.
 /// Run serially, with a runner maximum/default allowance of at least 300 seconds.
 @MainActor
 final class BatchImportUITests: XCTestCase {
@@ -155,6 +155,256 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
+    // Opt-in paired phases. The host must snapshot the actual UI-exported file
+    // and active library between them; see docs/recovery-ui-regression.md.
+    // No StoreKit session or transaction is created by either recovery case.
+    func testRecoveryExportFullBackupThroughFiles() async throws {
+        let recoveryFolder = try recoveryConfiguration(phase: "export")
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--demo"]
+        app.launch()
+        try await wait("The demo library did not finish loading", app: app) {
+            app.staticTexts["Coast weekend"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
+        try await recoveryFreeGate(app)
+        try await recoveryTab("People", app: app)
+        let add = app.navigationBars["People"].buttons["Add person"]
+        try await wait("Add person is unavailable", app: app) { add.isHittable }
+        add.tap()
+        let alert = app.alerts["Add a person"]
+        let name = alert.textFields["Name or nickname"]
+        try await wait("Add-person dialog did not open", app: app) { name.isHittable }
+        name.tap()
+        name.typeText("Recovery Sentinel")
+        let confirm = alert.buttons["Add"]
+        try check(confirm.isEnabled && confirm.isHittable, app: app, "Add person cannot be confirmed")
+        confirm.tap()
+        try await wait("The unassigned person was not saved", app: app) {
+            app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
+        let export = app.buttons["Export full backup"]
+        try await reveal(export, app: app, navigation: "Settings")
+        try check(export.isEnabled, app: app, "Free full-backup export is disabled")
+        export.tap()
+        let warning = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
+        try await wait("Full-backup disclosure is missing", app: app) {
+            app.staticTexts["Export an unencrypted backup?"].exists && app.staticTexts[warning].exists
+                && app.buttons["Export…"].isHittable
+        }
+        capture(app, "Recovery export — full unencrypted-backup disclosure")
+        app.buttons["Export…"].tap()
+        let saveToFiles = app.buttons["Save to Files"].firstMatch
+        // This native Save surface still needs first-run AX/pixel validation.
+        // Unknown layouts fail with captures; do not substitute coordinates.
+        try await wait("Share sheet has no visible Save to Files action", app: app) { saveToFiles.isHittable }
+        saveToFiles.tap()
+        let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
+        let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
+        let save = fileNavigation.buttons["Save"]
+        try await wait("The confirmed destination has no reachable Save control", app: app) {
+            picker.exists && self.isRecoveryFolder(recoveryFolder, navigation: fileNavigation)
+                && save.exists && save.isEnabled && save.isHittable
+        }
+        capture(app, "Recovery export — selected owned Files destination before Save")
+        try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
+                  "Files left the confirmed owned destination before Save")
+        save.tap()
+        try await wait("Save to Files did not return to Settings", app: app) {
+            !picker.exists && app.navigationBars["Settings"].exists
+        }
+        capture(app, "Recovery export — UI completed, host file verification still required")
+        // A dismissed sheet alone proves no export. The host must find exactly
+        // Documents.tripbackup and compare its metadata/originals before reset.
+    }
+
+    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal() async throws {
+        let recoveryFolder = try recoveryConfiguration(phase: "restore")
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--ui-testing-reset"]
+        app.launch()
+        try await wait("Reset did not show an empty Trips library", app: app) {
+            app.buttons["Create a trip"].exists && !app.staticTexts["Coast weekend"].exists
+        }
+        try await recoveryTab("People", app: app)
+        try await wait("Reset did not show an empty People library", app: app) {
+            app.staticTexts["Who’s coming?"].exists
+                && !app.staticTexts["Alex Example"].exists && !app.staticTexts["Recovery Sentinel"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 0, people: 0, documents: 0, app: app)
+        capture(app, "Recovery restore — empty Free library before import")
+        let restore = app.buttons["Restore from backup"]
+        try await reveal(restore, app: app, navigation: "Settings")
+        try check(restore.isEnabled, app: app, "Free backup restore is disabled")
+        restore.tap()
+        let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
+        let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
+        // Folder was created empty and host-verified to contain exactly this
+        // one UI-exported file. Match a complete display name, never a prefix.
+        let files = picker.cells.matching(NSPredicate(
+            format: "label == %@ OR label BEGINSWITH %@ OR label == %@ OR label BEGINSWITH %@",
+            "Documents.tripbackup", "Documents.tripbackup,", "Documents", "Documents,"
+        ))
+        try await wait("Exactly one exported backup must be selectable", app: app) {
+            self.isRecoveryFolder(recoveryFolder, navigation: fileNavigation)
+                && files.count == 1 && files.element(boundBy: 0).isHittable
+        }
+        capture(app, "Recovery restore — actual exported file in owned Files folder")
+        try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
+                  "Files left the confirmed owned folder before selection")
+        files.element(boundBy: 0).tap()
+        let replace = app.buttons["Replace library from backup"]
+        // A single-file importer normally completes on selection. Some native
+        // versions require Open; only accept that control within this picker.
+        let open = picker.buttons.matching(NSPredicate(format: "label == %@", "Open")).firstMatch
+        try await wait("File selection neither completed nor exposed Open", app: app) {
+            replace.isHittable || (picker.exists && open.isHittable && open.isEnabled)
+        }
+        if !replace.isHittable {
+            try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
+                      "Files left the confirmed owned folder before Open")
+            open.tap()
+        }
+        let replacementWarning = "This will replace all 0 current documents, trips and people with the selected backup. Export your current library first if you need to keep it. The backup is validated before replacement; a failed restore keeps your current library."
+        try await wait("Empty-library replacement disclosure is missing", app: app) {
+            app.staticTexts["Replace your entire library?"].exists
+                && app.staticTexts[replacementWarning].exists && replace.isHittable
+        }
+        capture(app, "Recovery restore — explicit replacement confirmation")
+        replace.tap()
+        let notice = app.staticTexts["Backup restored and originals verified. Schedule reminders again on this device."]
+        try await reveal(notice, app: app, navigation: "Settings")
+        try await wait("The app did not verify and restore the backup", app: app) { notice.exists }
+        capture(app, "Recovery restore — successful app validation")
+        try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
+
+        // Read persistence after a clean launch, with neither reset nor demo.
+        app.terminate()
+        app.launchArguments = recoveryArguments
+        app.launch()
+        try await recoveryFreeGate(app)
+        try await recoveryTab("People", app: app)
+        try await wait("Restored people did not survive relaunch", app: app) {
+            app.staticTexts["Alex Example"].exists && app.staticTexts["Recovery Sentinel"].exists
+        }
+        capture(app, "Recovery restore — assigned and unassigned people persisted")
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
+        try await recoveryTab("Trips", app: app)
+        try await openTrip(app)
+        let checkOriginal = app.buttons["Check original"]
+        try await reveal(checkOriginal, app: app, navigation: "Coast weekend")
+        checkOriginal.tap()
+        try await wait("The restored complete original did not verify", app: app) {
+            app.staticTexts["1 of 1 original verified"].exists
+        }
+        let document = documentRow("Weekend reservation", in: app)
+        try await reveal(document, app: app, navigation: "Coast weekend")
+        try check(document.label.contains("Booking") && document.label.contains("Alex Example"),
+                  app: app, "Restored document metadata is not visible")
+        document.tap()
+        try await wait("Restored original preview did not open", app: app) {
+            app.navigationBars["Original document"].exists && app.otherElements["QLPreviewControllerView"].exists
+        }
+        try await Task.sleep(for: .seconds(5))
+        capture(app, "Recovery restored original — inspect synthetic PDF pixels")
+        let done = app.navigationBars["Original document"].buttons["Done"]
+        try check(done.isHittable, app: app, "Restored original Done is not reachable")
+        done.tap()
+        // The host now compares the active catalog and original bytes against
+        // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
+        // This is a navigation-title marker, not the folder's row in its parent.
+        // Unknown native accessibility layouts must fail before a write/selection.
+        let titles = navigation.staticTexts.matching(NSPredicate(format: "label == %@", folder))
+        return navigation.exists && titles.count == 1 && titles.element(boundBy: 0).isHittable
+    }
+
+    private func recoveryFilesNavigation(_ folder: String, picker: XCUIElement,
+                                         app: XCUIApplication) async throws -> XCUIElement {
+        let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
+        try await wait("Files did not positively identify the current owned folder", app: app) {
+            picker.exists && self.isRecoveryFolder(folder, navigation: navigation)
+        }
+        return navigation
+    }
+
+    private var recoveryArguments: [String] {
+        ["--ui-testing-unlocked", "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+         "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+    }
+
+    private func recoveryConfiguration(phase: String) throws -> String {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_UI"] == "1", "Recovery UI phases require explicit opt-in")
+        try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_PHASE"] == phase, "Run exactly the admitted recovery phase")
+        guard let value = env["TRIPDOCKET_RECOVERY_FOLDER"],
+              value.hasPrefix("TripDocket-Recovery-"), value.count <= 100,
+              value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
+            throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
+        }
+        executionTimeAllowance = 300
+        continueAfterFailure = false
+        return value
+    }
+
+    private func recoveryTab(_ title: String, app: XCUIApplication) async throws {
+        let tab = app.buttons[title].firstMatch
+        try await wait("Tab is unavailable: \(title)", app: app) { tab.isHittable }
+        tab.tap()
+        let navigationTitle = title == "Trips" ? "TripDocket" : title
+        try await wait("Tab did not open: \(title)", app: app) { app.navigationBars[navigationTitle].exists }
+    }
+
+    private func recoveryFreeCard(_ app: XCUIApplication) async throws {
+        let free = app.staticTexts["Make room for every trip"]
+        try await reveal(free, app: app, navigation: "Settings")
+        try check(free.exists && !app.staticTexts["Pro is unlocked on this device."].exists,
+                  app: app, "This phase requires an observed Free library")
+    }
+
+    private func recoveryFreeGate(_ app: XCUIApplication) async throws {
+        try await recoveryTab("Trips", app: app)
+        try await wait("The recovered/demo trip is missing", app: app) { app.staticTexts["Coast weekend"].exists }
+        let create = app.navigationBars["TripDocket"].buttons["Create trip"]
+        try await wait("Create trip is unavailable", app: app) { create.isEnabled && create.isHittable }
+        create.tap()
+        try await wait("The second-trip action did not show the real Free gate", app: app) {
+            app.navigationBars["TripDocket Pro"].exists && !app.textFields["Trip name"].exists
+        }
+        capture(app, "Recovery — real second-trip Free gate without purchase")
+        let done = app.navigationBars["TripDocket Pro"].buttons["Done"]
+        try check(done.isHittable, app: app, "Free gate Done is unavailable")
+        done.tap()
+        try await wait("Free gate did not close", app: app) { !app.navigationBars["TripDocket Pro"].exists }
+    }
+
+    private func recoveryCounts(trips: Int, people: Int, documents: Int, app: XCUIApplication) async throws {
+        for (label, count) in [("Trips", trips), ("People", people), ("Documents", documents)] {
+            let rows = app.cells.containing(.staticText, identifier: label)
+            let row = rows.firstMatch
+            try await reveal(row, app: app, navigation: "Settings")
+            try await wait("Incorrect or ambiguous Settings count for \(label)", app: app) {
+                rows.count == 1 && row.staticTexts[String(count)].exists
+            }
+        }
+    }
+
+
     private func localStoreSession() async throws -> SKTestSession {
         let configuration = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "Tripfolio", withExtension: "storekit"))
         let session = try SKTestSession(contentsOf: configuration)
@@ -263,7 +513,7 @@ final class BatchImportUITests: XCTestCase {
         batch.tap()
     }
 
-    private func selectRealFiles(_ app: XCUIApplication) async throws {
+    private func openLocalFilesFolder(_ folder: String, app: XCUIApplication) async throws -> XCUIElement {
         let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
         try await wait("Files did not present its navigation", app: app) { navigation.exists }
         let picker = app.otherElements["Browse View (Picker)"].firstMatch
@@ -295,6 +545,12 @@ final class BatchImportUITests: XCTestCase {
         }
         try await wait("The named synthetic Files folder is missing", app: app) { directory.exists && directory.isHittable }
         directory.tap()
+        return picker
+    }
+
+    private func selectRealFiles(_ app: XCUIApplication) async throws {
+        let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
+        let picker = try await openLocalFilesFolder(folder, app: app)
         for filename in filenames {
             let basename = (filename as NSString).deletingPathExtension
             let file = picker.cells.matching(NSPredicate(format: "label BEGINSWITH %@", basename)).firstMatch

@@ -5,12 +5,13 @@ Prepared 20 October 2026. Every unchecked item is pending. A successful compiler
 run, unit test, StoreKit configuration or simulator screenshot does not mark a
 physical-device test complete.
 
-Separate automated results are tracked in [release evidence](release-evidence.md):
-Core 23 passed; an existing iPhone Simulator passed all 27 app/platform/UI tests,
-including actual system purchase cancellation. Later AppModel 14/14, six normal
-simulated-authentication privacy cases and selected maximum-type UI checks are
-recorded separately. Fresh-device CLI StoreKit setup is still blocked. None of
-these results checks off the physical-device items below.
+Separate [automated evidence](release-evidence.md) includes accepted `674cbb6`
+CI: 38 core tests, 95 phone tests passed with zero failures and seven expected
+opt-in skips, and two selected iPad guidance cases passed. All seven StoreKit
+cases passed. The exact Release ZIP also reached the system passcode prompt in
+one ordinary Simulator launch with verified cleanup. Authentication was not
+completed. Earlier simulator results retain their original scope. None of these
+results completes a physical-device item below.
 
 Use synthetic documents and fictional people only. Backup replacement and
 app deletion below are destructive test actions: use a dedicated test library
