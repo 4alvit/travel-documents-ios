@@ -84,7 +84,14 @@ private struct TripsView: View {
                 if model.library.trips.isEmpty {
                     Section {
                         ContentUnavailableView {
-                            Label(L10n.ui("trips.emptyTitle", defaultValue: "Your first trip starts here"), systemImage: "suitcase.rolling")
+                            Label {
+                                Text(L10n.ui("trips.emptyTitle", defaultValue: "Your first trip starts here"))
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .multilineTextAlignment(.center)
+                            } icon: {
+                                Image(systemName: "suitcase.rolling")
+                            }
                         } description: {
                             Text(L10n.ui("trips.emptyBody", defaultValue: "Create a trip, add travel documents, then verify the complete files are available on this device."))
                         } actions: {
