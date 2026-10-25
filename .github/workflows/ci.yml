@@ -19,11 +19,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Toolchain
         run: |
-          xcodebuild -version
-          swift --version
+          set -euo pipefail
+          mkdir -p build/ci-toolchain
+          xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
       - name: Verify
-        run: bash scripts/verify.sh
+        run: |
+          set -euo pipefail
+          TRIPDOCKET_VERIFY_COMMIT=$(git rev-parse HEAD)
+          bash scripts/verify.sh
+          test "$TRIPDOCKET_VERIFY_COMMIT" = "$(git rev-parse HEAD)"
+          printf '%s\n' "$TRIPDOCKET_VERIFY_COMMIT" > build/ci-toolchain/verified-commit.txt
+      - name: Package verified Simulator preview
+        run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         run: bash scripts/test-simulator.sh
       - name: Test evidence
@@ -38,16 +47,45 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: TripDocket-simulator-${{ github.sha }}
-          path: build/DerivedData/Build/Products/Release-iphonesimulator/Tripfolio.app
+          path: |
+            build/ci-preview/TripDocket-Simulator.zip
+            build/ci-preview/provenance.json
+            build/ci-preview/SHA256SUMS
           if-no-files-found: error
+          retention-days: 7
+  privacy_ipad:
+    name: iPad privacy and support
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain
+        timeout-minutes: 3
+        run: |
+          xcodebuild -version
+          swift --version
+          brew install xcodegen
+      - name: Owned iPad guidance (EN normal, RU maximum type)
+        timeout-minutes: 29
+        run: bash scripts/test-privacy-support-ipad.sh
+      - name: iPad test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-privacy-ipad-${{ github.sha }}
+          path: build/PrivacySupport-iPad/
+          if-no-files-found: warn
           retention-days: 7
   gate:
     name: CI gate
     if: always()
-    needs: [validate]
+    needs: [validate, privacy_ipad]
     runs-on: ubuntu-latest
     steps:
       - name: Require successful validation
         env:
-          RESULT: ${{ needs.validate.result }}
-        run: test "$RESULT" = success
+          PHONE_RESULT: ${{ needs.validate.result }}
+          IPAD_RESULT: ${{ needs.privacy_ipad.result }}
+        run: |
+          test "$PHONE_RESULT" = success
+          test "$IPAD_RESULT" = success

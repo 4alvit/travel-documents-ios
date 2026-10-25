@@ -85,6 +85,16 @@ Debug builds with real sensitive documents. Release builds omit these flags.
 
 ## Targeted checks
 
+The hosted iPad guidance job runs the existing English normal-size and Russian
+maximum Dynamic Type cases with `bash scripts/test-privacy-support-ipad.sh`.
+It creates a dedicated compatible iPad, builds once, sets and reads back the
+system text size before each separate test, then deletes only that simulator
+and checks that its UUID is absent. Both CI jobs must succeed. Evidence under
+`build/PrivacySupport-iPad/` includes original result bundles, separate reader
+copies, source/product hashes and cleanup records. These Debug tests use the
+synthetic library and authentication bypass; they do not establish real
+security, VoiceOver speech, offline network denial or purchase behavior.
+
 The real Files batch-import scenario is opt-in and uses the local StoreKit
 purchase UI. On an explicitly selected, already booted test simulator, run:
 
@@ -155,3 +165,11 @@ Terraform; this repository never contains its state or credentials.
 For a clean, committed checkout, `bash scripts/package-preview.sh` produces a
 source archive, unsigned simulator app and SHA-256 checksums under `dist/`.
 Physical-device distribution requires separate Apple signing and review.
+
+Hosted CI packages the Release app immediately after verification, before UI
+tests. The `TripDocket-simulator` artifact contains `TripDocket-Simulator.zip`,
+`provenance.json` and `SHA256SUMS`. The inner ZIP preserves the `.app` directory
+and executable permissions; its bytes and modes are checked before upload.
+Provenance identifies the actual tested checkout, which can be a PR merge commit.
+It is an unsigned Simulator candidate: a successful CI upload does not establish
+physical-device, App Store or separate release-smoke acceptance.
