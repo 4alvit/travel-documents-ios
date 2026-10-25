@@ -132,7 +132,8 @@ final class PurchaseUITests: XCTestCase {
                 : "The purchase could not be completed. Check your connection and App Store account, then try again."
             let alert = app.alerts[title]
             let ok = alert.buttons[russian ? "ОК" : "OK"]
-            for attempt in 1...2 {
+            var completedAttempts = 0
+            for attempt in 1...ExpectedFailureHistory.requiredAttempts {
                 try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard) {
                     buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
                 }
@@ -166,6 +167,8 @@ final class PurchaseUITests: XCTestCase {
                 guard await session.simulatedError(forAPI: .purchase) == nil else {
                     throw PurchaseTestError(message: "The previous purchase failure was not cleared")
                 }
+                // Count only a fully checked alert/idle cycle and verified fault removal.
+                completedAttempts += 1
             }
             app.buttons[russian ? "Готово" : "Done"].tap()
             try await require("Paywall did not dismiss", app: app, springboard: springboard) {
@@ -176,8 +179,9 @@ final class PurchaseUITests: XCTestCase {
                 buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
             }
             try await requirePurchasePostcondition(app: app, springboard: springboard, session: session,
-                                                   buy: buy, russian: russian, diagnostics: diagnostics)
-            // Keep the original failure immediate. Navigation can trigger the
+                                                   buy: buy, russian: russian, diagnostics: diagnostics,
+                                                   completedAttempts: completedAttempts)
+            // Keep postcondition failures immediate. Navigation can trigger the
             // existing ProView load(), so quota is a later, success-only check.
             try await verifyFailedPurchaseFreeQuota(app: app, springboard: springboard, russian: russian)
         } catch {
@@ -188,34 +192,43 @@ final class PurchaseUITests: XCTestCase {
 
     private func requirePurchasePostcondition(
         app: XCUIApplication, springboard: XCUIApplication, session: SKTestSession,
-        buy: XCUIElement, russian: Bool, diagnostics: Bool
+        buy: XCUIElement, russian: Bool, diagnostics: Bool, completedAttempts: Int
     ) async throws {
         var lastObservation = "observation=unavailable"
         var completion = "interrupted"
+        var knownProObserved = false
         defer {
-            recordPurchaseObservation("purchase-postcondition completion=\(completion)\n\(lastObservation)\nquota=notAttemptedBeforePredicateCompletion",
+            recordPurchaseObservation("purchase-postcondition completion=\(completion)\n\(lastObservation)\nquota=notAttemptedBeforeExpectedFailurePostconditionCompletion",
                                       name: "Purchase postcondition before cleanup")
         }
         do {
-            // One unchanged 15-second wait. Always read both operands, even
-            // when the Pro selector matches. All other fields are observations.
-            try await require("Failed purchases changed free access or created a transaction", app: app, springboard: springboard) {
+            // Retain the 15-second wait and raw empty-history observation.
+            // Acceptance classifies the full array, never the diagnostic prefix.
+            try await require("Failed purchases did not preserve Free access or expected failure history", app: app, springboard: springboard) {
                 let proLabel = russian ? "Pro доступен" : "Pro is unlocked"
                 let proSelector = app.staticTexts[proLabel]
                 let proExists = proSelector.exists
                 let transactions = session.allTransactions()
                 let historyEmpty = transactions.isEmpty
+                let decision = ExpectedFailureHistory.evaluate(transactions.map {
+                    ExpectedFailureHistory.Record(stateRawValue: $0.state.rawValue,
+                        productIdentifier: $0.productIdentifier,
+                        pendingAskToBuyConfirmation: $0.pendingAskToBuyConfirmation)
+                }, completedAttempts: completedAttempts, productID: self.productID)
                 let history = self.purchaseHistoryObservation(transactions)
                 let buyExists = buy.exists
                 let buyEnabled = buyExists ? String(buy.isEnabled) : "unknown"
                 let buyHittable = buyExists ? String(buy.isHittable) : "unknown"
+                let appState = self.purchaseAppState(app, diagnostics: diagnostics)
+                // A later poll or navigation must not conceal a known Pro observation.
+                knownProObserved = knownProObserved || appState.knownIsPro == true
                 // AX queries are sequential, not an atomic entitlement snapshot.
                 lastObservation = "noPro=\(!proExists) historyEmpty=\(historyEmpty) proMatches=\(app.staticTexts.matching(identifier: proLabel).count)\n"
                     + "buyExists=\(buyExists) buyEnabled=\(buyEnabled) buyHittable=\(buyHittable)\n"
-                    + "appState=\(self.purchaseAppState(app, diagnostics: diagnostics))\n"
+                    + "appState=\(appState.diagnostic)\n"
+                    + "expectedFailureHistory accepted=\(decision.accepted) completedAttempts=\(completedAttempts) requiredAttempts=\(ExpectedFailureHistory.requiredAttempts) attemptsComplete=\(decision.attemptsComplete) withinAttemptBound=\(decision.withinAttemptBound) allRecordsExpectedFailures=\(decision.allRecordsExpectedFailures) knownProObserved=\(knownProObserved)\n"
                     + history
-                // Retain the original verdict, including nonempty failed history.
-                return !proExists && historyEmpty
+                return decision.allowsPostcondition(noPro: !proExists, knownProObserved: knownProObserved)
             }
             completion = "passed"
         } catch let error as PurchaseTestError {
@@ -224,17 +237,17 @@ final class PurchaseUITests: XCTestCase {
         }
     }
 
-    private func purchaseAppState(_ app: XCUIApplication, diagnostics: Bool) -> String {
-        guard diagnostics else { return "unknown-disabled" }
+    private func purchaseAppState(_ app: XCUIApplication, diagnostics: Bool) -> PurchaseAppState {
+        guard diagnostics else { return .unknownDisabled }
         let elements = app.buttons.matching(identifier: "purchase.state")
-        guard elements.count == 1 else { return "unknown-missing-or-ambiguous" }
+        guard elements.count == 1 else { return .unknownMissingOrAmbiguous }
         // Never copy arbitrary AX values into the bounded record.
         switch elements.element(boundBy: 0).value as? String {
-        case "purchase-state isPro=false isBusy=false": return "known isPro=false isBusy=false"
-        case "purchase-state isPro=false isBusy=true": return "known isPro=false isBusy=true"
-        case "purchase-state isPro=true isBusy=false": return "known isPro=true isBusy=false"
-        case "purchase-state isPro=true isBusy=true": return "known isPro=true isBusy=true"
-        default: return "unknown-unrecognized"
+        case "purchase-state isPro=false isBusy=false": return .known(isPro: false, isBusy: false)
+        case "purchase-state isPro=false isBusy=true": return .known(isPro: false, isBusy: true)
+        case "purchase-state isPro=true isBusy=false": return .known(isPro: true, isBusy: false)
+        case "purchase-state isPro=true isBusy=true": return .known(isPro: true, isBusy: true)
+        default: return .unknownUnrecognized
         }
     }
 
@@ -269,7 +282,7 @@ final class PurchaseUITests: XCTestCase {
     ) async throws {
         var completion = "interrupted-or-failed"
         defer {
-            recordPurchaseObservation("purchase-free-quota completion=\(completion) afterOriginalPredicatePassed=true",
+            recordPurchaseObservation("purchase-free-quota completion=\(completion) afterExpectedFailurePostconditionPassed=true",
                                       name: "Purchase failure Free quota")
         }
         app.buttons[russian ? "Готово" : "Done"].tap()
@@ -384,6 +397,178 @@ final class PurchaseUITests: XCTestCase {
         hierarchy.name = "\(name) — accessibility"
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
+    }
+
+    func testExpectedFailureHistoryAcceptsEmptyOneAndTwoFailures() {
+        for count in 0...2 {
+            let result = expectedHistory(Array(repeating: historyRecord(), count: count))
+            XCTAssertTrue(result.attemptsComplete)
+            XCTAssertTrue(result.withinAttemptBound)
+            XCTAssertTrue(result.allRecordsExpectedFailures)
+            XCTAssertTrue(result.accepted)
+        }
+    }
+
+    func testExpectedFailureHistoryRejectsUnsafeAndUnknownStates() {
+        let unsafe = [SKPaymentTransactionState.purchasing.rawValue,
+                      SKPaymentTransactionState.purchased.rawValue,
+                      SKPaymentTransactionState.restored.rawValue,
+                      SKPaymentTransactionState.deferred.rawValue, Int.max]
+        for state in unsafe {
+            let result = expectedHistory([historyRecord(stateRawValue: state)])
+            XCTAssertFalse(result.allRecordsExpectedFailures, "state=\(state)")
+            XCTAssertFalse(result.accepted)
+        }
+    }
+
+    func testExpectedFailureHistoryRejectsForeignOrEmptyProduct() {
+        for product in ["", "com.example.other.pro", productID.uppercased()] {
+            let result = expectedHistory([historyRecord(product: product)])
+            XCTAssertFalse(result.allRecordsExpectedFailures)
+            XCTAssertFalse(result.accepted)
+        }
+    }
+
+    func testExpectedFailureHistoryRejectsPendingConfirmation() {
+        let result = expectedHistory([historyRecord(pending: true)])
+        XCTAssertFalse(result.allRecordsExpectedFailures)
+        XCTAssertFalse(result.accepted)
+    }
+
+    func testExpectedFailureHistoryRejectsMixedRecordsInEitherOrder() {
+        let unsafe = [historyRecord(stateRawValue: SKPaymentTransactionState.purchased.rawValue),
+                      historyRecord(stateRawValue: Int.max), historyRecord(product: "other"),
+                      historyRecord(pending: true)]
+        for record in unsafe {
+            for records in [[historyRecord(), record], [record, historyRecord()]] {
+                let result = expectedHistory(records)
+                XCTAssertFalse(result.allRecordsExpectedFailures)
+                XCTAssertFalse(result.accepted)
+            }
+        }
+    }
+
+    func testExpectedFailureHistoryRejectsOverflow() {
+        let result = expectedHistory(Array(repeating: historyRecord(), count: 3))
+        XCTAssertTrue(result.attemptsComplete)
+        XCTAssertTrue(result.allRecordsExpectedFailures)
+        XCTAssertFalse(result.withinAttemptBound)
+        XCTAssertFalse(result.accepted)
+    }
+
+    func testExpectedFailureHistoryRejectsIncompleteAndInvalidAttemptCounts() {
+        for completed in [-1, 0, 1, 3, Int.max] {
+            for count in [0, 2] {
+                let result = expectedHistory(Array(repeating: historyRecord(), count: count),
+                                             completedAttempts: completed)
+                XCTAssertFalse(result.attemptsComplete, "completed=\(completed)")
+                XCTAssertFalse(result.accepted)
+            }
+        }
+    }
+
+    func testExpectedFailureHistoryInspectsSuffixBeyondDiagnosticPrefix() {
+        let prefix = Array(repeating: historyRecord(), count: 64)
+        let allFailed = expectedHistory(prefix + [historyRecord()])
+        XCTAssertTrue(allFailed.allRecordsExpectedFailures)
+        XCTAssertFalse(allFailed.accepted) // Still exceeds the two-attempt bound.
+        let unsafeSuffix = expectedHistory(prefix + [
+            historyRecord(stateRawValue: SKPaymentTransactionState.purchased.rawValue)
+        ])
+        // Inspect this independent result: accepted=false alone could pass
+        // solely because of the count bound, hiding a prefix-only classifier.
+        XCTAssertFalse(unsafeSuffix.allRecordsExpectedFailures)
+        XCTAssertFalse(unsafeSuffix.accepted)
+    }
+
+    func testPurchasePostconditionRejectsKnownProAndPreservesUnknownState() {
+        let valid = expectedHistory([])
+        for busy in [false, true] {
+            let pro = PurchaseAppState.known(isPro: true, isBusy: busy)
+            XCTAssertEqual(pro.knownIsPro, true)
+            XCTAssertFalse(valid.allowsPostcondition(noPro: true, knownProObserved: pro.knownIsPro == true))
+            let free = PurchaseAppState.known(isPro: false, isBusy: busy)
+            XCTAssertEqual(free.knownIsPro, false)
+            XCTAssertTrue(valid.allowsPostcondition(noPro: true, knownProObserved: free.knownIsPro == true))
+        }
+        let unknowns: [PurchaseAppState] = [.unknownDisabled, .unknownMissingOrAmbiguous, .unknownUnrecognized]
+        for state in unknowns {
+            XCTAssertNil(state.knownIsPro)
+            XCTAssertTrue(state.diagnostic.hasPrefix("unknown-"))
+            XCTAssertTrue(valid.allowsPostcondition(noPro: true, knownProObserved: state.knownIsPro == true))
+            // A previously observed Pro value remains a failure even when
+            // the latest observation is unknown or the Pro label is absent.
+            XCTAssertFalse(valid.allowsPostcondition(noPro: true, knownProObserved: true))
+        }
+        XCTAssertFalse(valid.allowsPostcondition(noPro: false, knownProObserved: false))
+        XCTAssertFalse(expectedHistory([historyRecord(pending: true)])
+            .allowsPostcondition(noPro: true, knownProObserved: false))
+    }
+
+    private func historyRecord(
+        stateRawValue: Int = SKPaymentTransactionState.failed.rawValue,
+        product: String? = nil, pending: Bool = false
+    ) -> ExpectedFailureHistory.Record {
+        .init(stateRawValue: stateRawValue, productIdentifier: product ?? productID,
+              pendingAskToBuyConfirmation: pending)
+    }
+
+    private func expectedHistory(
+        _ records: [ExpectedFailureHistory.Record], completedAttempts: Int = 2
+    ) -> ExpectedFailureHistory.Decision {
+        ExpectedFailureHistory.evaluate(records, completedAttempts: completedAttempts, productID: productID)
+    }
+
+    private enum ExpectedFailureHistory {
+        static let requiredAttempts = 2
+
+        struct Record {
+            let stateRawValue: Int
+            let productIdentifier: String
+            let pendingAskToBuyConfirmation: Bool
+        }
+
+        struct Decision {
+            let attemptsComplete: Bool
+            let withinAttemptBound: Bool
+            let allRecordsExpectedFailures: Bool
+            var accepted: Bool { attemptsComplete && withinAttemptBound && allRecordsExpectedFailures }
+
+            func allowsPostcondition(noPro: Bool, knownProObserved: Bool) -> Bool {
+                noPro && accepted && !knownProObserved
+            }
+        }
+
+        static func evaluate(_ records: [Record], completedAttempts: Int, productID: String) -> Decision {
+            // Independent full-array classification lets the suffix regression
+            // detect a prefix-only scan even when the count bound also rejects.
+            let allExpected = records.allSatisfy {
+                $0.stateRawValue == SKPaymentTransactionState.failed.rawValue
+                    && $0.productIdentifier == productID && !$0.pendingAskToBuyConfirmation
+            }
+            return Decision(attemptsComplete: completedAttempts == requiredAttempts,
+                            withinAttemptBound: completedAttempts >= 0 && records.count <= completedAttempts,
+                            allRecordsExpectedFailures: allExpected)
+        }
+    }
+
+    private enum PurchaseAppState {
+        case known(isPro: Bool, isBusy: Bool)
+        case unknownDisabled, unknownMissingOrAmbiguous, unknownUnrecognized
+
+        var knownIsPro: Bool? {
+            if case .known(let isPro, _) = self { return isPro }
+            return nil
+        }
+
+        var diagnostic: String {
+            switch self {
+            case .known(let isPro, let isBusy): return "known isPro=\(isPro) isBusy=\(isBusy)"
+            case .unknownDisabled: return "unknown-disabled"
+            case .unknownMissingOrAmbiguous: return "unknown-missing-or-ambiguous"
+            case .unknownUnrecognized: return "unknown-unrecognized"
+            }
+        }
     }
 
     private struct PurchaseTestError: LocalizedError, CustomStringConvertible {
