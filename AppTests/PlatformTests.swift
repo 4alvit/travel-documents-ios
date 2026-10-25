@@ -283,6 +283,68 @@ final class PlatformTests: XCTestCase {
         }
     }
 
+    func testSemanticPurchaseFailureForNetworkAndCatalogErrors() async throws {
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
+            let purchaseFailure = await manager.purchase()
+            XCTAssertEqual(purchaseFailure, .failed)
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+
+            try await session.setSimulatedError(nil, forAPI: .purchase)
+            try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .loadProducts)
+            let withoutCatalog = PurchaseManager()
+            let catalogFailure = await withoutCatalog.purchase()
+            XCTAssertEqual(catalogFailure, .failed)
+            XCTAssertNil(withoutCatalog.displayPrice)
+            XCTAssertFalse(withoutCatalog.isPro)
+            XCTAssertFalse(withoutCatalog.isBusy)
+        }
+    }
+
+    func testSemanticPurchaseFailureForUnverifiedTransaction() async throws {
+        try await withStoreSession { session in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            try await session.setSimulatedError(.verification(.invalidSignature), forAPI: .verification)
+            let failure = await manager.purchase()
+            XCTAssertEqual(failure, .unverified)
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+        }
+    }
+
+    func testVerifiedPurchaseFeedbackMatchesEntitlementAtReturn() async throws {
+        try await withStoreSession { _ in
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            let failure = await manager.purchase()
+            XCTAssertEqual(failure, manager.isPro ? nil : .noEntitlement)
+            XCTAssertFalse(manager.isBusy)
+            let purchased = try await eventually { manager.isPro }
+            XCTAssertTrue(purchased, diagnostics(manager))
+        }
+    }
+
+    func testPendingPurchaseHasNoSemanticFailureOrProAccess() async throws {
+        try await withStoreSession { session in
+            session.askToBuyEnabled = true
+            let manager = PurchaseManager()
+            await manager.load()
+            _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
+            let failure = await manager.purchase()
+            XCTAssertNil(failure)
+            XCTAssertFalse(manager.isPro)
+            XCTAssertFalse(manager.isBusy)
+            XCTAssertTrue(session.allTransactions().contains(where: \.pendingAskToBuyConfirmation))
+        }
+    }
+
     private func makeStoreSession() async throws -> SKTestSession {
         let configuration = try XCTUnwrap(
             Bundle(for: PlatformTests.self).url(forResource: "Tripfolio", withExtension: "storekit"),
@@ -494,4 +556,144 @@ final class PlatformTests: XCTestCase {
             storedFilename: "synthetic.pdf", byteCount: 1, sha256: String(repeating: "0", count: 64)
         )
     }
+}
+
+final class PurchaseFeedbackTests: XCTestCase {
+    func testDismissedPresentationIgnoresLateFailure() {
+        var feedback = PurchaseFeedback()
+        let dismissed = feedback.begin()
+        feedback.reset()
+        feedback.receive(.failed, for: dismissed)
+        XCTAssertNil(feedback.failure)
+    }
+
+    func testOlderCompletionCannotOverwriteNewAttempt() {
+        var feedback = PurchaseFeedback()
+        let old = feedback.begin()
+        let current = feedback.begin()
+        feedback.receive(.unverified, for: current)
+        feedback.receive(nil, for: old)
+        XCTAssertEqual(feedback.failure, .unverified)
+        feedback.receive(.failed, for: old)
+        XCTAssertEqual(feedback.failure, .unverified)
+    }
+
+    func testSameFailureCanBePresentedAgainAfterAcknowledgement() {
+        var feedback = PurchaseFeedback()
+        let first = feedback.begin()
+        feedback.receive(.failed, for: first)
+        XCTAssertEqual(feedback.failure, .failed)
+        feedback.reset()
+        XCTAssertNil(feedback.failure)
+        let second = feedback.begin()
+        feedback.receive(.failed, for: second)
+        XCTAssertEqual(feedback.failure, .failed)
+        feedback.reset()
+        feedback.receive(.failed, for: second)
+        XCTAssertNil(feedback.failure)
+    }
+
+    func testNonFailureResultDoesNotPresentAnAlert() {
+        var feedback = PurchaseFeedback()
+        let first = feedback.begin()
+        feedback.receive(.failed, for: first)
+        let next = feedback.begin()
+        feedback.receive(nil, for: next)
+        XCTAssertNil(feedback.failure)
+    }
+
+    func testPurchaseAlertTitleIsLocalizedInEnglishAndRussian() {
+        XCTAssertEqual(L10n.ui("pro.purchaseErrorTitle", defaultValue: "Purchase not completed",
+                              preferredLanguages: ["en"]), "Purchase not completed")
+        XCTAssertEqual(L10n.ui("pro.purchaseErrorTitle", defaultValue: "Purchase not completed",
+                              preferredLanguages: ["ru"]), "Не удалось завершить покупку")
+    }
+
+    #if DEBUG && targetEnvironment(simulator)
+    private let diagnosticFlag = "--ui-testing-purchase-diagnostics"
+
+    func testDiagnosticsRequireTheExactExplicitFlag() {
+        for arguments in [[], ["--ui-testing-unlocked"], [diagnosticFlag + "=true"], [diagnosticFlag + "-extra"]] {
+            var diagnostics = PurchaseDiagnostics(arguments: arguments)
+            diagnostics.recordCatalog(URLError(.notConnectedToInternet))
+            diagnostics.recordPurchase(phase: .purchase, error: URLError(.timedOut))
+            diagnostics.recordPurchase(category: .verification)
+            XCTAssertNil(diagnostics.accessibilityValue)
+        }
+        var enabled = PurchaseDiagnostics(arguments: [diagnosticFlag])
+        enabled.recordPurchase(phase: .purchase, error: URLError(.timedOut))
+        XCTAssertNotNil(enabled.accessibilityValue)
+    }
+
+    func testAllowlistedDomainAndCodeDoNotExposeErrorPayload() {
+        for domain in ["SKErrorDomain", "NSURLErrorDomain", "NSCocoaErrorDomain", "NSPOSIXErrorDomain"] {
+            let error = NSError(domain: domain, code: -1009, userInfo: [
+                NSLocalizedDescriptionKey: "SYNTHETIC_PRIVATE_DESCRIPTION",
+                NSFilePathErrorKey: "/synthetic/private/document.pdf",
+                NSUnderlyingErrorKey: NSError(domain: "SYNTHETIC_PRIVATE_DOMAIN", code: 998)
+            ])
+            let diagnostic = PurchaseDiagnostic(phase: .catalog, error: error)
+            XCTAssertEqual(diagnostic.domain, domain)
+            XCTAssertEqual(diagnostic.code, -1009)
+            XCTAssertEqual(diagnostic.phase, .catalog)
+            XCTAssertFalse(diagnostic.accessibilityValue.contains("PRIVATE"))
+            XCTAssertFalse(diagnostic.accessibilityValue.contains("document.pdf"))
+            XCTAssertFalse(diagnostic.accessibilityValue.contains("998"))
+        }
+    }
+
+    func testUnknownAndPrefixSpoofedDomainsAreNeutralized() {
+        for domain in ["SYNTHETIC_PRIVATE_DOMAIN", "NSURLErrorDomain.private", "Xcode\naccount=synthetic"] {
+            let diagnostic = PurchaseDiagnostic(phase: .purchase, error: NSError(domain: domain, code: 12345))
+            XCTAssertEqual(diagnostic.domain, "other")
+            XCTAssertNil(diagnostic.code)
+            XCTAssertEqual(diagnostic.accessibilityValue,
+                           "purchase-diagnostic phase=purchase category=other domain=other code=none")
+        }
+    }
+
+    func testOnlyOnePublicStoreKitAssociatedErrorIsInspected() {
+        let network = PurchaseDiagnostic(phase: .purchase,
+                                         error: StoreKitError.networkError(URLError(.notConnectedToInternet)))
+        XCTAssertEqual(network.category, .network)
+        XCTAssertEqual(network.domain, "NSURLErrorDomain")
+        XCTAssertEqual(network.code, -1009)
+        let system = PurchaseDiagnostic(phase: .purchase,
+                                        error: StoreKitError.systemError(NSError(domain: "NSPOSIXErrorDomain", code: 13)))
+        XCTAssertEqual(system.category, .system)
+        XCTAssertEqual(system.domain, "NSPOSIXErrorDomain")
+        XCTAssertEqual(system.code, 13)
+        let nested = PurchaseDiagnostic(phase: .purchase, error: StoreKitError.systemError(
+            StoreKitError.systemError(NSError(domain: "NSPOSIXErrorDomain", code: 87654))))
+        XCTAssertEqual(nested.category, .system)
+        XCTAssertFalse(nested.accessibilityValue.contains("87654"))
+    }
+
+    func testLatestPurchaseSurvivesBackgroundCatalogButNewOperationClearsIt() {
+        var diagnostics = PurchaseDiagnostics(arguments: [diagnosticFlag])
+        diagnostics.recordPurchase(phase: .purchase, error: URLError(.notConnectedToInternet))
+        let purchase = diagnostics.accessibilityValue
+        diagnostics.beginCatalog()
+        diagnostics.recordCatalog(URLError(.timedOut))
+        XCTAssertEqual(diagnostics.accessibilityValue, purchase)
+        diagnostics.beginPurchaseOrRestore()
+        XCTAssertNil(diagnostics.accessibilityValue)
+        diagnostics.recordPurchase(phase: .catalog, error: URLError(.timedOut))
+        XCTAssertTrue(diagnostics.accessibilityValue?.contains("phase=catalog") == true)
+        diagnostics.beginPurchaseOrRestore()
+        diagnostics.recordPurchase(category: .verification)
+        XCTAssertEqual(diagnostics.accessibilityValue,
+                       "purchase-diagnostic phase=purchase category=verification domain=none code=none")
+    }
+
+    func testDiagnosticSizeIsBoundedAndCannotMimicThePaymentSheetMarker() {
+        for code in [Int.min, 0, Int.max] {
+            let value = PurchaseDiagnostic(phase: .purchase,
+                error: NSError(domain: "NSCocoaErrorDomain", code: code)).accessibilityValue
+            XCTAssertLessThanOrEqual(value.utf8.count, 160)
+            XCTAssertTrue(value.unicodeScalars.allSatisfy { $0.isASCII })
+            XCTAssertFalse(value.localizedCaseInsensitiveContains("Xcode"))
+        }
+    }
+    #endif
 }

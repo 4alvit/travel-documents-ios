@@ -21,7 +21,7 @@ final class PurchaseUITests: XCTestCase {
             session.resetToDefaultState()
         }
 
-        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo"]
+        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-purchase-diagnostics"]
         app.launch()
         try await require("The synthetic demo trip did not load", app: app, springboard: springboard) {
             app.staticTexts["Coast weekend"].exists
@@ -82,6 +82,125 @@ final class PurchaseUITests: XCTestCase {
             app.navigationBars["TripDocket Pro"].exists
         }
         XCTAssertFalse(app.textFields["Trip name"].exists)
+    }
+
+    func testPurchaseFailureAlertInEnglishWithDiagnostics() async throws {
+        try await verifyPurchaseFailureAlert(russian: false, diagnostics: true)
+    }
+
+    func testPurchaseFailureAlertInRussianWithDiagnostics() async throws {
+        try await verifyPurchaseFailureAlert(russian: true, diagnostics: true)
+    }
+
+    func testPurchaseFailureAlertWithoutDiagnosticFlag() async throws {
+        try await verifyPurchaseFailureAlert(russian: false, diagnostics: false)
+    }
+
+    private func verifyPurchaseFailureAlert(russian: Bool, diagnostics: Bool) async throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        let session = try await makeLocalStoreSession()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        addTeardownBlock { @MainActor in
+            app.terminate()
+            try await self.clearPurchaseFailure(session)
+        }
+        // The existing local preflight must pass before any simulated API error.
+        session.disableDialogs = true
+        do {
+            app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
+                                   "-AppleLanguages", russian ? "(ru-RU,en-US)" : "(en-US)",
+                                   "-AppleLocale", "en_US"]
+            if diagnostics { app.launchArguments.append("--ui-testing-purchase-diagnostics") }
+            app.launch()
+            let settings = app.buttons[russian ? "Настройки" : "Settings"].firstMatch
+            try await require("Localized Settings did not load", app: app, springboard: springboard) {
+                settings.exists && settings.isHittable
+            }
+            settings.tap()
+            let upgrade = app.staticTexts[russian ? "Место для каждой поездки" : "Make room for every trip"]
+            try await require("The free plan is not available", app: app, springboard: springboard) {
+                upgrade.exists && upgrade.isHittable
+            }
+            upgrade.tap()
+            let buy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@",
+                russian ? "Открыть Pro ·" : "Unlock Pro ·")).firstMatch
+            let title = russian ? "Не удалось завершить покупку" : "Purchase not completed"
+            let message = russian
+                ? "Не удалось завершить покупку. Проверьте подключение к интернету и учётную запись App Store, затем повторите попытку."
+                : "The purchase could not be completed. Check your connection and App Store account, then try again."
+            let alert = app.alerts[title]
+            let ok = alert.buttons[russian ? "ОК" : "OK"]
+            for attempt in 1...2 {
+                try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard) {
+                    buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
+                }
+                try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
+                guard await session.simulatedError(forAPI: .purchase) != nil else {
+                    throw PurchaseTestError(message: "The purchase failure was not installed")
+                }
+                buy.tap()
+                // No scrolling: a matching status below the paywall or in the
+                // underlying Settings must not satisfy this alert assertion.
+                let body = alert.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", message)).firstMatch
+                try await require("Purchase failure is not immediately accessible on the paywall", app: app, springboard: springboard) {
+                    app.alerts.count == 1 && alert.exists && body.exists && body.isHittable
+                        && ok.exists && ok.isEnabled && ok.isHittable
+                }
+                try await require("Unexpected purchase diagnostic visibility", app: app, springboard: springboard) {
+                    diagnostics
+                        ? body.label == message + "\n\npurchase-diagnostic phase=purchase category=network domain=NSURLErrorDomain code=-1009"
+                        : body.label == message && !app.debugDescription.contains("purchase-diagnostic")
+                }
+                try await require("An app error must not imitate the system payment sheet", app: app, springboard: springboard) {
+                    !self.xcodeMarker(in: app).exists && !self.xcodeMarker(in: springboard).exists
+                }
+                attachDiagnostics(app: app, springboard: springboard,
+                                  name: "Purchase failure \(russian ? "ru" : "en") diagnostics=\(diagnostics) attempt=\(attempt)")
+                ok.tap()
+                try await require("Acknowledging the failure did not restore an idle paywall", app: app, springboard: springboard) {
+                    app.alerts.count == 0 && buy.exists && buy.isEnabled && buy.isHittable
+                }
+                try await session.setSimulatedError(nil, forAPI: .purchase)
+                guard await session.simulatedError(forAPI: .purchase) == nil else {
+                    throw PurchaseTestError(message: "The previous purchase failure was not cleared")
+                }
+            }
+            app.buttons[russian ? "Готово" : "Done"].tap()
+            try await require("Paywall did not dismiss", app: app, springboard: springboard) {
+                upgrade.exists && upgrade.isHittable
+            }
+            upgrade.tap()
+            try await require("Reopening the paywall replayed an old failure", app: app, springboard: springboard) {
+                buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
+            }
+            try await require("Failed purchases changed free access or created a transaction", app: app, springboard: springboard) {
+                !app.staticTexts[russian ? "Pro доступен" : "Pro is unlocked"].exists
+                    && session.allTransactions().isEmpty
+            }
+        } catch {
+            attachDiagnostics(app: app, springboard: springboard, name: "Purchase failure regression cleanup")
+            throw error
+        }
+    }
+
+    private func clearPurchaseFailure(_ session: SKTestSession) async throws {
+        // Await fault removal before restoring the local configuration. A failed
+        // cleanup is a test failure and cannot be silently carried to another test.
+        do {
+            try await session.setSimulatedError(nil, forAPI: .purchase)
+        } catch {
+            session.clearTransactions()
+            session.resetToDefaultState()
+            throw error
+        }
+        session.clearTransactions()
+        session.resetToDefaultState()
+        guard await session.simulatedError(forAPI: .purchase) == nil,
+              session.allTransactions().isEmpty else {
+            throw PurchaseTestError(message: "Purchase failure regression left local StoreKit state behind")
+        }
     }
 
     private func makeLocalStoreSession() async throws -> SKTestSession {

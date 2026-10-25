@@ -990,9 +990,24 @@ private struct SettingsView: View {
     }
 }
 
+#if DEBUG && targetEnvironment(simulator)
+private struct PurchaseDiagnosticValue: ViewModifier {
+    let value: String?
+
+    func body(content: Content) -> some View {
+        if let value {
+            content.accessibilityValue(Text(verbatim: value))
+        } else {
+            content
+        }
+    }
+}
+#endif
+
 private struct ProView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var purchaseFeedback = PurchaseFeedback()
 
     var body: some View {
         NavigationStack {
@@ -1021,7 +1036,15 @@ private struct ProView: View {
                         Label(L10n.ui("pro.unlocked", defaultValue: "Pro is unlocked"), systemImage: "checkmark.seal.fill").foregroundStyle(TripStyle.accent)
                     } else {
                         Button {
-                            Task { await model.purchases.purchase() }
+                            let generation = purchaseFeedback.begin()
+                            Task {
+                                let failure = await model.purchases.purchase()
+                                guard !model.purchases.isPro else {
+                                    purchaseFeedback.reset()
+                                    return
+                                }
+                                purchaseFeedback.receive(failure, for: generation)
+                            }
                         } label: {
                             HStack {
                                 Spacer()
@@ -1032,12 +1055,21 @@ private struct ProView: View {
                             }.padding(.vertical, 8)
                         }.buttonStyle(.borderedProminent)
                             .disabled(model.purchases.isBusy || model.purchases.displayPrice == nil)
+                            #if DEBUG && targetEnvironment(simulator)
+                            .modifier(PurchaseDiagnosticValue(value: model.purchases.purchaseDiagnostics.accessibilityValue))
+                            #endif
                         Text(L10n.ui("pro.oneTime", defaultValue: "One-time purchase. No subscription.")).font(.footnote).foregroundStyle(.secondary)
                     }
-                    Button(L10n.ui("pro.restore", defaultValue: "Restore purchases")) { Task { await model.purchases.restore() } }
+                    Button(L10n.ui("pro.restore", defaultValue: "Restore purchases")) {
+                        purchaseFeedback.reset()
+                        Task { await model.purchases.restore() }
+                    }
                         .disabled(model.purchases.isBusy)
                     if model.purchases.displayPrice == nil && !model.purchases.isPro {
-                        Button(L10n.ui("pro.retryPrice", defaultValue: "Retry loading price")) { Task { await model.purchases.load() } }
+                        Button(L10n.ui("pro.retryPrice", defaultValue: "Retry loading price")) {
+                            purchaseFeedback.reset()
+                            Task { await model.purchases.load() }
+                        }
                             .disabled(model.purchases.isBusy)
                     }
                     if let status = model.purchases.statusMessage {
@@ -1050,9 +1082,38 @@ private struct ProView: View {
                 }
             }
             .navigationTitle(L10n.ui("brand.pro", defaultValue: "TripDocket Pro")).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button(L10n.ui("common.done", defaultValue: "Done")) { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button(L10n.ui("common.done", defaultValue: "Done")) {
+                purchaseFeedback.reset()
+                dismiss()
+            } } }
             .task { await model.purchases.load() }
         }
+        .onDisappear { purchaseFeedback.reset() }
+        .onChange(of: model.purchases.isPro) { _, isPro in
+            if isPro { purchaseFeedback.reset() }
+        }
+        .alert(L10n.ui("pro.purchaseErrorTitle", defaultValue: "Purchase not completed"),
+               isPresented: Binding(
+                   get: { purchaseFeedback.failure != nil },
+                   set: { if !$0 { purchaseFeedback.reset() } }
+               ), presenting: purchaseFeedback.failure) { _ in
+            Button(L10n.ui("common.ok", defaultValue: "OK"), role: .cancel) {
+                purchaseFeedback.reset()
+            }
+        } message: { failure in
+            Text(purchaseFailureMessage(failure))
+        }
+    }
+
+    private func purchaseFailureMessage(_ failure: PurchaseFailure) -> String {
+        #if DEBUG && targetEnvironment(simulator)
+        // The alert owns accessibility focus. Include the same bounded value
+        // here so existing failure attachments also capture it while modal.
+        if let value = model.purchases.purchaseDiagnostics.accessibilityValue {
+            return failure.message + "\n\n" + value
+        }
+        #endif
+        return failure.message
     }
 }
 
