@@ -153,12 +153,16 @@ class Smoke:
                   'requested_cap_seconds': cap, 'stop_reserve_seconds': 8,
                   'work_deadline': end - 8 - self.t0, 'command_deadline': end - self.t0}
         self.report['commands'].append(record)
-        self.save()  # Intent and any one-shot counter are durable before spawn.
-        p, failure = None, None
+        p, failure, stdout_text = None, None, None
         paths = {k: self.out / (str(len(self.report['commands'])) + '-' + k + '.log') for k in ('stdout', 'stderr')}
         record['logs'] = {k: str(v) for k, v in paths.items()}
-        handles = {k: v.open('wb') for k, v in paths.items()}
+        handles = {}
         try:
+            self.save()  # Persist intent before any process acquisition.
+            for channel, path in paths.items():
+                handles[channel] = path.open('wb')
+            self.checkpoint(force_resources=True)
+            require(end - self.ops.now() > 8, 'Insufficient command/stop budget before spawn')
             try:
                 p = self.ops.spawn(argv)
             except BaseException:
@@ -202,16 +206,53 @@ class Smoke:
                 except BaseException as error:
                     failure = failure or error
                     record['close_error'] = repr(error)
-            for f in handles.values():
-                f.close()
+            for channel, stream in handles.items():
+                try:
+                    stream.close()
+                except BaseException as error:
+                    record.setdefault('log_close_errors', {})[channel] = repr(error)
+                    failure = failure or error
+            if failure is None:
+                try:
+                    stdout_text = paths['stdout'].read_text(errors='replace')
+                except BaseException as error:
+                    record['stdout_read_error'] = repr(error)
+                    failure = error
+            if failure is None:
+                try:
+                    self.checkpoint()
+                except BaseException as error:
+                    record['finalization_error'] = repr(error)
+                    failure = error
             record['finish'] = self.ops.now() - self.t0
-            self.save()
             if self.ops.now() > end:
-                failure = failure or RuntimeError('Command plus cleanup exceeded cap')
+                cap_error = RuntimeError('Command plus cleanup exceeded cap')
+                record['cap_error'] = repr(cap_error)
+                failure = failure or cap_error
+            record['outcome'] = 'failed' if failure else 'completed'
+            if failure:
+                record.setdefault('error', repr(failure))
+                self.error(label + ': ' + repr(failure))
+            try:
+                self.save()
+            except BaseException as error:
+                record['receipt_error'] = repr(error)
+                record['outcome'] = 'failed'
+                record.setdefault('error', repr(error))
+                self.error(label + ' receipt: ' + repr(error))
+                failure = failure or error
+            record['finish'] = self.ops.now() - self.t0
+            if self.ops.now() > end:
+                cap_error = RuntimeError('Command plus cleanup exceeded cap')
+                failure = failure or cap_error
+                record.setdefault('error', repr(cap_error))
+                record['outcome'] = 'failed'
+                if 'cap_error' not in record:
+                    self.error(label + ': ' + repr(cap_error))
+                record['cap_error'] = repr(cap_error)
         if failure:
-            self.error(label + ': ' + repr(failure))
             raise RuntimeError(label + ' failed') from failure
-        return paths['stdout'].read_text(errors='replace')
+        return stdout_text
 
     @staticmethod
     def devices(data):

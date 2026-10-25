@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = 'ce820e763ce57b0c7efb1ce510b0b24e736bf4df85d80e5fa359fed8d86dad65'
+HELPER_SHA = 'df8c61354b2b7eb3c103fad0a319adb99124fc0d16d97fce269e39cc529ee81a'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
@@ -221,10 +221,12 @@ class Recovery:
         require(self.ops.now() < self.limit, self.phase+' deadline reached')
         require(self.cleaning or not self.interrupted, 'Interrupted')
 
-    def checkpoint(self):
+    def checkpoint(self, *, force_resources=False):
         self.timecheck()
-        if not self.cleaning and self.ops.now() >= self.next_scan:
+        if not self.cleaning and (force_resources or self.ops.now() >= self.next_scan):
             self.monitor()
+        if force_resources:
+            self.timecheck()  # Include the final resource read in admission.
 
     def monitor(self):
         self.timecheck()
