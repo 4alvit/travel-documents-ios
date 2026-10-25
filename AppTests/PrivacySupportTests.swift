@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import SwiftUI
+import UIKit
 @testable import Tripfolio
 
 final class PrivacySupportTests: XCTestCase {
@@ -8,9 +9,10 @@ final class PrivacySupportTests: XCTestCase {
     func testGuidanceRendersWithoutALibraryOrPurchaseEnvironment() async throws {
         var appeared = false
         var requestedURLs: [URL] = []
+        let didAppear = XCTestExpectation(description: "Guidance host finished appearing")
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
-        let host = UIHostingController(rootView:
+        let host = PrivacySupportHostingController(rootView:
             NavigationStack {
                 PrivacySupportView().onAppear { appeared = true }
             }
@@ -19,16 +21,18 @@ final class PrivacySupportTests: XCTestCase {
                 return .discarded
             })
         )
+        host.onDidAppear = { didAppear.fulfill() }
         window.rootViewController = host
         window.isHidden = false
         defer {
             window.isHidden = true
             window.rootViewController = nil
+            host.onDidAppear = nil
         }
-        for _ in 0..<30 {
-            if appeared { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+
+        // SwiftUI.onAppear can run before UIKit finishes the host transition.
+        let appearance = await XCTWaiter.fulfillment(of: [didAppear], timeout: 5)
+        XCTAssertEqual(appearance, .completed, "Guidance host must finish appearing")
         XCTAssertTrue(appeared, "Guidance must render without AppModel or a purchase environment")
         XCTAssertTrue(requestedURLs.isEmpty, "Rendering guidance must not open a website")
     }
@@ -77,5 +81,17 @@ final class PrivacySupportTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+@MainActor
+private final class PrivacySupportHostingController<Content: View>: UIHostingController<Content> {
+    var onDidAppear: (@MainActor () -> Void)?
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let completion = onDidAppear
+        onDidAppear = nil
+        completion?()
     }
 }

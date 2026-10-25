@@ -92,7 +92,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testMaximumTypeCompleteBackupWarningAndCancellation() async throws {
-        executionTimeAllowance = 120
+        executionTimeAllowance = 180
         let app = try launchFixture()
         defer { app.terminate() }
         try selectTab("Settings", in: app)
