@@ -1,5 +1,11 @@
 # TripDocket privacy policy
 
+In the app, open **Settings → Privacy & support** (Russian: **Настройки → Данные
+и помощь**) for bundled guidance available offline and without Pro. It describes
+local storage, deletion, temporary copies, unencrypted exports, recovery and
+Apple services. Web buttons show the public destination before the user chooses
+to open it. No document data is appended to those URLs.
+
 Expanded privacy drafts: [English](app-store/drafts/privacy-en-US.md) · [Russian](app-store/drafts/privacy-ru.md).
 These drafts still need real owner/contact details before App Store submission.
 

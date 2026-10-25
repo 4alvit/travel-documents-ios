@@ -32,7 +32,10 @@ These public source drafts expose no customer information. Their bracketed
 owner/contact/retention/effective-date fields are deliberately incomplete.
 They are **not final privacy/support pages for submission**. Public access to a
 commit-pinned draft proves only that the reviewed text can be read; it does not
-satisfy every App Store policy or support requirement.
+satisfy every App Store policy or support requirement. Settings now includes
+free bundled EN/RU guidance and explicit, confirmed links to published preview
+documents pinned to commit `1391b30776cd6ea48eab97cd92d4b098ff8f9474`.
+The guidance itself needs no network; opening a website does.
 
 [Owner inputs](owner-inputs.json) separates unknown legal/contact facts from
 technical work. The Free + one-time Pro model, target USD24.99, primary en-US,
@@ -41,7 +44,7 @@ this preparation. The target price is currently a local test configuration,
 not a live storefront price. Consumer copy uses the localized store price.
 
 Before submission, fill actual owner/contact details, finalize and publish the
-pages, add an accessible in-app privacy link, check name availability, finish
+pages, replace the in-app preview links with those final URLs, check name availability, finish
 Apple account/signing/product setup, review all privacy and legal declarations,
 and complete physical-device QA. An IAP review image must depict the actual
 configured product; old local-price paywalls are not evidence of live pricing.

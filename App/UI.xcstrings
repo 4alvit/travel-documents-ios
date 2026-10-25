@@ -2286,6 +2286,534 @@
         }
       }
     },
+    "privacySupport.access.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A device passcode is required. TripDocket uses Apple’s Face ID, Touch ID or passcode prompt to unlock, and system file protection for saved library files. The app covers its content when inactive."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "На устройстве должен быть установлен код-пароль. Для разблокировки TripDocket использует системную проверку Face ID, Touch ID или код-пароль, а для сохранённых файлов — системную защиту. Пока приложение неактивно, оно закрывает своё содержимое."
+          }
+        }
+      }
+    },
+    "privacySupport.access.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlocking & protection"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ и защита"
+          }
+        }
+      }
+    },
+    "privacySupport.apple.backup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Depending on your Apple settings, device backups may include the library. TripDocket has no automatic library sync between devices."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В зависимости от настроек Apple резервные копии устройства могут включать библиотеку. В TripDocket нет автоматической синхронизации библиотеки между устройствами."
+          }
+        }
+      }
+    },
+    "privacySupport.apple.purchases": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchases use Apple’s StoreKit. TripDocket reads product information and verified Pro access, not payment-card details. Restore Purchases may ask you to sign in to your Apple Account; it restores Pro access, not documents."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для покупок используется StoreKit от Apple. TripDocket получает сведения о продукте и подтверждённом доступе Pro, но не данные банковской карты. Восстановление покупок может потребовать входа в Аккаунт Apple; оно возвращает доступ Pro, а не документы."
+          }
+        }
+      }
+    },
+    "privacySupport.apple.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple services"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сервисы Apple"
+          }
+        }
+      }
+    },
+    "privacySupport.deletion.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleting a document removes it from the active library. Deleting a trip also removes its documents. Copies already exported or kept in device backups are managed separately; the app cannot erase them. Deleting a person keeps their documents and removes the assignment."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удаление документа убирает его из текущей библиотеки. При удалении поездки удаляются и её документы. Ранее экспортированные копии и копии в резервных копиях устройства хранятся отдельно; приложение не может стереть их. При удалении человека документы остаются без привязки к нему."
+          }
+        }
+      }
+    },
+    "privacySupport.deletion.temporary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previews and exports use protected temporary copies. Cleanup may happen after the operation or on a later launch. Unsaved batch imports stay in memory and are lost if the app quits."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для просмотра и экспорта создаются защищённые временные копии. Очистка может произойти после операции или при следующем запуске. Несохранённый пакет импорта остаётся в памяти и теряется при завершении приложения."
+          }
+        }
+      }
+    },
+    "privacySupport.deletion.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleting data"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удаление данных"
+          }
+        }
+      }
+    },
+    "privacySupport.developer.name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "alvit (4alvit)"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "alvit (4alvit)"
+          }
+        }
+      }
+    },
+    "privacySupport.developer.open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Developer on GitHub"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Разработчик на GitHub"
+          }
+        }
+      }
+    },
+    "privacySupport.developer.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Developer"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Разработчик"
+          }
+        }
+      }
+    },
+    "privacySupport.export.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exported files and .tripbackup copies are not encrypted by TripDocket. A recipient or app with access to the destination can read them. Choose where you save or send them carefully."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket не шифрует экспортированные файлы и копии .tripbackup. Получатель или приложение с доступом к месту сохранения может их прочитать. Внимательно выбирайте, куда сохранить или отправить копию."
+          }
+        }
+      }
+    },
+    "privacySupport.export.restore": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restoring a backup replaces the current library. Save a backup first if you need to keep it. Losing the device and all backups can mean losing your documents. After a restore, schedule reminders again. Viewing, editing, deletion, export and recovery of existing data do not require Pro."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Восстановление из копии заменяет текущую библиотеку. Сначала сделайте резервную копию, если хотите её сохранить. Потеря устройства и всех копий может привести к потере документов. После восстановления настройте напоминания заново. Просмотр, редактирование, удаление, экспорт и восстановление существующих данных не требуют Pro."
+          }
+        }
+      }
+    },
+    "privacySupport.export.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export & recovery"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Экспорт и восстановление"
+          }
+        }
+      }
+    },
+    "privacySupport.external.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This opens GitHub outside TripDocket and needs an internet connection. GitHub handles the web visit under its own policies. TripDocket does not attach your documents to this link."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ссылка откроет GitHub вне TripDocket; для этого нужен интернет. Посещение сайта регулируется правилами GitHub. TripDocket не прикрепляет ваши документы к этой ссылке."
+          }
+        }
+      }
+    },
+    "privacySupport.external.open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open website"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть сайт"
+          }
+        }
+      }
+    },
+    "privacySupport.external.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a website?"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть веб-сайт?"
+          }
+        }
+      }
+    },
+    "privacySupport.help.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "For a file stored in the cloud, finish downloading it in Files before importing. Keep a backup before troubleshooting; do not delete the app while it holds your only copy."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Если файл хранится в облаке, дождитесь его загрузки в «Файлах» перед импортом. Перед устранением неполадок сделайте резервную копию. Не удаляйте приложение, если в нём хранится единственная копия документов."
+          }
+        }
+      }
+    },
+    "privacySupport.help.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Before asking for help"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Если нужна помощь"
+          }
+        }
+      }
+    },
+    "privacySupport.limits.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Up to 16 MiB per original and 64 MiB of originals in the library. A backup opened for restore must be no larger than 96 MiB. Pro batch import accepts up to 10 files at once. Dates are confirmed by you. Reminders do not check entry requirements or whether documents are valid for a destination."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "До 16 МиБ на оригинал и до 64 МиБ оригиналов в библиотеке. Размер файла резервной копии для восстановления — не более 96 МиБ. С Pro можно импортировать пакетом до 10 файлов за раз. Даты подтверждаете вы. Напоминания не проверяют правила въезда или пригодность документов для поездки."
+          }
+        }
+      }
+    },
+    "privacySupport.limits.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File limits"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ограничения файлов"
+          }
+        }
+      }
+    },
+    "privacySupport.local.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your imported originals and trip details are stored on this device. Text recognition (OCR) runs here too. TripDocket has no developer-operated document server and does not send your library to the developer. No TripDocket account is needed. The app includes no advertising, analytics or crash-upload SDK."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Оригиналы документов и сведения о поездках хранятся на этом устройстве. Текст тоже распознаётся здесь. У TripDocket нет сервера разработчика для документов; приложение не отправляет ему вашу библиотеку. Аккаунт TripDocket не нужен. В приложении нет SDK рекламы, аналитики или отправки отчётов о сбоях."
+          }
+        }
+      }
+    },
+    "privacySupport.local.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On this device"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "На устройстве"
+          }
+        }
+      }
+    },
+    "privacySupport.offline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This page is available offline and without Pro. Website links need an internet connection."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Эта страница доступна без интернета и без Pro. Для перехода по веб-ссылкам нужна сеть."
+          }
+        }
+      }
+    },
+    "privacySupport.support.body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report app problems in the project’s public GitHub Issues. Anyone can read these reports. Include the app version, device, OS version and steps using fictional data."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сообщайте о проблемах в публичных GitHub Issues проекта. Эти сообщения доступны всем. Укажите версию приложения, устройство, версию ОС и шаги на вымышленных данных."
+          }
+        }
+      }
+    },
+    "privacySupport.support.open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open public support"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть публичную поддержку"
+          }
+        }
+      }
+    },
+    "privacySupport.support.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Public support"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Публичная поддержка"
+          }
+        }
+      }
+    },
+    "privacySupport.support.warning": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Do not post documents, purchase receipts, credentials or personal backups. Check screenshots for private information before posting."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не публикуйте документы, чеки о покупках, пароли, коды доступа и другие данные для входа или личные резервные копии. Перед публикацией проверьте снимки экрана на личные сведения."
+          }
+        }
+      }
+    },
+    "privacySupport.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy & support"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Данные и помощь"
+          }
+        }
+      }
+    },
+    "privacySupport.web.preview": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The linked privacy and support documents are published previews. They are not final App Store policies."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "По ссылкам опубликованы предварительные тексты о данных и поддержке. Это ещё не окончательные документы для App Store."
+          }
+        }
+      }
+    },
+    "privacySupport.web.privacy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy preview (web)"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "О данных: веб-черновик"
+          }
+        }
+      }
+    },
+    "privacySupport.web.support": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Support preview (web)"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Помощь: веб-черновик"
+          }
+        }
+      }
+    },
+    "privacySupport.web.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Online documents"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Документы в интернете"
+          }
+        }
+      }
+    },
     "pro.activeHero": {
       "extractionState": "manual",
       "localizations": {
@@ -3260,6 +3788,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Конфиденциальность и сохранность"
+          }
+        }
+      }
+    },
+    "settings.privacySupport": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy & support"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Данные и помощь"
           }
         }
       }

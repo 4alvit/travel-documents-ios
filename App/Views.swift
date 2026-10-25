@@ -896,6 +896,13 @@ private struct SettingsView: View {
         NavigationStack {
             List {
                 Section {
+                    NavigationLink { PrivacySupportView() } label: {
+                        Label(L10n.ui("settings.privacySupport", defaultValue: "Privacy & support"), systemImage: "hand.raised")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityIdentifier("privacySupport.entry")
+                }
+                Section {
                     Button { showsPro = true } label: {
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: "sparkles").font(.title2)

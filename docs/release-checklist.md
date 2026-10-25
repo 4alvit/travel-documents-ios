@@ -3,8 +3,9 @@
 Record exact commit, OS, Xcode and tests in release-evidence.md. Advance a release
 channel only after its evidence exists; never relabel an unverified build stable.
 Checked historical items below retain their recorded source/scope; they are not
-whole-suite acceptance of the current PR. The 25 October hosted baseline has
-four StoreKit failures; see [publication evidence](release-evidence.md#publication-baseline--25-october-2026).
+whole-suite acceptance of the current PR. The accepted 25 October hosted baseline
+passed at `1391b307`; see [publication evidence](release-evidence.md#accepted-hosted-baseline--25-october-2026).
+Every later push requires its own ordinary CI.
 
 - [x] Public repository provisioned through Terraform; development preview in draft PR #1.
 - [ ] Fresh independent approval of the final PR push, with repository protection retained.
@@ -23,8 +24,9 @@ four StoreKit failures; see [publication evidence](release-evidence.md#publicati
 - [x] Existing-device full app/platform/UI suite: 27/27 passed on iPhone Simulator.
 - [x] Actual system purchase cancellation passed on that configured simulator,
       with the result bundle recorded.
-- [ ] Clean-device CLI StoreKit purchase/restore is reproducible. Fresh iPhone
-      and iPad probes currently fail during test-environment setup.
+- [x] Ordinary hosted StoreKit fixture suite passes at the accepted baseline.
+      Earlier cold local probes remain historical evidence, not a current
+      request for repeated diagnostics. Live/physical-device validation remains open.
 - [x] Three selected nonpayment UI scenarios pass on iPhone and iPad Simulators.
 - [ ] Complete iPhone and iPad UI coverage: import/scan, people/trips, readiness, preview,
       explicit sharing, restore cancellation/replacement, error and empty states.
@@ -71,7 +73,10 @@ four StoreKit failures; see [publication evidence](release-evidence.md#publicati
 - [ ] Non-consumable SKU `com.4alvit.tripfolio.pro` exists and is approved.
 - [ ] The actual App Store Connect product price/territories and localized price
       display are verified. The local StoreKit configuration is not a live price.
-- [ ] Privacy/support URLs are public, metadata and screenshots are approved.
+- [x] Bundled EN/RU privacy/support guidance and confirmed public preview links
+      are available at the top of Settings without Pro.
+- [ ] Final privacy/support URLs, actual legal/contact/retention details, metadata
+      and screenshots are approved for submission; preview documents are not final.
 - [ ] Final-build privacy labels, permissions, age rating and account details
       are completed accurately; no untested security or unlimited-storage claims.
 - [ ] Export-compliance answers reviewed for actual use of Apple system crypto.
