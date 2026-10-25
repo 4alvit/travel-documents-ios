@@ -255,8 +255,8 @@ class BoundaryTests(unittest.TestCase):
 
     def proof(self):
         stop={'group_absent':True,'leader_reaped':True}
-        normal={'pgid':101,'returncode':0,'stop':copy.deepcopy(stop)}
-        failed={'pgid':102,'error':"RuntimeError('Command timeout')",'start':1,'finish':20,
+        normal={'pgid':101,'returncode':0,'outcome':'completed','stop':copy.deepcopy(stop)}
+        failed={'pgid':102,'error':"RuntimeError('Command timeout')",'outcome':'failed','start':1,'finish':20,
                 'stop':{**stop,'signals':[int(signal.SIGTERM),int(signal.SIGKILL)]},
                 'process_observations':{'stop.signal_'+str(int(sig)):
                     {'calls':1,'outcome':'returned','result':'syscall_returned'}
@@ -675,6 +675,252 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.limit,1380)
         with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
         self.assertEqual(len(r.ops.processes),1)
+
+
+    # C12: exercise the actual command implementation with synthetic process/file boundaries.
+    def c12_after_first_save(self, runner, action):
+        original=runner.save;calls=0
+        def save():
+            nonlocal calls
+            calls+=1
+            if calls==1:action()
+            return original()
+        return patch.object(runner,'save',side_effect=save)
+
+    def c12_command_pair(self, runner, cap=60):
+        runner.command('first',['synthetic-only'],cap)
+        runner.command('second',['synthetic-only'],cap)
+
+    def test_c12_deadline_during_intent_prevents_spawn(self):
+        r=self.runner()
+        with self.c12_after_first_save(r,lambda:setattr(r.ops,'t',61)):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[]);self.assertFalse(r.unknown_spawn)
+        self.assertEqual(r.report['commands'][0]['outcome'],'failed')
+
+    def test_c12_cancel_during_intent_prevents_spawn(self):
+        r=self.runner()
+        with self.c12_after_first_save(r,r.signal):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[]);self.assertFalse(r.unknown_spawn)
+
+    def test_c12_resource_during_intent_forces_fresh_scan(self):
+        r=self.runner();free=SimpleNamespace(free=32*hosted.core.GIB)
+        with patch.object(hosted.core.shutil,'disk_usage',return_value=free),self.c12_after_first_save(r,lambda:setattr(free,'free',1)):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[]);self.assertFalse(r.unknown_spawn)
+        self.assertEqual(r.ops.now(),0)  # The periodic scan is not due yet.
+
+    def test_c12_exact_eight_seconds_rejected(self):
+        r=self.runner()
+        with self.c12_after_first_save(r,lambda:setattr(r.ops,'t',52)):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[])
+        row=r.report['commands'][0];self.assertEqual((row['command_deadline'],row['work_deadline'],row['stop_reserve_seconds']),(60,52,8))
+
+    def test_c12_more_than_eight_seconds_retains_positive_control(self):
+        r=self.runner()
+        with self.c12_after_first_save(r,lambda:setattr(r.ops,'t',51.999)):
+            self.c12_command_pair(r)
+        self.assertEqual(len(r.ops.processes),2);self.assertTrue(all(row['outcome']=='completed' for row in r.report['commands']))
+
+    def c12_open_hook(self, runner, action):
+        original=Path.open
+        def open_(path,*args,**kwargs):
+            if path==runner.out/'1-stderr.log':action()
+            return original(path,*args,**kwargs)
+        return patch.object(Path,'open',open_)
+
+    def test_c12_cancel_during_log_setup_prevents_spawn(self):
+        r=self.runner()
+        with self.c12_open_hook(r,r.signal):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_c12_resource_during_log_setup_prevents_spawn(self):
+        r=self.runner();free=SimpleNamespace(free=32*hosted.core.GIB)
+        with patch.object(hosted.core.shutil,'disk_usage',return_value=free),self.c12_open_hook(r,lambda:setattr(free,'free',1)):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[]);self.assertEqual(r.ops.now(),0)
+
+    def test_c12_deadline_during_log_setup_prevents_spawn(self):
+        r=self.runner()
+        with self.c12_open_hook(r,lambda:setattr(r.ops,'t',61)):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_c12_partial_log_open_closes_first_handle(self):
+        r=self.runner();opened=[];original=Path.open
+        def open_(path,*args,**kwargs):
+            if path==r.out/'1-stderr.log':raise OSError('synthetic second log open')
+            f=original(path,*args,**kwargs)
+            if path==r.out/'1-stdout.log':opened.append(f)
+            return f
+        with patch.object(Path,'open',open_):
+            with self.assertRaises(RuntimeError) as caught:self.c12_command_pair(r)
+        self.assertIsInstance(caught.exception.__cause__,OSError)
+        self.assertEqual(len(opened),1);self.assertTrue(opened[0].closed);self.assertEqual(r.ops.processes,[])
+        self.assertEqual(r.report['commands'][0]['outcome'],'failed')
+
+    def c12_log_close_errors(self, runner, names=('1-stdout.log','1-stderr.log')):
+        original=Path.open;closed=[]
+        class Log:
+            def __init__(self,f,name):self.file,self.name=f,name
+            def write(self,data):return self.file.write(data)
+            def close(self):
+                self.file.close();closed.append(self.name)
+                raise OSError('synthetic close '+self.name)
+        def open_(path,*args,**kwargs):
+            f=original(path,*args,**kwargs)
+            return Log(f,path.name) if path.parent==runner.out and path.name in names and args and args[0]=='wb' else f
+        return patch.object(Path,'open',open_),closed
+
+    def test_c12_primary_and_all_secondary_errors_are_preserved(self):
+        primary=RuntimeError('synthetic primary poll')
+        r=self.runner(Ops({'poll_errors':{1:primary,2:PermissionError(errno.EPERM,'synthetic stop poll')},'close_error':True}))
+        original=r.save;calls=0
+        def save():
+            nonlocal calls
+            calls+=1
+            if calls==3:raise OSError('synthetic receipt failure')
+            return original()
+        logs,closed=self.c12_log_close_errors(r)
+        with logs,patch.object(r,'save',side_effect=save):
+            with self.assertRaises(RuntimeError) as caught:self.c12_command_pair(r)
+        self.assertIs(caught.exception.__cause__,primary)
+        row=r.report['commands'][0];self.assertEqual(row['error'],repr(primary));self.assertEqual(row['outcome'],'failed')
+        self.assertCountEqual(closed,['1-stdout.log','1-stderr.log'])
+        self.assertEqual(set(row['log_close_errors']),{'stdout','stderr'})
+        self.assertIn('stop_error',row);self.assertIn('close_error',row);self.assertIn('receipt_error',row)
+        self.assertEqual(row['process_observations']['command.poll']['exception_type'],'RuntimeError')
+        self.assertEqual(row['process_observations']['stop.poll']['errno'],errno.EPERM)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_c12_initial_receipt_failure_is_recorded_without_spawn(self):
+        r=self.runner();original=r.save;calls=0
+        def save():
+            nonlocal calls
+            calls+=1
+            if calls==1:raise OSError('synthetic intent write failure')
+            return original()
+        with patch.object(r,'save',side_effect=save):
+            with self.assertRaises(RuntimeError) as caught:self.c12_command_pair(r)
+        self.assertIn('intent write failure',str(caught.exception.__cause__))
+        self.assertEqual(r.ops.processes,[]);self.assertEqual(r.report['commands'][0]['outcome'],'failed')
+        saved=json.loads((r.out/'receipt.json').read_text());self.assertIn('intent write failure',saved['commands'][0]['error'])
+
+    def test_c12_successful_child_then_stdout_read_failure_stops_pair(self):
+        r=self.runner();original=Path.read_text
+        def read(path,*args,**kwargs):
+            if path==r.out/'1-stdout.log':raise OSError('synthetic stdout read failure')
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'read_text',read):
+            with self.assertRaises(RuntimeError) as caught:self.c12_command_pair(r)
+        self.assertIn('stdout read failure',str(caught.exception.__cause__));self.assertEqual(len(r.ops.processes),1)
+        row=r.report['commands'][0];self.assertEqual(row['outcome'],'failed');self.assertIn('stdout_read_error',row)
+
+    def test_c12_final_save_failure_after_success_stops_pair(self):
+        r=self.runner();original=r.save;calls=0
+        def save():
+            nonlocal calls
+            calls+=1
+            if calls==3:raise OSError('synthetic final receipt error')
+            return original()
+        with patch.object(r,'save',side_effect=save):
+            with self.assertRaises(RuntimeError) as caught:self.c12_command_pair(r)
+        self.assertIn('final receipt error',str(caught.exception.__cause__));self.assertEqual(len(r.ops.processes),1)
+        row=r.report['commands'][0];self.assertEqual(row['outcome'],'failed');self.assertIn('receipt_error',row)
+
+    def test_c12_final_save_crossing_cap_keeps_command_failure(self):
+        r=self.runner();original=r.save;calls=0
+        def save():
+            nonlocal calls
+            calls+=1;result=original()
+            if calls==3:r.ops.t=61
+            return result
+        with patch.object(r,'save',side_effect=save):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(len(r.ops.processes),1);row=r.report['commands'][0]
+        self.assertEqual(row['outcome'],'failed');self.assertIn('exceeded cap',row['error'])
+        self.assertTrue(any('exceeded cap' in e for e in r.report['errors']))
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),(60,52,60,8))
+
+    def test_c12_capability_rejects_secondary_errors_and_wrong_outcomes(self):
+        for which in [0,1]:
+            for key,value in [('log_close_errors',{'stdout':'synthetic'}),('receipt_error','synthetic'),('stdout_read_error','synthetic'),('finalization_error','synthetic'),('cap_error','synthetic'),('outcome','unknown')]:
+                with self.subTest(which=which,key=key):
+                    normal,failed,observations=self.proof();[normal,failed][which][key]=value
+                    with self.assertRaises(RuntimeError):hosted.capability_result(normal,failed,observations,21,True)
+
+    def test_c12_capability_secondary_failure_cannot_reach_setup(self):
+        r=self.runner(self.capability_ops());r.capture_source=lambda:None;r.discover_profile=lambda:None
+        original_save=hosted.core.Recovery.save;injected=False;checked=[]
+        def save(probe):
+            nonlocal injected
+            if probe is not r and len(probe.report['commands'])==2 and 'finish' in probe.report['commands'][-1] and not injected:
+                injected=True;raise OSError('synthetic capability final receipt failure')
+            return original_save(probe)
+        real_validator=hosted.capability_result
+        def validate(normal,failed,observations,elapsed,actual):
+            # Exercise validation on synthetic records without fabricating accepted capability.
+            self.assertFalse(actual);checked.append(True)
+            return real_validator(normal,failed,observations,elapsed,True)
+        with patch.object(hosted.core.Recovery,'save',save),patch.object(hosted,'capability_result',side_effect=validate),patch.object(hosted.core.Recovery,'setup',side_effect=AssertionError('NO SETUP')) as setup:
+            with self.assertRaises(RuntimeError):r.setup()
+        self.assertTrue(injected and checked);setup.assert_not_called();self.assertNotIn('host_capability',r.report)
+        self.assertEqual(len(r.ops.processes),2)
+
+    def test_c12_command_failure_skips_restore_and_preserves_observations(self):
+        r=self.runner(Ops({'exit':7}));steps=[]
+        def work():
+            r.command('phase-export',['synthetic-only'],60);steps.append('restore')
+        with patch.object(r,'work',side_effect=work),patch.object(r,'cleanup',side_effect=lambda:r.report.update(cleanup_verified=True)):
+            self.assertEqual(r.run(),1)
+        self.assertEqual(steps,[]);row=r.report['commands'][0]
+        self.assertEqual(row['outcome'],'failed');self.assertEqual(row['returncode'],7)
+        self.assertEqual(row['process_observations']['command.poll']['result'],7)
+        self.assertEqual(r.report['status'],'failed');self.assertFalse(r.report['runtime_accepted'])
+
+
+    def test_c12_cancel_in_final_admission_resource_read_prevents_spawn(self):
+        r=self.runner();calls=0
+        def usage(_):
+            nonlocal calls
+            calls+=1
+            if calls==4:r.signal()
+            return SimpleNamespace(free=32*hosted.core.GIB)
+        with patch.object(hosted.core.shutil,'disk_usage',side_effect=usage):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(calls,4);self.assertEqual(r.ops.processes,[])
+
+    def test_c12_forced_scan_cannot_spend_stop_reserve(self):
+        r=self.runner();original=r.monitor;calls=0
+        def monitor():
+            nonlocal calls
+            calls+=1;original()
+            if calls==2:r.ops.t=52
+        with patch.object(r,'monitor',side_effect=monitor):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_c12_periodic_scan_and_cleanup_bypass_are_unchanged(self):
+        r=self.runner()
+        with patch.object(r,'monitor',wraps=r.monitor) as monitor:
+            r.checkpoint();r.checkpoint();self.assertEqual(monitor.call_count,1)
+            r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
+            r.cleaning=True;r.interrupted=True
+            r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
+
+    def test_c12_cancel_during_stdout_finalization_stops_pair(self):
+        r=self.runner();original=Path.read_text
+        def read(path,*args,**kwargs):
+            data=original(path,*args,**kwargs)
+            if path==r.out/'1-stdout.log':r.signal()
+            return data
+        with patch.object(Path,'read_text',read):
+            with self.assertRaises(RuntimeError):self.c12_command_pair(r)
+        self.assertEqual(len(r.ops.processes),1);row=r.report['commands'][0]
+        self.assertEqual(row['outcome'],'failed');self.assertIn('Interrupted',row['finalization_error'])
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -69,8 +69,10 @@ expiration. This stage is limited to 60 seconds inside the existing total work
 budget; no clock is reset afterwards. Injected Ops cannot produce actual
 capability approval. Unknown ownership prevents further process creation.
 
-The original helper's necessary definitions are copied verbatim into
-`recovery_process.py`. `recovery_core.py` retains the reviewed recovery behavior,
+`recovery_process.py` retains the reviewed process ownership, stop algorithm
+and bounded observation records. Its command admission and finalization also
+protect partial log setup and retain primary plus secondary failures.
+`recovery_core.py` retains the reviewed recovery behavior,
 with explicit source inputs and the validated host architecture. The wrapper
 adds CI/source/profile preparation and excludes raw host process listings from
 published artifacts. It does not replace the UI flows with direct service calls.
@@ -87,7 +89,19 @@ command caps remain 30 seconds, including Files provider lookup. Global time,
 ownership and cancellation checks can shorten or prevent any command. Files
 termination is still attempted after an uncertain launch outcome when those
 checks permit it; a secondary termination failure cannot replace the original
-launch/provider failure. No command or Simulator creation is retried.
+launch/provider failure. No command or Simulator creation is retried. Before spawning, work commands force one existing
+resource scan after intent/log setup and recheck cancellation and the remaining
+stop reserve. Ordinary sampled scans, scan bounds and the cleanup bypass do not
+change. Command failures retain the primary cause plus separate log-close,
+stdout-read, receipt, finalization and cap errors. Both log closes are attempted.
+The capability validator rejects any such secondary failure even when the main
+failure is the deliberately expected timeout.
+
+A command receipt is a snapshot: a final write failure or overrun may be observed
+after its contents were serialized. Inspect command records, top-level errors
+and the actual failed CLI result together; an earlier receipt is not a success
+signal. These source changes do not establish the cause or resolution of the
+previous output-scan deadline or EPERM failures.
 
 The separate iPad guidance driver gives only its initial runtime query a
 60-second wait timeout. Its other defaults remain 30 seconds, with 1,440 seconds

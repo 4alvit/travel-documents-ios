@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'd9cda1ab6882f9b07e65540043ce58b4892739dcb1aad313c9f5a6177aea6672'
+CORE_SHA = 'dfafb9868b5ec7c1952ac9788f917d09c822c5834e3619e14f94151f7ae027ab'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -135,8 +135,13 @@ while time.monotonic()<deadline:time.sleep(.1)
 
 def capability_result(normal, failed, observations, elapsed, actual):
     require(actual is True,'Injected boundary cannot approve actual capability')
-    require(normal.get('returncode')==0 and not normal.get('error'),'Normal capability command failed')
+    require(normal.get('outcome')=='completed' and normal.get('returncode')==0
+            and not normal.get('error'),'Normal capability command failed')
+    require(failed.get('outcome')=='failed','Timeout capability outcome missing')
     for row in [normal,failed]:
+        require(not any(row.get(key) for key in ['log_close_errors','receipt_error','stdout_read_error',
+                                                'finalization_error','cap_error']),
+                'Capability command finalization failed')
         stop=row.get('stop',{})
         require(stop.get('group_absent') is True and stop.get('leader_reaped') is True
                 and not stop.get('error') and not row.get('stop_error') and not row.get('close_error'),
