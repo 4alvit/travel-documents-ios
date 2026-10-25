@@ -1,11 +1,48 @@
 # Release evidence
 
-Current stage: local development preview. No GitHub or App Store release has
-been verified. **Cold-device StoreKit testing is blocked; the overall release
-gate is not green.** Passing tests on a previously configured simulator do not
-establish a reproducible clean CI environment.
+Current stage: development preview in a public draft PR. No GitHub or App Store
+release has been verified. Live Apple distribution and physical-device gates
+remain open. Historical failures below remain attached to their original runs.
 
-## Publication baseline — 25 October 2026
+## Bundled privacy and support — 25 October 2026
+
+Settings starts with a free English/Russian privacy and support page. Its text
+is bundled; it has no library or purchase dependency and does not fetch web
+content. The existing app-wide StoreKit startup task is unchanged. External
+buttons show a fixed public GitHub destination and require a separate explicit
+Open action. Cancel stays in the app. The published documents are explicitly
+preview drafts pinned to the accepted `1391b307` commit, not final store policies.
+
+All six distinct URLs returned HTTP 200 anonymously without redirects. The
+three targeted resource/URL/standalone-host tests passed locally. The UI suite
+checks normal English and maximum-size Russian text, full scroll coverage,
+Free access, four confirmation/cancellation paths and return navigation.
+Initial development runs exposed excessive test-driver AX traversal and a
+Settings entry too far below large text; the driver was simplified and the
+entry moved to the first section. Those initial failed runs are retained;
+only later passing results qualify the revised implementation.
+
+Use the [current PR checks](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
+for validation of the published revision. No physical-device, VoiceOver speech,
+actual external-app handoff, network-denial or live-purchase acceptance is
+inferred from this feature's tests. Source review and bundled-resource checks
+support the page's offline design, not a claim that the entire app makes zero
+network requests. The earlier release package remains tied to its own source;
+these changes do not silently update or relabel that binary.
+
+## Accepted hosted baseline — 25 October 2026
+
+At signed `1391b30776cd6ea48eab97cd92d4b098ff8f9474`, ordinary hosted
+[CI 40159228298](https://github.com/4alvit/travel-documents-ios/actions/runs/40159228298)
+passed: core **38/38**, unsigned Release build and metadata scan, simulator
+**90 passed / 0 failed / 7 expected opt-in skips** (97 unique cases).
+All seven StoreKit and eleven ordinary UI cases passed. Tested merge tree
+`5218e837e45cd6464562526c3fbe8de5abd0ba9b` matched the published head tree.
+This closes the earlier hosted StoreKit fixture acceptance gap, without proving
+live purchases, physical-device behavior or private StoreKit implementation.
+Later pushes require their own ordinary CI; use the PR checks for current status.
+
+## Historical publication baseline — 25 October 2026
 
 The public repository is provisioned and [draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1)
 contains the development preview. The completed hosted baseline at
@@ -32,9 +69,9 @@ The following test-fixture change reapplies the checked-in StoreKit defaults
 after awaited fault cleanup and records public state around that reset. It
 retains verified-entitlement guards and all purchase assertions. This is a
 compatibility candidate, not a proven explanation of private StoreKit behavior.
-The current PR checks remain the authority for any later commit. A successful
-hosted run, fresh independent PR approval and the device/distribution gates
-below are still required before release.
+The accepted hosted baseline above supersedes this failed fixture candidate.
+Fresh independent PR approval and the device/distribution gates below remain
+required before release.
 
 The current provisional consumer brand is **TripDocket**, with planned storefront
 title **TripDocket: Travel Documents**. The earlier evidence below was produced

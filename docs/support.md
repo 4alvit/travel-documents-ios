@@ -1,5 +1,10 @@
 # TripDocket support
 
+Basic help is bundled under **Settings → Privacy & support** (Russian:
+**Настройки → Данные и помощь**) and is available offline and without Pro.
+The public support button asks before opening GitHub. Do not submit private
+documents, purchase receipts, credentials or personal backups in public issues.
+
 Expanded support drafts: [English](app-store/drafts/support-en-US.md) · [Russian](app-store/drafts/support-ru.md).
 These drafts still need real owner/contact details before App Store submission.
 

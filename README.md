@@ -24,6 +24,8 @@ Developer Program membership is not yet active.
 - Selective portable packets and full backup/restore with validation before
   replacement. [Understand the backup contract](docs/data-and-recovery.md).
 - Device authentication and a privacy cover when the app becomes inactive.
+- Free, offline English/Russian privacy and support guidance in Settings; public
+  web destinations open only after an explicit confirmation.
 - Optional, explicit local expiry reminders with generic notification text.
 - StoreKit 2 one-time Pro: more than one trip, two people or eight documents.
   Pro also enables batch import and explicitly scheduled expiry reminders.
@@ -65,14 +67,15 @@ Run `bash scripts/test-simulator.sh` with an installed runtime to execute app,
 StoreKit and UI tests serially. `TRIPFOLIO_SIMULATOR_ID` can select a specific
 device. The result bundle is written under `build/`.
 
-Cold-device StoreKit tests currently fail on the validated Xcode 27/iOS 27
-toolchain. A previously configured simulator passed the full suite; this does
-not establish clean CI reproducibility. See the recorded failures in
-[release evidence](docs/release-evidence.md). A configuration file or a passing
-synthetic transaction alone does not prove application StoreKit API routing.
-The published CI baseline also has four ordinary-purchase failures despite
-successful synthetic preflights; these are recorded separately from cold-device
-routing. Follow [draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1)
+The accepted hosted baseline at `1391b307` passed all seven StoreKit scenarios:
+[CI 40159228298](https://github.com/4alvit/travel-documents-ios/actions/runs/40159228298)
+reports 90 simulator tests passed, zero failed and seven expected opt-in skips.
+Earlier cold-device Xcode 27/iOS 27 failures and a failed hosted candidate remain
+recorded as historical results in [release evidence](docs/release-evidence.md).
+A configuration file or a passing synthetic transaction alone does not prove
+application StoreKit API routing; the accepted run does not establish physical-
+device or live-store behavior. Follow
+[draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
 for the current commit's checks.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
