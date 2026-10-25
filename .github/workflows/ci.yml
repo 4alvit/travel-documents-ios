@@ -83,8 +83,6 @@ jobs:
     timeout-minutes: 35
     env:
       TRIPDOCKET_RUNNER_LABEL: macos-15
-      TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
-      TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -95,6 +93,9 @@ jobs:
         run: python3 -B scripts/test-recovery-hosted.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
+        env:
+          TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
+          TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -B scripts/recovery_hosted.py --run
       - name: Recovery evidence
         if: always()
