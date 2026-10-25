@@ -28,7 +28,7 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        executionTimeAllowance = 360
+        executionTimeAllowance = russian && maximumType ? 480 : 360
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()

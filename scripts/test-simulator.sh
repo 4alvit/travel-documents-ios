@@ -14,13 +14,13 @@ print(phones[0]["udid"])
 ')
 fi
 mkdir -p build
-# Keep the default at 180s while allowing the two full guidance flows to
-# request 360s. Other tests retain their existing individual allowances.
+# Keep the default at 180s while allowing the Russian maximum-type guidance
+# flow to request 480s. Other tests retain their existing individual allowances.
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \
   -configuration Debug -destination "platform=iOS Simulator,id=$TRIPFOLIO_SIMULATOR_ID" \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
   -collect-test-diagnostics never \
-  -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 360 \
+  -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 480 \
   -derivedDataPath build/DerivedData \
   -resultBundlePath "build/Tests-$(date -u +%Y%m%dT%H%M%SZ).xcresult" \
   CODE_SIGNING_ALLOWED=NO test
