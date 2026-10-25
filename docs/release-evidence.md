@@ -5,6 +5,37 @@ been verified. **Cold-device StoreKit testing is blocked; the overall release
 gate is not green.** Passing tests on a previously configured simulator do not
 establish a reproducible clean CI environment.
 
+## Publication baseline — 25 October 2026
+
+The public repository is provisioned and [draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1)
+contains the development preview. The completed hosted baseline at
+`ddd92406f630994a631c09fa773957e271496ca6` is
+[CI run 40155191653](https://github.com/4alvit/travel-documents-ios/actions/runs/40155191653):
+core **38/38 passed**, unsigned Release build and distribution-metadata scan
+passed, and the simulator result bundle reports **97 tests: 86 passed,
+4 failed, 7 expected opt-in skips**. All 11 ordinary UI cases passed.
+
+The four failures are ordinary StoreKit purchases in the price/sync-error,
+refund, unverified-purchase and purchase/restore scenarios. Their verified
+synthetic Xcode preflights passed, but the local Xcode server cancelled the app's
+purchase calls. This is distinct from the historical cold-runtime routing
+failure below. Ask to Buy passed; the real notification callback test passed in
+the unauthorized branch, without establishing notification scheduling or delivery.
+
+The job was cancelled near its 25-minute limit, after the complete test result
+reported failure. About 11 minutes elapsed between the build and the first
+XCTest. Neither that startup delay nor the purchase-cancellation cause is
+established. A local run of all 17 PlatformTests at the same source passed on
+the configured iOS 27 simulator; it does not replace hosted acceptance.
+
+The following test-fixture change reapplies the checked-in StoreKit defaults
+after awaited fault cleanup and records public state around that reset. It
+retains verified-entitlement guards and all purchase assertions. This is a
+compatibility candidate, not a proven explanation of private StoreKit behavior.
+The current PR checks remain the authority for any later commit. A successful
+hosted run, fresh independent PR approval and the device/distribution gates
+below are still required before release.
+
 The current provisional consumer brand is **TripDocket**, with planned storefront
 title **TripDocket: Travel Documents**. The earlier evidence below was produced
 under the **Tripfolio** brand and remains tied to its original source commits.
@@ -446,7 +477,7 @@ supported activation mechanism; no test-plan UI switch is asserted here.
 Apple has discussed a related CLI configuration issue and an earlier-version
 fix in [Developer Forums](https://developer.apple.com/forums/thread/826971).
 That report is context, not proof of the cause on Xcode 27. A clean-device
-purchase/restore run and an actual published CI result remain required.
+purchase/restore run and a successful published CI result remain required.
 
 ## Distribution and physical-device limits
 
@@ -464,9 +495,9 @@ physical-device build is verified. Name/trademark clearance, live IAP SKU,
 paid-app agreement, public support/privacy URLs, TestFlight and App Review
 remain unverified. Test purchases are not sales.
 
-Public repository provisioning is managed through Terraform outside this
-source tree and is blocked on workspace access. There is no verified public
-remote, published app CI result or GitHub release. Do not label this preview
+Public repository provisioning was completed through Terraform outside this
+source tree. Draft PR #1 and hosted CI are available as recorded above, but no
+successful final CI gate or GitHub release is verified. Do not label this preview
 stable or ready for sale.
 
 The preview package records its exact source commit/toolchain in `BUILD.txt`

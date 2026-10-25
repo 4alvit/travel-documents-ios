@@ -70,6 +70,10 @@ toolchain. A previously configured simulator passed the full suite; this does
 not establish clean CI reproducibility. See the recorded failures in
 [release evidence](docs/release-evidence.md). A configuration file or a passing
 synthetic transaction alone does not prove application StoreKit API routing.
+The published CI baseline also has four ordinary-purchase failures despite
+successful synthetic preflights; these are recorded separately from cold-device
+routing. Follow [draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1)
+for the current commit's checks.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.

@@ -1,7 +1,7 @@
 # TripDocket support
 
-For reproducible app problems use https://github.com/4alvit/travel-documents-ios/issues
-after the public repository is provisioned. Include the version, device/OS and
+For reproducible app problems use https://github.com/4alvit/travel-documents-ios/issues.
+Include the version, device/OS and
 steps with fictional data. Never attach passports, tickets, purchase receipts
 from StoreKit, or personal backups.
 
