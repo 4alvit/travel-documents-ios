@@ -1,4 +1,5 @@
-"""Exact process primitives from reviewed functional-v1 (ec872d3557f8391c0f3b6139d6381c8eb48d8a90cda175e6ca7b24308af16046)."""
+"""Owned-process primitives derived from functional-v1, with bounded diagnostics."""
+import errno
 import json
 import os
 import select
@@ -12,6 +13,28 @@ PER_LOG, ALL_LOG = 16 * 1024**2, 64 * 1024**2
 def require(ok, message):
     if not ok:
         raise RuntimeError(message)
+
+
+def observed(runner, record, stage, operation, call):
+    """Summarize existing calls in six fixed slots; never probe or persist here."""
+    started = runner.ops.now() - runner.t0
+    slots = record.setdefault('process_observations', {})
+    row = slots.setdefault(stage + '.' + operation,
+                           {'calls': 0, 'first_start': started})
+    row['calls'] += 1
+    row['last_start'] = started
+    try:
+        result = call()
+        row.update(outcome='returned', result=result)
+        return result
+    except BaseException as error:
+        row.pop('result', None)
+        row.update(outcome='raised', exception_type=type(error).__name__,
+                   errno=getattr(error, 'errno', None))
+        raise
+    finally:
+        row['last_finish'] = runner.ops.now() - runner.t0
+        row['last_duration'] = row['last_finish'] - started
 
 
 class RealOps:
@@ -43,15 +66,21 @@ class RealOps:
     def absent(self, p):
         try:
             os.killpg(p.pid, 0)
-        except ProcessLookupError:
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
             return True
         return False  # PermissionError deliberately propagates.
 
     def send(self, p, sig):
         try:
             os.killpg(p.pid, sig)
-        except ProcessLookupError:
-            pass
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
+            return 'already_absent_ESRCH'
+        # A successful syscall return does not establish delivery or termination.
+        return 'syscall_returned'
 
     def close(self, p):
         p.stdout.close()
@@ -88,10 +117,12 @@ class Smoke:
         stop = record.setdefault('stop', {'signals': [], 'group_absent': False, 'leader_reaped': False})
         require(not stop.get('attempted'), 'No repeated signalling after stop attempt')
         stop['attempted'] = True
+        stop['signals_semantics'] = 'send_wrapper_returned_not_delivery'
         try:
             def done():
-                stop['leader_reaped'] = p.poll() is not None
-                if p.pid in self.absent_groups or self.ops.absent(p):
+                stop['leader_reaped'] = observed(self, record, 'stop', 'poll', p.poll) is not None
+                if p.pid in self.absent_groups or observed(
+                        self, record, 'stop', 'group_probe', lambda: self.ops.absent(p)):
                     self.absent_groups.add(p.pid)
                     stop['group_absent'] = True
                 return stop['leader_reaped'] and stop['group_absent']
@@ -99,7 +130,8 @@ class Smoke:
                 for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
                     require(self.ops.now() < deadline, 'Stop deadline reached')
                     if not stop['group_absent']:
-                        self.ops.send(p, sig)
+                        observed(self, record, 'stop', 'signal_' + str(int(sig)),
+                                 lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))
                     end = min(deadline, self.ops.now() + grace)
                     while not done() and self.ops.now() < end:
@@ -117,7 +149,9 @@ class Smoke:
         require(not self.active and not self.unknown_spawn, 'Prior process ownership unresolved; further process creation withheld')
         end = min(self.limit, self.ops.now() + cap)
         require(end - self.ops.now() > 8, 'Insufficient command/stop budget')
-        record = {'id': label, 'argv': argv, 'bytes': {'stdout': 0, 'stderr': 0}, 'start': self.ops.now() - self.t0}
+        record = {'id': label, 'argv': argv, 'bytes': {'stdout': 0, 'stderr': 0}, 'start': self.ops.now() - self.t0,
+                  'requested_cap_seconds': cap, 'stop_reserve_seconds': 8,
+                  'work_deadline': end - 8 - self.t0, 'command_deadline': end - self.t0}
         self.report['commands'].append(record)
         self.save()  # Intent and any one-shot counter are durable before spawn.
         p, failure = None, None
@@ -140,7 +174,7 @@ class Smoke:
             self.save()
             while True:
                 self.pump(p, record, handles)
-                if p.poll() is not None:
+                if observed(self, record, 'command', 'poll', p.poll) is not None:
                     # Drain bounded pipe output after leader exit; deadline still applies.
                     before = sum(record['bytes'].values())
                     self.pump(p, record, handles)
@@ -149,7 +183,8 @@ class Smoke:
                 require(self.ops.now() < end - 8, 'Command timeout')
                 self.ops.sleep(min(.02, max(0, end - 8 - self.ops.now())))
             record['returncode'] = p.returncode
-            require(self.ops.absent(p), 'Leader exited but process group remains')
+            require(observed(self, record, 'command', 'group_probe', lambda: self.ops.absent(p)),
+                    'Leader exited but process group remains')
             self.absent_groups.add(p.pid)
             require(p.returncode == 0, 'Nonzero command exit: ' + str(p.returncode))
         except BaseException as error:

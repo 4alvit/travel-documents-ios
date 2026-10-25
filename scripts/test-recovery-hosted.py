@@ -1,6 +1,7 @@
 """Offline regressions for hosted-only boundaries. No native process execution."""
 import contextlib
 import copy
+import errno
 import hashlib
 import importlib.util
 import io
@@ -28,9 +29,13 @@ class Process:
         self.ops, self.pid, self.options = ops, pid, options
         self.started, self.returncode = ops.now(), None
         self.dead = False
+        self.poll_calls, self.probe_calls = 0, 0
         self.output = list(options.get('output', []))
 
     def poll(self):
+        self.poll_calls += 1
+        if self.poll_calls in self.options.get('poll_errors', {}):
+            raise self.options['poll_errors'][self.poll_calls]
         if self.dead:
             self.returncode = self.options.get('exit', 0)
         elif self.ops.now() - self.started >= self.options.get('delay', 0):
@@ -75,18 +80,22 @@ class Ops:
 
     def absent(self, p):
         self.probes.append(p.pid)
+        p.probe_calls += 1
+        if p.probe_calls in p.options.get('probe_errors', {}):
+            raise p.options['probe_errors'][p.probe_calls]
         if p.options.get('probe_error'):
-            raise PermissionError('EPERM probe')
+            raise PermissionError(errno.EPERM, 'EPERM probe')
         if p.options.get('absent_sequence'):
             return p.options['absent_sequence'].pop(0)
-        return p.dead or (p.poll() is not None and not p.options.get('lingering'))
+        return p.dead or (p.returncode is not None and not p.options.get('lingering'))
 
     def send(self, p, sig):
         self.signals.append((p.pid, sig, self.t))
         if p.options.get('signal_error'):
-            raise PermissionError('EPERM signal')
+            raise PermissionError(errno.EPERM, 'EPERM signal')
         if not p.options.get('ignore_all') and (sig == signal.SIGKILL or not p.options.get('ignore_term')):
             p.dead = True
+        return 'syscall_returned'
 
     def close(self, p):
         if p.options.get('close_error'):
@@ -248,7 +257,10 @@ class BoundaryTests(unittest.TestCase):
         stop={'group_absent':True,'leader_reaped':True}
         normal={'pgid':101,'returncode':0,'stop':copy.deepcopy(stop)}
         failed={'pgid':102,'error':"RuntimeError('Command timeout')",'start':1,'finish':20,
-                'stop':{**stop,'signals':[int(signal.SIGTERM),int(signal.SIGKILL)]}}
+                'stop':{**stop,'signals':[int(signal.SIGTERM),int(signal.SIGKILL)]},
+                'process_observations':{'stop.signal_'+str(int(sig)):
+                    {'calls':1,'outcome':'returned','result':'syscall_returned'}
+                    for sig in [signal.SIGTERM,signal.SIGKILL]}}
         observations=[[{'kind':'normal','pid':101,'pgid':101}],
                       [{'kind':'parent','pid':102,'pgid':102},{'kind':'descendant','pid':103,'ppid':102,'pgid':102}]]
         return normal,failed,observations
@@ -258,13 +270,16 @@ class BoundaryTests(unittest.TestCase):
         result=hosted.capability_result(normal,failed,observations,21,True)
         self.assertTrue(result['approved']);self.assertEqual(result['scope'],'owned subprocess boundary only')
         with self.assertRaises(RuntimeError):hosted.capability_result(normal,failed,observations,21,False)
-        for kind in ['lineage','timeout','unreaped','signals','elapsed']:
+        for kind in ['lineage','timeout','unreaped','signals','elapsed','missing_outcome','ESRCH','repeated_signal']:
             n,f,o=copy.deepcopy(self.proof());elapsed=21
             if kind=='lineage':o[1][1]['ppid']=999
             if kind=='timeout':f['error']='unrelated failure'
             if kind=='unreaped':f['stop']['leader_reaped']=False
             if kind=='signals':f['stop']['signals']=[int(signal.SIGTERM)]
             if kind=='elapsed':elapsed=61
+            if kind=='missing_outcome':f.pop('process_observations')
+            if kind=='ESRCH':f['process_observations']['stop.signal_15']['result']='already_absent_ESRCH'
+            if kind=='repeated_signal':f['process_observations']['stop.signal_15']['calls']=2
             with self.subTest(kind=kind),self.assertRaises(RuntimeError):hosted.capability_result(n,f,o,elapsed,True)
 
     def test_failed_log_publication_cannot_expose_process_listing(self):
@@ -371,6 +386,195 @@ class BoundaryTests(unittest.TestCase):
         for name in ['command','pump','stop','save','signal','recover']:
             self.assertIs(getattr(hosted.HostedRecovery,name),getattr(hosted.core.base.Smoke,name))
         self.assertEqual((hosted.core.CAPS['total_seconds'],hosted.core.CAPS['cleanup_seconds']),(1500,120))
+
+    def discovery_runner(self, **runtime_options):
+        developer=self.root/'Xcode.app/Contents/Developer'
+        sdk_path=developer/'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator18.5.sdk'
+        sdk_path.mkdir(parents=True)
+        texts=[str(developer),'Xcode 16.4\nBuild version 16F6','18.5',str(sdk_path)]
+        plans=[{'output':[('stdout',text.encode())]} for text in texts]
+        plans.append({'output':[('stdout',json.dumps({'runtimes':[self.runtime()]}).encode())],**runtime_options})
+        return self.runner(Ops(*plans))
+
+    def discover(self, runner):
+        # Only filesystem/tool identities are synthetic; command, timing, stop,
+        # parsing and selection use the actual candidate implementation.
+        with patch.object(hosted,'toolchain_paths'),patch.object(hosted.core,'file_digest',return_value='a'*64):
+            runner.discover_profile()
+
+    def test_first_runtime_query_gets_60_seconds_and_retains_toolchain_facts(self):
+        r=self.discovery_runner(delay=25)
+        self.discover(r)
+        rows=r.report['commands']
+        self.assertEqual([x['requested_cap_seconds'] for x in rows],[20,20,20,20,60])
+        self.assertEqual(rows[-1]['argv'],['/usr/bin/xcrun','simctl','list','runtimes','--json'])
+        self.assertEqual(len(r.ops.processes),5)
+        self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+        self.assertEqual(PROFILE['prep_seconds'],60)
+        self.assertEqual(r.report['profile_discovery']['sdk_version'],'18.5')
+        self.assertEqual(r.report['profile_discovery']['runtime_inventory_status'],'returned')
+        self.assertTrue((r.out/'resolved-profile.json').is_file())
+        self.assertAlmostEqual(rows[-1]['work_deadline']-rows[-1]['start'],52,places=6)
+        # The separate pre-create inventory and every other sim call keep 30s.
+        with patch.object(r,'command',return_value='{}') as call:
+            r.sim('runtime-inventory','list','runtimes','--json')
+        self.assertEqual(call.call_args.args[-1],30)
+
+    def test_runtime_query_still_times_out_once_and_preserves_pending_facts(self):
+        r=self.discovery_runner(delay=float('inf'))
+        with self.assertRaises(RuntimeError):self.discover(r)
+        row=r.report['commands'][-1]
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+        self.assertAlmostEqual(row['finish']-row['start'],52,places=6)
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),5)
+        saved=json.loads((r.out/'receipt.json').read_text())
+        self.assertEqual(saved['profile_discovery']['runtime_inventory_status'],'pending')
+        self.assertEqual(saved['profile_discovery']['xcode_version'],'Xcode 16.4\nBuild version 16F6')
+        self.assertNotIn('resolved_profile',saved)
+        self.assertNotIn('host_capability',saved)
+
+    def test_runtime_command_uses_remaining_global_budget_and_reserves_stop(self):
+        r=self.runner(Ops({'delay':float('inf')}));r.ops.t=1370
+        with self.assertRaises(RuntimeError):r.sim('profile-runtimes','list','runtimes','--json',cap=60)
+        row=r.report['commands'][-1]
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(1372,1380))
+        self.assertLessEqual(row['finish'],1380)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        r.ops.t=1372
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+            r.sim('profile-runtimes','list','runtimes','--json',cap=60)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_runtime_output_cap_invalid_json_and_wrong_sdk_have_no_fallback(self):
+        for kind in ['output','json','sdk']:
+            with self.subTest(kind=kind):
+                old=self.root;self.root=old/kind;self.root.mkdir()
+                data=b'not json' if kind=='json' else json.dumps({'runtimes':[self.runtime('26.0')]}).encode()
+                r=self.discovery_runner(output=[('stdout',data)])
+                if kind=='output':
+                    r.ops.on_spawn=lambda _:setattr(r,'log_total',64*hosted.core.MIB-1) if len(r.ops.processes)==4 else None
+                with self.assertRaises((RuntimeError,json.JSONDecodeError)):self.discover(r)
+                self.assertLessEqual(len(r.ops.processes),5)
+                self.assertNotIn('host_capability',r.report)
+                self.assertFalse(r.create_attempted)
+                self.assertNotIn('resolved_profile',r.report)
+                self.root=old
+
+    def test_real_signal_boundary_distinguishes_return_ESRCH_and_EPERM(self):
+        ops=hosted.core.base.RealOps({},self.root);p=SimpleNamespace(pid=321)
+        outcomes=[None,ProcessLookupError(errno.ESRCH,'gone'),PermissionError(errno.EPERM,'denied'),ProcessLookupError('unknown')]
+        with patch('os.killpg',side_effect=outcomes) as raw:
+            self.assertEqual(ops.send(p,signal.SIGTERM),'syscall_returned')
+            self.assertEqual(ops.send(p,signal.SIGTERM),'already_absent_ESRCH')
+            with self.assertRaises(PermissionError):ops.send(p,signal.SIGTERM)
+            with self.assertRaises(ProcessLookupError):ops.send(p,signal.SIGTERM)
+            self.assertEqual(raw.call_count,4)
+            self.assertTrue(all(x.args==(321,signal.SIGTERM) for x in raw.call_args_list))
+        with patch('os.killpg',side_effect=[ProcessLookupError(errno.ESRCH,'gone'),PermissionError(errno.EPERM,'denied'),ProcessLookupError('unknown')]):
+            self.assertTrue(ops.absent(p))
+            with self.assertRaises(PermissionError):ops.absent(p)
+            with self.assertRaises(ProcessLookupError):ops.absent(p)
+
+    def test_command_and_stop_poll_errors_are_separate_and_fail_closed(self):
+        r=self.runner(Ops({'poll_errors':{1:OSError(errno.EIO,'first poll'),2:PermissionError(errno.EPERM,'stop poll')}}))
+        with self.assertRaises(RuntimeError):r.command('poll-errors',['synthetic'],30)
+        row=r.report['commands'][0];obs=row['process_observations']
+        self.assertEqual(obs['command.poll']['errno'],errno.EIO)
+        self.assertEqual(obs['stop.poll']['errno'],errno.EPERM)
+        self.assertEqual(obs['stop.poll']['exception_type'],'PermissionError')
+        self.assertGreaterEqual(obs['stop.poll']['last_finish'],obs['stop.poll']['last_start'])
+        self.assertFalse(row['stop']['group_absent'] or row['stop']['leader_reaped'])
+        with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_EPERM_after_TERM_identifies_group_probe_and_never_retries_stop(self):
+        r=self.runner(Ops({'delay':float('inf'),'probe_errors':{2:PermissionError(errno.EPERM,'after TERM')}}))
+        with self.assertRaises(RuntimeError):r.command('after-term',['synthetic'],30)
+        row=r.report['commands'][0];obs=row['process_observations'];p=r.ops.processes[0]
+        self.assertEqual(obs['stop.signal_15']['result'],'syscall_returned')
+        self.assertEqual(obs['stop.group_probe']['errno'],errno.EPERM)
+        self.assertEqual(obs['stop.group_probe']['calls'],2)
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertEqual(row['stop']['signals_semantics'],'send_wrapper_returned_not_delivery')
+        self.assertNotIn('stop.signal_9',obs)
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIn(p.pid,r.active)
+        with self.assertRaisesRegex(RuntimeError,'No repeated signalling'):r.stop(p,60,row)
+        with self.assertRaisesRegex(RuntimeError,'Unowned group'):r.stop(SimpleNamespace(pid=p.pid),60,{})
+        with patch.object(r,'sim',side_effect=AssertionError('NO CLEANUP CHILD')) as sim:
+            r.cleanup();sim.assert_not_called()
+        self.assertFalse(r.report['cleanup_verified'])
+        self.assertEqual(len(r.ops.signals),1)
+
+    def test_signal_EPERM_is_distinct_from_probe_failure(self):
+        r=self.runner(Ops({'delay':float('inf'),'signal_error':True}))
+        with self.assertRaises(RuntimeError):r.command('signal-denied',['synthetic'],30)
+        row=r.report['commands'][0];obs=row['process_observations']
+        self.assertEqual(obs['stop.signal_15']['outcome'],'raised')
+        self.assertEqual(obs['stop.signal_15']['errno'],errno.EPERM)
+        self.assertEqual(obs['stop.group_probe']['outcome'],'returned')
+        self.assertEqual(row['stop']['signals'],[])
+        self.assertTrue(r.active)
+        with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
+        self.assertEqual(len(r.ops.signals),1)
+
+    def test_signal_ESRCH_is_recorded_without_claiming_delivery(self):
+        r=self.runner(Ops({'delay':float('inf')}));real=hosted.core.base.RealOps({},self.root)
+        def vanished(p,sig):
+            outcome=real.send(p,sig);p.dead=True;return outcome
+        with patch('os.killpg',side_effect=ProcessLookupError(errno.ESRCH,'gone')) as raw,patch.object(r.ops,'send',side_effect=vanished):
+            with self.assertRaises(RuntimeError):r.command('gone',['synthetic'],30)
+            self.assertEqual(raw.call_count,1)
+        row=r.report['commands'][0]
+        self.assertEqual(row['process_observations']['stop.signal_15']['result'],'already_absent_ESRCH')
+        self.assertEqual(row['stop']['signals_semantics'],'send_wrapper_returned_not_delivery')
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertFalse(r.active)
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+
+    def test_returned_signals_do_not_establish_absence_or_reap(self):
+        r=self.runner(Ops({'delay':float('inf'),'ignore_all':True}))
+        with self.assertRaises(RuntimeError):r.command('unresolved',['synthetic'],30)
+        row=r.report['commands'][0]
+        for sig in [15,9]:self.assertEqual(row['process_observations']['stop.signal_'+str(sig)]['result'],'syscall_returned')
+        self.assertFalse(row['stop']['group_absent'] or row['stop']['leader_reaped'])
+        self.assertTrue(r.active)
+        with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_exited_leader_with_live_group_is_never_command_success(self):
+        r=self.runner(Ops({'lingering':True}))
+        with self.assertRaises(RuntimeError):r.command('descendant',['synthetic'],30)
+        row=r.report['commands'][0]
+        self.assertIn('Leader exited but process group remains',row['error'])
+        self.assertFalse(row['process_observations']['command.group_probe']['result'])
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+
+    def test_many_polls_keep_fixed_diagnostics_and_existing_save_count(self):
+        r=self.runner(Ops({'delay':25}))
+        with patch.object(r,'save',wraps=r.save) as save:r.command('slow',['synthetic'],60)
+        row=r.report['commands'][0];obs=row['process_observations'];p=r.ops.processes[0]
+        self.assertGreater(p.poll_calls,1000)
+        self.assertEqual(p.poll_calls,sum(v['calls'] for k,v in obs.items() if k.endswith('.poll')))
+        self.assertEqual(p.probe_calls,sum(v['calls'] for k,v in obs.items() if k.endswith('.group_probe')))
+        self.assertLessEqual(len(obs),6)
+        self.assertLess(len(json.dumps(obs)),3000)
+        self.assertEqual(save.call_count,3)
+        self.assertFalse(r.ops.signals)
+
+    def test_nested_capability_probe_preserves_exact_EPERM_operation(self):
+        r=self.runner(Ops({'probe_error':True}))
+        with self.assertRaises(RuntimeError):r.check_capability()
+        saved=json.loads((r.out/'Capability/receipt.json').read_text())
+        obs=saved['commands'][0]['process_observations']
+        self.assertEqual(obs['command.group_probe']['errno'],errno.EPERM)
+        self.assertEqual(obs['stop.group_probe']['errno'],errno.EPERM)
+        self.assertTrue(r.active)
+        self.assertEqual(r.limit,1380)
+        with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
+        self.assertEqual(len(r.ops.processes),1)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
