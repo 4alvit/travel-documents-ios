@@ -311,8 +311,7 @@ class Driver:
         require(not self.source_before["status"], "Hosted source checkout must be clean")
         self.report["source_before"] = self.source_before["head"]
         for argv, label in ((["xcodebuild", "-version"], "xcode-version"),
-                            (["xcrun", "xcresulttool", "version"], "xcresulttool-version"),
-                            (["xcrun", "simctl", "help", "ui"], "simctl-ui-help")):
+                            (["xcrun", "xcresulttool", "version"], "xcresulttool-version")):
             self.command(argv, label)
         for kind in ("summary", "tests"):
             self.command(["xcrun", "xcresulttool", "help", "get", "test-results", kind], "xcresulttool-help-" + kind)

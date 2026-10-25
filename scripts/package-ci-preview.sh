@@ -31,6 +31,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -45,6 +46,23 @@ def require(condition, message):
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+def commit_parents(commit, tree):
+    require(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit), "invalid source commit ID")
+    require(subprocess.check_output(["git", "cat-file", "-t", commit]).strip() == b"commit",
+            "source object is not a commit")
+    raw = subprocess.check_output(["git", "cat-file", "commit", commit])
+    actual = subprocess.check_output(["git", "hash-object", "-t", "commit", "--stdin"], input=raw)
+    require(actual.decode("ascii").strip() == commit, "source commit object identity changed")
+    header, separator, _ = raw.partition(b"\n\n")
+    require(bool(separator), "source commit has no header/body separator")
+    lines = header.split(b"\n")
+    require([line[5:] for line in lines if line.startswith(b"tree ")] == [tree.encode("ascii")],
+            "source commit tree does not match")
+    parents = [line[7:].decode("ascii") for line in lines if line.startswith(b"parent ")]
+    require(all(len(parent) == len(commit) and re.fullmatch(r"[0-9a-f]+", parent) for parent in parents),
+            "invalid parent commit ID")
+    return parents
 
 def members(path):
     mode = path.lstat().st_mode
@@ -94,7 +112,7 @@ provenance = {
     "schema_version": 1,
     "packaged_at_utc": datetime.now(timezone.utc).isoformat(),
     "source": {"commit": commit, "tree": tree, "clean_checkout": True,
-               "parents": subprocess.check_output(["git", "show", "-s", "--format=%P", commit], text=True).strip().split()},
+               "parents": commit_parents(commit, tree)},
     "artifact": {"filename": archive.name, "sha256": sha256(archive.read_bytes()),
                  "bundle_root": "Tripfolio.app", "executable_sha256": sha256((app / "Tripfolio").read_bytes()),
                  "app_file_count": sum(stat.S_ISREG(mode) for _, mode in source.values()),
