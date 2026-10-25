@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  merge_group:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    name: Swift and iOS build
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          brew install xcodegen
+      - name: Verify
+        run: bash scripts/verify.sh
+      - name: Simulator integration and StoreKit tests
+        run: bash scripts/test-simulator.sh
+      - name: Test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-tests-${{ github.sha }}
+          path: build/*.xcresult
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Simulator artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-simulator-${{ github.sha }}
+          path: build/DerivedData/Build/Products/Release-iphonesimulator/Tripfolio.app
+          if-no-files-found: error
+          retention-days: 7
+  gate:
+    name: CI gate
+    if: always()
+    needs: [validate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful validation
+        env:
+          RESULT: ${{ needs.validate.result }}
+        run: test "$RESULT" = success
