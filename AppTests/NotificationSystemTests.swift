@@ -4,7 +4,7 @@ import XCTest
 @testable import Tripfolio
 
 /// Exercises the actual framework callbacks without requesting permission.
-/// Records acceptance or refusal without changing the runtime's authorization.
+/// Records callback completion without changing the runtime's authorization.
 @MainActor
 final class NotificationSystemTests: XCTestCase {
     func testSystemCallbacksCompleteAndCleanUpTheirOwnRequest() async throws {
@@ -21,23 +21,33 @@ final class NotificationSystemTests: XCTestCase {
             content: content,
             trigger: UNTimeIntervalNotificationTrigger(timeInterval: 86_400, repeats: false)
         )
-        let accepted: Bool
+        let addCompletedWithoutError: Bool
         let outcome: String
         do {
             try await client.add(request)
-            accepted = true
-            outcome = "accepted"
+            addCompletedWithoutError = true
+            outcome = "callback completed without error"
         } catch {
             let failure = error as NSError
             // Unauthorized runtimes can return different framework error codes.
             // Any failure with a usable authorization remains unexpected.
             XCTAssertTrue(authorization == .notDetermined || authorization == .denied)
             XCTAssertEqual(failure.domain, UNErrorDomain)
-            accepted = false
+            addCompletedWithoutError = false
             outcome = "error: \(failure.domain)/\(failure.code) — \(failure.localizedDescription)"
         }
-        let pendingAfterAdd = await containsRequest(identifier, center: center)
-        XCTAssertEqual(pendingAfterAdd, accepted)
+        let maySchedule = authorization == .authorized || authorization == .provisional || authorization == .ephemeral
+        var pendingAfterAdd = await containsRequest(identifier, center: center)
+        if maySchedule {
+            XCTAssertTrue(addCompletedWithoutError, "An authorized request must complete without error")
+            for _ in 0..<100 where !pendingAfterAdd {
+                try await Task.sleep(for: .milliseconds(50))
+                pendingAfterAdd = await containsRequest(identifier, center: center)
+            }
+            XCTAssertTrue(pendingAfterAdd, "An authorized request must become pending")
+        }
+        // With no authorization, a nil error is only evidence that the callback
+        // completed. Record queue visibility without claiming successful scheduling.
 
         client.remove([identifier])
         var remains = await containsRequest(identifier, center: center)
@@ -47,7 +57,7 @@ final class NotificationSystemTests: XCTestCase {
         }
         XCTAssertFalse(remains, "The test must clean up its own future request")
 
-        let evidence = XCTAttachment(string: "Request: \(identifier); authorization raw value: \(authorization.rawValue); outcome: \(outcome); cleanup complete: \(!remains)")
+        let evidence = XCTAttachment(string: "Request: \(identifier); authorization raw value: \(authorization.rawValue); outcome: \(outcome); pending observed: \(pendingAfterAdd); scheduling validated: \(maySchedule && addCompletedWithoutError && pendingAfterAdd); cleanup complete: \(!remains)")
         evidence.name = "Actual UserNotifications callback outcome"
         evidence.lifetime = .keepAlways
         add(evidence)
