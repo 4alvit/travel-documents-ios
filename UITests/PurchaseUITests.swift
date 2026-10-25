@@ -175,14 +175,129 @@ final class PurchaseUITests: XCTestCase {
             try await require("Reopening the paywall replayed an old failure", app: app, springboard: springboard) {
                 buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
             }
-            try await require("Failed purchases changed free access or created a transaction", app: app, springboard: springboard) {
-                !app.staticTexts[russian ? "Pro доступен" : "Pro is unlocked"].exists
-                    && session.allTransactions().isEmpty
-            }
+            try await requirePurchasePostcondition(app: app, springboard: springboard, session: session,
+                                                   buy: buy, russian: russian, diagnostics: diagnostics)
+            // Keep the original failure immediate. Navigation can trigger the
+            // existing ProView load(), so quota is a later, success-only check.
+            try await verifyFailedPurchaseFreeQuota(app: app, springboard: springboard, russian: russian)
         } catch {
             attachDiagnostics(app: app, springboard: springboard, name: "Purchase failure regression cleanup")
             throw error
         }
+    }
+
+    private func requirePurchasePostcondition(
+        app: XCUIApplication, springboard: XCUIApplication, session: SKTestSession,
+        buy: XCUIElement, russian: Bool, diagnostics: Bool
+    ) async throws {
+        var lastObservation = "observation=unavailable"
+        var completion = "interrupted"
+        defer {
+            recordPurchaseObservation("purchase-postcondition completion=\(completion)\n\(lastObservation)\nquota=notAttemptedBeforePredicateCompletion",
+                                      name: "Purchase postcondition before cleanup")
+        }
+        do {
+            // One unchanged 15-second wait. Always read both operands, even
+            // when the Pro selector matches. All other fields are observations.
+            try await require("Failed purchases changed free access or created a transaction", app: app, springboard: springboard) {
+                let proLabel = russian ? "Pro доступен" : "Pro is unlocked"
+                let proSelector = app.staticTexts[proLabel]
+                let proExists = proSelector.exists
+                let transactions = session.allTransactions()
+                let historyEmpty = transactions.isEmpty
+                let history = self.purchaseHistoryObservation(transactions)
+                let buyExists = buy.exists
+                let buyEnabled = buyExists ? String(buy.isEnabled) : "unknown"
+                let buyHittable = buyExists ? String(buy.isHittable) : "unknown"
+                // AX queries are sequential, not an atomic entitlement snapshot.
+                lastObservation = "noPro=\(!proExists) historyEmpty=\(historyEmpty) proMatches=\(app.staticTexts.matching(identifier: proLabel).count)\n"
+                    + "buyExists=\(buyExists) buyEnabled=\(buyEnabled) buyHittable=\(buyHittable)\n"
+                    + "appState=\(self.purchaseAppState(app, diagnostics: diagnostics))\n"
+                    + history
+                // Retain the original verdict, including nonempty failed history.
+                return !proExists && historyEmpty
+            }
+            completion = "passed"
+        } catch let error as PurchaseTestError {
+            completion = "conditionNotMet"
+            throw error
+        }
+    }
+
+    private func purchaseAppState(_ app: XCUIApplication, diagnostics: Bool) -> String {
+        guard diagnostics else { return "unknown-disabled" }
+        let elements = app.buttons.matching(identifier: "purchase.state")
+        guard elements.count == 1 else { return "unknown-missing-or-ambiguous" }
+        // Never copy arbitrary AX values into the bounded record.
+        switch elements.element(boundBy: 0).value as? String {
+        case "purchase-state isPro=false isBusy=false": return "known isPro=false isBusy=false"
+        case "purchase-state isPro=false isBusy=true": return "known isPro=false isBusy=true"
+        case "purchase-state isPro=true isBusy=false": return "known isPro=true isBusy=false"
+        case "purchase-state isPro=true isBusy=true": return "known isPro=true isBusy=true"
+        default: return "unknown-unrecognized"
+        }
+    }
+
+    private func purchaseHistoryObservation(_ transactions: [SKTestTransaction]) -> String {
+        let limit = 64
+        let states = ["purchasing", "purchased", "failed", "restored", "deferred", "unknown"]
+        var counts = Array(repeating: Array(repeating: 0, count: 4), count: states.count)
+        for transaction in transactions.prefix(limit) {
+            let state: Int
+            switch transaction.state {
+            case .purchasing: state = 0
+            case .purchased: state = 1
+            case .failed: state = 2
+            case .restored: state = 3
+            case .deferred: state = 4
+            @unknown default: state = 5
+            }
+            let productMatches = transaction.productIdentifier == productID
+            let pending = transaction.pendingAskToBuyConfirmation
+            counts[state][(productMatches ? 2 : 0) + (pending ? 1 : 0)] += 1
+        }
+        var lines = ["history total=\(transactions.count) inspected=\(min(transactions.count, limit)) truncated=\(transactions.count > limit)",
+                     "history columns=unmatchedNotPending,unmatchedPending,matchedNotPending,matchedPending"]
+        for (index, state) in states.enumerated() {
+            lines.append("history state=\(state) counts=\(counts[index].map(String.init).joined(separator: ","))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func verifyFailedPurchaseFreeQuota(
+        app: XCUIApplication, springboard: XCUIApplication, russian: Bool
+    ) async throws {
+        var completion = "interrupted-or-failed"
+        defer {
+            recordPurchaseObservation("purchase-free-quota completion=\(completion) afterOriginalPredicatePassed=true",
+                                      name: "Purchase failure Free quota")
+        }
+        app.buttons[russian ? "Готово" : "Done"].tap()
+        let trips = app.buttons[russian ? "Поездки" : "Trips"].firstMatch
+        try await require("Trips did not become available for the Free quota check", app: app, springboard: springboard) {
+            trips.exists && trips.isHittable
+        }
+        trips.tap()
+        let create = app.buttons[russian ? "Создать поездку" : "Create trip"]
+        try await require("The existing demo trip is not available after failed purchases", app: app, springboard: springboard) {
+            app.staticTexts["Coast weekend"].exists && create.exists && create.isHittable
+        }
+        create.tap()
+        try await require("Failed purchases unexpectedly removed the free trip limit", app: app, springboard: springboard) {
+            app.navigationBars["TripDocket Pro"].exists
+                && !app.textFields[russian ? "Название поездки" : "Trip name"].exists
+        }
+        attachDiagnostics(app: app, springboard: springboard, name: "Failed purchases preserve Free trip quota")
+        completion = "passed"
+    }
+
+    private func recordPurchaseObservation(_ value: String, name: String) {
+        // Fixed vocabulary, booleans and counts only; no identifiers or error payloads.
+        print(value)
+        let attachment = XCTAttachment(string: value)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func clearPurchaseFailure(_ session: SKTestSession) async throws {

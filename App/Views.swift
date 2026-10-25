@@ -1002,6 +1002,20 @@ private struct PurchaseDiagnosticValue: ViewModifier {
         }
     }
 }
+
+private struct PurchaseStateDiagnosticValue: ViewModifier {
+    let value: String?
+
+    func body(content: Content) -> some View {
+        if let value {
+            content
+                .accessibilityIdentifier("purchase.state")
+                .accessibilityValue(Text(verbatim: value))
+        } else {
+            content
+        }
+    }
+}
 #endif
 
 private struct ProView: View {
@@ -1085,7 +1099,15 @@ private struct ProView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button(L10n.ui("common.done", defaultValue: "Done")) {
                 purchaseFeedback.reset()
                 dismiss()
-            } } }
+            }
+            #if DEBUG && targetEnvironment(simulator)
+            .modifier(PurchaseStateDiagnosticValue(
+                value: model.purchases.purchaseDiagnostics.stateAccessibilityValue(
+                    isPro: model.purchases.isPro, isBusy: model.purchases.isBusy
+                )
+            ))
+            #endif
+            } }
             .task { await model.purchases.load() }
         }
         .onDisappear { purchaseFeedback.reset() }
