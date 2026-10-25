@@ -564,6 +564,106 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(save.call_count,3)
         self.assertFalse(r.ops.signals)
 
+    def files_runner(self, launch=None, terminate=None, group=None):
+        home=self.root/'home'
+        owned='10000000-0000-0000-0000-000000000001'
+        container=home/'Library/Developer/CoreSimulator/Devices'/owned/'data/Containers/Shared/AppGroup/20000000-0000-0000-0000-000000000002'
+        provider=container/'File Provider Storage';provider.mkdir(parents=True)
+        home_patch=patch.object(Path,'home',return_value=home)
+        home_patch.start();self.addCleanup(home_patch.stop)
+        launch={'output':[('stdout',(hosted.core.FILES_BUNDLE+': 123\n').encode())],**(launch or {})}
+        lookup={'output':[('stdout',(hosted.core.GROUP+'\t'+str(container)+'\n').encode())],**(group or {})}
+        r=self.runner(Ops(launch,lookup,terminate or {}))
+        r.owned,r.recovered=owned,True
+        return r,provider
+
+    def test_files_60s_caps_allow_slow_launch_and_terminate_with_real_provider_checks(self):
+        r,provider=self.files_runner({'delay':25},{'delay':45})
+        r.setup_files()
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual(list(r.folder.iterdir()),[])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,30,60])
+        self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
+        self.assertFalse(r.active);self.assertEqual((r.limit,r.final),(1380,1500))
+        with self.assertRaisesRegex(RuntimeError,'One-shot'):r.setup_files()
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_files_double_timeout_retains_launch_failure_and_attempts_terminate_once(self):
+        r,_=self.files_runner({'delay':float('inf')})
+        r.ops.plans=[r.ops.plans[0],{'delay':float('inf')}]
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed') as failure:r.setup_files()
+        self.assertEqual(str(failure.exception.__cause__),'Command timeout')
+        self.assertEqual(r.report['files_setup_terminate_error'],"RuntimeError('files-terminate failed')")
+        self.assertEqual([x['id'] for x in r.report['commands']],['files-launch','files-terminate'])
+        self.assertTrue(all(x['requested_cap_seconds']==60 for x in r.report['commands']))
+        self.assertAlmostEqual(r.ops.t,104,places=6)
+        self.assertIsNone(r.folder);self.assertFalse(r.active)
+
+    def test_files_successful_launch_still_requires_successful_termination(self):
+        r,provider=self.files_runner(terminate={'exit':2})
+        with self.assertRaisesRegex(RuntimeError,'files-terminate failed'):r.setup_files()
+        self.assertNotIn('files_setup_primary_error',r.report)
+        self.assertFalse((provider/r.folder_name).exists());self.assertFalse(r.active)
+
+    def test_files_provider_error_is_not_masked_by_termination_failure(self):
+        r,_=self.files_runner(group={'output':[('stdout',b'invalid-group-list')]},terminate={'exit':2})
+        with self.assertRaisesRegex(RuntimeError,'Malformed Files group list'):r.setup_files()
+        self.assertIn('files-terminate failed',r.report['files_setup_terminate_error'])
+        self.assertIsNone(r.folder)
+
+    def test_files_provider_identity_is_rechecked_after_terminate(self):
+        r,provider=self.files_runner()
+        def replace_provider(argv):
+            if argv[2]=='terminate':
+                provider.rename(provider.with_name('original-provider'))
+                provider.mkdir()
+        r.ops.on_spawn=replace_provider
+        with self.assertRaisesRegex(RuntimeError,'Provider changed before mkdir'):r.setup_files()
+        self.assertFalse((provider/r.folder_name).exists());self.assertEqual(len(r.ops.processes),3)
+
+    def test_files_cancelled_before_launch_creates_no_process(self):
+        r,_=self.files_runner();r.interrupted=True
+        with self.assertRaisesRegex(RuntimeError,'Interrupted'):r.setup_files()
+        self.assertEqual(r.ops.processes,[])
+
+    def test_files_cancelled_during_spawn_stops_group_without_terminate_spawn(self):
+        r,_=self.files_runner();r.ops.on_spawn=lambda _:r.signal()
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+        self.assertTrue(r.interrupted);self.assertIsNone(r.folder)
+
+    def test_files_unknown_spawn_or_unresolved_group_withholds_terminate(self):
+        for kind,plan in [('unknown',{'spawn_error':True}),('unresolved',{'delay':float('inf'),'ignore_all':True})]:
+            with self.subTest(kind=kind):
+                old=self.root;self.root=old/kind;self.root.mkdir()
+                r,_=self.files_runner(plan)
+                with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+                self.assertEqual(r.report['attempts'],{'files-launch':1})
+                self.assertEqual(len(r.report['commands']),1)
+                self.assertTrue(r.unknown_spawn or r.active)
+                self.root=old
+
+    def test_files_caps_use_remaining_budget_and_never_spend_cleanup_reserve(self):
+        r,_=self.files_runner({'delay':float('inf')});r.ops.t=1370
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+        row=r.report['commands'][0]
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(1372,1380))
+        self.assertLessEqual(r.ops.t,1380);self.assertEqual(len(r.ops.processes),1)
+        self.assertFalse(r.active);self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_only_exact_hosted_files_actions_get_larger_caps(self):
+        r,_=self.files_runner()
+        with patch.object(r,'command',return_value='') as command:
+            r.sim('other','launch',r.owned,hosted.core.FILES_BUNDLE)
+            self.assertEqual(command.call_args.args[-1],30)
+            hosted.core.Recovery.sim(r,'files-launch','launch',r.owned,hosted.core.FILES_BUNDLE)
+            self.assertEqual(command.call_args.args[-1],30)
+            for args in [('launch','foreign',hosted.core.FILES_BUNDLE),('terminate',r.owned,hosted.core.FILES_BUNDLE),('launch',r.owned,'foreign.bundle')]:
+                with self.assertRaisesRegex(RuntimeError,'Unexpected Files'):r.sim('files-launch',*args)
+            with self.assertRaisesRegex(RuntimeError,'Unexpected Files'):
+                r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE,cap=90)
+            self.assertEqual(command.call_count,2)
+
     def test_nested_capability_probe_preserves_exact_EPERM_operation(self):
         r=self.runner(Ops({'probe_error':True}))
         with self.assertRaises(RuntimeError):r.check_capability()

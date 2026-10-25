@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = '8a3ed32c74f9e1957f82885a9e6affc8a01dd7af59ceeaf0ea444eaf04c7ff0c'
+CORE_SHA = 'd9cda1ab6882f9b07e65540043ce58b4892739dcb1aad313c9f5a6177aea6672'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -170,6 +170,15 @@ class HostedRecovery(core.Recovery):
         run_id=str(uuid.uuid5(uuid.NAMESPACE_URL,job['GITHUB_REPOSITORY']+'/'+job['GITHUB_RUN_ID']+'/recovery'))
         super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={})
         self.report['job']=job
+
+    def sim(self,label,*args,cap=30):
+        # Only the initial owned Files preparation gets a larger command cap.
+        action={'files-launch':'launch','files-terminate':'terminate'}.get(label)
+        if action:
+            require(self.owned and args==(action,self.owned,core.FILES_BUNDLE) and cap==30,
+                    'Unexpected Files preparation command')
+            cap=60
+        return super().sim(label,*args,cap=cap)
 
     def capture_source(self):
         require(not self.command('git-clean',['/usr/bin/git','status','--porcelain'],20).strip(),'Checkout is not clean')

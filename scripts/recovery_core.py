@@ -311,6 +311,7 @@ class Recovery:
     def setup_files(self):
         self.once('files-launch')
         provider_fd = None
+        primary_error = None
         try:
             try:
                 launched = self.sim('files-launch','launch',self.owned,FILES_BUNDLE)
@@ -326,10 +327,19 @@ class Recovery:
                 provider_fd = os.open(provider,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
                 st = os.fstat(provider_fd)
                 require([st.st_dev,st.st_ino]==self.provider_id,'Provider changed during open')
+            except BaseException as error:
+                primary_error = error
+                self.report['files_setup_primary_error'] = repr(error)
+                raise
             finally:
                 if not self.active and not self.unknown_spawn:
-                    self.once('files-terminate')
-                    self.sim('files-terminate','terminate',self.owned,FILES_BUNDLE)
+                    try:
+                        self.once('files-terminate')
+                        self.sim('files-terminate','terminate',self.owned,FILES_BUNDLE)
+                    except BaseException as error:
+                        self.report['files_setup_terminate_error'] = repr(error)
+                        if primary_error is None:
+                            raise
             # The async termination boundary cannot turn a checked pathname
             # into permission to create a folder through a replaced symlink.
             self.owned_root()
