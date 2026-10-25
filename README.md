@@ -67,16 +67,16 @@ Run `bash scripts/test-simulator.sh` with an installed runtime to execute app,
 StoreKit and UI tests serially. `TRIPFOLIO_SIMULATOR_ID` can select a specific
 device. The result bundle is written under `build/`.
 
-The accepted hosted baseline at `1391b307` passed all seven StoreKit scenarios:
-[CI 40159228298](https://github.com/4alvit/travel-documents-ios/actions/runs/40159228298)
-reports 90 simulator tests passed, zero failed and seven expected opt-in skips.
-Earlier cold-device Xcode 27/iOS 27 failures and a failed hosted candidate remain
-recorded as historical results in [release evidence](docs/release-evidence.md).
-A configuration file or a passing synthetic transaction alone does not prove
-application StoreKit API routing; the accepted run does not establish physical-
-device or live-store behavior. Follow
-[draft PR #1](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
-for the current commit's checks.
+The accepted executable baseline is `674cbb6`. [CI 40169628635](https://github.com/4alvit/travel-documents-ios/actions/runs/40169628635)
+passed 38 core tests, 95 phone tests with zero failures and seven expected opt-in
+skips, and two separately selected iPad guidance tests. All seven StoreKit cases
+passed. The tested merge `5cb2d0a9` has the same tree as that source commit.
+Earlier failures remain historical evidence. Later documentation or source
+commits require their own checks; these results are not relabelled as new runs.
+
+This exact Release ZIP subsequently passed one ordinary Simulator launch to the
+system passcode prompt and verified cleanup. Authentication was not completed;
+unlocked workflows, physical devices and live purchases remain unverified.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.

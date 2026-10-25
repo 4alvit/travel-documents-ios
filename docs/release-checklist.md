@@ -3,8 +3,8 @@
 Record exact commit, OS, Xcode and tests in release-evidence.md. Advance a release
 channel only after its evidence exists; never relabel an unverified build stable.
 Checked historical items below retain their recorded source/scope; they are not
-whole-suite acceptance of the current PR. The accepted 25 October hosted baseline
-passed at `1391b307`; see [publication evidence](release-evidence.md#accepted-hosted-baseline--25-october-2026).
+whole-suite acceptance of the current PR. The accepted executable baseline
+passed at `674cbb6`; see [current evidence](release-evidence.md#accepted-executable-baseline-and-ordinary-release-launch--25-october-2026).
 Every later push requires its own ordinary CI.
 
 - [x] Public repository provisioned through Terraform; development preview in draft PR #1.
@@ -52,8 +52,13 @@ Every later push requires its own ordinary CI.
 - [ ] All relevant regression suites pass on the final release candidate commit.
 - [ ] Exact simulator/runtime, commands, test totals and result bundles are linked
       in release-evidence.md, including failures and isolated reruns.
-- [ ] Published SHA has green CI gate; release contains source and reproducible
-      simulator build instructions/artifact with checksums.
+- [x] Published executable baseline `674cbb6` has a successful CI gate and verified
+      source/Simulator archives with checksums and build instructions.
+- [x] Exact Release ZIP ordinary launch reached system authentication; three
+      captures and owned-device cleanup were independently reviewed.
+- [ ] GitHub prerelease publication and its downloadable assets are verified.
+- [ ] Final release-candidate validation includes the separately enabled scenarios
+      and remaining physical-device/distribution checks.
 - [x] Only fictional screenshots/fixtures; source scan found no secrets or private paths.
 
 - [x] English/Russian resources and system-language fallback verified: core 38/38,

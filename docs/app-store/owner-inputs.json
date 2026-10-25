@@ -1,6 +1,6 @@
 {
   "prepared_local_date": "2026-10-24",
-  "status": "Text drafts complete; owner facts and root integration remain before publication/submission. No account or public-site change performed.",
+  "status": "Text drafts and bundled EN/RU guidance are integrated. Final owner-dependent policy/contact details and App Store submission configuration remain pending.",
   "confirmed_defaults_do_not_reask": {
     "primary_locale": "en-US",
     "additional_locale": "ru",
@@ -74,9 +74,9 @@
     }
   ],
   "root_integration_tasks_not_owner_questions": [
-    "Integrate reviewed text into the repository; keep technical identifiers unchanged.",
+    "Keep the reviewed listing, IAP and review-note drafts integrated; preserve technical identifiers.",
     "Publish final privacy/support pages after replacing owner-dependent placeholders, then verify public HTTPS URLs and all links. Prefer stable pages; verify commit-pinned source URLs after the integration push if those are used for review evidence.",
-    "Add an easily accessible in-app privacy-policy link and support contact path before App Review. Current App/Views.swift Settings contains privacy prose but no Link/openURL policy contact route found in this source audit.",
+    "The in-app privacy/support entry is implemented and uses confirmed preview URLs pinned to commit 1391b307. After final owner-approved pages are published, update and verify the final destinations without silently changing the historical preview evidence.",
     "Verify final app-name availability in App Store Connect and finish any needed name clearance. A prior bounded search is not reservation or clearance.",
     "Configure the matching non-consumable at the authorized target price, with the EN/RU localizations and family sharing off; verify actual price/availability and attach the first IAP to the app version submission.",
     "Use a real purchase-screen review screenshot and accurate synthetic-data App Store screenshots. Do not claim local Xcode screenshots establish live pricing or purchases.",

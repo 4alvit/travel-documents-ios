@@ -4,6 +4,39 @@ Current stage: development preview in a public draft PR. No GitHub or App Store
 release has been verified. Live Apple distribution and physical-device gates
 remain open. Historical failures below remain attached to their original runs.
 
+## Accepted executable baseline and ordinary Release launch — 25 October 2026
+
+The accepted executable baseline is `674cbb6`. [CI 40169628635](https://github.com/4alvit/travel-documents-ios/actions/runs/40169628635)
+passed 38 core tests, 95 phone tests with zero failures and seven expected opt-in
+skips, and two separately selected iPad guidance tests. All seven StoreKit cases
+passed. The tested merge `5cb2d0a9` has the same tree as that source commit.
+Earlier failures remain historical evidence. Later documentation or source
+commits require their own checks; these results are not relabelled as new runs.
+
+The reviewed source head is `674cbb6cf655242838686fc6f0a50b6c2eff0492`;
+the binary was built from merge `5cb2d0a9f0a5593c85bda0fe7e20b714731a909a`.
+Both have tree `92013978c35e79058f65c82e77ae656aae9ac590`.
+The Simulator ZIP SHA-256 is
+`f232351349677cb9a4ea5caa779f6941c4440e8892e2990564d4afc96e83cc1a`.
+Source and installed payload checks covered all 22 app files.
+
+The complete smoke attempt for one ordinary launch of that unchanged Release
+ZIP took 73.246 seconds, including setup, installation, observation and cleanup;
+this is not a measurement of app startup latency.
+Three actual screenshots show the app locked/authenticating at approximately
+2 seconds, then the system passcode prompt at 10 and 30 seconds. The 22 commands
+completed within their limits, and the fresh owned simulator was deleted with
+baseline/final inventories equal. Independent execution and pixel review were
+accepted for this narrow scope. Root acceptance SHA-256:
+`5774577defa2b2019932c2372dde70cb7f1bc958beaf64f803e2754393bca7c7`.
+The original receipt remains unchanged; later acceptance is a separate record.
+
+No credential was entered. This is not evidence of successful authentication,
+full unlocked workflows, real purchases, continuous liveness, physical devices,
+TestFlight or App Store acceptance. Whole-device allocation was not measured;
+the original allocation requirement remains incomplete. Earlier unsuccessful
+allocation-limited attempts remain failures and are not replaced by this run.
+
 ## Bundled privacy and support — 25 October 2026
 
 Settings starts with a free English/Russian privacy and support page. Its text
@@ -56,8 +89,9 @@ Only that Russian maximum-type case now requests 480 seconds, with a matching
 runner ceiling. English guidance remains at 360 seconds, the ordinary default
 at 180 seconds, and the job at 35 minutes. The preceding job took 30m55s. The
 additional case margin is based on observed completion time; no assertion,
-scenario, attachment, retry policy or unrelated case allowance changed. The
-new published revision still requires its own successful CI result.
+scenario, attachment, retry policy or unrelated case allowance changed. At that stage the
+new published revision still required its own successful CI result; the later
+accepted baseline is recorded above.
 
 Use the [current PR checks](https://github.com/4alvit/travel-documents-ios/pull/1/checks)
 for validation of the published revision. No physical-device, VoiceOver speech,
@@ -550,8 +584,10 @@ supported activation mechanism; no test-plan UI switch is asserted here.
 
 Apple has discussed a related CLI configuration issue and an earlier-version
 fix in [Developer Forums](https://developer.apple.com/forums/thread/826971).
-That report is context, not proof of the cause on Xcode 27. A clean-device
-purchase/restore run and a successful published CI result remain required.
+That report is context, not proof of the cause on Xcode 27. The historical
+cold-device CLI probes did not establish their local test environment. Subsequent
+accepted hosted CI passed all seven StoreKit cases. No physical-device or
+live-store acceptance follows from that result.
 
 ## Distribution and physical-device limits
 
@@ -570,12 +606,14 @@ paid-app agreement, public support/privacy URLs, TestFlight and App Review
 remain unverified. Test purchases are not sales.
 
 Public repository provisioning was completed through Terraform outside this
-source tree. Draft PR #1 and hosted CI are available as recorded above, but no
-successful final CI gate or GitHub release is verified. Do not label this preview
-stable or ready for sale.
+source tree. The published `674cbb6` baseline has a successful CI gate and a
+verified Simulator package. No GitHub release or App Store release has yet been
+verified. Do not label this preview stable or ready for sale.
 
-The preview package records its exact source commit/toolchain in `BUILD.txt`
-and artifact digests in `SHA256SUMS`. `scripts/package-preview.sh` runs core
-checks and the Release build; it does not override the StoreKit or device gates
-above. Source archives are rebuildable; binaries are not claimed to be
-bit-for-bit reproducible.
+The consolidated `674cbb6` preview records its original build provenance in
+`provenance.json`, later scoped acceptance in `acceptance.json`, and artifact
+digests in `SHA256SUMS`. The historical `scripts/package-preview.sh` format
+uses `BUILD.txt` and runs core checks plus a Release build; that script was not
+rerun to assemble this consolidated preview. Neither format overrides the
+StoreKit or device gates above. Source archives are rebuildable; binaries are
+not claimed to be bit-for-bit reproducible.

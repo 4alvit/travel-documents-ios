@@ -9,7 +9,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve the recovery job's bounded owned-process cleanup window.
+  cancel-in-progress: false
 jobs:
   validate:
     name: Swift and iOS build
@@ -76,16 +77,54 @@ jobs:
           path: build/PrivacySupport-iPad/
           if-no-files-found: warn
           retention-days: 7
+  recovery:
+    name: Free backup and recovery
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      TRIPDOCKET_RUNNER_LABEL: macos-15
+      TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
+      TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Hosted adapter regression checks
+        timeout-minutes: 2
+        run: python3 -B scripts/test-recovery-hosted.py
+      - name: One bounded recovery attempt
+        timeout-minutes: 27
+        run: python3 -B scripts/recovery_hosted.py --run
+      - name: Recovery evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-recovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/RecoveryHosted/*.json
+            build/RecoveryHosted/PhaseLogs/
+            build/RecoveryHosted/Capability/
+            build/RecoveryHosted/*.xcresult/
+            build/RecoveryHosted/BeforeReset/
+            build/RecoveryHosted/AfterRestore/
+            build/RecoveryHosted/*-attachments/
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true
   gate:
     name: CI gate
     if: always()
-    needs: [validate, privacy_ipad]
+    needs: [validate, privacy_ipad, recovery]
     runs-on: ubuntu-latest
     steps:
       - name: Require successful validation
         env:
           PHONE_RESULT: ${{ needs.validate.result }}
           IPAD_RESULT: ${{ needs.privacy_ipad.result }}
+          RECOVERY_RESULT: ${{ needs.recovery.result }}
         run: |
           test "$PHONE_RESULT" = success
           test "$IPAD_RESULT" = success
+          test "$RECOVERY_RESULT" = success
