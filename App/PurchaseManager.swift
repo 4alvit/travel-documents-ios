@@ -347,5 +347,11 @@ struct PurchaseDiagnostics {
     }
 
     var accessibilityValue: String? { (purchase ?? catalog)?.accessibilityValue }
+
+    /// Last rendered app state only; this performs no StoreKit lookup or refresh.
+    func stateAccessibilityValue(isPro: Bool, isBusy: Bool) -> String? {
+        guard enabled else { return nil }
+        return "purchase-state isPro=\(isPro) isBusy=\(isBusy)"
+    }
 }
 #endif

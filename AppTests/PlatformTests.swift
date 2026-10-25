@@ -619,10 +619,17 @@ final class PurchaseFeedbackTests: XCTestCase {
             diagnostics.recordPurchase(phase: .purchase, error: URLError(.timedOut))
             diagnostics.recordPurchase(category: .verification)
             XCTAssertNil(diagnostics.accessibilityValue)
+            XCTAssertNil(diagnostics.stateAccessibilityValue(isPro: true, isBusy: true))
         }
         var enabled = PurchaseDiagnostics(arguments: [diagnosticFlag])
         enabled.recordPurchase(phase: .purchase, error: URLError(.timedOut))
         XCTAssertNotNil(enabled.accessibilityValue)
+        for isPro in [false, true] {
+            for isBusy in [false, true] {
+                XCTAssertEqual(enabled.stateAccessibilityValue(isPro: isPro, isBusy: isBusy),
+                               "purchase-state isPro=\(isPro) isBusy=\(isBusy)")
+            }
+        }
     }
 
     func testAllowlistedDomainAndCodeDoNotExposeErrorPayload() {
