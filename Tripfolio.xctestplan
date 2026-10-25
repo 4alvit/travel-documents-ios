@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "id": "547C5B91-2868-41C0-9480-A3DAF299D07C",
+      "name": "Local StoreKit",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "commandLineArgumentEntries": [
+      { "argument": "--ui-testing-unlocked", "enabled": true }
+    ],
+    "defaultTestExecutionTimeAllowance": 30,
+    "maximumTestExecutionTimeAllowance": 60,
+    "testTimeoutsEnabled": true,
+    "storeKitConfiguration": {
+      "identifier": "App/Tripfolio.storekit"
+    },
+    "targetForVariableExpansion": {
+      "containerPath": "container:Tripfolio.xcodeproj",
+      "identifier": "B8962A135336070583A5FA4D",
+      "name": "Tripfolio"
+    }
+  },
+  "testTargets": [
+    {
+      "parallelizable": false,
+      "target": {
+        "containerPath": "container:Tripfolio.xcodeproj",
+        "identifier": "F30125537E69F67D0E0CF65D",
+        "name": "TripfolioTests"
+      }
+    },
+    {
+      "parallelizable": false,
+      "target": {
+        "containerPath": "container:Tripfolio.xcodeproj",
+        "identifier": "E3D331DFE1F8C0A20C268C69",
+        "name": "TripfolioUITests"
+      }
+    }
+  ],
+  "version": 1
+}

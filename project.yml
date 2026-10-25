@@ -1,0 +1,80 @@
+name: Tripfolio
+options:
+  developmentLanguage: en
+  knownRegions: [en, ru]
+  bundleIdPrefix: com.4alvit
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  TravelCore:
+    path: .
+targets:
+  Tripfolio:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - "*.storekit"
+    dependencies:
+      - package: TravelCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.4alvit.tripfolio
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  TripfolioTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AppTests
+      - path: App/Tripfolio.storekit
+        buildPhase: resources
+    dependencies:
+      - target: Tripfolio
+      - package: TravelCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.4alvit.tripfolio.tests
+        GENERATE_INFOPLIST_FILE: YES
+  TripfolioUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+      - path: App/Tripfolio.storekit
+        buildPhase: resources
+    dependencies:
+      - target: Tripfolio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.4alvit.tripfolio.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Tripfolio:
+    build:
+      targets:
+        Tripfolio: all
+    run:
+      config: Debug
+      storeKitConfiguration: App/Tripfolio.storekit
+    test:
+      config: Debug
+      testPlans:
+        - path: Tripfolio.xctestplan
+          defaultPlan: true
+      targets:
+        - TripfolioTests
+        - TripfolioUITests
+    archive:
+      config: Release
