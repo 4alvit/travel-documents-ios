@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -921,6 +922,185 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):self.c12_command_pair(r)
         self.assertEqual(len(r.ops.processes),1);row=r.report['commands'][0]
         self.assertEqual(row['outcome'],'failed');self.assertIn('Interrupted',row['finalization_error'])
+
+
+class ResourceAccountingTests(unittest.TestCase):
+    """Small filesystem fixtures and fake metadata; no native jobs or signals."""
+
+    def setUp(self):
+        stack = self.enterContext(contextlib.ExitStack())
+        for name in ('subprocess.Popen', 'os.system', 'os.kill', 'os.killpg'):
+            stack.enter_context(patch(name, side_effect=AssertionError('No native operation')))
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temp).resolve() / 'owned'
+        self.root.mkdir()
+
+    def scan(self, **caps):
+        with patch.dict(hosted.core.CAPS, caps):
+            return hosted.core.live_sizes(self.root, hosted.core.identity_of(self.root), lambda: 0, 10)
+
+    @staticmethod
+    def metadata(*, size=0, blocks=0, directory=False, inode=2):
+        return SimpleNamespace(st_dev=1, st_ino=inode,
+            st_mode=(stat.S_IFDIR if directory else stat.S_IFREG) | 0o600,
+            st_size=size, st_blocks=blocks)
+
+    def fake_scan(self, root_stat, entries, **caps):
+        """Keep the production walk/checks, replacing only filesystem reads."""
+        children = []
+        calls = []
+        for name, metadata in entries:
+            def read(*, follow_symlinks, metadata=metadata):
+                calls.append(follow_symlinks)
+                return metadata
+            children.append(SimpleNamespace(name=name, stat=read))
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(hosted.core.CAPS, caps))
+            stack.enter_context(patch.object(hosted.core, 'identity_of', return_value=[1, 1]))
+            opened = stack.enter_context(patch.object(hosted.core.os, 'open', return_value=123))
+            stack.enter_context(patch.object(hosted.core.os, 'fstat', return_value=root_stat))
+            closed = stack.enter_context(patch.object(hosted.core.os, 'close'))
+            stack.enter_context(patch.object(hosted.core.os, 'scandir',
+                side_effect=lambda fd: contextlib.nullcontext(iter(children))))
+            try:
+                result = hosted.core.live_sizes(self.root, [1, 1], lambda: 0, 10)
+            finally:
+                opened.assert_called_once_with(self.root,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                closed.assert_called_once_with(123)
+        self.assertEqual(calls, [False] * len(entries))
+        return result
+
+    def sparse(self, path, size=2 * 1024**2):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('wb') as stream:
+            stream.truncate(size)
+        self.assertEqual(path.stat().st_size, size)
+        return path
+
+    def test_sparse_derived_data_uses_allocated_disk_budget(self):
+        sparse = self.sparse(self.root / 'DerivedData' / 'index')
+        expected_allocated = sum(p.lstat().st_blocks * 512
+            for p in (self.root, sparse.parent, sparse))
+        self.assertLess(expected_allocated, 64 * 1024, 'Fixture must be physically sparse')
+        result = self.scan(output_bytes=64 * 1024)
+        self.assertEqual(result['logical'], 2 * 1024**2)
+        self.assertEqual(result['allocated'], expected_allocated)
+        self.assertEqual(result['entries'], 2)
+        self.assertEqual(result['xcresults'], {})
+
+    def test_dense_over_cap_still_rejected(self):
+        dense = self.root / 'dense'
+        dense.write_bytes(b'x' * (128 * 1024))
+        self.assertGreater(dense.stat().st_blocks * 512, 64 * 1024)
+        with self.assertRaisesRegex(RuntimeError, 'Owned output size cap exceeded'):
+            self.scan(output_bytes=64 * 1024)
+
+    def test_empty_root_allocation_is_capped(self):
+        with self.assertRaisesRegex(RuntimeError, 'Owned output size cap exceeded'):
+            self.fake_scan(self.metadata(directory=True, inode=1, blocks=129), [],
+                output_bytes=64 * 1024)
+
+    def test_root_allocation_unknown_fails_closed(self):
+        for value in (None, -1, 1.5, True, '8', 'missing'):
+            with self.subTest(value=value):
+                root = self.metadata(directory=True, inode=1, blocks=value)
+                if value == 'missing':
+                    del root.st_blocks
+                with self.assertRaisesRegex(RuntimeError, 'Allocation unknown'):
+                    self.fake_scan(root, [])
+
+    def test_entry_allocation_unknown_fails_closed(self):
+        for value in (None, -1, 1.5, True, '8', 'missing'):
+            with self.subTest(value=value):
+                entry = self.metadata(size=1, blocks=value)
+                if value == 'missing':
+                    del entry.st_blocks
+                with self.assertRaisesRegex(RuntimeError, 'Allocation unknown'):
+                    self.fake_scan(self.metadata(directory=True, inode=1), [('index', entry)])
+
+    def test_zero_blocks_remain_valid_for_sparse_files(self):
+        result = self.fake_scan(self.metadata(directory=True, inode=1),
+            [('index', self.metadata(size=2 * 1024**2))], output_bytes=0)
+        self.assertEqual(result['allocated'], 0)
+        self.assertEqual(result['logical'], 2 * 1024**2)
+
+    def test_hardlinks_conservatively_count_each_entry_and_rescan_growth(self):
+        first = self.root / 'first'
+        first.write_bytes(b'x' * 4096)
+        second = self.root / 'second'
+        os.link(first, second)
+        self.assertEqual(first.stat().st_ino, second.stat().st_ino)
+        before = self.scan()
+        self.assertEqual(before['logical'], 8192)
+        self.assertEqual(before['allocated'],
+            self.root.stat().st_blocks * 512 + 2 * first.stat().st_blocks * 512)
+        with first.open('ab') as stream:
+            stream.write(b'y' * (16 * 1024))
+        after = self.scan()
+        self.assertEqual(after['logical'], 2 * (4096 + 16 * 1024))
+        self.assertEqual(after['allocated'],
+            self.root.stat().st_blocks * 512 + 2 * first.stat().st_blocks * 512)
+        self.assertGreater(after['allocated'], before['allocated'])
+        with self.assertRaisesRegex(RuntimeError, 'Owned output size cap exceeded'):
+            self.scan(output_bytes=before['allocated'])
+
+    def test_later_hardlink_alias_uses_fresh_grown_stat(self):
+        result = self.fake_scan(self.metadata(directory=True, inode=1, blocks=1), [
+            ('first', self.metadata(size=4096, blocks=8, inode=2)),
+            ('second', self.metadata(size=8192, blocks=16, inode=2))])
+        self.assertEqual(result['logical'], 12288)
+        self.assertEqual(result['allocated'], 512 + 12288)
+        self.assertEqual(result['entries'], 2)
+
+    def test_symlink_targets_are_never_counted_or_traversed(self):
+        outside = Path(self.temp).resolve() / 'outside'
+        outside.mkdir()
+        target = outside / 'dense'
+        target.write_bytes(b'x' * (128 * 1024))
+        file_link, directory_link = self.root / 'file-link', self.root / 'dir-link'
+        file_link.symlink_to(target)
+        directory_link.symlink_to(outside, target_is_directory=True)
+        result = self.scan()
+        self.assertEqual(result['logical'], 0)
+        self.assertEqual(result['allocated'], sum(p.lstat().st_blocks * 512
+            for p in (self.root, file_link, directory_link)))
+        self.assertEqual(result['entries'], 2)
+        with self.assertRaisesRegex(RuntimeError, 'Manifest rejects links and special files'):
+            hosted.core.tree_manifest(self.root)
+
+    def test_xcresult_sparse_logical_content_limit_is_unchanged(self):
+        self.sparse(self.root / 'result.xcresult' / 'data')
+        with self.assertRaisesRegex(RuntimeError, 'xcresult size cap exceeded'):
+            self.scan(output_bytes=8 * 1024**2, xcresult_bytes=64 * 1024)
+
+    def test_xcresult_allocated_limit_also_remains(self):
+        with self.assertRaisesRegex(RuntimeError, 'xcresult size cap exceeded'):
+            self.fake_scan(self.metadata(directory=True, inode=1),
+                [('result.xcresult', self.metadata(size=1, blocks=128))],
+                output_bytes=1024**2, xcresult_bytes=32 * 1024)
+
+    def test_manifest_logical_content_limit_still_precedes_hashing(self):
+        self.sparse(self.root / 'content')
+        with patch.object(hosted.core, 'file_digest', side_effect=AssertionError('No content read')) as digest:
+            with self.assertRaisesRegex(RuntimeError, 'Manifest size cap exceeded'):
+                hosted.core.tree_manifest(self.root, max_bytes=64 * 1024)
+            digest.assert_not_called()
+
+    def test_entry_limit_is_unchanged(self):
+        (self.root / 'one').touch()
+        (self.root / 'two').touch()
+        with self.assertRaisesRegex(RuntimeError, 'Output scan entry cap exceeded'):
+            self.scan(scan_entries=1)
+
+    def test_depth_limit_is_unchanged(self):
+        (self.root / 'nested').mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'Output scan depth exceeded'):
+            self.scan(scan_depth=0)
+
+    def test_scan_deadline_is_unchanged(self):
+        with self.assertRaisesRegex(RuntimeError, 'Output scan deadline exceeded'):
+            hosted.core.live_sizes(self.root, hosted.core.identity_of(self.root), lambda: 10, 10)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -123,11 +123,17 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
     Directory mtimes may change during a writer. Every encountered entry is
-    measured; traversal errors/limits fail closed. This is sampled accounting,
-    not a filesystem quota or an instantaneous peak measurement.
+    measured; traversal errors/limits fail closed. The disk cap uses allocated
+    512-byte blocks, not sparse logical lengths. Hardlinks are conservatively
+    charged per entry with fresh stats, including growth seen on later aliases
+    or scans. This is sampled accounting, not a quota or an instantaneous peak.
     """
     totals = {'logical': 0, 'allocated': 0, 'entries': 0, 'xcresults': {}}
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    def allocated_bytes(metadata):
+        blocks = getattr(metadata, 'st_blocks', None)
+        require(type(blocks) is int and blocks >= 0, 'Allocation unknown')
+        return blocks * 512
     def check():
         checkpoint()
         require(now() < deadline, 'Output scan deadline exceeded')
@@ -141,9 +147,8 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
                 totals['entries'] += 1
                 require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
                 require(s.st_dev == root_id[0], 'Output filesystem boundary')
-                require(s.st_blocks >= 0, 'Allocation unknown')
                 logical = s.st_size if stat.S_ISREG(s.st_mode) else 0
-                allocated = s.st_blocks * 512
+                allocated = allocated_bytes(s)
                 totals['logical'] += logical
                 totals['allocated'] += allocated
                 relative = prefix + (child.name,)
@@ -153,7 +158,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
                     row['logical'] += logical
                     row['allocated'] += allocated
                     require(max(row.values()) <= CAPS['xcresult_bytes'], 'xcresult size cap exceeded')
-                require(max(totals['logical'], totals['allocated']) <= CAPS['output_bytes'], 'Owned output size cap exceeded')
+                require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
                 if stat.S_ISDIR(s.st_mode):
                     nested = os.open(child.name,flags,dir_fd=fd)
                     try:
@@ -169,7 +174,8 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
     try:
         opened = os.fstat(fd)
         require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
-        totals['allocated'] = opened.st_blocks*512
+        totals['allocated'] = allocated_bytes(opened)
+        require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
         walk(fd,0)
     finally: os.close(fd)
     check()
