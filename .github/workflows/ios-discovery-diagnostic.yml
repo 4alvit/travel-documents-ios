@@ -1,0 +1,47 @@
+# Proposed .github/workflows/ios-discovery-diagnostic.yml; not installed/dispatched.
+name: iOS discovery diagnostic
+on:
+  push:
+    branches: ['diagnostics/ios-discovery-20261027-a1']
+    paths:
+      - '.github/workflows/ios-discovery-diagnostic.yml'
+      - 'diagnostics/ios-discovery/**'
+permissions:
+  contents: read
+concurrency:
+  group: ios-discovery-diagnostic-single-cohort
+  cancel-in-progress: false
+jobs:
+  diagnostic:
+    name: Discovery observations only (not product acceptance)
+    if: ${{ github.event.created && !github.event.deleted && !github.event.forced && github.run_attempt == '1' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DIAGNOSTIC_EXPECTED_SHA: ${{ github.sha }}
+      DIAGNOSTIC_PACKAGE_SHA: 'd051f560e53360de9132ea9df59ef5eb040ebccdf3c999238dcbed4bc905828e'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: One sealed diagnostic cohort
+        timeout-minutes: 14
+        run: |
+          set -euo pipefail
+          python3 -I -B diagnostics/ios-discovery/runner.py --execute \
+            --expected-sha "$DIAGNOSTIC_EXPECTED_SHA" \
+            --package-sha256 "$DIAGNOSTIC_PACKAGE_SHA"
+      - name: Typed diagnostic receipt only
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-discovery-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            diagnostics/ios-discovery/public/diagnostic.json
+            diagnostics/ios-discovery/public/hard-deadline.json
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: false

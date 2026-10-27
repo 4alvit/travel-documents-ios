@@ -1,0 +1,32 @@
+{
+  "files": [
+    {
+      "path": "vendor/room/scripts/recovery_hosted.py",
+      "source_commit": "1395744885fb9296881afb617688cb994ee8f399",
+      "source_path": "scripts/recovery_hosted.py",
+      "sha256": "529e67bf3b7c3cc4e51c53ad2d969fa36af66cc1958d2271d521cfaa28bd7195",
+      "bytes": 34998
+    },
+    {
+      "path": "vendor/room/scripts/run-recovery-journey.py",
+      "source_commit": "1395744885fb9296881afb617688cb994ee8f399",
+      "source_path": "scripts/run-recovery-journey.py",
+      "sha256": "640194829f904994aa86332edf0aa8bc1886c70e0ff08f512cddaa7f54a6ee1f",
+      "bytes": 43251
+    },
+    {
+      "path": "vendor/redact/scripts/check-privacy-ipad.py",
+      "source_commit": "64d21067134bfd815d4cb605afc07a454b3f05a4",
+      "source_path": "scripts/check-privacy-ipad.py",
+      "sha256": "3c840d43a0ce30b57f5d1fe0718db0996841f0d6d7b9f93fde5c29a62fa48ae5",
+      "bytes": 34681
+    },
+    {
+      "path": "vendor/trip/scripts/recovery_process.py",
+      "source_commit": "b7c4500113eb1ef27aa22abee026ade7e4c2cec7",
+      "source_path": "scripts/recovery_process.py",
+      "sha256": "df8c61354b2b7eb3c103fad0a319adb99124fc0d16d97fce269e39cc529ee81a",
+      "bytes": 11981
+    }
+  ]
+}

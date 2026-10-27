@@ -1,0 +1,241 @@
+{
+  "recommendation": "One exact-branch creation push producing one workflow job, one fresh hosted macOS ARM64 VM. Fixed Room A0 then Room/Redact/Trip A-before,B-env-only,A-after. Maximum ten discovery calls. Supersedes A/A-only proposal because A/A alone does not address env-policy contrast.",
+  "historical_identity": {
+    "all_three_observed_architecture": "ARM64/arm64, image macos-15-arm64",
+    "ImageVersion": "20260907.0337.1",
+    "Xcode": "16.4 build16F6",
+    "macOS": "15.7.9 build24G830",
+    "source_runs_on_label": "macos-15",
+    "evidence": "Room Q9/Q11 hosted-identity; Redact Q25 failure job log; Trip C21 host-capability/receipt/job log (referenced by prior reports).",
+    "guard": "Historical ImageVersion is a reference, not an admission requirement. All comparisons use one current standard hosted macos-15 ARM64 job and the same installed pinned Xcode16.4/16F6/SDK18.5. Record image/Python/OS differences; this is a current-image diagnostic, never historical reproduction."
+  },
+  "fixed_order": [
+    "room-first",
+    "room-A-before",
+    "room-B",
+    "room-A-after",
+    "redact-A-before",
+    "redact-B",
+    "redact-A-after",
+    "trip-A-before",
+    "trip-B",
+    "trip-A-after"
+  ],
+  "phase_labels": {
+    "A0": "First measured simctl query in this job; not certified cold. Record all non-simulator preflight.",
+    "room_A_before": "Immediate repeat of A0 under original Room env policy.",
+    "other_A_before": "First for boundary after earlier boundaries; not cold.",
+    "B": "Only admitted frozen parent env-bundle added; original argv/stdio/session/mask/command caps preserved.",
+    "A_after": "Restore exact A env; not a service-state reset."
+  },
+  "boundaries": {
+    "room": {
+      "head": "1395744885fb9296881afb617688cb994ee8f399",
+      "module": "scripts/recovery_hosted.py",
+      "sha256": "529e67bf3b7c3cc4e51c53ad2d969fa36af66cc1958d2271d521cfaa28bd7195",
+      "argv": [
+        "xcrun",
+        "simctl",
+        "list",
+        "--json"
+      ],
+      "env_A": "PATH HOME TMPDIR LANG LC_ALL DEVELOPER_DIR allowlist; selected canonical Xcode binding",
+      "stdio": "DEVNULL stdin, two nonblocking PIPE streams, original selector drain",
+      "budget": "60s total:56s work+4s cleanup",
+      "preserve": "Discovery.command plus original alarm/cleanup dependencies and SIGALRM masking around spawn. Full inventory, not runtime-only replacement."
+    },
+    "redact": {
+      "head": "64d21067134bfd815d4cb605afc07a454b3f05a4",
+      "module": "scripts/check-privacy-ipad.py",
+      "sha256": "3c840d43a0ce30b57f5d1fe0718db0996841f0d6d7b9f93fde5c29a62fa48ae5",
+      "argv": [
+        "xcrun",
+        "simctl",
+        "list",
+        "runtimes",
+        "--json"
+      ],
+      "env_A": "HOME USER LOGNAME PATH TMPDIR DEVELOPER_DIR if present; fixed LANG=en_US.UTF-8. Do not normalize an absent DEVELOPER_DIR.",
+      "stdio": "Inherited stdin, combined stdout/stderr regular private file",
+      "budget": "60s wait plus original up-to3s cleanup; spawn/persist overhead separate",
+      "preserve": "Run.command and stop_group; runtime_context private only."
+    },
+    "trip": {
+      "head": "b7c4500113eb1ef27aa22abee026ade7e4c2cec7",
+      "modules": {
+        "scripts/recovery_hosted.py": "ef116cf8fb7dd544992b3d46f254c87d34753706e762fc5f7748557eb1bf2252",
+        "scripts/recovery_core.py": "dfafb9868b5ec7c1952ac9788f917d09c822c5834e3619e14f94151f7ae027ab",
+        "scripts/recovery_process.py": "df8c61354b2b7eb3c103fad0a319adb99124fc0d16d97fce269e39cc529ee81a"
+      },
+      "argv": [
+        "/usr/bin/xcrun",
+        "simctl",
+        "list",
+        "runtimes",
+        "--json"
+      ],
+      "env_A": "HOME USER TMPDIR DEVELOPER_DIR if present; fixed PATH=/usr/bin:/bin:/usr/sbin:/sbin and GIT_OPTIONAL_LOCKS=0; selected canonical DEVELOPER_DIR",
+      "stdio": "Inherited stdin, two nonblocking PIPE streams, original pump/checkpoints",
+      "budget": "60s total:52s work+8s cleanup",
+      "preserve": "Smoke.command/stop/RealOps with original dependencies, command only; no setup/work/run."
+    }
+  },
+  "env_B_contract": {
+    "keys": [
+      "XPC_SERVICE_NAME",
+      "XPC_FLAGS",
+      "__CF_USER_TEXT_ENCODING"
+    ],
+    "freeze_once": true,
+    "max_bytes": 128,
+    "encoding": "ASCII",
+    "reject": "NUL/CR/LF/control characters, overlength or unknown format. Any present invalid key skips entire B; never partial intervention.",
+    "formats": "Exact regexes frozen in plan: XPC_FLAGS numeric hexadecimal/decimal, __CF_USER_TEXT_ENCODING canonical hex triple, XPC_SERVICE_NAME restricted ASCII label characters. No permissive fallback or arbitrary parent-env forwarding.",
+    "absent_or_equal": "Absent keys remain absent. If no actual A/B delta, skip B with typed reason and no duplicate process. Unexpected original A key membership is a boundary mismatch.",
+    "proof": "Assert exact dict diff(A,B) is only admitted three-key additions. Restore A in finally; parent environment unchanged. Snapshot once, not each phase.",
+    "publication": "Only key/presence/admissibility/length/digest/change flag. Raw values private. Hash is comparison metadata, not a confidentiality guarantee.",
+    "meaning": "Parent metadata-string bundle, not transferred bootstrap port, GUI/audit session or credentials. Session and signal-mask hypotheses untested."
+  },
+  "declared_diagnostic_deltas": {
+    "adapters": "Exact vendored class/function bodies and dependency hashes; explicit diagnostic constructors/context. Production mains/host guards not invoked or spoofed. Changed context/observations are declared deltas.",
+    "session": "start_new_session=True remains on every arm; original signal masks and cleanup order retained.",
+    "RLIMIT_FSIZE": "Latest candidate sets global8MiB soft RLIMIT_FSIZE for the whole diagnostic process and all arms; preserves hard limit and restores original soft value in finally. Record old/new/restore values. Never raise a stricter pre-existing limit; a stricter limit is a nonmatching-policy result.",
+    "RLIMIT_confound": "FSIZE covers ALL regular-file writes, including tool/cache writes, not just logs. It can itself alter discovery; the delta applies to all three boundaries. Holding it equal within ABA permits this diagnostic-regime contrast, not historical equivalence.",
+    "censor": "Any SIGXFSZ/EFBIG/output cap is OUTPUT_LIMIT_CENSORED and stops remaining probes; never interpret as env failure or historical timeout reproduction.",
+    "post_return_guard": "Added Redact post-return owned-group absence check is declared cleanup delta; no new acceptance claim. Any uncertainty stops.",
+    "equivalence": "Original command function bytes can be preserved while full historical context is not. Report command-boundary reuse plus explicit deltas, never full historical replication.",
+    "environment": "One current hosted image and common installed Python3.12\u20133.14, no Python installation. Workflow explicitly sets DEVELOPER_DIR to installed Xcode16.4 for all phases. Room/Trip canonicalize this path; Redact retains the workflow-provided value. Global Xcode default can differ and is recorded. No xcode-select mutation.",
+    "supervisor_signals": "Declared supervisory delta shared by all arms: require inherited SIGUSR1 unblocked with default disposition, then install owned SIGUSR1 soft-deadline exception and SIGTERM InterruptedError handlers. Restore prior handlers on normal exit. No signal-mask changes and no change to original Room SIGALRM masking. Redact/Trip retain their scoped handlers and restore the outer handler."
+  },
+  "metadata": {
+    "identity": "Actual source seal/commit binding, run/attempt, fixed guarded job/ref/workflow, ImageOS/ImageVersion, OS build, machine/Python version and Python binary hash. Source seal supplied independently, not generated from live checkout.",
+    "xcode": "Installed pinned Xcode and SDK versions plus tool hashes; record whether global selected symlink matches the pin and hash its path. Prospective PATH lookup is not proof of child executable image.",
+    "env": "Freeze actual per-boundary env privately; public fixed-key typed presence/equality/digest only. Preserve inherited PATH differences and missing DEVELOPER_DIR.",
+    "rlimits": "Read fixed available AS CORE CPU DATA FSIZE NOFILE NPROC RSS STACK soft/hard values; explicit infinity/unavailable. Capture before/after blocks and global FSIZE restoration. Apart from declared FSIZE delta no changes. Parent readings are inheritance policy evidence, not live child/kernel-policy proof.",
+    "process": "Supervisor numeric UID/EUID/GID/EGID/PID/PPID/PGID/SID and narrow acquired-child identity if instrumented; no whole-machine process listing.",
+    "output": "Only explicit public/diagnostic.json plus optional fixed public/hard-deadline.json are uploaded. Hard receipt dominates stale partial diagnostic success. Private logs/env are never upload paths. Inventory JSON is not parsed or accepted for runtime selection; command success only means process return plus cleanup.",
+    "preflight": "Filesystem/plist/hash reads only. No native version command, simctl warmup, UI, boot/reset, service restart, cache clearing or downloads. A0 remains first measured, not certified cold."
+  },
+  "continuation": {
+    "advance": "Only after durable receipt, stable source/env identity, bounded output and confirmed leader reap plus owned-group absence with no ownership/cleanup errors. A normal timeout may advance to its predeclared contrast only with those clean postconditions and remaining budget; record timeout as failed/censored.",
+    "abort_all_later": "Unknown spawn/group, EPERM/error in ownership observation, cleanup error, identity drift, receipt failure, output limit or insufficient reserve. No extra child for uncertain-group inspection, retries, killall or unrelated service/device cleanup.",
+    "outer_guard": "Killing only the supervisor group does not stop start_new_session command groups. Candidate must prove nested ownership registration/accounting; otherwise UNKNOWN/UNRESOLVED and stop, never report cleanup complete.",
+    "states": "Distinguish COMMAND_FAILED_CLEANED, OWNERSHIP_UNCERTAIN, OUTPUT_LIMIT_CENSORED and NOT_RUN reason.",
+    "hard_fallback": "Hard receipt, when present, overrides any earlier diagnostic.json success state. cleanup UNKNOWN; no further probes or retry; runner teardown is delegated to hosted runner lifecycle, never claimed confirmed by the diagnostic. No runtime acceptance follows from COLLECTED/complete telemetry alone."
+  },
+  "budget_proposal": {
+    "total_driver_seconds": 780,
+    "preflight_max_seconds": 45,
+    "final_receipt_cleanup_reserve_seconds": 30,
+    "probe_count_max": 10,
+    "nominal_probe_seconds": 609,
+    "arithmetic": "Room4*60 + Redact3*(60+3) + Trip3*60=609. With45s preflight and30s reserve,684s nominal leaves96s overhead within780; no original per-command limit increases.",
+    "admission": "Require full original phase allowance plus global reserve before each phase. No deadline reset for B/A-after. Skipped B never authorizes another probe.",
+    "outer": "Driver780s including preflight; work ends750s with30s receipt reserve. Step14min and job20min independent backstops. Queue/checkout/upload separate.",
+    "authorization": "Plan only, not execution grant.",
+    "actual_values": {
+      "driver_seconds": 780,
+      "preflight_seconds": 45,
+      "work_end_seconds": 750,
+      "receipt_reserve_seconds": 30,
+      "step_minutes": 14,
+      "job_minutes": 20
+    },
+    "interrupting_watchdogs": "Owned daemon watchdog: soft absolute deadline started+45 for preflight, then started+750 for the whole work sequence. It signals only the captured supervisor PID with SIGUSR1, never descendant groups. Immutable hard timer started+780 writes a fixed HARD_ABORT/cleanup UNKNOWN receipt best effort and exits124 even if the receipt write fails. Failure to deliver the soft signal also triggers the unresolved hard-abort callback. No automatic retry.",
+    "bound_limit": "Python timers/signals require interpreter/OS scheduling; this is not a real-time guarantee against kernel/interpreter stalls. Step14min/job20min remain independent hosted backstops. Hard fallback or hosted cancellation cannot prove descendant cleanup; mark unresolved and stop the series."
+  },
+  "interpretation": [
+    {
+      "pattern": "Room A0 slow/fails, immediate A-before faster",
+      "supports": "Repeat/order association",
+      "not_proven": "True cold/warm cause, permanent warmup or env effect."
+    },
+    {
+      "pattern": "A-before fails/slow, B passes/fast, A-after fails/slow",
+      "supports": "Local admitted-env-bundle association",
+      "not_proven": "Causality, individual key effect, bootstrap repair or release acceptance. Timeouts are censored latencies."
+    },
+    {
+      "pattern": "A-before passes, B fails/slow, A-after passes",
+      "supports": "Local negative bundle association",
+      "not_proven": "Universal harm or key-level effect."
+    },
+    {
+      "pattern": "A-before fails, B and A-after pass",
+      "supports": "Chronological state transition",
+      "not_proven": "Env cause; warming/recovery/order explains it."
+    },
+    {
+      "pattern": "All pass similarly",
+      "supports": "No large observed difference here",
+      "not_proven": "Env irrelevance or historical fix."
+    },
+    {
+      "pattern": "All timeout cleanly",
+      "supports": "No successful query under either policy within this sample budget",
+      "not_proven": "Blocked phase or platform-wide fault."
+    },
+    {
+      "pattern": "B skipped or block aborted",
+      "supports": "No intervention/remaining result",
+      "not_proven": "Any skipped outcome."
+    }
+  ],
+  "counterexamples": [
+    "Background services, scheduling and load can oscillate ABA with no env effect; one block has no error-rate estimate.",
+    "Stopping a timed-out earlier request can warm or poison shared services. B inherits that state and A-after cannot erase history.",
+    "XPC_SERVICE_NAME copying presents parent metadata but does not recreate Mach bootstrap/audit/session identity.",
+    "Global FSIZE can affect tool/cache writes and introduce a new failure, even though allarms receive the same limit.",
+    "Full inventory versus runtimes-only, FILE versus PIPE and different wait/pump semantics confound cross-boundary speed comparisons.",
+    "Only A0 is first measured; later boundaries are already exposed to earlier queries. Even A0 may follow hosted-provider initialization.",
+    "A current image can differ from historical runs, and same image/arch is not same worker/service state. Image/Python changes are explicitly reported without claiming reproduction.",
+    "Discovery does not exercise Files launch/terminate/EPERM5624, UI Runner delay, backup/restore, signing or App Store publication."
+  ],
+  "code_review_gates": [
+    "Verify complete dependency graph and module-import/constructor side effects before native use.",
+    "Verify A/B differs only by admitted env inside declared diagnostic regime.",
+    "Verify outer deadline handles nested sessions conservatively; supervisor exit cannot prove children stopped.",
+    "Verify FSIZE failure has independent censorship status and restoration, including exceptions.",
+    "Verify no raw env/log/process/private-path publication on any sanitizer/persist failure.",
+    "Actual candidate needs independent source review and a separate finite execution grant; no uninspected executable is approved here.",
+    "Review changed push-event guard, literal source-seal binding and isolated branch trigger. Final launcher hash and signed commit must be reviewed before the only push; no default-branch registration workaround."
+  ],
+  "schema": 1,
+  "status": "SOURCE_PREPARATION_ONLY_NO_EXECUTION_AUTHORIZATION",
+  "deployment": {
+    "repository": "4alvit/travel-documents-ios",
+    "package_destination": "diagnostics/ios-discovery",
+    "workflow_destination": ".github/workflows/ios-discovery-diagnostic.yml",
+    "source_workflow": "workflow.proposed.yml",
+    "future_gate": "Review exact isolated branch commit and literal package seal hash, then coordinator GO before ONE branch-creation push. No PR, main mutation, manual dispatch, extra validation push or retry. Existing product CI triggers only push to main and pull_request; confirm remote workflow inventory before push.",
+    "diagnostic_branch": "diagnostics/ios-discovery-20261027-a1",
+    "source_binding": "Package seal covers runner/adapters/guard/tests/plan/vendor only. Launcher is excluded to avoid self-referential seal embedding; launcher SHA is independently reviewed and bound by final signed commit. Workflow embeds literal seal SHA. Expected source SHA from github.sha is a context-consistency check, not independent approval; coordinator reviews the actual signed commit before its only push."
+  },
+  "host_gate": {
+    "ImageOS": "macos15",
+    "ImageVersion": "actual current value recorded; numeric format only",
+    "machine": "arm64",
+    "Xcode": "16.4",
+    "build": "16F6",
+    "SDK": "18.5",
+    "python": "installed Python3.12\u20133.14, actual version/hash recorded",
+    "mismatch": "Architecture, Xcode16.4/16F6/SDK18.5, supported Python or hosted identity failure refuses before simulator queries. ImageVersion drift alone does not refuse. No substitutions, retry or installation.",
+    "python_scope": "One common installed interpreter is constant within the job. Room historical3.12.10, Travel3.14.7, Redact exact version not retained; not full historical equivalence.",
+    "DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
+    "trigger": "push only, exact refs/heads/diagnostics/ios-discovery-20261027-a1, attempt1; bounded event JSON requires created=true, forced=false, deleted=false, before=40zeros, after=expected commit and exact repository/ref.",
+    "repeat_policy": "Workflow job also requires branch creation and attempt1, so ordinary updates/reruns do not acquire a macOS runner. Branch must be absent remotely before the authorized creation push; do not delete/recreate or retry."
+  },
+  "acceptance": {
+    "product_acceptance": false,
+    "issue_closure": false,
+    "release_progress": false
+  },
+  "runner_image_availability": {
+    "checked_at_utc": "2026-10-27T16:27:27.175020+00:00",
+    "source": "https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md",
+    "runner_labels_source": "https://github.com/actions/runner-images",
+    "read_evidence": "Official arm64 README currently lists ImageVersion20260907.0337.1, macOS15.7.9/24G830, Python3.14.7, installed Xcode16.4 default build16F6 at /Applications/Xcode_16.4.app, SimulatorSDK18.5.",
+    "immutable_pin": "No immutable ImageVersion selector was identified in official standard hosted label documentation. macos-15 selects the OS/architecture channel; images are updated. Current documented version matches historical, but actual job version remains authoritative.",
+    "execution_decision": "Use current-image diagnostic and explicit installed Xcode pin; do not spend a run deliberately requiring obsolete ImageVersion equality. Coordinator must review final source before one execution."
+  }
+}
