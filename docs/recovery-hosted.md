@@ -112,8 +112,16 @@ is a failure, and only ESRCH establishes group absence. A primary timeout remain
 visible alongside secondary stop or receipt-write errors. These are cooperative
 deadline checks between operations; they do not preempt a blocked OS syscall.
 
-The work free-space floor is 8 GiB, owned output limit 8 GiB, each xcresult limit
-2 GiB, each log stream 16 MiB and all log streams 64 MiB. Output limits remain
+The work free-space floor is 8 GiB. The 8 GiB owned-output disk limit uses
+allocated 512-byte blocks, so a sparse DerivedData file's logical length alone
+does not consume that budget. Receipts retain separate logical and allocated
+totals. Missing, negative or non-integer allocation metadata fails closed;
+logical size is not a safe upper bound for allocated storage. Hardlinks remain
+conservatively charged per directory entry, with a fresh stat for every entry
+and scan so observed growth is charged. This may overcount shared storage.
+The 2 GiB xcresult content limit still checks both logical and allocated size;
+manifest, archive, input and log-content bounds are unchanged. Each log stream
+has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
 measurement. The workflow's 27-minute execution step and 35-minute job give an
 outer deadline plus time for checkout, offline checks and evidence upload.
