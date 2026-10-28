@@ -90,10 +90,18 @@ published artifacts. It does not replace the UI flows with direct service calls.
 The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
 reserved for owned cleanup, including a final 10-second receipt reserve. Each
 Xcode phase has at most 600 seconds including process stop; each test has 300.
-The initial runtime discovery and the two owned Files preparation commands
-(`launch` and the required final `terminate`) each have a 60-second command cap:
-52 seconds for work and the existing 8-second stop reserve. Other default
-command caps remain 30 seconds, including Files provider lookup. Global time,
+The initial runtime discovery has a 120-second command cap: 112 seconds for
+work and the existing 8-second stop reserve. A returned inventory at or after
+its original command work deadline is rejected before parsing or selection.
+This is a finite scheduling-policy change from 60 seconds; the earlier hosted
+query timed out with no output at its 52-second work bound. That evidence does
+not establish the cause or that 120 seconds would suffice. There is no retry,
+warmup query, runtime fallback or download. The separate capability preparation
+stage remains limited to 60 seconds.
+
+The two owned Files preparation commands (`launch` and the required final
+`terminate`) keep their 60-second cap, including the same 8-second stop reserve.
+Other default command caps remain 30 seconds, including Files provider lookup. Global time,
 ownership and cancellation checks can shorten or prevent any command. Files
 termination is still attempted after an uncertain launch outcome when those
 checks permit it; a secondary termination failure cannot replace the original
@@ -129,6 +137,27 @@ the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
 visible alongside secondary stop or receipt-write errors. These are cooperative
 deadline checks between operations; they do not preempt a blocked OS syscall.
+
+The first EN iPad XCTest command has a 600-second wait allowance instead of
+450, to allow more time for initial test-runner startup. A recorded run finished
+bootstrapping about 374 seconds after that command began and reached about
+60 seconds of testcase progress before the old wait expired. This supports a
+finite scheduling-policy proposal, not a guarantee that 600 seconds succeeds
+or an explanation of the startup delay. No warmup, retry or runtime selection
+change is added. RU keeps its existing 570-second wait allowance. Both exact
+test methods, UI assertions, content-size settings and XCTest default180/max480
+execution allowances remain unchanged.
+
+These waits still fit inside the shared 1,440-second work deadline, with the
+existing seven seconds reserved for each stop and 180 seconds for final cleanup.
+They are upper bounds, not separately reserved time. At the recorded EN start
+about 358 seconds into work, using all600 seconds would leave at most482 seconds
+before evidence processing and RU preparation; the next wait has at most475
+seconds after its stop reserve, and less if intervening work consumes time.
+The unchanged global clamp may therefore shorten RU below570 seconds. Increasing
+both cases is unsupported by this evidence because RU was not reached. A command
+return still requires the original result/provenance validation before a case
+can pass; partial testcase progress is not acceptance.
 
 One complete resource sample has a fixed five-second cooperative allowance,
 clipped to the overall work limit and any pending command's original work

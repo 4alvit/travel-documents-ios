@@ -18,7 +18,7 @@ import uuid
 
 
 CASES = (
-    ("en-US", "testEnglishFreeGuidanceAndCancelledLinks", "large", 450),
+    ("en-US", "testEnglishFreeGuidanceAndCancelledLinks", "large", 600),
     ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 570),
 )
 BUNDLE_ID = "com.4alvit.tripfolio"

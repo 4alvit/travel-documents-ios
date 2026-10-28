@@ -111,6 +111,71 @@ class DriverTests(unittest.TestCase):
         stored = json.loads((driver.out/'run-summary.json').read_text())
         self.assertEqual(stored['commands'][-1], row)
 
+    def attempted_case(self, index, **plan):
+        driver, world = self.driver(**plan)
+        case = ipad.CASES[index]; locale, method, size, _ = case
+        driver.owned = 'synthetic-owned-device'
+        driver.products = {'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
+        (driver.out/'originals'/(locale+'.xcresult')).mkdir(parents=True)
+        actual = driver.command
+        def command(argv, label, **kwargs):
+            if label == locale+'-test':
+                return actual(argv, label, **kwargs)
+            return 0, size if label == locale+'-read-size' else ''
+        with patch.object(driver,'command',side_effect=command), \
+             patch.object(driver,'product_snapshot'), \
+             patch.object(driver,'installed',return_value={'available':True}), \
+             patch.object(driver,'parse_case',side_effect=RuntimeError('Synthetic result validation withheld')) as validate:
+            with self.assertRaises(RuntimeError) as failure:driver.run_case(*case)
+        self.assertEqual(len(world.processes),1)
+        self.assertFalse(driver.active)
+        self.assertEqual(driver.report['cases'][0]['status'],'started')
+        self.assertEqual(self.row(driver)['argv'][-1],
+            '-only-testing:TripfolioUITests/PrivacySupportUITests/'+method)
+        return driver,world,failure.exception,validate.called
+
+    def test_first_EN_allows_500_seconds_but_still_requires_result_validation(self):
+        driver,world,failure,validated=self.attempted_case(0,delay=500)
+        self.assertEqual(str(failure),'Synthetic result validation withheld')
+        self.assertTrue(validated);self.assertGreaterEqual(world.t,500);self.assertLess(world.t,600)
+        row=self.row(driver);self.assertEqual(row['timeout_seconds'],600)
+        args=row['argv'];self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')
+        self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
+        self.assertEqual(args[args.index('-parallel-testing-enabled')+1],'NO')
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        self.assert_finished(driver)
+
+    def test_first_EN_timeout_keeps_one_attempt_and_existing_stop_reserve(self):
+        driver,world,failure,validated=self.attempted_case(0,delay=float('inf'),ignore_term=True)
+        self.assertIn('en-US-test exceeded its finite timeout',str(failure))
+        self.assertFalse(validated);self.assertEqual(self.row(driver)['wait_deadline_monotonic'],600)
+        self.assertGreaterEqual(world.t,605);self.assertLessEqual(world.t,607)
+        self.assertEqual([name for name,_ in world.calls if name.startswith('signal')],['signal_15','signal_9'])
+        self.assertEqual(len(driver.report['cases']),1);self.assert_finished(driver)
+
+    def test_RU_wait_remains_570_and_does_not_inherit_EN_allowance(self):
+        driver,world,failure,validated=self.attempted_case(1,delay=float('inf'))
+        self.assertIn('ru-RU-test exceeded its finite timeout',str(failure))
+        self.assertFalse(validated);self.assertEqual(world.t,570)
+        self.assertEqual(self.row(driver)['timeout_seconds'],570)
+        self.assertEqual(driver.report['cases'][0]['system_content_size_expected'],
+                         'accessibility-extra-extra-extra-large')
+        self.assert_finished(driver)
+
+    def test_long_first_wait_leaves_RU_clipped_by_original_global_deadline(self):
+        driver,world=self.driver(delay=599);world.t=358
+        driver.command(['synthetic'],'en-US-test',timeout=ipad.CASES[0][3])
+        after_EN=world.t;self.assertGreaterEqual(after_EN,957);self.assertLess(after_EN,958)
+        world.plan['delay']=float('inf')
+        with self.assertRaisesRegex(RuntimeError,'finite timeout'):
+            driver.command(['synthetic'],'ru-RU-test',timeout=ipad.CASES[1][3])
+        self.assertEqual(self.row(driver)['timeout_seconds'],570)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],1433)
+        self.assertEqual(world.t,1433);self.assertLess(world.t-after_EN,570)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        self.assertEqual(len(world.processes),2);self.assertFalse(driver.active)
+        self.assert_finished(driver)
+
     def test_runtime_60_allows_slow_success_and_other_default_stays_30(self):
         driver, world = self.driver(delay=34.3, output=b'{"runtimes": []}')
         # Real prepare() passes the timeout to real json_command()/command().

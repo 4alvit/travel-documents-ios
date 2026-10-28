@@ -247,14 +247,17 @@ class HostedRecovery(core.Recovery):
         sdk_path=Path(self.command('sdk-path',['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-path'],20).strip()).resolve(strict=True)
         toolchain_paths(developer,sdk_path)
         # Publish only bounded toolchain facts in the existing receipt allowlist.
-        # The first runtime query gets 52s work + 8s stop inside the same global
-        # budget. This is a finite diagnostic hypothesis, not a proven OS fix.
+        # The first runtime query gets 112s work + 8s stop inside the same global
+        # budget. This is a finite scheduling policy, not a proven OS fix.
         discovery={'xcode_version':version,'developer_dir':str(developer),
                    'sdk_version':sdk if len(sdk)<=32 and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}',sdk) else 'INVALID_FORMAT',
-                   'sdk_path':str(sdk_path),'runtime_inventory_cap_seconds':60,
+                   'sdk_path':str(sdk_path),'runtime_inventory_cap_seconds':120,
                    'runtime_inventory_status':'pending'}
         self.report['profile_discovery']=discovery
-        raw_inventory=self.sim('profile-runtimes','list','runtimes','--json',cap=60)
+        raw_inventory=self.sim('profile-runtimes','list','runtimes','--json',cap=120)
+        inventory_command=self.report['commands'][-1]
+        require(self.ops.now() < self.t0+inventory_command['work_deadline'],
+                'Initial runtime inventory work deadline reached')
         discovery.update(runtime_inventory_status='returned',
                          runtime_inventory_utf8_bytes=len(raw_inventory.encode()),
                          runtime_inventory_sha256=hashlib.sha256(raw_inventory.encode()).hexdigest())
