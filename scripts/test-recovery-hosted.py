@@ -103,6 +103,51 @@ class Ops:
             raise OSError('close failed')
 
 
+class PostKillOps(Ops):
+    """Pure clock model: post-KILL EPERM stays unknown until explicit absence."""
+    def __init__(self, reap_after=.1, absent_after=.2, probe_error=None, kill_result='syscall_returned'):
+        super().__init__({'delay': float('inf'), 'ignore_all': True, 'exit': -9})
+        self.reap_after, self.absent_after = reap_after, absent_after
+        self.probe_error, self.kill_result = probe_error, kill_result
+        self.kill_at, self.unknown_count, self.events = None, 0, []
+        self.after_poll = self.after_probe = self.after_send = lambda: None
+
+    def spawn(self, argv):
+        p = super().spawn(argv)
+        original_poll = p.poll
+        def poll():
+            self.events.append(('poll', self.t))
+            if self.kill_at is not None and self.t - self.kill_at >= self.reap_after:
+                p.dead = True
+            result = original_poll()
+            self.after_poll()
+            return result
+        p.poll = poll
+        return p
+
+    def absent(self, p):
+        self.events.append(('probe', self.t))
+        self.probes.append(p.pid)
+        p.probe_calls += 1
+        self.after_probe()
+        if self.kill_at is None:
+            return False
+        if self.probe_error is not None:
+            raise self.probe_error
+        if self.t - self.kill_at < self.absent_after:
+            self.unknown_count += 1
+            raise PermissionError(errno.EPERM, 'post-KILL unknown')
+        return True  # Model RealOps.absent's explicit ESRCH result only.
+
+    def send(self, p, sig):
+        self.events.append(('signal', self.t))
+        super().send(p, sig)
+        if sig == signal.SIGKILL:
+            self.kill_at = self.t
+        self.after_send()
+        return self.kill_result if sig == signal.SIGKILL else 'syscall_returned'
+
+
 class BoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='trip-hosted-injected-')
@@ -489,6 +534,136 @@ class BoundaryTests(unittest.TestCase):
         self.assertFalse(row['stop']['group_absent'] or row['stop']['leader_reaped'])
         with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.command('next',['synthetic'],30)
         self.assertEqual(len(r.ops.processes),1)
+
+    def owned_stop(self, ops):
+        r = hosted.core.base.Smoke()
+        r.ops, r.t0, r.absent_groups = ops, 0., set()
+        p = ops.spawn(['synthetic'])
+        r.active = {p.pid: p}
+        return r, p, {}
+
+    def test_post_kill_unknown_can_settle_only_with_both_actual_proofs(self):
+        ops = PostKillOps()
+        r, p, row = self.owned_stop(ops)
+        r.stop(p, 8., row)
+        stop = row['stop']
+        self.assertEqual(stop['signals'], [15, 9])
+        self.assertTrue(stop['leader_reaped'] and stop['group_absent'])
+        self.assertFalse(r.active)
+        self.assertEqual(stop['post_kill_confirmation']['status'], 'confirmed')
+        self.assertEqual(stop['post_kill_confirmation']['deadline'], ops.kill_at + 2.)
+        self.assertLess(ops.t, stop['post_kill_confirmation']['deadline'])
+        self.assertEqual(stop['post_kill_unknown_probes']['count'], ops.unknown_count)
+        self.assertGreater(ops.unknown_count, 1)
+        probe = row['process_observations']['stop.group_probe']
+        self.assertTrue(probe['result'])
+        self.assertNotIn('errno', probe)
+        self.assertNotIn('error', stop)
+        self.assertEqual(len(ops.signals), 2)
+
+    def test_post_kill_permanent_unknown_stops_at_fixed_deadline_with_bounded_history(self):
+        ops = PostKillOps(absent_after=float('inf'))
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+            r.stop(p, 8., row)
+        stop = row['stop']; unknown = stop['post_kill_unknown_probes']
+        self.assertTrue(stop['leader_reaped'])
+        self.assertFalse(stop['group_absent'])
+        self.assertIs(r.active[p.pid], p)
+        self.assertEqual(stop['post_kill_confirmation']['status'], 'unconfirmed')
+        self.assertEqual(ops.t, ops.kill_at + 2.)
+        self.assertEqual(unknown['count'], ops.unknown_count)
+        self.assertGreater(unknown['count'], 20)
+        self.assertEqual(set(unknown), {'count', 'first_start', 'last_start', 'last_finish', 'exception_type', 'errno'})
+        self.assertLess(len(json.dumps(unknown)), 300)
+        self.assertEqual(row['process_observations']['stop.group_probe']['errno'], errno.EPERM)
+        self.assertTrue(all(t < ops.t for _, t in ops.events))
+        with self.assertRaisesRegex(RuntimeError, 'No repeated signalling'):
+            r.stop(p, 20., row)
+        self.assertEqual(len(ops.signals), 2)
+
+    def test_post_kill_group_absence_alone_never_releases_owned_child(self):
+        ops = PostKillOps(reap_after=float('inf'), absent_after=0.)
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+            r.stop(p, 8., row)
+        self.assertTrue(row['stop']['group_absent'])
+        self.assertFalse(row['stop']['leader_reaped'])
+        self.assertIs(r.active[p.pid], p)
+        self.assertEqual(len(ops.signals), 2)
+
+    def test_post_kill_other_errors_and_unsuccessful_send_are_not_settled(self):
+        poll_error = PostKillOps()
+        def denied_poll():
+            if poll_error.kill_at is not None:
+                raise PermissionError(errno.EPERM, 'poll denied')
+        poll_error.after_poll = denied_poll
+        cases = [poll_error, PostKillOps(probe_error=PermissionError(errno.EACCES, 'denied')),
+                 PostKillOps(probe_error=OSError(errno.EIO, 'probe I/O')),
+                 PostKillOps(kill_result='already_absent_ESRCH')]
+        for ops in cases:
+            with self.subTest(error=repr(ops.probe_error), result=ops.kill_result):
+                r, p, row = self.owned_stop(ops)
+                with self.assertRaises(OSError):
+                    r.stop(p, 8., row)
+                self.assertNotIn('post_kill_unknown_probes', row['stop'])
+                self.assertIs(r.active[p.pid], p)
+                self.assertEqual(ops.t, ops.kill_at)
+                self.assertEqual(len(ops.signals), 2)
+
+    def test_post_kill_late_poll_or_probe_cannot_supply_terminal_proof(self):
+        for operation in ('poll', 'probe'):
+            with self.subTest(operation=operation):
+                ops = PostKillOps(reap_after=0., absent_after=0.)
+                r, p, row = self.owned_stop(ops)
+                def late():
+                    if ops.kill_at is not None:
+                        ops.t = ops.kill_at + 2.
+                setattr(ops, 'after_' + operation, late)
+                with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+                    r.stop(p, 8., row)
+                self.assertIs(r.active[p.pid], p)
+                self.assertFalse(row['stop']['group_absent'])
+                if operation == 'poll':
+                    self.assertFalse(row['stop']['leader_reaped'])
+                    self.assertEqual(ops.events[-1][0], 'poll')
+                self.assertTrue(all(t < ops.t for _, t in ops.events))
+                self.assertEqual(len(ops.signals), 2)
+
+    def test_post_kill_confirmation_uses_original_deadline_and_exact_owner(self):
+        ops = PostKillOps(absent_after=float('inf'))
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+            r.stop(p, 5.25, row)
+        self.assertEqual(row['stop']['post_kill_confirmation']['deadline'], 5.25)
+        self.assertEqual(ops.t, 5.25)
+        self.assertTrue(all(t < 5.25 for _, t in ops.events))
+        ops = PostKillOps()
+        r, p, row = self.owned_stop(ops)
+        def rebind():
+            if ops.kill_at is not None:
+                r.active[p.pid] = SimpleNamespace(pid=p.pid)
+        ops.after_poll = rebind
+        with self.assertRaisesRegex(RuntimeError, 'Unowned group'):
+            r.stop(p, 8., row)
+        self.assertNotIn('post_kill_unknown_probes', row['stop'])
+        self.assertEqual(ops.events[-1][0], 'poll')
+        self.assertEqual(len(ops.signals), 2)
+
+    def test_stop_never_observes_or_signals_after_deadline(self):
+        ops = PostKillOps()
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+            r.stop(p, 0., row)
+        self.assertEqual(ops.events, [])
+        ops = PostKillOps()
+        r, p, row = self.owned_stop(ops)
+        ops.after_send = lambda: setattr(ops, 't', 8.)
+        with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+            r.stop(p, 8., row)
+        self.assertEqual(row['stop']['signals'], [15])
+        self.assertEqual(ops.events[-1][0], 'signal')
+        self.assertTrue(all(t < 8. for _, t in ops.events))
 
     def test_EPERM_after_TERM_identifies_group_probe_and_never_retries_stop(self):
         r=self.runner(Ops({'delay':float('inf'),'probe_errors':{2:PermissionError(errno.EPERM,'after TERM')}}))

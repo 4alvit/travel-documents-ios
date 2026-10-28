@@ -118,29 +118,79 @@ class Smoke:
         require(not stop.get('attempted'), 'No repeated signalling after stop attempt')
         stop['attempted'] = True
         stop['signals_semantics'] = 'send_wrapper_returned_not_delivery'
+        confirmation_end = None
         try:
+            def check():
+                require(self.active.get(p.pid) is p, 'Unowned group')
+                require(self.ops.now() < (confirmation_end if confirmation_end is not None else deadline),
+                        'Stop deadline reached')
+
             def done():
-                stop['leader_reaped'] = observed(self, record, 'stop', 'poll', p.poll) is not None
-                if p.pid in self.absent_groups or observed(
-                        self, record, 'stop', 'group_probe', lambda: self.ops.absent(p)):
+                check()
+                reaped = observed(self, record, 'stop', 'poll', p.poll) is not None
+                check()
+                stop['leader_reaped'] = reaped
+                absent = p.pid in self.absent_groups
+                if not absent:
+                    check()
+                    try:
+                        absent = observed(self, record, 'stop', 'group_probe', lambda: self.ops.absent(p))
+                    except PermissionError as error:
+                        if confirmation_end is None or error.errno != errno.EPERM:
+                            raise
+                        check()
+                        # Unknown is never absence. Keep bounded history while the
+                        # same owned child settles after the one successful KILL.
+                        probe = record['process_observations']['stop.group_probe']
+                        unknown = stop.setdefault('post_kill_unknown_probes',
+                                                  {'count': 0, 'first_start': probe['last_start'],
+                                                   'exception_type': 'PermissionError', 'errno': errno.EPERM})
+                        unknown.update(count=unknown['count'] + 1, last_start=probe['last_start'],
+                                       last_finish=probe['last_finish'])
+                        return False
+                    check()
+                    probe = record['process_observations']['stop.group_probe']
+                    probe.pop('exception_type', None)
+                    probe.pop('errno', None)
+                if absent:
                     self.absent_groups.add(p.pid)
                     stop['group_absent'] = True
+                check()
                 return stop['leader_reaped'] and stop['group_absent']
-            if not done():
+            complete = done()
+            if not complete:
                 for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
-                    require(self.ops.now() < deadline, 'Stop deadline reached')
+                    check()
+                    sent = None
                     if not stop['group_absent']:
-                        observed(self, record, 'stop', 'signal_' + str(int(sig)),
-                                 lambda: self.ops.send(p, sig))
+                        sent = observed(self, record, 'stop', 'signal_' + str(int(sig)),
+                                        lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))
                     end = min(deadline, self.ops.now() + grace)
-                    while not done() and self.ops.now() < end:
-                        self.ops.sleep(min(.05, end - self.ops.now()))
-                    if done():
+                    if sig == signal.SIGKILL and sent == 'syscall_returned':
+                        confirmation_end = end
+                        stop['post_kill_confirmation'] = {'deadline': end - self.t0, 'status': 'pending'}
+                    check()
+                    while self.ops.now() < end:
+                        if done():
+                            complete = True
+                            break
+                        check()
+                        remaining = end - self.ops.now()
+                        if remaining <= 0:
+                            break
+                        self.ops.sleep(min(.05, remaining))
+                        check()
+                    if complete:
                         break
-            require(done(), 'Group absence/reap unconfirmed')
+            check()
+            require(complete, 'Group absence/reap unconfirmed')
+            if confirmation_end is not None:
+                stop['post_kill_confirmation']['status'] = 'confirmed'
             self.active.pop(p.pid)
         except BaseException as error:
+            if confirmation_end is not None:
+                stop['post_kill_confirmation']['status'] = 'unconfirmed'
             stop['error'] = repr(error)
             raise
 
