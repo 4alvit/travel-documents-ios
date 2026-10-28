@@ -205,6 +205,9 @@ class Smoke:
             stop['error'] = repr(error)
             raise
 
+    def accept_nonzero_exit(self, p, record, handles):
+        return False
+
     def command(self, label, argv, cap):
         self.checkpoint()
         require(not self.active and not self.unknown_spawn, 'Prior process ownership unresolved; further process creation withheld')
@@ -251,7 +254,8 @@ class Smoke:
             require(observed(self, record, 'command', 'group_probe', lambda: self.ops.absent(p)),
                     'Leader exited but process group remains')
             self.absent_groups.add(p.pid)
-            require(p.returncode == 0, 'Nonzero command exit: ' + str(p.returncode))
+            require(p.returncode == 0 or self.accept_nonzero_exit(p, record, handles),
+                    'Nonzero command exit: ' + str(p.returncode))
         except BaseException as error:
             failure = error
             record['error'] = repr(error)

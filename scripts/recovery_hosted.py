@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'd69696aad4f25b1f15048367c5377aa42d53f39df6ab2a7613baa72add311694'
+CORE_SHA = '6ff1a3c72949577bd0aac1315b66c50787c3b61c5ca501f169da8c99b70766fe'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -195,6 +195,63 @@ class HostedRecovery(core.Recovery):
             cap=60
         return super().sim(label,*args,cap=cap)
 
+    def accept_nonzero_exit(self, p, record, handles):
+        # simctl may find Files already stopped after its successful launch.
+        # Recognize only the observed response for this one preparation action;
+        # command() still verifies stop, pipe/log closure, finalization and cap.
+        if record.get('id')!='files-terminate' or p.returncode!=3:
+            return False
+        first=getattr(self,'_files_setup_command_start',None)
+        rows=self.report['commands']
+        if (type(first) is not int or len(rows)!=first+3 or rows[-1] is not record
+                or [r['id'] for r in rows[first:]]!=['files-launch','files-group','files-terminate']):
+            return False
+        expected=[['/usr/bin/xcrun','simctl',action,self.owned,core.FILES_BUNDLE]
+                  for action in ('launch','get_app_container','terminate')]
+        expected[1].append('groups')
+        if (any(r.get('argv')!=argv for r,argv in zip(rows[first:],expected))
+                or any(r.get('outcome')!='completed' or r.get('returncode')!=0 or r.get('error')
+                       for r in rows[first:first+2])):
+            return False
+        require(self.active=={p.pid:p} and p.pid==record.get('pgid')
+                and p.pid in self.absent_groups and not self.unknown_spawn,
+                'Files termination process ownership unresolved')
+        def check():
+            self.timecheck()
+            require(self.ops.now()<self.t0+record['work_deadline'],
+                    'Files termination classification deadline reached')
+        check()
+        self.owned_root()
+        require(self.provider_id is not None,'Files provider was not established')
+        require(core.identity_of(self.out)==self.output_id,'Output root changed during Files termination')
+        diagnostic=(
+            'An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=3):\n'
+            'Simulator device failed to terminate com.apple.DocumentsApp.\n'
+            'found nothing to terminate\n'
+            'Underlying error (domain=NSPOSIXErrorDomain, code=3):\n'
+            '\tThe request to terminate "com.apple.DocumentsApp" failed. found nothing to terminate\n'
+            '\tfound nothing to terminate\n').encode('utf-8')
+        if record.get('bytes')!={'stdout':0,'stderr':len(diagnostic)}:
+            return False
+        require(set(handles)=={'stdout','stderr'},'Files termination streams missing')
+        for stream in handles.values():
+            check();stream.flush();check()
+        path=Path(record['logs']['stderr'])
+        require(path==self.out/(str(len(rows))+'-stderr.log') and path.resolve(strict=True)==path
+                and not path.is_symlink() and path.is_file(),'Unexpected Files termination log path')
+        check()
+        with path.open('rb') as stream:
+            info=os.fstat(stream.fileno());writer=os.fstat(handles['stderr'].fileno())
+            require((info.st_dev,info.st_ino)==(writer.st_dev,writer.st_ino)
+                    and info.st_size==len(diagnostic),'Files termination log changed')
+            check();actual=stream.read(len(diagnostic)+1);check()
+        if actual!=diagnostic:
+            return False
+        check()
+        record['accepted_nonzero_exit']={'kind':'simctl_reported_files_already_absent',
+                                         'returncode':3,'stderr_sha256':hashlib.sha256(actual).hexdigest()}
+        return True
+
     def capture_source(self):
         require(not self.command('git-clean',['/usr/bin/git','status','--porcelain'],20).strip(),'Checkout is not clean')
         head=self.command('git-head',['/usr/bin/git','rev-parse','HEAD'],20).strip()
@@ -316,12 +373,15 @@ class HostedRecovery(core.Recovery):
     def setup_files(self):
         first=len(self.report['commands'])
         primary=None
+        require(not hasattr(self,'_files_setup_command_start'),'Files setup already active')
+        self._files_setup_command_start=first
         try:
             return super().setup_files()
         except BaseException as error:
             primary=error
             raise
         finally:
+            del self._files_setup_command_start
             try:
                 self.retain_files_logs(first)
                 self.save()
