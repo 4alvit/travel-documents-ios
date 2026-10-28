@@ -192,7 +192,7 @@ class HostedRecovery(core.Recovery):
         if action:
             require(self.owned and args==(action,self.owned,core.FILES_BUNDLE) and cap==30,
                     'Unexpected Files preparation command')
-            cap=60
+            cap=120 if label=='files-launch' else 60
         return super().sim(label,*args,cap=cap)
 
     def accept_nonzero_exit(self, p, record, handles):

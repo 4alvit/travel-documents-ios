@@ -99,9 +99,13 @@ not establish the cause or that 120 seconds would suffice. There is no retry,
 warmup query, runtime fallback or download. The separate capability preparation
 stage remains limited to 60 seconds.
 
-The two owned Files preparation commands (`launch` and the required final
-`terminate`) keep their 60-second cap, including the same 8-second stop reserve.
-Other default command caps remain 30 seconds, including Files provider lookup. Global time,
+The initial owned Files `launch` has a 120-second command cap: 112 seconds of
+work and the existing 8-second stop reserve. This is a finite cold-start policy
+allowance, changed from 60 seconds after two hosted attempts exhausted the old
+52-second work window with no output; another attempt launched successfully in
+30.44 seconds. The cause and whether 120 seconds suffices remain unestablished.
+The required final Files `terminate` keeps its 60-second cap. Other default
+command caps remain 30 seconds, including Files provider lookup. Global time,
 ownership and cancellation checks can shorten or prevent any command. Files
 termination is still attempted after an uncertain launch outcome when those
 checks permit it; a secondary termination failure cannot replace the original
@@ -268,3 +272,30 @@ fail. No command, retry or budget is added. Provider and folder identity checks,
 export/restore assertions, final simulator cleanup and independent UI/pixel
 review remain required. This handles the terminal response; it does not establish
 why the Files application had stopped or claim that recovery tests passed.
+
+The Files launch allowance does not extend the total work deadline. At the
+observed prelaunch elapsed time of 132.3 seconds, 1,247.7 seconds remain before
+the 1,380-second work limit. If launch/provider lookup/termination consume their
+full 120/30/60-second caps, only 1,037.7 seconds remain for export, restore and
+evidence processing. The two 600-second phase caps therefore cannot both be
+consumed in full, even before parser/comparator work. They remain maxima clipped
+to the original remaining work time, not separately reserved allocations. Every
+command still needs more than its 8-second stop reserve before admission and
+again before spawn. Cleanup retains its original 120 seconds within the same
+1,500-second executor limit; no retry or extra worker is introduced.
+
+The iPad driver gives each existing fresh installed-AUT container lookup a
+60-second wait, increased from the generic 30-second default after the second
+locale's pre-test lookup timed out. This is a finite scheduling allowance, not
+a demonstrated application bug or a guarantee of completion. It applies only
+to `get_app_container <owned UUID> com.4alvit.tripfolio app` within `installed()`,
+called before and after each of the two locale cases. Other default command
+waits stay 30 seconds. The same fresh path, bundle identifier and complete
+built-versus-installed byte comparison remain mandatory.
+
+The four existing lookups can together consume up to 120 additional seconds
+relative to the old per-call caps; those seconds come from the same 1,440-second
+work budget. All waits remain clipped to work deadline minus the original
+7-second stop reserve. The 180-second cleanup allowance, EN600/RU570 waits,
+XCTest assertions and one-attempt behavior do not change. The observed single
+EN XCTest pass does not establish that the RU case executed or passed.

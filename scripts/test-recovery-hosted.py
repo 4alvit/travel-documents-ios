@@ -1023,16 +1023,69 @@ class BoundaryTests(unittest.TestCase):
         r.owned,r.recovered=owned,True
         return r,provider
 
-    def test_files_60s_caps_allow_slow_launch_and_terminate_with_real_provider_checks(self):
-        r,provider=self.files_runner({'delay':25},{'delay':45})
+    def test_files_launch120_terminate60_allow_slow_start_with_real_provider_checks(self):
+        r,provider=self.files_runner({'delay':70},{'delay':45})
         r.setup_files()
         self.assertEqual(r.folder,provider/r.folder_name)
         self.assertEqual(list(r.folder.iterdir()),[])
-        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,30,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
         self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
         self.assertFalse(r.active);self.assertEqual((r.limit,r.final),(1380,1500))
         with self.assertRaisesRegex(RuntimeError,'One-shot'):r.setup_files()
         self.assertEqual(len(r.ops.processes),3)
+
+    def test_files_launch120_times_out_at_work_bound_and_retains_stop_reserve(self):
+        r,_=self.files_runner({'delay':112.5})
+        r.ops.plans=[r.ops.plans[0],{}]
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (120,112,120))
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop_reserve_seconds'],8)
+        self.assertLessEqual(row['finish'],120)
+        self.assertEqual([x['id'] for x in r.report['commands']],['files-launch','files-terminate'])
+        self.assertEqual(r.report['commands'][1]['requested_cap_seconds'],60)
+        self.assertIsNone(r.folder);self.assertFalse(r.active)
+
+    def test_files_launch120_clips_to_global_work_and_withholds_late_children(self):
+        r,_=self.files_runner({'delay':73});r.ops.t=1300
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (120,1372,1380))
+        self.assertEqual(len(r.ops.processes),1)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLessEqual(r.ops.t,1380);self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertIsNone(r.folder)
+
+    def test_files_launch120_leaves_later_phase_caps_subject_to_original_global_limit(self):
+        r,_=self.files_runner({'delay':110},{'delay':45},group={'delay':20})
+        r.ops.t=132.3;r.setup_files()
+        launch=r.report['commands'][0]
+        self.assertAlmostEqual(launch['work_deadline'],244.3,places=5)
+        self.assertAlmostEqual(launch['command_deadline'],252.3,places=5)
+        self.assertGreaterEqual(r.ops.t,307.3)
+        r.ops.plans=[{'delay':590},{'delay':float('inf')}]
+        r.command('phase-export',['synthetic-export'],hosted.core.CAPS['phase_seconds'])
+        with self.assertRaisesRegex(RuntimeError,'phase-restore failed'):
+            r.command('phase-restore',['synthetic-restore'],hosted.core.CAPS['phase_seconds'])
+        export,restore=r.report['commands'][-2:]
+        self.assertEqual(export['requested_cap_seconds'],600)
+        self.assertEqual((restore['requested_cap_seconds'],restore['work_deadline'],restore['command_deadline']),
+                         (600,1372,1380))
+        self.assertLess(restore['command_deadline']-restore['start'],600)
+        self.assertLessEqual(r.ops.t,1380);self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertFalse(r.active or r.unknown_spawn)
+        self.assertFalse(r.report['cleanup_verified'] or r.report['runtime_accepted'])
+
+    def test_files_launch120_does_not_admit_with_only_stop_reserve_remaining(self):
+        r,_=self.files_runner();r.ops.t=1372
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):r.setup_files()
+        self.assertEqual(r.ops.processes,[]);self.assertEqual(r.report['commands'],[])
+        self.assertEqual(r.ops.t,1372);self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertIsNone(r.folder)
 
     def test_files_double_timeout_retains_launch_failure_and_attempts_terminate_once(self):
         r,_=self.files_runner({'delay':float('inf')})
@@ -1041,8 +1094,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(str(failure.exception.__cause__),'Command timeout')
         self.assertEqual(r.report['files_setup_terminate_error'],"RuntimeError('files-terminate failed')")
         self.assertEqual([x['id'] for x in r.report['commands']],['files-launch','files-terminate'])
-        self.assertTrue(all(x['requested_cap_seconds']==60 for x in r.report['commands']))
-        self.assertAlmostEqual(r.ops.t,104,places=6)
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,60])
+        self.assertAlmostEqual(r.ops.t,164,places=6)
         self.assertIsNone(r.folder);self.assertFalse(r.active)
 
     def test_files_already_absent_exact_response_allows_preparation_only(self):
@@ -1058,7 +1111,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.folder,provider/r.folder_name)
         self.assertEqual(list(r.folder.iterdir()),[])
         self.assertEqual((r.out/'PhaseLogs/files-terminate-stderr.log').read_bytes(),FILES_ALREADY_ABSENT)
-        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,30,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
         self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
         self.assertEqual(len(r.ops.processes),3);self.assertFalse(r.ops.signals or r.active)
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
@@ -1231,6 +1284,12 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'Unexpected Files'):
                 r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE,cap=90)
             self.assertEqual(command.call_count,2)
+            r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE)
+            self.assertEqual(command.call_args.args[1],['/usr/bin/xcrun','simctl','launch',r.owned,hosted.core.FILES_BUNDLE])
+            self.assertEqual(command.call_args.args[-1],120)
+            r.sim('files-terminate','terminate',r.owned,hosted.core.FILES_BUNDLE)
+            self.assertEqual(command.call_args.args[-1],60)
+            self.assertEqual(command.call_count,4)
 
     def test_files_failure_retains_only_exact_closed_streams_and_keeps_primary(self):
         r,_=self.files_runner({'delay':float('inf'),'output':[]})
@@ -1250,7 +1309,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(len(r.ops.processes),2);self.assertFalse(r.active)
         self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
         for row in r.report['commands'][1:]:
-            self.assertEqual(row['requested_cap_seconds'],60)
+            self.assertEqual(row['requested_cap_seconds'],120 if row['id']=='files-launch' else 60)
             self.assertTrue(all(Path(p).parent==public for p in row['logs'].values()))
         self.assertEqual((r.limit,r.final),(1380,1500))
 

@@ -134,6 +134,100 @@ class DriverTests(unittest.TestCase):
             '-only-testing:TripfolioUITests/PrivacySupportUITests/'+method)
         return driver,world,failure.exception,validate.called
 
+    def installed_fixture(self, **plan):
+        driver,world=self.driver(**plan)
+        driver.owned='synthetic-owned-device'
+        (driver.out/'commands').mkdir()
+        built=self.root/'built/Tripfolio.app';fresh=self.root/'installed/Tripfolio.app'
+        for app in (built,fresh):
+            app.mkdir(parents=True)
+            (app/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':ipad.BUNDLE_ID}))
+            (app/'Tripfolio').write_bytes(b'synthetic identical application bytes')
+        driver.products={'aut':built}
+        driver.built={'aut':ipad.tree_manifest(built,driver.checkpoint)}
+        world.plan['output']=(str(fresh)+'\n').encode()
+        return driver,world,fresh
+
+    def test_installed_lookup60_allows45_seconds_and_keeps_exact_fresh_byte_checks(self):
+        driver,world,fresh=self.installed_fixture(delay=45)
+        result=driver.installed('ru-RU/installed-before',required=True)
+        self.assertTrue(result['available'] and result['matches_built_bytes'])
+        self.assertEqual(result['path'],str(fresh))
+        row=self.row(driver)
+        self.assertEqual(row['argv'],['xcrun','simctl','get_app_container',driver.owned,ipad.BUNDLE_ID,'app'])
+        self.assertEqual((row['timeout_seconds'],row['wait_deadline_monotonic']),(60,60))
+        self.assertGreaterEqual(world.t,45);self.assertLess(world.t,60)
+        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        self.assertEqual(driver.report['cases'],[])
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        self.assert_finished(driver)
+
+    def test_installed_lookup60_applies_only_to_the_existing_four_lookup_calls(self):
+        driver,world,_=self.installed_fixture()
+        for label in ['en-US/installed-before','en-US/installed-after','ru-RU/installed-before','ru-RU/installed-after']:
+            self.assertTrue(driver.installed(label,required=True)['available'])
+            self.assertEqual(self.row(driver)['timeout_seconds'],60)
+            self.assertEqual(self.row(driver)['label'],label+'-lookup')
+        driver.command(['synthetic'],'unrelated-default')
+        self.assertEqual(self.row(driver)['timeout_seconds'],30)
+        self.assertEqual(len(world.processes),5)
+
+    def test_installed_lookup60_timeout_keeps_original_stop_and_no_retry(self):
+        driver,world,_=self.installed_fixture(delay=float('inf'),ignore_term=True)
+        with self.assertRaisesRegex(RuntimeError,'ru-RU/installed-before-lookup exceeded its finite timeout'):
+            driver.installed('ru-RU/installed-before',required=True)
+        row=self.row(driver);self.assertEqual(row['wait_deadline_monotonic'],60)
+        self.assertGreaterEqual(world.t,65);self.assertLessEqual(world.t,67)
+        self.assertEqual([name for name,_ in world.calls if name.startswith('signal')],['signal_15','signal_9'])
+        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        self.assertFalse((driver.out/'ru-RU/installed-before.json').exists())
+        self.assertEqual(driver.report['cases'],[]);self.assert_finished(driver)
+
+    def test_installed_lookup60_is_clipped_to_global_work_and_preserves_cleanup(self):
+        driver,world,_=self.installed_fixture(delay=50);world.t=1400
+        with self.assertRaisesRegex(RuntimeError,'exceeded its finite timeout'):
+            driver.installed('ru-RU/installed-before',required=True)
+        self.assertEqual((self.row(driver)['timeout_seconds'],self.row(driver)['wait_deadline_monotonic']),(60,1433))
+        self.assertEqual(world.t,1433);self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        self.assertEqual(len(world.processes),1);self.assert_finished(driver)
+
+    def test_installed_lookup60_still_rejects_wrong_bundle_or_changed_bytes(self):
+        original=self.root
+        for kind in ['bundle','bytes']:
+            with self.subTest(kind=kind):
+                self.root=original/kind;self.root.mkdir()
+                driver,world,fresh=self.installed_fixture(delay=45)
+                if kind=='bundle':
+                    (fresh/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':'wrong.synthetic.bundle'}))
+                else:(fresh/'Tripfolio').write_bytes(b'changed synthetic application')
+                expected='wrong AUT bundle identifier' if kind=='bundle' else 'Installed AUT bytes differ'
+                with self.assertRaisesRegex(RuntimeError,expected):driver.installed('ru-RU/installed-before',required=True)
+                self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        self.root=original
+
+    def test_installed_lookup60_still_rejects_nonzero_and_invalid_path(self):
+        original=self.root
+        for kind in ['nonzero','path']:
+            with self.subTest(kind=kind):
+                self.root=original/kind;self.root.mkdir()
+                driver,world,_=self.installed_fixture()
+                if kind=='nonzero':world.plan['exit']=3
+                else:world.plan['output']=b'relative/Tripfolio.app'
+                expected='Installed AUT unavailable' if kind=='nonzero' else 'Invalid fresh AUT container path'
+                with self.assertRaisesRegex(RuntimeError,expected):driver.installed('ru-RU/installed-before',required=True)
+                self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+                self.assertEqual(driver.report['cases'],[])
+        self.root=original
+
+    def test_installed_lookup60_with_only_stop_reserve_never_spawns(self):
+        driver,world,_=self.installed_fixture();world.t=1433
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+            driver.installed('ru-RU/installed-before',required=True)
+        self.assertEqual(world.processes,[]);self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        self.assertEqual(world.t,1433);self.assert_finished(driver)
+
     def test_first_EN_allows_500_seconds_but_still_requires_result_validation(self):
         driver,world,failure,validated=self.attempted_case(0,delay=500)
         self.assertEqual(str(failure),'Synthetic result validation withheld')
