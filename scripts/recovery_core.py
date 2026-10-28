@@ -29,7 +29,7 @@ MIB = 1024 ** 2
 CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             phase_seconds=600, testcase_seconds=300, admission_free_bytes=16*GIB,
             work_free_bytes=8*GIB, output_bytes=8*GIB, xcresult_bytes=2*GIB,
-            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5,
+            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 CASES = {
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -120,18 +120,27 @@ def tree_manifest(root, checkpoint=lambda: None, max_bytes=2*GIB):
     return result
 
 
-def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observation=None):
+def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observation=None,
+               allow_xcresult_restart=False):
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
     Directory mtimes may change during a writer. Every encountered entry consumes
     the entry budget. Confirmed absent regular leaves in mutable DerivedData
     build/cache output contribute no bytes, excluding Build/Products and every
-    xcresult bundle. Other traversal errors/limits fail closed. The disk cap uses allocated
+    xcresult bundle. Only an explicitly active owned test writer may request one
+    complete fresh traversal after confirmed absence of a regular direct
+    <root>.xcresult/Data/_tmp. leaf. Both passes share the original deadline and
+    encounter cap; no partial accounting is accepted. Other errors fail closed.
+    The disk cap uses allocated
     512-byte blocks, not sparse logical lengths. Hardlinks are conservatively
     charged per entry with fresh stats, including growth seen on later aliases
     or scans. This is sampled accounting, not a quota or an instantaneous peak.
     """
     totals = {'logical': 0, 'allocated': 0, 'entries': 0, 'xcresults': {}}
+    encounters = 0
+    class RestartScan(Exception):
+        def __init__(self, error, relative):
+            self.error, self.relative = error, relative
     observation = {} if observation is None else observation
     started = now()
     observation.update(status='running', operation_count=0, max_depth=0)
@@ -163,6 +172,12 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     def check():
         checkpoint()
         require(now() < deadline, 'Output scan deadline exceeded')
+    def charge_entry():
+        nonlocal encounters
+        encounters += 1
+        totals['entries'] += 1
+        observation['encounter_count'] = encounters
+        require(encounters <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
     def walk(fd, depth, prefix=(), bundle=None, pin=None):
         check()
         observation['max_depth'] = max(observation['max_depth'], depth)
@@ -180,17 +195,19 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                 try:
                     s = observe('entry_stat', relative, depth, lambda: child.stat(follow_symlinks=False))
                 except FileNotFoundError as error:
-                    if (error.errno != errno.ENOENT or bundle is not None
-                            or not prefix or prefix[0] != 'DerivedData'
-                            or relative[:3] == ('DerivedData', 'Build', 'Products')
-                            or child.name.endswith('.xcresult')):
+                    result_temp = (allow_xcresult_restart and len(prefix) == 2
+                            and bundle == prefix[0] and prefix[0].endswith('.xcresult')
+                            and prefix[1] == 'Data' and child.name.startswith('_tmp.')
+                            and len(child.name) > len('_tmp.'))
+                    derived_leaf = (bundle is None and prefix and prefix[0] == 'DerivedData'
+                            and relative[:3] != ('DerivedData', 'Build', 'Products')
+                            and not child.name.endswith('.xcresult'))
+                    if error.errno != errno.ENOENT or not (result_temp or derived_leaf):
                         raise
                     check()
-                    # Missing entries still consume the encounter cap. A live
-                    # build/cache writer may rename/unlink a leaf between enumeration
-                    # and stat; this is not permission to reuse partial accounting.
-                    totals['entries'] += 1
-                    require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
+                    # Count every missing encounter, including any discarded pass.
+                    # Restarting accounting never renews this shared entry budget.
+                    charge_entry()
                     def confirm_parent():
                         check()
                         require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id,
@@ -209,7 +226,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                     # was regular. Unknown kinds, links and directories fail.
                     require(observe('absent_entry_kind', relative, depth,
                                     lambda: child.is_file(follow_symlinks=False)),
-                            'Missing derived entry is not a known regular entry')
+                            'Missing entry is not a known regular entry')
                     check()
                     try:
                         observe('absence_stat', relative, depth,
@@ -217,16 +234,19 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                     except FileNotFoundError as absent:
                         if absent.errno != errno.ENOENT: raise
                     else:
-                        raise RuntimeError('Derived entry reappeared during absence confirmation')
+                        raise RuntimeError('Entry reappeared during absence confirmation')
                     check()
                     confirm_parent()
+                    if result_temp:
+                        # Never skip an xcresult entry or return this partial sample.
+                        # All open traversal descriptors unwind before a fresh pass.
+                        raise RestartScan(error, relative)
                     totals['confirmed_absent_derived_entries'] = totals.get('confirmed_absent_derived_entries', 0) + 1
                     observation['confirmed_absent_derived_entries'] = totals['confirmed_absent_derived_entries']
                     observation['last_confirmed_absent_path'] = '/'.join(relative)[:256]
                     continue
                 check()
-                totals['entries'] += 1
-                require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
+                charge_entry()
                 require(s.st_dev == root_id[0], 'Output filesystem boundary')
                 logical = s.st_size if stat.S_ISREG(s.st_mode) else 0
                 allocated = allocated_bytes(s)
@@ -253,24 +273,47 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                 else:
                     require(stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode), 'Unexpected output special file')
     try:
-        check()
-        require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
-        check()
-        fd = observe('directory_open', (), 0, lambda: os.open(root,flags))
-        try:
-            check()
-            opened = observe('directory_fstat', (), 0, lambda: os.fstat(fd))
-            check()
-            require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
-            totals['allocated'] = allocated_bytes(opened)
-            require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
-            walk(fd,0,pin=root_id)
-        finally: os.close(fd)
-        check()
-        require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
-        check()
-        observation['status'] = 'completed'
-        return totals
+        for attempt in range(2):
+            observation['traversal_attempts'] = attempt + 1
+            try:
+                check()
+                require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
+                check()
+                fd = observe('directory_open', (), 0, lambda: os.open(root,flags))
+                try:
+                    check()
+                    opened = observe('directory_fstat', (), 0, lambda: os.fstat(fd))
+                    check()
+                    require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
+                    totals['allocated'] = allocated_bytes(opened)
+                    require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
+                    walk(fd,0,pin=root_id)
+                finally: os.close(fd)
+                check()
+                require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
+                check()
+            except RestartScan as restart:
+                if attempt:
+                    raise restart.error
+                check()
+                require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id,
+                        'Output root replaced before complete rescan')
+                check()
+                observation['discarded_scan'] = {
+                    'reason': 'Confirmed absent regular xcresult Data/_tmp. leaf',
+                    'path': '/'.join(restart.relative)[:256],
+                    'error': repr(restart.error)[:512],
+                    'partial_counts_are_not_valid_accounting': True,
+                    'partial_totals': {key: totals[key] for key in ('logical', 'allocated', 'entries')}}
+                # Fresh complete accounting, with the original deadline, depth/byte
+                # caps and cumulative encounter budget. No previous sample is reused.
+                totals = {'logical': 0, 'allocated': 0, 'entries': 0, 'xcresults': {}}
+                continue
+            if attempt:
+                totals.update(complete_scan_attempts=attempt+1, scan_encounters=encounters,
+                              xcresult_rescan_path=observation['discarded_scan']['path'])
+            observation['status'] = 'completed'
+            return totals
     except BaseException as error:
         observation.update(status='failed', error=repr(error)[:512])
         raise
@@ -336,17 +379,41 @@ class Recovery:
 
     def monitor(self, *, command_owner=None):
         started = self.ops.now()
-        deadline = min(self.limit, started+CAPS['scan_seconds'])
         # A pending command's work deadline applies during admission, execution
         # and finalization, including a capability probe delegating its scan.
         # Pass context per checkpoint; never install a sticky parent deadline.
         owner = self if command_owner is None else command_owner
-        deadline = min(deadline, owner.limit)
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
-        if pending is not None and 'finish' not in pending:
+        unfinished = pending is not None and 'finish' not in pending
+        # Only the two disposable native test phases receive this explicit
+        # sampling allowance. Preparation, capability and evidence stay at5s.
+        phase_scan = unfinished and pending.get('id') in ('phase-export', 'phase-restore')
+        allowance = CAPS['phase_scan_seconds'] if phase_scan else CAPS['scan_seconds']
+        deadline = min(self.limit, owner.limit, started+allowance)
+        if unfinished:
             deadline = min(deadline, owner.t0+pending['work_deadline'])
+        primary = self.report['commands'][-1] if self.report['commands'] else None
+        if owner is not self and primary is not None and 'finish' not in primary:
+            # A delegated child cannot spend the still-running primary's stop
+            # reserve, even if the child's own work deadline is later.
+            deadline = min(deadline, self.t0+primary['work_deadline'])
+        def active_test_writer(context, record):
+            if (record is None or 'finish' in record or record.get('id') not in
+                    ('phase-export', 'phase-restore', 'selected-tests')):
+                return False
+            pid = record.get('pgid')
+            process = context.active.get(pid)
+            return process is not None and process.pid == pid
+        restart_allowed = active_test_writer(owner, pending)
+        if (owner is not self and getattr(owner, 'parent', None) is self
+                and owner.ops is self.ops
+                and owner.report is self.report.get('biometric_bridge')
+                and primary is not None and primary.get('id') == 'selected-tests'):
+            # The private biometric Bridge delegates scans while the parent
+            # still owns xcodebuild; the bridge is not itself the test writer.
+            restart_allowed = restart_allowed or active_test_writer(self, primary)
         observation = dict(started_elapsed=started-self.t0, deadline_elapsed=deadline-self.t0,
-                           stage='free_space_before', traversal={})
+                           requested_scan_seconds=allowance, stage='free_space_before', traversal={})
         def check():
             self.timecheck()
             require(self.ops.now() < deadline, 'Output scan deadline exceeded')
@@ -356,7 +423,8 @@ class Recovery:
             check()
             observation['stage'] = 'traversal'
             row = live_sizes(self.out, self.output_id, self.ops.now, deadline, self.timecheck,
-                             observation=observation['traversal'])
+                             observation=observation['traversal'],
+                             allow_xcresult_restart=restart_allowed)
             check()
             observation['stage'] = 'free_space_after'
             free = shutil.disk_usage(self.out).free

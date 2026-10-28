@@ -1916,9 +1916,156 @@ class BoundaryTests(unittest.TestCase):
             r.cleaning=True;r.interrupted=True
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
 
+    def test_phase_scan_ceiling_only_applies_to_unfinished_native_phase_context(self):
+        r=self.runner();deadlines=[]
+        def scan(*args,**kwargs):
+            deadlines.append(args[3])
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()
+            row={'id':'phase-export','work_deadline':592.,'command_deadline':600.}
+            r.report['commands'].append(row);r.monitor()
+            row['id']='phase-restore';r.monitor()
+            row['id']='export-summary';r.monitor()
+            row.update(id='phase-export',finish=0.);r.monitor()
+            del row['finish'];row['work_deadline']=7.;r.monitor()
+            row['work_deadline']=592.;r.limit=4.;r.monitor();r.limit=1380.
+            probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[{'id':'normal','work_deadline':3.}]})
+            r.monitor(command_owner=probe)
+        self.assertEqual(deadlines,[5.,15.,15.,5.,5.,7.,4.,3.])
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']), (5,15))
+        self.assertEqual((r.limit,r.final,hosted.core.CAPS['phase_seconds']), (1380.,1500.,600))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_phase_scan_slow_return_completes_uncached_traversal_within_fixed_15(self):
+        r=self.runner();(r.out/'synthetic.bin').write_bytes(b'complete original')
+        r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+        real=hosted.core.os.scandir;delayed=False
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if not delayed:delayed=True;r.ops.t+=6.
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):r.monitor()
+        self.assertTrue(delayed);self.assertEqual(len(r.report['resources']),1)
+        self.assertGreaterEqual(r.report['resources'][0]['entries'],2)
+        self.assertEqual((r.report['resources'][0]['elapsed'],r.next_scan),(6.,7.))
+        self.assertNotIn('resource_scan_failure',r.report)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_phase_scan_cooperative_overshoot_keeps_failed_totals_and_never_renews(self):
+        r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+        real=hosted.core.os.scandir;calls=0
+        def scan(fd):
+            nonlocal calls
+            calls+=1;value=real(fd);r.ops.t+=15.25;return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        row=r.report['resource_scan_failure']
+        self.assertEqual(calls,1)
+        self.assertEqual((row['started_elapsed'],row['deadline_elapsed'],row['finished_elapsed']),(0.,15.,15.25))
+        self.assertEqual(row['requested_scan_seconds'],15)
+        self.assertEqual(row['traversal']['last_operation']['operation'],'scandir_open')
+        self.assertEqual(row['traversal']['partial_totals']['entries'],0)
+        self.assertTrue(row['partial_counts_are_not_valid_accounting'])
+        self.assertEqual((r.report['resources'],r.next_scan),([],0))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_phase_scan_actual_command_clips_15_to_original_work_and_stop_reserve(self):
+        r=self.runner(Ops({'delay':float('inf')}));real=hosted.core.os.scandir;delayed=False
+        r.ops.on_spawn=lambda argv:setattr(r.ops,'t',50.)
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if r.active and not delayed:delayed=True;r.ops.t+=2.25
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'phase-export failed'):
+                r.command('phase-export',['synthetic-only'],60)
+        row=r.report['commands'][0];failed=r.report['resource_scan_failure']
+        self.assertTrue(delayed);self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(52.,60.))
+        self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),(50.,52.,52.25))
+        self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLess(r.ops.t,60.);self.assertEqual((r.limit,r.final),(1380.,1500.))
+        self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+
+    def test_combined_phase15_rescan_uses_same_original_command_deadline(self):
+        for name,work,success,passes in [('phase-export',592.,True,2),
+                ('selected-tests',592.,False,1),('phase-export',10.,False,2)]:
+            with self.subTest(name=name,work=work):
+                parent=self.root;self.root=parent/(name+'-'+str(work));self.root.mkdir()
+                try:r=self.runner()
+                finally:self.root=parent
+                target=r.out/'Tests.xcresult'/'Data'/'_tmp.IJNVOw'
+                target.parent.mkdir(parents=True);target.write_bytes(b'transient')
+                r.report['commands'].append({'id':name,'pgid':123,'work_deadline':work})
+                r.active[123]=SimpleNamespace(pid=123)
+                root_passes=[0];vanished=[False];real=os.scandir
+                def entry_stat(entry,*,follow_symlinks):
+                    if entry.name==target.name and not vanished[0]:
+                        vanished[0]=True;target.unlink()
+                    return entry.stat(follow_symlinks=follow_symlinks)
+                @contextlib.contextmanager
+                def scan(fd):
+                    info=os.fstat(fd)
+                    if [info.st_dev,info.st_ino]==r.output_id:
+                        root_passes[0]+=1;r.ops.t+=6.
+                    with real(fd) as it:
+                        yield (SimpleNamespace(name=e.name,
+                            stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
+                            is_file=lambda *,follow_symlinks,e=e:e.is_file(follow_symlinks=follow_symlinks)) for e in it)
+                with patch.object(hosted.core.os,'scandir',side_effect=scan):
+                    if success:r.monitor()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+                self.assertEqual(root_passes[0],passes);self.assertEqual(r.ops.t,6.*passes)
+                if success:
+                    row=r.report['resources'][-1];self.assertEqual(row['complete_scan_attempts'],2)
+                    self.assertEqual(row['elapsed'],12.);self.assertEqual(r.next_scan,13.)
+                else:
+                    self.assertEqual(r.report['resources'],[]);self.assertEqual(r.next_scan,0)
+                    failed=r.report['resource_scan_failure']
+                    self.assertEqual(failed['deadline_elapsed'],min(work,15. if name=='phase-export' else 5.))
+                    self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
+                self.assertEqual(r.ops.processes,[])
+
+    def test_biometric_bridge_checkpoint_binds_primary_writer_and_both_deadlines(self):
+        cases=[('active',10.,3.,True,True,3.),('active',2.,10.,True,True,2.),
+               ('active',10.,10.,True,True,5.),('ended',10.,3.,True,False,3.),
+               ('absent',10.,3.,True,False,3.),('unowned',10.,3.,True,False,3.),
+               ('wrong-pid',10.,3.,True,False,3.),('active',10.,3.,False,False,3.),
+               ('unrelated-report',10.,3.,True,False,3.),('other-command',10.,3.,True,False,3.)]
+        for index,(state,primary_work,child_work,linked,expected,end) in enumerate(cases):
+            with self.subTest(state=state,primary_work=primary_work,child_work=child_work):
+                root=self.root;self.root=root/str(index);self.root.mkdir()
+                try:r=self.runner()
+                finally:self.root=root
+                primary={'id':'selected-tests','pgid':123,'work_deadline':primary_work}
+                if state=='ended':primary['finish']=0.
+                if state=='other-command':primary['id']='initial-runtimes'
+                if state!='absent':r.report['commands']=[primary]
+                if state!='unowned':r.active[123]=SimpleNamespace(pid=456 if state=='wrong-pid' else 123)
+                report={'commands':[{'id':'biometric-1-match','pgid':456,'work_deadline':child_work}]}
+                r.report['biometric_bridge']=report
+                bridge=SimpleNamespace(parent=r if linked else object(),ops=r.ops,t0=r.t0,
+                    limit=50.,report=copy.deepcopy(report) if state=='unrelated-report' else report,
+                    active={456:SimpleNamespace(pid=456)})
+                def checkpoint(*,force_resources=False):
+                    r.checkpoint(force_resources=force_resources,command_owner=bridge)
+                def scan(root,pin,now,deadline,check,*,observation,allow_xcresult_restart):
+                    self.assertEqual(allow_xcresult_restart,expected);self.assertEqual(deadline,end)
+                    return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+                with patch.object(hosted.core,'live_sizes',side_effect=scan):
+                    checkpoint(force_resources=True)
+                self.assertEqual(len(r.report['resources']),1);self.assertEqual(r.ops.processes,[])
+
     def test_scan_policy_clips_allowance_to_global_and_pending_command_work(self):
         r=self.runner();deadlines=[]
-        def scan(root,identity,now,deadline,checkpoint,*,observation):
+        def scan(root,identity,now,deadline,checkpoint,*,observation,allow_xcresult_restart):
             deadlines.append(deadline)
             return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
         with patch.object(hosted.core,'live_sizes',side_effect=scan):
@@ -2094,7 +2241,7 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(path.stat().st_size, size)
         return path
 
-    def derived_vanish_scan(self, *, relative=None, scenario='absent', **caps):
+    def derived_vanish_scan(self, *, relative=None, scenario='absent', allow_xcresult_restart=False, **caps):
         relative=relative or 'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp'
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve();target=root/relative
         target.parent.mkdir(parents=True,exist_ok=True)
@@ -2151,7 +2298,8 @@ class ResourceAccountingTests(unittest.TestCase):
         with patch.dict(hosted.core.CAPS,caps),patch.object(hosted.core.os,'scandir',side_effect=entries), \
              patch.object(hosted.core.os,'stat',side_effect=metadata),patch.object(hosted.core.os,'open',side_effect=open_fd), \
              patch.object(hosted.core.os,'close',side_effect=close_fd),patch.object(hosted.core.os,'fstat',side_effect=fd_stat):
-            try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,observation=observation)
+            try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,observation=observation,
+                                             allow_xcresult_restart=allow_xcresult_restart)
             except BaseException as error:result=error
         self.assertTrue(triggered[0]);self.assertCountEqual(opened,closed)
         return result,observation,root,absence_stats,clock[0]
@@ -2237,6 +2385,134 @@ class ResourceAccountingTests(unittest.TestCase):
                 result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario='late_dense_cap')
                 self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
                 self.assertEqual(observation['status'],'failed')
+
+    def xcresult_rescan_fixture(self, *, repeated=False, end_first=False,
+                                end_second=False, entry_cap=100000, dense_cap=None):
+        root=Path(tempfile.mkdtemp(dir=self.temp)).resolve()
+        data=root/'Tests.xcresult'/'Data';data.mkdir(parents=True)
+        stable=root/'00-stable';stable.write_bytes(b'old')
+        first=data/'_tmp.IJNVOw';first.write_bytes(b'first incomplete writer entry')
+        second=data/'_tmp.second'
+        if repeated:second.write_bytes(b'second incomplete writer entry')
+        identity=hosted.core.identity_of(root);clock=[0.];observation={}
+        root_passes=[0];seen=[];triggered=set();opened=[];closed=[]
+        real_scan,real_open,real_close=os.scandir,os.open,os.close
+        def entry_stat(entry,*,follow_symlinks):
+            seen.append((root_passes[0],entry.name))
+            if entry.name.startswith('_tmp.') and entry.name not in triggered:
+                triggered.add(entry.name);(data/entry.name).unlink()
+                stable.write_bytes(b'fresh complete sample'*4096)
+            return entry.stat(follow_symlinks=follow_symlinks)
+        @contextlib.contextmanager
+        def entries(fd):
+            metadata=os.fstat(fd)
+            if [metadata.st_dev,metadata.st_ino]==identity:
+                root_passes[0]+=1
+                if root_passes[0]==2 and end_second:clock[0]=10.
+            with real_scan(fd) as iterator:
+                rows=sorted(iterator,key=lambda e:e.name)
+                yield (SimpleNamespace(name=e.name,
+                    stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
+                    is_file=lambda *,follow_symlinks,e=e:e.is_file(follow_symlinks=follow_symlinks)) for e in rows)
+        def open_fd(path,*args,**kwargs):
+            fd=real_open(path,*args,**kwargs);opened.append(fd);return fd
+        def close_fd(fd):
+            info=os.fstat(fd);closed.append(fd);real_close(fd)
+            if end_first and [info.st_dev,info.st_ino]==identity and root_passes[0]==1:clock[0]=10.
+        caps={'scan_entries':entry_cap}
+        if dense_cap is not None:caps['output_bytes']=dense_cap
+        with patch.dict(hosted.core.CAPS,caps),patch.object(hosted.core.os,'scandir',side_effect=entries), \
+             patch.object(hosted.core.os,'open',side_effect=open_fd),patch.object(hosted.core.os,'close',side_effect=close_fd):
+            try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,
+                    observation=observation,allow_xcresult_restart=True)
+            except BaseException as error:result=error
+        self.assertCountEqual(opened,closed)
+        return result,observation,root,root_passes[0],seen,clock[0]
+
+    def test_xcresult_temp_disappearance_restarts_complete_accounting_once(self):
+        result,observation,root,passes,seen,_=self.xcresult_rescan_fixture()
+        self.assertIsInstance(result,dict);self.assertEqual(passes,2)
+        paths=[root]+list(root.rglob('*'))
+        self.assertEqual(result['allocated'],sum(x.lstat().st_blocks*512 for x in paths))
+        self.assertEqual(result['logical'],sum(x.stat().st_size for x in paths if x.is_file()))
+        self.assertEqual(result['entries'],len(paths)-1)
+        self.assertEqual([n for _,n in seen].count('00-stable'),2)
+        self.assertEqual(observation['encounter_count'],7)
+        self.assertEqual(observation['traversal_attempts'],2)
+        self.assertEqual((result['complete_scan_attempts'],result['scan_encounters']), (2,7))
+        self.assertTrue(observation['discarded_scan']['partial_counts_are_not_valid_accounting'])
+        self.assertEqual(observation['discarded_scan']['path'],'Tests.xcresult/Data/_tmp.IJNVOw')
+        self.assertNotEqual(observation['discarded_scan']['partial_totals']['logical'],result['logical'])
+        self.assertEqual(observation['status'],'completed')
+
+    def test_xcresult_second_disappearance_fails_without_third_traversal(self):
+        result,observation,_,passes,_,_=self.xcresult_rescan_fixture(repeated=True)
+        self.assertIsInstance(result,FileNotFoundError);self.assertEqual(passes,2)
+        self.assertEqual(observation['status'],'failed')
+        self.assertEqual(observation['traversal_attempts'],2)
+
+    def test_xcresult_rescan_never_renews_deadline_or_encounter_budget(self):
+        for options,passes in [({'end_first':True},1),({'end_second':True},2)]:
+            with self.subTest(options=options):
+                result,observation,_,actual,_,elapsed=self.xcresult_rescan_fixture(**options)
+                self.assertIsInstance(result,RuntimeError);self.assertIn('deadline',str(result))
+                self.assertEqual(actual,passes);self.assertEqual(elapsed,10.)
+                self.assertEqual(observation['status'],'failed')
+        result,observation,_,passes,_,_=self.xcresult_rescan_fixture(entry_cap=6)
+        self.assertIsInstance(result,RuntimeError);self.assertIn('entry cap',str(result))
+        self.assertEqual(passes,2);self.assertEqual(observation['encounter_count'],7)
+        result,observation,_,passes,_,_=self.xcresult_rescan_fixture(dense_cap=32768)
+        self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
+        self.assertEqual(passes,2);self.assertEqual(observation['status'],'failed')
+
+    def test_xcresult_rescan_requires_opt_in_and_exact_result_data_temp_scope(self):
+        for relative in ['Tests.xcresult/Data/_tmp.IJNVOw','Tests.xcresult/Data/record',
+                'Tests.xcresult/Other/_tmp.IJNVOw','Tests.xcresult/Data/nested/_tmp.IJNVOw',
+                'Source/_tmp.IJNVOw','DerivedData/nested.xcresult/Data/_tmp.IJNVOw']:
+            for enabled in ([False] if relative=='Tests.xcresult/Data/_tmp.IJNVOw' else [False,True]):
+                with self.subTest(relative=relative,enabled=enabled):
+                    result,observation,_,probes,_=self.derived_vanish_scan(relative=relative,
+                        allow_xcresult_restart=enabled)
+                    self.assertIsInstance(result,FileNotFoundError);self.assertEqual(probes,[])
+                    self.assertEqual(observation['traversal_attempts'],1)
+                    self.assertNotIn('discarded_scan',observation)
+
+    def test_xcresult_rescan_retains_identity_kind_absence_and_error_guards(self):
+        for scenario in ['directory','symlink','unknown_kind','directory_open','reappeared',
+                'root_replaced','parent_replaced','fd_replaced','final_root_replaced',
+                'entry_permission','entry_other_errno','confirmation_permission','confirmation_other_errno',
+                'late_entry','late_confirmation']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.derived_vanish_scan(
+                    relative='Tests.xcresult/Data/_tmp.IJNVOw',scenario=scenario,allow_xcresult_restart=True)
+                self.assertIsInstance(result,(OSError,RuntimeError))
+                self.assertEqual(observation['status'],'failed')
+                self.assertEqual(observation['traversal_attempts'],1)
+                self.assertNotIn('discarded_scan',observation)
+
+    def test_xcresult_rescan_monitor_requires_active_owned_test_context(self):
+        for name,active,finished,expected in [
+                ('selected-tests',True,False,True),('phase-export',True,False,True),
+                ('phase-restore',True,False,True),('selected-tests',False,False,False),
+                ('selected-tests',True,True,False),('capability-normal',True,False,False)]:
+            for delegated in [False,True]:
+                with self.subTest(name=name,active=active,finished=finished,delegated=delegated):
+                    r=object.__new__(hosted.core.Recovery);r.ops=SimpleNamespace(now=lambda:0.)
+                    r.t0=0.;r.limit=100.;r.out=self.root;r.output_id=hosted.core.identity_of(self.root)
+                    r.timecheck=lambda:None;r.report={'commands':[],'resources':[]};r.active={}
+                    owner=SimpleNamespace(t0=0.,limit=50.,report={'commands':[]},active={}) if delegated else r
+                    command={'id':name,'pgid':123,'work_deadline':2.}
+                    if finished:command['finish']=1.
+                    owner.report['commands']=[command]
+                    if active:owner.active[123]=SimpleNamespace(pid=123)
+                    def sample(root,pin,now,deadline,checkpoint,*,observation,allow_xcresult_restart):
+                        self.assertEqual(allow_xcresult_restart,expected)
+                        self.assertEqual(deadline,5. if finished else 2.)
+                        return {'allocated':0,'logical':0,'entries':0,'xcresults':{}}
+                    with patch.object(hosted.core,'live_sizes',side_effect=sample), \
+                         patch.object(hosted.core.shutil,'disk_usage',return_value=SimpleNamespace(free=100*hosted.core.GIB)):
+                        r.monitor(command_owner=owner if delegated else None)
+                    self.assertEqual(len(r.report['resources']),1)
 
     def test_sparse_derived_data_uses_allocated_disk_budget(self):
         sparse = self.sparse(self.root / 'DerivedData' / 'index')

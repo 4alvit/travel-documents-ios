@@ -176,13 +176,17 @@ both cases is unsupported by this evidence because RU was not reached. A command
 return still requires the original result/provenance validation before a case
 can pass; partial testcase progress is not acceptance.
 
-One complete resource sample has a fixed five-second cooperative allowance,
-clipped to the overall work limit and any pending command's original work
-deadline. It covers both free-space reads and the full output traversal; it is
-never restarted within a sample. The next ordinary sample remains due one
-second after a completed sample. This is an explicit scheduling policy change
-from two seconds, while all byte, entry, depth, command, phase and cleanup limits
-remain fixed. A failed hosted scan exceeded the old allowance after 328 complete
+One complete resource sample normally has a fixed five-second cooperative
+allowance. During an unfinished `phase-export` or `phase-restore` command,
+including its admission and finalization, the explicit ceiling is fifteen
+seconds. Every sample is clipped to the overall work limit, the actual command
+owner's limit and its original work deadline, preserving the stop reserve. The
+one fixed deadline covers both free-space reads and the full uncached output
+traversal; its deadline is never renewed within a sample. Capability, preparation and
+evidence commands retain five seconds; a finished phase grants no later sample
+an extended allowance. The next ordinary sample remains due one
+second after a completed sample. The ordinary five-second allowance replaced an earlier two-second limit,
+while byte, entry, depth, command, phase and cleanup limits remained fixed. A failed hosted scan exceeded the old allowance after 328 complete
 samples; the last completed sample counted 5,132 entries and 307,924,992 allocated
 bytes. The old receipt did not retain failed-scan progress, so it establishes
 neither the cause of the delay nor that five seconds would have sufficed.
@@ -194,11 +198,26 @@ defines this setting as controlling index data emitted while compiling. The
 recovery run does not use that editor index. Disabling its generation removes
 unneeded index-store writes and traversal work; it does not exclude an existing
 index directory from accounting. All output paths still participate in the
-same complete five-second scan, with the same allocation, entry, depth, command,
+same complete scan and phase-specific ceiling, with the same allocation, entry, depth, command,
 cleanup and test-result checks. Compilation, linking, Debug settings and both
 selected UI cases remain required. Other CI builds keep their existing settings.
 This targets observed index-store traversal overhead; it does not establish
 that every future filesystem or scheduler delay will fit the unchanged budget.
+
+
+The fifteen-second phase ceiling is a scheduling-policy proposal based on a
+retained hosted failure: one sample took 5.305 seconds in traversal and failed
+at 350.670 elapsed, while the original export work deadline was 769.587. Its last
+`scandir_open` began at 4.971 seconds and returned 0.334 seconds later; a different
+`directory_open` span took 1.175 seconds. These spans include scheduling and do
+not isolate syscall latency. Fifteen seconds gives a finite allowance for a
+complete scan under such delays; it does not guarantee this or another run
+would complete. Partial totals remain invalid and timeouts still fail closed.
+No paths, including Build/Products or xcresults, are excluded. Cleanup already
+bypasses sampled scans and is unchanged: the retained shutdown/delete/final
+inventory timeouts are separate failures, and that run's device cleanup remains
+unverified. All whole, phase, command, stop, cleanup and byte/entry/depth limits
+remain unchanged; a timeout never causes an automatic sample retry or workflow rerun.
 
 Capability commands keep their own pending-command context when delegating a
 resource checkpoint to the parent output scanner. Their admission, execution
@@ -351,3 +370,28 @@ and original deadline. This readiness policy does not establish that delayed
 provider initialization caused any earlier hosted failure. UI export/restore
 assertions, exclusive test-folder creation, other command caps, global budgets,
 and cleanup proofs remain required.
+
+While an owned export/restore XCTest command is active, one confirmed vanished
+regular `*.xcresult/Data/_tmp.*` direct leaf may abort the current live resource
+traversal and trigger one complete fresh traversal. The private six-case runner
+uses the same rule for its active `selected-tests` command. All partial logical,
+allocated, entry and bundle totals are discarded; neither a skipped leaf nor a
+previous completed sample can become the new accounting result. The second pass
+uses the original scan/command deadline, the same byte/depth limits, and one
+cumulative encounter budget across both passes. A second disappearance fails.
+The existing no-follow fresh-absence, known-regular kind and root/parent/open-FD
+identity checks apply before the first pass can be discarded. Permission,
+directory/open/scandir, unknown-kind, reappearance and identity errors remain
+strict. Immutable manifests and scans without an active owned test context do
+not permit this restart. This responds to an actual entry-stat ENOENT in
+`Tests.xcresult/Data/_tmp.IJNVOw` after 0.0258 seconds; it does not change any
+scan allowance, native attempt count or test assertion, and does not establish
+that another run will pass.
+
+A biometric bridge checkpoint retains the parent's active owned
+`selected-tests` writer identity when the bridge is explicitly linked to that
+parent and its shared biometric report/clock. The child itself is not treated
+as the xcresult writer. The scan remains limited to five seconds and to both
+the primary and child original work deadlines; neither stop reserve may be
+borrowed. An ended or absent primary, unrelated report/parent or missing owned
+process cannot inherit restart permission.
