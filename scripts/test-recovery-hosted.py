@@ -2050,6 +2050,132 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(path.stat().st_size, size)
         return path
 
+    def compiler_vanish_scan(self, *, relative=None, scenario='absent', **caps):
+        relative=relative or 'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp'
+        root=Path(tempfile.mkdtemp(dir=self.temp)).resolve();target=root/relative
+        target.parent.mkdir(parents=True,exist_ok=True)
+        directory=scenario in ('directory','directory_open')
+        target.mkdir() if directory else target.write_bytes(b'compiler temporary')
+        (root/'retained-output').write_bytes(b'x'*4096)
+        if scenario=='late_dense_cap':
+            caps['output_bytes']=sum(path.lstat().st_blocks*512 for path in [root]+list(root.rglob('*')) if path!=target)-1
+        identity=hosted.core.identity_of(root);observation={};clock=[0.];triggered=[False]
+        opened=[];closed=[];absence_stats=[]
+        real_scan,real_stat,real_open,real_close,real_fstat=os.scandir,os.stat,os.open,os.close,os.fstat
+        def entry_stat(entry,*,follow_symlinks):
+            if entry.name==target.name and not triggered[0]:
+                triggered[0]=True
+                if scenario=='entry_permission':raise PermissionError(errno.EACCES,'synthetic denied')
+                if scenario=='entry_other_errno':raise FileNotFoundError(errno.ENOTDIR,'synthetic wrong type')
+                if scenario=='directory_open':return entry.stat(follow_symlinks=follow_symlinks)
+                target.rmdir() if directory else target.unlink()
+                try:return entry.stat(follow_symlinks=follow_symlinks)
+                except FileNotFoundError:
+                    if scenario=='reappeared':target.write_bytes(b'new entry')
+                    if scenario=='root_replaced':root.rename(root.with_name(root.name+'-old'));root.mkdir()
+                    if scenario=='parent_replaced':target.parent.rename(target.parent.with_name(target.parent.name+'-old'));target.parent.mkdir()
+                    if scenario=='late_entry':clock[0]=10.
+                    raise
+            return entry.stat(follow_symlinks=follow_symlinks)
+        @contextlib.contextmanager
+        def entries(fd):
+            with real_scan(fd) as iterator:
+                entries=sorted(iterator,key=lambda entry:entry.name=='retained-output')
+                yield (SimpleNamespace(name=e.name,
+                    stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
+                    is_file=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_file(follow_symlinks=follow_symlinks)) for e in entries)
+        def metadata(path,*args,**kwargs):
+            if path==target.name and kwargs.get('dir_fd') is not None:
+                self.assertIs(kwargs.get('follow_symlinks'),False);absence_stats.append(path)
+                if scenario=='confirmation_permission':raise PermissionError(errno.EACCES,'synthetic denied')
+                if scenario=='confirmation_other_errno':raise FileNotFoundError(errno.ENOTDIR,'synthetic wrong type')
+                try:return real_stat(path,*args,**kwargs)
+                except FileNotFoundError:
+                    if scenario=='late_confirmation':clock[0]=10.
+                    if scenario=='final_root_replaced':root.rename(root.with_name(root.name+'-old'));root.mkdir()
+                    raise
+            return real_stat(path,*args,**kwargs)
+        def open_fd(path,*args,**kwargs):
+            if scenario=='directory_open' and path==target.name:raise FileNotFoundError(errno.ENOENT,'synthetic directory vanished')
+            fd=real_open(path,*args,**kwargs);opened.append(fd);return fd
+        def close_fd(fd):closed.append(fd);return real_close(fd)
+        def fd_stat(fd):
+            value=real_fstat(fd)
+            if scenario=='fd_replaced' and triggered[0]:
+                return SimpleNamespace(st_dev=value.st_dev,st_ino=value.st_ino+1,st_mode=value.st_mode)
+            return value
+        with patch.dict(hosted.core.CAPS,caps),patch.object(hosted.core.os,'scandir',side_effect=entries), \
+             patch.object(hosted.core.os,'stat',side_effect=metadata),patch.object(hosted.core.os,'open',side_effect=open_fd), \
+             patch.object(hosted.core.os,'close',side_effect=close_fd),patch.object(hosted.core.os,'fstat',side_effect=fd_stat):
+            try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,observation=observation)
+            except BaseException as error:result=error
+        self.assertTrue(triggered[0]);self.assertCountEqual(opened,closed)
+        return result,observation,root,absence_stats,clock[0]
+
+    def test_compiler_temporary_stat_race_confirms_absence_and_finishes_actual_accounting(self):
+        for suffix in ['OCRService-bf16349b.o.tmp','Tripfolio.swiftdeps.tmp']:
+            relative='DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/'+suffix
+            with self.subTest(suffix=suffix):
+                result,observation,root,probes,_=self.compiler_vanish_scan(relative=relative)
+                self.assertIsInstance(result,dict);self.assertEqual(probes,[suffix])
+                paths=[root]+list(root.rglob('*'))
+                self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in paths))
+                self.assertEqual(result['logical'],sum(p.stat().st_size for p in paths if p.is_file()))
+                self.assertEqual(result['entries'],len(paths)) # Includes the vanished encounter.
+                self.assertEqual(result['confirmed_absent_build_temporaries'],1)
+                self.assertEqual(observation['status'],'completed')
+                self.assertEqual(observation['last_confirmed_absent_path'],relative)
+
+    def test_compiler_temporary_absence_scope_excludes_other_outputs_and_non_tmp(self):
+        for relative in ['evidence.xcresult/result.o.tmp','DerivedData/Index.noindex/record.tmp','Source/input.tmp',
+                         'DerivedData/Build/Intermediates.noindex/object.o']:
+            with self.subTest(relative=relative):
+                result,observation,_,probes,_=self.compiler_vanish_scan(relative=relative)
+                self.assertIsInstance(result,FileNotFoundError);self.assertEqual(probes,[])
+                self.assertEqual(observation['status'],'failed')
+                self.assertNotIn('confirmed_absent_build_temporaries',observation)
+
+    def test_compiler_temporary_absence_never_suppresses_permission_or_other_errno(self):
+        for scenario in ['entry_permission','entry_other_errno','confirmation_permission','confirmation_other_errno']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.compiler_vanish_scan(scenario=scenario)
+                self.assertIsInstance(result,OSError);self.assertNotEqual(result.errno,errno.ENOENT)
+                self.assertEqual(observation['status'],'failed')
+
+    def test_compiler_temporary_absence_rejects_root_parent_and_descriptor_replacement(self):
+        for scenario in ['root_replaced','parent_replaced','fd_replaced','final_root_replaced']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.compiler_vanish_scan(scenario=scenario)
+                self.assertIsInstance(result,RuntimeError);self.assertIn('replaced',str(result))
+                self.assertEqual(observation['status'],'failed')
+                self.assertNotIn('confirmed_absent_build_temporaries',observation)
+
+    def test_compiler_temporary_absence_requires_known_regular_kind_and_strict_directory_open(self):
+        for scenario in ['directory','unknown_kind','directory_open']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,probes,_=self.compiler_vanish_scan(scenario=scenario)
+                self.assertIsInstance(result,(RuntimeError,FileNotFoundError));self.assertEqual(probes,[])
+                self.assertEqual(observation['status'],'failed')
+
+    def test_compiler_temporary_reappearance_never_rebinds_or_accepts_partial_scan(self):
+        result,observation,_,probes,_=self.compiler_vanish_scan(scenario='reappeared')
+        self.assertIsInstance(result,RuntimeError);self.assertIn('reappeared',str(result))
+        self.assertEqual(len(probes),1);self.assertEqual(observation['status'],'failed')
+        self.assertNotIn('confirmed_absent_build_temporaries',observation)
+
+    def test_compiler_temporary_absence_preserves_encounter_deadline_and_allocation_caps(self):
+        result,observation,_,probes,_=self.compiler_vanish_scan(scan_entries=8)
+        self.assertIsInstance(result,RuntimeError);self.assertIn('entry cap',str(result));self.assertEqual(probes,[])
+        for scenario,expected_probes in [('late_entry',0),('late_confirmation',1)]:
+            with self.subTest(scenario=scenario):
+                result,observation,_,probes,elapsed=self.compiler_vanish_scan(scenario=scenario)
+                self.assertIsInstance(result,RuntimeError);self.assertIn('deadline',str(result))
+                self.assertEqual(elapsed,10.);self.assertEqual(len(probes),expected_probes)
+                self.assertEqual(observation['status'],'failed')
+        result,observation,_,_,_=self.compiler_vanish_scan(scenario='late_dense_cap')
+        self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
+        self.assertEqual(observation['status'],'failed')
+
     def test_sparse_derived_data_uses_allocated_disk_budget(self):
         sparse = self.sparse(self.root / 'DerivedData' / 'index')
         expected_allocated = sum(p.lstat().st_blocks * 512
