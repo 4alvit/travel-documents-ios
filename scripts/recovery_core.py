@@ -685,7 +685,8 @@ class Recovery:
                 '-collect-test-diagnostics','never','-default-test-execution-time-allowance','300',
                 '-maximum-test-execution-time-allowance','300','-derivedDataPath',str(self.out/'DerivedData'),
                 '-resultBundlePath',str(self.out/(phase+'.xcresult')),
-                '-only-testing:TripfolioUITests/'+CASES[phase].removesuffix('()'),'CODE_SIGNING_ALLOWED=NO','test']
+                '-only-testing:TripfolioUITests/'+CASES[phase].removesuffix('()'),
+                'COMPILER_INDEX_STORE_ENABLE=NO','CODE_SIGNING_ALLOWED=NO','test']
 
     def run_phase(self, phase):
         require(phase in CASES,'Unknown phase')

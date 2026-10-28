@@ -187,6 +187,19 @@ samples; the last completed sample counted 5,132 entries and 307,924,992 allocat
 bytes. The old receipt did not retain failed-scan progress, so it establishes
 neither the cause of the delay nor that five seconds would have sufficed.
 
+The disposable recovery Debug test builds set
+`COMPILER_INDEX_STORE_ENABLE=NO` for both export and restore. Apple's
+[build-setting reference](https://developer.apple.com/documentation/xcode/build-settings-reference)
+defines this setting as controlling index data emitted while compiling. The
+recovery run does not use that editor index. Disabling its generation removes
+unneeded index-store writes and traversal work; it does not exclude an existing
+index directory from accounting. All output paths still participate in the
+same complete five-second scan, with the same allocation, entry, depth, command,
+cleanup and test-result checks. Compilation, linking, Debug settings and both
+selected UI cases remain required. Other CI builds keep their existing settings.
+This targets observed index-store traversal overhead; it does not establish
+that every future filesystem or scheduler delay will fit the unchanged budget.
+
 Capability commands keep their own pending-command context when delegating a
 resource checkpoint to the parent output scanner. Their admission, execution
 and finalization scans use the probe's original work deadline and the parent's
