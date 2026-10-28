@@ -289,6 +289,34 @@ class BoundaryTests(unittest.TestCase):
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
 
+    def test_settings_counts_bind_real_model_to_localized_visible_and_accessible_value(self):
+        source=(HERE.parent/'App/Views.swift').read_text()
+        for key,label,member in [('trips','Trips','trips'),('people','People','travelers'),('documents','Documents','documents')]:
+            localization='documents.title' if key=='documents' else 'nav.'+key
+            binding=f'libraryCount(L10n.ui("{localization}", defaultValue: "{label}"), count: model.library.{member}.count, identifier: "settings.count.{key}")'
+            self.assertEqual(source.count(binding),1)
+            self.assertEqual(source.count(f'"settings.count.{key}"'),1)
+        helper=source.split('private func libraryCount(',1)[1].split('\n    }',1)[0]
+        for contract in ['count.formatted(.number.locale(L10n.formattingLocale()))','LabeledContent(label, value: value)',
+                         '.accessibilityElement(children: .ignore)','.accessibilityLabel(Text(verbatim: label))',
+                         '.accessibilityValue(Text(verbatim: value))','.accessibilityIdentifier(identifier)']:
+            self.assertIn(contract,helper)
+
+    def test_recovery_counts_require_unique_reachable_row_exact_label_and_value(self):
+        source=(HERE.parent/'UITests/BatchImportUITests.swift').read_text()
+        helper=source.split('private func recoveryCounts(',1)[1].split('private func localStoreSession()',1)[0]
+        for key,label,count in [('trips','Trips','trips'),('people','People','people'),('documents','Documents','documents')]:
+            self.assertIn(f'("settings.count.{key}", "{label}", {count})',helper)
+        self.assertIn('app.descendants(matching: .any).matching(identifier: identifier)',helper)
+        self.assertIn('try await reveal(row, app: app, navigation: "Settings")',helper)
+        self.assertIn('rows.count == 1 && row.isHittable && row.label == label',helper)
+        self.assertIn('(row.value as? String) == String(count)',helper)
+        self.assertNotIn('||',helper);self.assertNotIn('row.staticTexts',helper)
+        for expected in ['recoveryCounts(trips: 1, people: 1, documents: 1, app: app)',
+                         'recoveryCounts(trips: 1, people: 2, documents: 1, app: app)',
+                         'recoveryCounts(trips: 0, people: 0, documents: 0, app: app)']:
+            self.assertIn(expected,source)
+
     def runtime(self,version='18.5'):
         return {'version':version,'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-'+version.replace('.','-'),
                 'isAvailable':True,'supportedArchitectures':['arm64','x86_64'],
