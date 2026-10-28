@@ -35,7 +35,26 @@ jobs:
       - name: Package verified Simulator preview
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
+        id: integration
         run: bash scripts/test-simulator.sh
+      - name: Extract existing Files-picker failure pair
+        if: ${{ failure() && steps.integration.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python3 -B scripts/files_picker_failure.py --run
+      - name: Files-picker failure evidence
+        if: ${{ always() && steps.integration.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-files-picker-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure.png
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure-ax.txt
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,7 +109,9 @@ jobs:
           persist-credentials: false
       - name: Hosted adapter regression checks
         timeout-minutes: 2
-        run: python3 -B scripts/test-recovery-hosted.py
+        run: |
+          python3 -B scripts/test-recovery-hosted.py
+          python3 -B scripts/test-files-picker-failure.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
         env:

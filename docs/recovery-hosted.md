@@ -203,6 +203,23 @@ errors still fail closed. All existing directory handles are closed on failure.
 Checks before and after operations cannot preempt a blocked OS call, and partial
 counts never establish compliance or UI acceptance.
 
+Live accounting tolerates a confirmed absent regular leaf only within the owned
+`DerivedData` build/cache area, excluding `DerivedData/Build/Products` and every
+`.xcresult` bundle. Build intermediates, indexing and module-cache writers may
+remove an enumerated entry before its stat. Hosted failures observed this race
+in both a compiler `.o.tmp` and an index-store leaf; the allowance is scoped by
+mutable output ownership, not a temporary filename or index format version.
+The vanished encounter still consumes the entry cap. Its original no-follow
+DirEntry kind must be regular, a fresh descriptor-relative no-follow stat must
+confirm ENOENT, and the named root/parent plus open parent descriptor identities
+must match before and after confirmation. Every added operation remains within
+the original checkpoint/deadline. Reappearance, unknown kind, links, directories,
+permission and other errors fail closed. The scan must still finish completely,
+with final root identity checked, before its totals become a resource sample.
+Completed samples record a bounded confirmed-absence count; traversal diagnostics
+retain the last relative path. This is sampled live disk accounting; source,
+payload and evidence manifests and binary verification remain strict and unchanged.
+
 The work free-space floor is 8 GiB. The 8 GiB owned-output disk limit uses
 allocated 512-byte blocks, so a sparse DerivedData file's logical length alone
 does not consume that budget. Receipts retain separate logical and allocated
