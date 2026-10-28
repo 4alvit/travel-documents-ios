@@ -76,7 +76,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   privacy_ipad:
-    name: iPad privacy and support
+    name: iPad privacy and support (${{ matrix.locale }})
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        locale: [en-US, ru-RU]
     runs-on: macos-15
     timeout-minutes: 35
     steps:
@@ -87,15 +92,15 @@ jobs:
           xcodebuild -version
           swift --version
           brew install xcodegen
-      - name: Owned iPad guidance (EN normal, RU maximum type)
+      - name: Owned iPad guidance (${{ matrix.locale }})
         timeout-minutes: 29
-        run: bash scripts/test-privacy-support-ipad.sh
+        run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
       - name: iPad test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-privacy-ipad-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/PrivacySupport-iPad/
+          name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/PrivacySupport-iPad/${{ matrix.locale }}/
           if-no-files-found: warn
           retention-days: 7
   recovery:
@@ -146,6 +151,7 @@ jobs:
       - name: Require successful validation
         env:
           PHONE_RESULT: ${{ needs.validate.result }}
+          # Aggregate matrix result requires both fixed locales to succeed.
           IPAD_RESULT: ${{ needs.privacy_ipad.result }}
           RECOVERY_RESULT: ${{ needs.recovery.result }}
         run: |

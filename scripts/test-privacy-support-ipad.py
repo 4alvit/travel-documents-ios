@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Two unchanged guidance cases on one new, owned iPad. No retries or purchases."""
+"""One selected guidance locale on one fresh owned iPad. No retries or purchases."""
+import argparse
 import datetime
 import errno
 import hashlib
@@ -24,6 +25,15 @@ CASES = (
 BUNDLE_ID = "com.4alvit.tripfolio"
 WORK_SECONDS = 24 * 60
 CLEANUP_SECONDS = 3 * 60
+# Existing command waits + each owned7s stop;30s for local manifests/copy/validation.
+CASE_PREP_SECONDS = (60 + 7) + (60 + 7) + (30 + 7) + (30 + 7)
+CASE_POST_SECONDS = (60 + 7) + (30 + 7) + (30 + 7) + 30
+
+
+def selected_case(locale):
+    matches = [case for case in CASES if case[0] == locale]
+    require(len(matches) == 1, "Exactly one supported locale is required")
+    return matches[0]
 
 
 def require(value, message):
@@ -141,11 +151,12 @@ def validate_result(summary, tree, method, udid):
 
 
 class Driver:
-    def __init__(self, root):
+    def __init__(self, root, locale):
+        self.case = selected_case(locale)
         self.root = Path(root).resolve()
-        self.out = self.root / "build/PrivacySupport-iPad"
+        self.out = self.root / "build/PrivacySupport-iPad" / locale
         self.out.mkdir(parents=True)  # Refuse to overwrite another run's evidence.
-        self.derived = self.root / "build/PrivacySupport-iPad-DerivedData"
+        self.derived = self.root / ("build/PrivacySupport-iPad-DerivedData-" + locale)
         require(not self.derived.exists(), "DerivedData must be fresh; no build reuse")
         self.start = time.monotonic()
         self.work_deadline = self.start + WORK_SECONDS
@@ -165,6 +176,7 @@ class Driver:
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
                        "work_seconds": WORK_SECONDS, "cleanup_reserve_seconds": CLEANUP_SECONDS,
+                       "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
         self.save()
 
@@ -282,7 +294,7 @@ class Driver:
                 if failure is None:
                     raise
 
-    def command(self, argv, label, timeout=30, check=True, stream=False):
+    def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0):
         limit = self.final_deadline if self.cleaning else self.work_deadline
         deadline = min(limit - 7, time.monotonic() + timeout)
         prefix = f"commands/{len(self.report['commands']):03d}-{label}"
@@ -299,6 +311,10 @@ class Driver:
             with stdout.open("wb") as output, stderr.open("wb") as errors, stdout.open("rb") as reader, stderr.open("rb") as error_reader:
                 require(limit - time.monotonic() > 7, "Insufficient command/stop budget; cleanup reserve preserved")
                 require(time.monotonic() < deadline, label + " exceeded its finite timeout before spawn")
+                if required_after:
+                    # Recheck immediately before spawn; no clipped test is admitted.
+                    require(time.monotonic() + timeout + 7 + required_after < limit,
+                            label + " lacks full test/post-validation budget; no test spawned")
                 self.registering_process = True
                 try:
                     process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors, start_new_session=True)
@@ -507,13 +523,21 @@ class Driver:
             require(after == self.originals[label][1], "Original xcresult changed while parsing its copy")
 
     def run_case(self, locale, method, size, allowance):
+        require((locale, method, size, allowance) == self.case, "Case differs from selected locale")
+        require(not self.report["cases"], "One locale attempt per driver; no retry")
         label = locale
         original = self.out / "originals" / (locale + ".xcresult")
         original.parent.mkdir(exist_ok=True)
         entry = {"locale": locale, "method": method, "system_content_size_expected": size,
-                 "original_xcresult": str(original), "status": "started"}
+                 "original_xcresult": str(original), "status": "not_admitted"}
         self.report["cases"].append(entry)
+        required = CASE_PREP_SECONDS + allowance + 7 + CASE_POST_SECONDS
+        entry["admission"] = {"required_seconds": required, "remaining_seconds": self.work_deadline - time.monotonic(),
+                              "post_validation_seconds": CASE_POST_SECONDS, "work_deadline": self.work_deadline}
         self.save()
+        require(time.monotonic() + required < self.work_deadline,
+                label + " lacks full case/post-validation budget; no case started")
+        entry["status"] = "started"
         self.product_snapshot(label + "/products-before")
         self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]], label + "-install", timeout=60)
         entry["installed_before"] = self.installed(label + "/installed-before", required=True)["available"]
@@ -522,16 +546,34 @@ class Driver:
         entry["system_content_size_actual"] = actual
         require(actual == size, "System content-size readback mismatch for " + label)
         self.save()
+        primary, primary_traceback = None, None
         try:
             code, _ = self.command(["xcodebuild", "test-without-building", "-xctestrun", self.products["xctestrun"],
                                    *self.common_xcode(), "-resultBundlePath", original,
                                    "-only-testing:TripfolioUITests/PrivacySupportUITests/" + method],
-                                  label + "-test", timeout=allowance, check=False, stream=True)
+                                  label + "-test", timeout=allowance, check=False, stream=True,
+                                  required_after=CASE_POST_SECONDS)
             entry["xcodebuild_exit_code"] = code
+            require(code == 0, "xcodebuild failed; result data cannot override nonzero exit")
+        except BaseException as error:
+            primary, primary_traceback = error, error.__traceback__
+            entry["primary_error"] = repr(error)
         finally:
-            self.product_snapshot(label + "/products-after")
-            entry["installed_after"] = self.installed(label + "/installed-after", required=True)["available"]
-            self.save()
+            # Post-test evidence is mandatory, but must never replace the test's
+            # original timeout/nonzero/stop error when the remaining work expires.
+            for stage, operation in (
+                    ("products-after", lambda: self.product_snapshot(label + "/products-after")),
+                    ("installed-after", lambda: entry.update(installed_after=self.installed(label + "/installed-after", required=True)["available"])),
+                    ("save", self.save)):
+                try:
+                    operation()
+                except BaseException as error:
+                    entry.setdefault("post_validation_errors", []).append({"stage": stage, "error": repr(error)})
+                    if primary is None:
+                        primary, primary_traceback = error, error.__traceback__
+                        entry["primary_error"] = repr(error)
+        if primary is not None:
+            raise primary.with_traceback(primary_traceback)
         require(original.is_dir(), "Missing original result bundle for " + label)
         entry["validated"] = self.parse_case(original, label, method)
         require(code == 0, "xcodebuild failed; result data cannot override nonzero exit")
@@ -587,7 +629,7 @@ class Driver:
             self.write(locale + "/original-final.json", manifest)
             require(manifest == before, "Original result changed after parsing: " + locale)
         # Optional discovery is only for failed/partial outputs never registered.
-        for locale, _, _, _ in CASES:
+        for locale, _, _, _ in (self.case,):
             if locale in self.originals:
                 continue
             original = self.out / "originals" / (locale + ".xcresult")
@@ -601,8 +643,7 @@ class Driver:
         try:
             self.prepare()
             self.build_once()
-            for case in CASES:
-                self.run_case(*case)
+            self.run_case(*self.case)
         except BaseException as error:
             self.report["errors"].append(repr(error))
         finally:
@@ -614,7 +655,10 @@ class Driver:
                 except BaseException as error:
                     self.report["errors"].append("Finalization: " + repr(error))
             passed = (not self.report["errors"] and self.report["cleanup"]["verified"]
-                      and len(self.report["cases"]) == 2 and all(case["status"] == "passed" for case in self.report["cases"]))
+                      and len(self.report["cases"]) == 1
+                      and self.report["cases"][0].get("locale") == self.case[0]
+                      and self.report["cases"][0].get("method") == self.case[1]
+                      and self.report["cases"][0]["status"] == "passed")
             self.report.update(status="passed" if passed else "failed", finished_at=self.now(), elapsed_seconds=round(time.monotonic() - self.start, 3))
             self.save()
         print(json.dumps({"status": self.report["status"], "errors": self.report["errors"], "evidence": str(self.out)}, indent=2), flush=True)
@@ -622,4 +666,7 @@ class Driver:
 
 
 if __name__ == "__main__":
-    sys.exit(Driver(Path(__file__).resolve().parent.parent).run())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--locale", required=True, choices=[case[0] for case in CASES])
+    args = parser.parse_args()
+    sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale).run())

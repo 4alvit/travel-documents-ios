@@ -676,6 +676,44 @@ final class PurchaseFeedbackTests: XCTestCase {
         XCTAssertFalse(nested.accessibilityValue.contains("87654"))
     }
 
+    func testStoreKitCaseDiagnosticUsesOnlyFixedVocabulary() {
+        var cases: [(StoreKitError, PurchaseDiagnostic.StoreKitCase)] = [
+            (.unknown, .unknown),
+            (.userCancelled, .userCancelled),
+            (.notAvailableInStorefront, .notAvailableInStorefront),
+            (.notEntitled, .notEntitled)
+        ]
+        if #available(iOS 18.4, *) { cases.append((.unsupported, .unsupported)) }
+        for (error, expected) in cases {
+            let diagnostic = PurchaseDiagnostic(phase: .purchase, error: error)
+            XCTAssertEqual(diagnostic.category, .storekit)
+            XCTAssertEqual(diagnostic.storeKitCase, expected)
+            XCTAssertEqual(diagnostic.accessibilityValue,
+                           "purchase-diagnostic phase=purchase category=storekit domain=other code=none storekitCase=\(expected.rawValue)")
+            XCTAssertLessThanOrEqual(diagnostic.accessibilityValue.utf8.count, 160)
+            XCTAssertTrue(diagnostic.accessibilityValue.unicodeScalars.allSatisfy { $0.isASCII })
+            XCTAssertFalse(diagnostic.accessibilityValue.localizedCaseInsensitiveContains("Xcode"))
+        }
+    }
+
+    func testStoreKitCaseDoesNotChangeAssociatedErrorOrSemanticDiagnostics() {
+        let network = PurchaseDiagnostic(phase: .purchase,
+            error: StoreKitError.networkError(URLError(.notConnectedToInternet)))
+        XCTAssertNil(network.storeKitCase)
+        XCTAssertEqual(network.accessibilityValue,
+                       "purchase-diagnostic phase=purchase category=network domain=NSURLErrorDomain code=-1009")
+        let system = PurchaseDiagnostic(phase: .purchase, error: StoreKitError.systemError(
+            NSError(domain: "SYNTHETIC_PRIVATE_DOMAIN", code: 87654,
+                    userInfo: [NSLocalizedDescriptionKey: "SYNTHETIC_PRIVATE_DESCRIPTION"])))
+        XCTAssertNil(system.storeKitCase)
+        XCTAssertEqual(system.accessibilityValue,
+                       "purchase-diagnostic phase=purchase category=system domain=other code=none")
+        let semantic = PurchaseDiagnostic(phase: .purchase, category: .verification)
+        XCTAssertNil(semantic.storeKitCase)
+        XCTAssertEqual(semantic.accessibilityValue,
+                       "purchase-diagnostic phase=purchase category=verification domain=none code=none")
+    }
+
     func testLatestPurchaseSurvivesBackgroundCatalogButNewOperationClearsIt() {
         var diagnostics = PurchaseDiagnostics(arguments: [diagnosticFlag])
         diagnostics.recordPurchase(phase: .purchase, error: URLError(.notConnectedToInternet))

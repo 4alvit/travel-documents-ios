@@ -1,4 +1,4 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec python3 scripts/test-privacy-support-ipad.py
+exec python3 scripts/test-privacy-support-ipad.py "$@"

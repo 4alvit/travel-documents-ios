@@ -94,13 +94,13 @@ class DriverTests(unittest.TestCase):
         for guard in self.guards:
             guard.assert_not_called()
 
-    def driver(self, **plan):
+    def driver(self, locale="en-US", **plan):
         world = World(**plan)
         for name, value in [('time.monotonic', world.clock), ('time.sleep', world.sleep),
                             ('subprocess.Popen', world.spawn), ('os.killpg', world.killpg)]:
             injected = patch(name, side_effect=value)
             injected.start(); self.addCleanup(injected.stop)
-        return ipad.Driver(self.root), world
+        return ipad.Driver(self.root, locale), world
 
     def row(self, driver):
         return driver.report['commands'][-1]
@@ -112,8 +112,8 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(stored['commands'][-1], row)
 
     def attempted_case(self, index, **plan):
-        driver, world = self.driver(**plan)
         case = ipad.CASES[index]; locale, method, size, _ = case
+        driver, world = self.driver(locale=locale, **plan)
         driver.owned = 'synthetic-owned-device'
         driver.products = {'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
         (driver.out/'originals'/(locale+'.xcresult')).mkdir(parents=True)
@@ -133,6 +133,116 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.row(driver)['argv'][-1],
             '-only-testing:TripfolioUITests/PrivacySupportUITests/'+method)
         return driver,world,failure.exception,validate.called
+
+    def test_selected_locale_is_required_and_invalid_locale_creates_no_output(self):
+        with self.assertRaises(TypeError): ipad.Driver(self.root)
+        with self.assertRaisesRegex(RuntimeError, 'Exactly one supported locale'): ipad.Driver(self.root, 'all')
+        self.assertFalse((self.root/'build').exists())
+
+    def test_fresh_locale_driver_runs_exactly_one_case_and_requires_its_success(self):
+        for locale in ('en-US', 'ru-RU'):
+            with self.subTest(locale=locale):
+                driver, world = self.driver(locale=locale)
+                def passed(*case):
+                    self.assertEqual(case, driver.case)
+                    driver.report['cases'].append(dict(locale=case[0],method=case[1],status='passed'))
+                def cleanup(): driver.report['cleanup']['verified']=True
+                with patch('signal.signal'), patch.object(driver,'prepare'), patch.object(driver,'build_once'), \
+                     patch.object(driver,'run_case',side_effect=passed) as case_run, \
+                     patch.object(driver,'cleanup',side_effect=cleanup), patch.object(driver,'final_evidence'), patch('builtins.print'):
+                    self.assertEqual(driver.run(),0)
+                case_run.assert_called_once_with(*driver.case)
+                self.assertEqual(driver.report['selected_locale'],locale)
+                self.assertEqual(driver.report['expected_case_count'],1)
+                self.assertEqual(driver.out,self.root.resolve()/'build/PrivacySupport-iPad'/locale)
+                self.assertEqual(driver.derived,self.root.resolve()/('build/PrivacySupport-iPad-DerivedData-'+locale))
+                self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+                self.assertEqual(world.processes,[])
+
+    def test_observed_RU_remaining357_is_not_admitted_or_spawned(self):
+        driver,world=self.driver(locale='ru-RU');world.t=1076.561
+        with patch.object(driver,'product_snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError,'lacks full case/post-validation budget'):
+                driver.run_case(*driver.case)
+        snapshot.assert_not_called();self.assertEqual(world.processes,[])
+        self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],956)
+        with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
+
+    def test_full_case_admission_rejects_exact_boundary(self):
+        driver,world=self.driver()
+        required=ipad.CASE_PREP_SECONDS+driver.case[3]+7+ipad.CASE_POST_SECONDS
+        self.assertEqual(required,986);world.t=1440-required
+        with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
+        self.assertEqual(world.processes,[]);self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
+
+    def test_actual_test_command_rechecks_full_wait_stop_and_post_budget_before_spawn(self):
+        driver,world=self.driver(delay=1)
+        world.t=1440-570-7-ipad.CASE_POST_SECONDS
+        with self.assertRaisesRegex(RuntimeError,'no test spawned'):
+            driver.command(['synthetic'],'ru-RU-test',timeout=570,required_after=ipad.CASE_POST_SECONDS)
+        self.assertEqual(world.processes,[])
+        world.t-=1
+        driver.command(['synthetic'],'ru-RU-test',timeout=570,required_after=ipad.CASE_POST_SECONDS)
+        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],world.processes[0].started+570)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+
+    def test_case_does_not_accept_a_different_locale_or_case(self):
+        driver,world=self.driver()
+        with self.assertRaisesRegex(RuntimeError,'differs from selected locale'):driver.run_case(*ipad.CASES[1])
+        self.assertEqual(driver.report['cases'],[]);self.assertEqual(world.processes,[])
+
+    def post_failure_case(self, **process_plan):
+        driver,world=self.driver(**process_plan);case=driver.case;locale,method,size,_=case
+        driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
+        actual=driver.command
+        def command(argv,label,**kwargs):
+            if label==locale+'-test':return actual(argv,label,**kwargs)
+            return 0,size if label==locale+'-read-size' else ''
+        def installed(label,required=False):
+            if label.endswith('/installed-after'):raise RuntimeError('Synthetic installed-after budget exhausted')
+            return {'available':True}
+        with patch.object(driver,'command',side_effect=command), patch.object(driver,'product_snapshot'), \
+             patch.object(driver,'installed',side_effect=installed), patch.object(driver,'parse_case') as parse:
+            with self.assertRaises(RuntimeError) as raised:driver.run_case(*case)
+        parse.assert_not_called();self.assertFalse(driver.active)
+        self.assertEqual(len(world.processes),1)
+        self.assertEqual(driver.report['cases'][0]['post_validation_errors'],[
+            {'stage':'installed-after','error':"RuntimeError('Synthetic installed-after budget exhausted')"}])
+        return driver,str(raised.exception)
+
+    def test_timeout_primary_survives_secondary_post_lookup_error(self):
+        driver,error=self.post_failure_case(delay=float('inf'))
+        self.assertIn('en-US-test exceeded its finite timeout',error)
+        self.assertIn('finite timeout',driver.report['cases'][0]['primary_error'])
+        self.assertEqual(driver.report['cases'][0]['status'],'started')
+
+    def test_nonzero_primary_survives_secondary_post_lookup_error(self):
+        driver,error=self.post_failure_case(exit=65)
+        self.assertIn('xcodebuild failed',error)
+        self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'],65)
+
+    def test_success_cannot_override_mandatory_post_validation_failure(self):
+        driver,error=self.post_failure_case(exit=0)
+        self.assertEqual(error,'Synthetic installed-after budget exhausted')
+        self.assertEqual(driver.report['cases'][0]['status'],'started')
+
+    def test_ci_fixed_two_locale_matrix_serializes_ipads_and_gates_both(self):
+        workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
+        lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
+        self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 1',lane)
+        self.assertIn('locale: [en-US, ru-RU]',lane)
+        self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
+        self.assertIn("run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'",lane)
+        self.assertIn('name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',lane)
+        self.assertIn('path: build/PrivacySupport-iPad/${{ matrix.locale }}/',lane)
+        self.assertIn('timeout-minutes: 35',lane);self.assertIn('timeout-minutes: 29',lane)
+        gate=workflow.split('  gate:',1)[1]
+        self.assertIn('if: always()',gate);self.assertIn('needs: [validate, privacy_ipad, recovery]',gate)
+        self.assertIn('IPAD_RESULT: ${{ needs.privacy_ipad.result }}',gate)
+        self.assertIn('test "$IPAD_RESULT" = success',gate)
+        self.assertIn('exec python3 scripts/test-privacy-support-ipad.py "$@"',(HERE/'test-privacy-support-ipad.sh').read_text())
 
     def installed_fixture(self, **plan):
         driver,world=self.driver(**plan)

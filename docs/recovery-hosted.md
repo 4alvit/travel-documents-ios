@@ -337,21 +337,41 @@ command still needs more than its 8-second stop reserve before admission and
 again before spawn. Cleanup retains its original 120 seconds within the same
 1,500-second executor limit; no retry or extra worker is introduced.
 
-The iPad driver gives each existing fresh installed-AUT container lookup a
-60-second wait, increased from the generic 30-second default after the second
-locale's pre-test lookup timed out. This is a finite scheduling allowance, not
-a demonstrated application bug or a guarantee of completion. It applies only
-to `get_app_container <owned UUID> com.4alvit.tripfolio app` within `installed()`,
-called before and after each of the two locale cases. Other default command
-waits stay 30 seconds. The same fresh path, bundle identifier and complete
-built-versus-installed byte comparison remain mandatory.
+Each iPad guidance locale now runs in a separate fresh driver and owned device.
+The fixed EN/RU CI matrix has `max-parallel: 1` and `fail-fast: false`: a failed
+English lane cannot prevent Russian from running, and the existing CI gate
+requires the aggregate matrix result to be `success`. Each artifact includes its
+locale, source SHA, run ID and attempt; the receipt records the exact locale,
+method, one-case count, source manifests, built/installed bytes and owned UUID.
+No case is inferred from the other locale's result.
 
-The four existing lookups can together consume up to 120 additional seconds
-relative to the old per-call caps; those seconds come from the same 1,440-second
-work budget. All waits remain clipped to work deadline minus the original
-7-second stop reserve. The 180-second cleanup allowance, EN600/RU570 waits,
-XCTest assertions and one-attempt behavior do not change. The observed single
-EN XCTest pass does not establish that the RU case executed or passed.
+This corrects an observed allocation defect: English took590 seconds including
+bootstrap; Russian was then admitted with only357 seconds of work even though
+its requested command allowance was570 seconds. Its timeout was subsequently
+masked by an installed-AUT lookup that could not fit. Every fresh locale keeps
+the original1,440-second work budget and180-second cleanup reserve. EN600/RU570
+command waits and XCTest's480-second maximum remain unchanged. Before case
+preparation, the driver requires the full command budgets and each7-second stop
+reserve, plus30 seconds for local manifests/copy/validation:986 seconds for EN
+or956 for RU. Immediately before test spawn it again requires the full test wait,
+its7-second stop reserve and171 seconds for post-test validation (installed
+lookup60, result summary30, result tests30, three7-second stops and30 seconds of
+local evidence work). These are admissions within the original absolute work
+limit, not renewed deadlines or guarantees against cooperative syscall stalls.
+Insufficient budget fails before starting the case/test. Post-test evidence is
+still mandatory; its errors are retained separately and cannot replace the
+original test timeout, nonzero exit or process cleanup error.
+
+Fresh installed-AUT lookups remain60 seconds and still verify the exact owned
+UUID, bundle path/identifier and complete built-versus-installed bytes. All other
+command caps, UI assertions, result checks and no-retry behavior are unchanged.
+The two independent builds increase the declared macOS job ceiling from105 to
+140 minutes (four35-minute jobs), while peak macOS concurrency remains three:
+Main, Recovery and at most one iPad locale. There are five jobs including the
+Ubuntu gate. The bounded observer retains its original120-minute admission
+window and records both locale jobs separately; it must not declare a complete
+cohort when one locale is missing, skipped or failed. This is a scheduling-policy
+change requiring new runtime evidence, not acceptance of either failed old run.
 
 
 Files provider readiness uses only the unused part of the original `files-group`
