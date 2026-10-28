@@ -313,6 +313,62 @@ class HostedRecovery(core.Recovery):
         self.check_capability()
         super().setup()
 
+    def setup_files(self):
+        first=len(self.report['commands'])
+        primary=None
+        try:
+            return super().setup_files()
+        except BaseException as error:
+            primary=error
+            raise
+        finally:
+            try:
+                self.retain_files_logs(first)
+                self.save()
+            except BaseException as error:
+                self.report['files_log_publication_error']=repr(error)
+                self.error('Files log publication: '+repr(error))
+                if primary is None:
+                    raise
+
+    def retain_files_logs(self, first):
+        # Raw root logs include ps output and must never be uploaded wholesale.
+        # Move only closed streams of these exact owned Files commands. No copy
+        # doubles their resource charge and no extra native command is needed.
+        seen=set()
+        for index,record in enumerate(self.report['commands'][first:],start=first):
+            action={'files-launch':'launch','files-terminate':'terminate'}.get(record['id'])
+            if action is None:
+                continue
+            self.timecheck()
+            require(record['id'] not in seen,'Duplicate Files log command')
+            seen.add(record['id'])
+            require(self.owned and record.get('argv')==['/usr/bin/xcrun','simctl',action,self.owned,core.FILES_BUNDLE],
+                    'Unexpected Files log command')
+            stop=record.get('stop',{})
+            require(not self.active and not self.unknown_spawn and stop.get('leader_reaped') is True
+                    and stop.get('group_absent') is True and not record.get('close_error')
+                    and not record.get('log_close_errors'),'Files log ownership or closure unresolved')
+            require(core.identity_of(self.out)==self.output_id,'Output root changed before Files log publication')
+            directory=self.out/'PhaseLogs'
+            self.timecheck()
+            directory.mkdir(exist_ok=True)
+            self.timecheck()
+            directory_id=core.identity_of(directory)
+            require(set(record.get('logs',{}))=={'stdout','stderr'},'Unexpected Files log streams')
+            for channel in ('stdout','stderr'):
+                self.timecheck()
+                path=Path(record['logs'][channel])
+                require(path==self.out/(str(index+1)+'-'+channel+'.log') and path.resolve(strict=True)==path
+                        and not path.is_symlink() and path.is_file(),'Unexpected Files log path')
+                require(path.stat().st_size==record['bytes'][channel]<=core.base.PER_LOG,'Files log size differs')
+                require(core.identity_of(directory)==directory_id,'Files log directory changed')
+                public=directory/(record['id']+'-'+channel+'.log')
+                require(not os.path.lexists(public),'Public Files log already exists')
+                self.timecheck()
+                path.rename(public);record['logs'][channel]=str(public)
+                self.timecheck()
+
     def work(self):
         super().work()
         identity=core.json_file(self.out/'source-identity.json')['checkout']
@@ -324,8 +380,8 @@ class HostedRecovery(core.Recovery):
     def run_phase(self,phase):
         try:return super().run_phase(phase)
         finally:
-            # Raw root logs are never public. Only the known Xcode phase logs
-            # enter the separate allowlisted directory; ps is never selected.
+            # Raw root logs are never public. This route selects only Xcode
+            # phase logs; the separate Files route also excludes every ps log.
             for record in self.report['commands']:
                 if record['id']=='phase-'+phase:
                     directory=self.out/'PhaseLogs'

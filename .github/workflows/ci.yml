@@ -105,7 +105,6 @@ jobs:
           name: TripDocket-recovery-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*.json
-            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*.log
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/PhaseLogs/
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/Capability/
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*.xcresult/
