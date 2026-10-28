@@ -299,3 +299,19 @@ work budget. All waits remain clipped to work deadline minus the original
 7-second stop reserve. The 180-second cleanup allowance, EN600/RU570 waits,
 XCTest assertions and one-attempt behavior do not change. The observed single
 EN XCTest pass does not establish that the RU case executed or passed.
+
+
+Files provider readiness uses only the unused part of the original `files-group`
+lookup work deadline (22 seconds within its unchanged 30-second command cap).
+After one successful launch and group lookup, the wrapper pins the exact owned
+group and observes only its `File Provider Storage` leaf. Initial leaf absence
+may settle within that existing deadline; the wrapper never creates the provider,
+relaunches Files, repeats a command, chooses another provider, or renews the clock.
+A missing/replaced group, symlink, permission error, or disappearance after the
+provider identity was observed fails immediately. The original work limit is
+restored before the existing termination and cleanup paths. Bounded receipt
+fields retain the failure stage, safe owned-relative filename, observation count,
+and original deadline. This readiness policy does not establish that delayed
+provider initialization caused any earlier hosted failure. UI export/restore
+assertions, exclusive test-folder creation, all command caps, global budgets,
+and cleanup proofs remain required.
