@@ -2698,7 +2698,10 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertIsInstance(value,RuntimeError)
         self.assertEqual(observation['partial_totals']['entries'],49)
         self.assertEqual(set(observation),{'status','operation_count','max_depth','last_operation',
-            'longest_operation','error','duration_seconds','partial_totals','xcresult_count'})
+            'longest_operation','error','duration_seconds','partial_totals','xcresult_count',
+            'traversal_attempts','encounter_count'})
+        self.assertEqual(observation['traversal_attempts'],1)
+        self.assertEqual(observation['encounter_count'],49)
         self.assertLess(len(json.dumps(observation)),2048)
 
     def test_scan_late_directory_open_closes_descriptor_without_fstat(self):
