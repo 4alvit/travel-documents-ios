@@ -1023,6 +1023,165 @@ class BoundaryTests(unittest.TestCase):
         r.owned,r.recovered=owned,True
         return r,provider
 
+    def test_provider_readiness_observes_exact_leaf_without_relaunch_or_bootstrap(self):
+        r,provider=self.files_runner(group={'delay':3})
+        provider.rmdir()
+        original_sleep=r.ops.sleep
+        def appear(seconds):
+            original_sleep(seconds)
+            observation=r.report.get('files_provider_readiness')
+            if observation and r.ops.now()>=observation['start']+.2 and not provider.exists():
+                provider.mkdir()  # Model the provider, never production bootstrap.
+        r.ops.sleep=appear
+        r.setup_files()
+        observation=r.report['files_provider_readiness']
+        self.assertEqual(observation['status'],'ready')
+        self.assertGreater(observation['absent_observations'],0)
+        self.assertEqual(observation['work_deadline'],r.report['commands'][1]['work_deadline'])
+        self.assertLess(observation['finish'],observation['work_deadline'])
+        self.assertEqual([x['id'] for x in r.report['commands']],['files-launch','files-group','files-terminate'])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertFalse(r.active)
+
+    def test_provider_readiness_does_not_renew_lookup_work_deadline(self):
+        r,provider=self.files_runner(group={'delay':21})
+        provider.rmdir()
+        with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
+        observation=r.report['files_provider_readiness'];lookup=r.report['commands'][1]
+        self.assertEqual(observation['work_deadline'],lookup['work_deadline'])
+        self.assertLess(observation['finish']-observation['start'],1.1)
+        self.assertEqual(observation['status'],'failed')
+        self.assertEqual(observation['last_absence'],{'errno':errno.ENOENT,'filename':'File Provider Storage'})
+        self.assertEqual(r.report['files_setup_failure']['stage'],'provider_readiness')
+        self.assertFalse(provider.exists())
+        self.assertEqual(len(r.ops.processes),3)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertLess(observation['probes'],25)
+
+    def test_provider_readiness_global_clip_keeps_stop_and_cleanup_reserves(self):
+        r,provider=self.files_runner();provider.rmdir();r.ops.t=1350
+        with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
+        observation=r.report['files_provider_readiness'];lookup=r.report['commands'][1]
+        self.assertEqual((lookup['work_deadline'],lookup['command_deadline']),(1372,1380))
+        self.assertEqual(observation['finish'],1372)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertEqual(len(r.ops.processes),2)  # Existing >8s admission still rejects TERM.
+        self.assertIn('Insufficient command/stop budget',r.report['files_setup_terminate_error'])
+        self.assertFalse(r.active)
+        self.assertLessEqual(observation['probes'],445)
+
+    def test_provider_readiness_rejects_appearance_at_original_deadline(self):
+        r,provider=self.files_runner(group={'delay':21});provider.rmdir()
+        original_sleep=r.ops.sleep
+        def too_late(seconds):
+            original_sleep(seconds)
+            observation=r.report.get('files_provider_readiness')
+            if observation and r.ops.now()>=observation['work_deadline'] and not provider.exists():provider.mkdir()
+        r.ops.sleep=too_late
+        with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
+        self.assertTrue(provider.exists());self.assertIsNone(r.folder)
+        self.assertEqual(r.report['files_provider_readiness']['status'],'failed')
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_provider_readiness_rejects_symlink_without_wait(self):
+        r,provider=self.files_runner();provider.rmdir()
+        target=self.root/'alternate';target.mkdir();provider.symlink_to(target,target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError,'not a real directory'):r.setup_files()
+        self.assertEqual(r.report['files_provider_readiness']['probes'],1)
+        self.assertEqual(r.report['files_provider_readiness']['absent_observations'],0)
+        self.assertFalse(list(target.iterdir()))
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_provider_readiness_permission_error_is_immediate_and_bounded(self):
+        r,provider=self.files_runner();original_stat=hosted.core.os.stat
+        def denied(path,*args,**kwargs):
+            if path==provider.name and kwargs.get('dir_fd') is not None:
+                raise PermissionError(errno.EACCES,'denied',provider.name)
+            return original_stat(path,*args,**kwargs)
+        with patch.object(hosted.core.os,'stat',side_effect=denied):
+            with self.assertRaises(PermissionError):r.setup_files()
+        diagnostic=r.report['files_setup_failure']
+        self.assertEqual(diagnostic,{'stage':'provider_readiness','type':'PermissionError',
+            'errno':errno.EACCES,'provider_leaf_filename':'File Provider Storage'})
+        self.assertEqual(r.report['files_provider_readiness']['probes'],1)
+        self.assertEqual(r.report['files_provider_readiness']['absent_observations'],0)
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_provider_readiness_rejects_group_replacement_during_absence(self):
+        r,provider=self.files_runner();provider.rmdir();original_sleep=r.ops.sleep;replaced=[]
+        def replace_group(seconds):
+            original_sleep(seconds)
+            if r.report.get('files_provider_readiness') and not replaced:
+                group=provider.parent;group.rename(group.with_name('old-group'));group.mkdir();replaced.append(True)
+        r.ops.sleep=replace_group
+        with self.assertRaisesRegex(RuntimeError,'group changed while observing'):r.setup_files()
+        self.assertEqual(r.report['files_provider_readiness']['probes'],1)
+        self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_provider_readiness_does_not_rebind_disappeared_observed_leaf(self):
+        r,provider=self.files_runner();original_open=hosted.core.os.open
+        def vanished(path,*args,**kwargs):
+            if path==provider.name and kwargs.get('dir_fd') is not None:provider.rmdir()
+            return original_open(path,*args,**kwargs)
+        with patch.object(hosted.core.os,'open',side_effect=vanished):
+            with self.assertRaises(FileNotFoundError):r.setup_files()
+        observation=r.report['files_provider_readiness']
+        self.assertEqual((observation['probes'],observation['absent_observations']),(1,0))
+        self.assertEqual(r.report['files_setup_failure']['provider_leaf_filename'],'File Provider Storage')
+        self.assertIsNone(r.folder);self.assertEqual(len(r.ops.processes),3)
+
+    def test_provider_readiness_expiry_during_open_closes_descriptors_and_restores_deadline(self):
+        r,provider=self.files_runner();original_open=hosted.core.os.open;opened=[]
+        def expire_after_open(path,*args,**kwargs):
+            fd=original_open(path,*args,**kwargs)
+            if path==provider.parent or (path==provider.name and kwargs.get('dir_fd') is not None):opened.append(fd)
+            if path==provider.name and kwargs.get('dir_fd') is not None:
+                r.ops.t=r.report['files_provider_readiness']['work_deadline']
+            return fd
+        with patch.object(hosted.core.os,'open',side_effect=expire_after_open):
+            with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
+        self.assertEqual(len(opened),2)
+        for fd in opened:
+            with self.assertRaises(OSError):os.fstat(fd)
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertIsNone(r.folder)
+        self.assertEqual(r.report['files_provider_readiness']['status'],'failed')
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_provider_readiness_expired_identity_cannot_start_later_filesystem_open(self):
+        for kind in ('group','provider'):
+            with self.subTest(kind=kind):
+                r,provider=self.files_runner();original_identity=hosted.core.identity_of
+                original_open=hosted.core.os.open;expired=[];late_opens=[]
+                target=provider.parent if kind=='group' else provider
+                def identity(path):
+                    result=original_identity(path)
+                    if path==target and r.report.get('files_provider_readiness') and not expired:
+                        r.ops.t=r.report['files_provider_readiness']['work_deadline'];expired.append(True)
+                    return result
+                def opened(path,*args,**kwargs):
+                    if expired and (path==provider.parent or path==provider.name):late_opens.append(str(path))
+                    return original_open(path,*args,**kwargs)
+                with patch.object(hosted.core,'identity_of',side_effect=identity),patch.object(hosted.core.os,'open',side_effect=opened):
+                    with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
+                self.assertTrue(expired);self.assertEqual(late_opens,[])
+                self.assertEqual((r.limit,r.final),(1380,1500));self.assertIsNone(r.folder)
+                self.assertEqual(len(r.ops.processes),3)
+                self.tearDown();self.doCleanups();self.setUp()
+
+    def test_provider_readiness_missing_group_fails_before_observation_with_relative_filename(self):
+        r,provider=self.files_runner();provider.rmdir();provider.parent.rmdir()
+        with self.assertRaises(FileNotFoundError):r.setup_files()
+        diagnostic=r.report['files_setup_failure']
+        self.assertEqual(diagnostic['stage'],'group_identity')
+        self.assertEqual(diagnostic['errno'],errno.ENOENT)
+        self.assertTrue(diagnostic['owned_relative_filename'].startswith('data/Containers/Shared/AppGroup/'))
+        self.assertNotIn(str(self.root),json.dumps(diagnostic))
+        self.assertNotIn('files_provider_readiness',r.report)
+        self.assertEqual(len(r.ops.processes),3)
+
     def test_files_launch120_terminate60_allow_slow_start_with_real_provider_checks(self):
         r,provider=self.files_runner({'delay':70},{'delay':45})
         r.setup_files()

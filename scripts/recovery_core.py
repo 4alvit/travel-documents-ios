@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Portable two-phase recovery core extracted from the reviewed source-only executor."""
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -396,28 +397,116 @@ class Recovery:
         self.sim('boot-ready','bootstatus',self.owned,'-b',cap=120)
         self.setup_files()
 
+    def wait_files_provider(self, group, deadline):
+        # Observe only the existing provider leaf within the original lookup
+        # work deadline. Never create Apple storage or issue another command.
+        provider = group/'File Provider Storage'
+        original_limit = self.limit
+        self.limit = min(original_limit, deadline)
+        observation = {'start':self.ops.now()-self.t0, 'work_deadline':self.limit-self.t0,
+                       'probes':0, 'absent_observations':0, 'status':'pending', 'stage':'group_pin'}
+        self.report['files_provider_readiness'] = observation
+        group_fd = None
+        try:
+            self.checkpoint()
+            group_id = identity_of(group)
+            self.timecheck()
+            group_fd = os.open(group,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            self.timecheck()
+            def checked():
+                require(self.ops.now()<self.limit,'Files provider readiness deadline reached')
+                self.checkpoint()
+                self.owned_root()
+                self.timecheck()
+                require(identity_of(group)==group_id,'Files group changed while observing provider')
+                self.timecheck()
+                st = os.fstat(group_fd)
+                require([st.st_dev,st.st_ino]==group_id,'Pinned Files group changed')
+                require(self.ops.now()<self.limit,'Files provider readiness deadline reached')
+            while True:
+                checked()
+                observation['probes'] += 1
+                observation['stage'] = 'leaf_stat'
+                try:
+                    leaf = os.stat(provider.name,dir_fd=group_fd,follow_symlinks=False)
+                except FileNotFoundError as error:
+                    if error.errno != errno.ENOENT: raise
+                    # This syscall addresses only the exact leaf beneath the
+                    # pinned group. A missing group/root is never retried.
+                    observation['absent_observations'] += 1
+                    observation['last_absence'] = {'errno':error.errno,'filename':error.filename if error.filename==provider.name else None}
+                    checked()
+                    self.ops.sleep(min(.05,self.limit-self.ops.now()))
+                    continue
+                checked()
+                require(stat.S_ISDIR(leaf.st_mode),'Files provider is not a real directory')
+                provider_id = [leaf.st_dev,leaf.st_ino]
+                observation['stage'] = 'leaf_identity'
+                require(identity_of(provider)==provider_id,'Provider changed during readiness observation')
+                self.timecheck()
+                observation['stage'] = 'leaf_open'
+                provider_fd = os.open(provider.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=group_fd)
+                try:
+                    self.timecheck()
+                    st = os.fstat(provider_fd)
+                    self.timecheck()
+                    require([st.st_dev,st.st_ino]==provider_id,'Provider changed during open')
+                    observation['stage'] = 'leaf_recheck'
+                    checked()
+                    require(identity_of(provider)==provider_id,'Provider changed after open')
+                    checked()
+                    closing_group = group_fd
+                    group_fd = None
+                    os.close(closing_group)
+                    self.timecheck()
+                    observation.update(status='ready',finish=self.ops.now()-self.t0)
+                    return provider,provider_id,provider_fd
+                except BaseException:
+                    os.close(provider_fd)
+                    raise
+        except BaseException:
+            observation.update(status='failed',finish=self.ops.now()-self.t0)
+            raise
+        finally:
+            try:
+                if group_fd is not None: os.close(group_fd)
+            finally:
+                self.limit = original_limit
+
     def setup_files(self):
         self.once('files-launch')
         provider_fd = None
         primary_error = None
+        stage = 'launch'
         try:
             try:
                 launched = self.sim('files-launch','launch',self.owned,FILES_BUNDLE)
                 require(re.fullmatch(re.escape(FILES_BUNDLE)+r': [1-9][0-9]*',launched.strip()),'Files launch PID missing')
+                stage = 'group_lookup'
                 output = self.sim('files-group','get_app_container',self.owned,FILES_BUNDLE,'groups')
+                lookup_deadline = self.t0+self.report['commands'][-1]['work_deadline']
+                stage = 'group_parse'
                 pairs = [line.split('\t') for line in output.splitlines() if line.strip()]
                 require(all(len(x)==2 and all(x) for x in pairs),'Malformed Files group list')
                 matches = [value for key,value in pairs if key==GROUP]
                 require(len(matches)==1,'Missing or ambiguous local Files group')
+                stage = 'group_identity'
                 group = self.owned_path(matches[0],('data','Containers','Shared','AppGroup'))
-                provider = group/'File Provider Storage'
-                self.provider_id = identity_of(provider)
-                provider_fd = os.open(provider,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-                st = os.fstat(provider_fd)
-                require([st.st_dev,st.st_ino]==self.provider_id,'Provider changed during open')
+                stage = 'provider_readiness'
+                provider,self.provider_id,provider_fd = self.wait_files_provider(group,lookup_deadline)
             except BaseException as error:
                 primary_error = error
                 self.report['files_setup_primary_error'] = repr(error)
+                diagnostic = {'stage':stage,'type':type(error).__name__,'errno':getattr(error,'errno',None)}
+                filename = getattr(error,'filename',None)
+                if isinstance(filename,str) and len(filename)<=1024:
+                    root = Path.home()/'Library/Developer/CoreSimulator/Devices'/self.owned
+                    path = Path(filename)
+                    if path.is_absolute() and path.is_relative_to(root) and '..' not in path.parts:
+                        diagnostic['owned_relative_filename'] = str(path.relative_to(root))
+                    elif filename=='File Provider Storage':
+                        diagnostic['provider_leaf_filename'] = filename
+                self.report['files_setup_failure'] = diagnostic
                 raise
             finally:
                 if not self.active and not self.unknown_spawn:
