@@ -218,10 +218,15 @@ are compared and an after snapshot is retained. Failure never becomes UI/PDF
 acceptance; cleanup success never removes an earlier failure.
 
 The upload step runs on failure too and uses an explicit allowlist of receipts,
-Xcode phase logs, capability evidence, xcresults, snapshots and attachments.
+selected Xcode/Files logs, capability evidence, xcresults, snapshots and attachments.
 Raw root command logs, including host process listings, are excluded from the
-start. Only the two known Xcode phase logs are moved into `PhaseLogs`; a failed
-move can omit diagnostics but cannot expose a process listing. The tested source
+start. Only the two known Xcode phases and exact owned Files launch/terminate
+stdout/stderr streams are moved into `PhaseLogs`. The Files route checks the
+command label, argv, owned UUID, sequential stream path, byte count and confirmed
+process stop/stream closure before moving already bounded logs. Unknown ownership,
+replaced paths and existing public filenames fail closed. No new native commands
+or log caps are added. A failed move can omit diagnostics but cannot expose a
+process listing, and any original Files failure remains primary. The tested source
 and DerivedData are also excluded. Hidden bundle
 files are included. GitHub artifact transport can normalize permissions; the
 original mode metadata remains in the immutable JSON manifests. A raw result

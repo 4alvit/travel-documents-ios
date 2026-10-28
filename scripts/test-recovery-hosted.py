@@ -1109,6 +1109,94 @@ class BoundaryTests(unittest.TestCase):
                 r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE,cap=90)
             self.assertEqual(command.call_count,2)
 
+    def test_files_failure_retains_only_exact_closed_streams_and_keeps_primary(self):
+        r,_=self.files_runner({'delay':float('inf'),'output':[]})
+        r.ops.plans=[r.ops.plans[0],{'exit':3,'output':[('stderr',b'synthetic termination diagnostic')]}]
+        private=r.out/'1-stdout.log';private.write_text('private process listing')
+        r.report['commands'].append({'id':'export-app-stopped','finish':0,'outcome':'completed',
+                                     'logs':{'stdout':str(private)}})
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed') as failure:r.setup_files()
+        self.assertEqual(str(failure.exception.__cause__),'Command timeout')
+        self.assertEqual(r.report['files_setup_terminate_error'],"RuntimeError('files-terminate failed')")
+        self.assertEqual(private.read_text(),'private process listing')
+        public=r.out/'PhaseLogs'
+        self.assertEqual({p.name for p in public.iterdir()},
+                         {label+'-'+channel+'.log' for label in ['files-launch','files-terminate']
+                          for channel in ['stdout','stderr']})
+        self.assertEqual((public/'files-terminate-stderr.log').read_bytes(),b'synthetic termination diagnostic')
+        self.assertEqual(len(r.ops.processes),2);self.assertFalse(r.active)
+        self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
+        for row in r.report['commands'][1:]:
+            self.assertEqual(row['requested_cap_seconds'],60)
+            self.assertTrue(all(Path(p).parent==public for p in row['logs'].values()))
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_files_log_move_failure_keeps_primary_and_raw_logs_private(self):
+        r,_=self.files_runner({'delay':float('inf')})
+        r.ops.plans=[r.ops.plans[0],{'exit':3}]
+        with patch.object(Path,'rename',side_effect=OSError('synthetic move failed')):
+            with self.assertRaisesRegex(RuntimeError,'files-launch failed') as failure:r.setup_files()
+        self.assertEqual(str(failure.exception.__cause__),'Command timeout')
+        self.assertIn('synthetic move failed',r.report['files_log_publication_error'])
+        self.assertEqual(list((r.out/'PhaseLogs').iterdir()),[])
+        self.assertTrue((r.out/'1-stdout.log').exists());self.assertFalse(r.active)
+        self.assertNotIn('/*.log',(HERE.parent/'.github/workflows/ci.yml').read_text())
+
+    def test_files_log_publication_failure_after_setup_success_still_fails(self):
+        r,_=self.files_runner()
+        with patch.object(Path,'rename',side_effect=OSError('synthetic move failed')):
+            with self.assertRaisesRegex(OSError,'synthetic move failed'):r.setup_files()
+        self.assertIn('synthetic move failed',r.report['files_log_publication_error'])
+        self.assertTrue(any('Files log publication' in e for e in r.report['errors']))
+        self.assertFalse(r.active);self.assertEqual(len(r.ops.processes),3)
+
+    def test_files_log_allowlist_rejects_forgery_unknown_ownership_and_replacement(self):
+        kinds=['argv','ps-path','symlink','unreaped','unclosed','unknown','collision','size','deadline']
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                root=self.root;self.root=root/kind;self.root.mkdir()
+                r=self.runner(Ops({'output':[('stdout',b'synthetic Files output')]}));r.owned='10000000-0000-0000-0000-000000000001'
+                r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE)
+                row=r.report['commands'][0];private=r.out/'private-ps.log';private.write_text('private process listing')
+                if kind=='argv':row['argv']=['/bin/ps','-axww']
+                if kind=='ps-path':row['logs']['stdout']=str(private)
+                if kind=='symlink':
+                    path=Path(row['logs']['stdout']);path.unlink();path.symlink_to(private)
+                if kind=='unreaped':row['stop']['leader_reaped']=False
+                if kind=='unclosed':row['log_close_errors']={'stdout':'unknown'}
+                if kind=='unknown':r.unknown_spawn=True
+                if kind=='collision':
+                    public=r.out/'PhaseLogs';public.mkdir();(public/'files-launch-stdout.log').write_text('prior evidence')
+                if kind=='size':row['bytes']['stdout']+=1
+                if kind=='deadline':r.ops.t=r.limit
+                with self.assertRaises(RuntimeError):r.retain_files_logs(0)
+                self.assertEqual(private.read_text(),'private process listing')
+                if (r.out/'PhaseLogs').exists():
+                    self.assertTrue(all(p.read_text()=='prior evidence' for p in (r.out/'PhaseLogs').iterdir()))
+                self.assertEqual(len(r.ops.processes),1)
+                self.root=root
+
+    def test_files_log_unknown_group_is_not_published_or_reinterpreted(self):
+        r,_=self.files_runner({'delay':float('inf'),'ignore_all':True})
+        with self.assertRaisesRegex(RuntimeError,'files-launch failed'):r.setup_files()
+        self.assertTrue(r.active);self.assertIn('unresolved',r.report['files_log_publication_error'])
+        self.assertFalse((r.out/'PhaseLogs').exists())
+        self.assertEqual(r.report['attempts'],{'files-launch':1})
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_files_log_read_checks_consuming_deadline_withhold_rename(self):
+        r=self.runner(Ops({'output':[('stdout',b'synthetic Files output')]}));r.owned='10000000-0000-0000-0000-000000000001'
+        r.sim('files-launch','launch',r.owned,hosted.core.FILES_BUNDLE)
+        original=hosted.os.path.lexists
+        def late_check(path):
+            result=original(path)
+            if str(path).endswith('files-launch-stdout.log'):r.ops.t=r.limit
+            return result
+        with patch.object(hosted.os.path,'lexists',side_effect=late_check), \
+             patch.object(Path,'rename',side_effect=AssertionError('NO LATE MUTATION')) as rename:
+            with self.assertRaisesRegex(RuntimeError,'deadline reached'):r.retain_files_logs(0)
+        rename.assert_not_called();self.assertEqual(list((r.out/'PhaseLogs').iterdir()),[])
+
     def test_nested_capability_probe_preserves_exact_EPERM_operation(self):
         r=self.runner(Ops({'probe_error':True}))
         with self.assertRaises(RuntimeError):r.check_capability()
