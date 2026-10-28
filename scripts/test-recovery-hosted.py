@@ -23,6 +23,7 @@ with patch('subprocess.Popen') as startup,patch('os.killpg') as signals:
     startup.assert_not_called();signals.assert_not_called()
 PROFILE=json.loads((HERE/'recovery-hosted-profile.json').read_text())
 SHA='a'*40;BASE='b'*40;HEAD='c'*40
+FILES_ALREADY_ABSENT = b'An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=3):\nSimulator device failed to terminate com.apple.DocumentsApp.\nfound nothing to terminate\nUnderlying error (domain=NSPOSIXErrorDomain, code=3):\n\tThe request to terminate "com.apple.DocumentsApp" failed. found nothing to terminate\n\tfound nothing to terminate\n'
 
 
 class Process:
@@ -1043,6 +1044,128 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(all(x['requested_cap_seconds']==60 for x in r.report['commands']))
         self.assertAlmostEqual(r.ops.t,104,places=6)
         self.assertIsNone(r.folder);self.assertFalse(r.active)
+
+    def test_files_already_absent_exact_response_allows_preparation_only(self):
+        r,provider=self.files_runner(terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]})
+        r.setup_files()
+        row=r.report['commands'][-1]
+        self.assertEqual(row['returncode'],3)
+        self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(row['accepted_nonzero_exit'],
+                         {'kind':'simctl_reported_files_already_absent','returncode':3,
+                          'stderr_sha256':hashlib.sha256(FILES_ALREADY_ABSENT).hexdigest()})
+        self.assertNotIn('error',row);self.assertEqual(r.report['errors'],[])
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual(list(r.folder.iterdir()),[])
+        self.assertEqual((r.out/'PhaseLogs/files-terminate-stderr.log').read_bytes(),FILES_ALREADY_ABSENT)
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,30,60])
+        self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
+        self.assertEqual(len(r.ops.processes),3);self.assertFalse(r.ops.signals or r.active)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.report['cleanup_verified'] or r.report['runtime_accepted'])
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertFalse(hasattr(r,'_files_setup_command_start'))
+        with self.assertRaisesRegex(RuntimeError,'One-shot'):r.setup_files()
+        self.assertEqual(len(r.ops.processes),3)
+
+    def test_files_already_absent_rejects_other_errors_and_outputs(self):
+        variants=[(3,b'',b''),(2,FILES_ALREADY_ABSENT,b''),
+                  (3,FILES_ALREADY_ABSENT.replace(b'code=3',b'code=1'),b''),
+                  (3,FILES_ALREADY_ABSENT.replace(b'com.apple.DocumentsApp',b'com.other.Bundle'),b''),
+                  (3,b'found nothing to terminate',b''),
+                  (3,FILES_ALREADY_ABSENT+b'additional failure',b''),
+                  (3,FILES_ALREADY_ABSENT,b'unexpected stdout')]
+        old=self.root
+        for index,(code,stderr,stdout) in enumerate(variants):
+            with self.subTest(index=index):
+                self.root=old/str(index);self.root.mkdir()
+                r,provider=self.files_runner(terminate={'exit':code,'output':[('stderr',stderr),('stdout',stdout)]})
+                with self.assertRaisesRegex(RuntimeError,'files-terminate failed'):r.setup_files()
+                row=r.report['commands'][-1]
+                self.assertNotIn('accepted_nonzero_exit',row)
+                self.assertFalse((provider/r.folder_name).exists())
+                self.assertIn('Nonzero command exit',row['error'])
+                self.assertEqual(len(r.ops.processes),3)
+        self.root=old
+
+    def test_files_already_absent_is_not_generic_exit3_or_direct_sim_policy(self):
+        r,_=self.files_runner()
+        r.ops.plans=[{'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]}]
+        with self.assertRaisesRegex(RuntimeError,'files-terminate failed'):
+            r.sim('files-terminate','terminate',r.owned,hosted.core.FILES_BUNDLE)
+        self.assertNotIn('accepted_nonzero_exit',r.report['commands'][-1])
+        r.ops.plans=[{'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]}]
+        with self.assertRaisesRegex(RuntimeError,'other failed'):
+            r.command('other',['synthetic'],30)
+        self.assertNotIn('accepted_nonzero_exit',r.report['commands'][-1])
+        self.assertFalse(hosted.core.base.Smoke.accept_nonzero_exit(r,None,{},{}))
+
+    def test_files_already_absent_never_recovers_launch_or_provider_failure(self):
+        old=self.root
+        for kind in ('launch','provider'):
+            with self.subTest(kind=kind):
+                self.root=old/kind;self.root.mkdir()
+                r,_=self.files_runner(group={'output':[('stdout',b'invalid')]} if kind=='provider' else None,
+                                     terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]})
+                if kind=='launch':
+                    r.ops.plans=[{'exit':2},r.ops.plans[-1]]
+                expected='files-launch failed' if kind=='launch' else 'Malformed Files group list'
+                with self.assertRaisesRegex(RuntimeError,expected):r.setup_files()
+                self.assertIsNone(r.folder)
+                self.assertIn('files_setup_primary_error',r.report)
+                self.assertIn('files_setup_terminate_error',r.report)
+                self.assertNotIn('accepted_nonzero_exit',r.report['commands'][-1])
+        self.root=old
+
+    def test_files_already_absent_preserves_provider_identity_recheck(self):
+        r,provider=self.files_runner(terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]})
+        def replace(argv):
+            if argv[2]=='terminate':
+                provider.rename(provider.with_name('original-provider'));provider.mkdir()
+        r.ops.on_spawn=replace
+        with self.assertRaisesRegex(RuntimeError,'Provider changed before mkdir'):r.setup_files()
+        self.assertFalse((provider/r.folder_name).exists())
+        self.assertIn('accepted_nonzero_exit',r.report['commands'][-1])
+
+    def test_files_already_absent_never_masks_command_close_or_group_error(self):
+        old=self.root
+        for kind,options in [('close',{'close_error':True}),('group',{'probe_error':True})]:
+            with self.subTest(kind=kind):
+                self.root=old/kind;self.root.mkdir()
+                r,_=self.files_runner(terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)],**options})
+                with self.assertRaisesRegex(RuntimeError,'files-terminate failed'):r.setup_files()
+                self.assertIsNone(r.folder)
+                self.assertEqual(r.report['commands'][-1]['outcome'],'failed')
+                self.assertTrue(r.report['errors'])
+                if kind=='group':
+                    self.assertNotIn('accepted_nonzero_exit',r.report['commands'][-1])
+                    self.assertTrue(r.active)
+        self.root=old
+
+    def test_files_already_absent_read_deadline_preserves_stop_and_cleanup_reserve(self):
+        r,_=self.files_runner(terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]})
+        original=Path.open
+        class DelayedReader:
+            def __init__(self,stream):self.stream=stream
+            def __enter__(self):self.stream.__enter__();return self
+            def __exit__(self,*args):return self.stream.__exit__(*args)
+            def fileno(self):return self.stream.fileno()
+            def read(self,n):
+                value=self.stream.read(n)
+                r.ops.t=r.report['commands'][-1]['work_deadline']
+                return value
+        def opened(path,*args,**kwargs):
+            stream=original(path,*args,**kwargs)
+            if path.name=='3-stderr.log' and args and args[0]=='rb':return DelayedReader(stream)
+            return stream
+        with patch.object(Path,'open',opened),self.assertRaisesRegex(RuntimeError,'files-terminate failed'):
+            r.setup_files()
+        row=r.report['commands'][-1]
+        self.assertIn('classification deadline reached',row['error'])
+        self.assertNotIn('accepted_nonzero_exit',row)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLessEqual(r.ops.t,row['command_deadline'])
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertIsNone(r.folder)
 
     def test_files_successful_launch_still_requires_successful_termination(self):
         r,provider=self.files_runner(terminate={'exit':2})

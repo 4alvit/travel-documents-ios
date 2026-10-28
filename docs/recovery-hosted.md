@@ -251,3 +251,20 @@ Offline adapter tests cover new job/profile, toolchain path, source/merge,
 capability-proof and artifact-exclusion boundaries. They deliberately forbid
 real process creation/signals. They do not establish host readiness or replace
 the inherited recovery tests and independent native UI review.
+
+The initial Files preparation treats one specific `simctl terminate` reply as
+already stopped: exit 3 with the exact `NSPOSIXErrorDomain` code 3 diagnostic
+that says `found nothing to terminate` for `com.apple.DocumentsApp`. This
+classification applies only inside the current preparation after its successful
+owned-device launch and group-container lookup. It requires the original owned
+command process to be reaped, its process group confirmed absent, empty stdout,
+and the complete matching stderr from the same bounded log file. The raw exit
+code and diagnostic hash remain in `accepted_nonzero_exit`; the raw diagnostic
+still follows the Files-only publication allowlist.
+
+The command must still pass stop, stream closure, resource/finalization, receipt
+and deadline checks. All other nonzero responses, permission errors and timeouts
+fail. No command, retry or budget is added. Provider and folder identity checks,
+export/restore assertions, final simulator cleanup and independent UI/pixel
+review remain required. This handles the terminal response; it does not establish
+why the Files application had stopped or claim that recovery tests passed.
