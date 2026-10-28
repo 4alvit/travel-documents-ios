@@ -372,7 +372,12 @@ class Driver:
             self.command(argv, label)
         for kind in ("summary", "tests"):
             self.command(["xcrun", "xcresulttool", "help", "get", "test-results", kind], "xcresulttool-help-" + kind)
-        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"], "runtimes", timeout=60)
+        # Finite initial inventory scheduling allowance; all later waits keep their own caps.
+        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"], "runtimes", timeout=120)
+        # A final poll may reap exactly at the effective deadline. Do not admit
+        # that inventory (or a late parse) into later commands or device selection.
+        require(time.monotonic() < self.report["commands"][-1]["wait_deadline_monotonic"],
+                "Initial runtime inventory wait deadline reached")
         dtypes = self.json_command(["xcrun", "simctl", "list", "devicetypes", "--json"], "device-types")
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
         pair = choose_pair(runtimes, dtypes, architecture)

@@ -130,13 +130,22 @@ capability acceptance rules are unchanged. This secondary cleanup correction
 cannot erase the primary scan failure or prove cleanup for an older run.
 
 The separate iPad guidance driver gives only its initial runtime query a
-60-second wait timeout. Its other defaults remain 30 seconds, with 1,440 seconds
+120-second wait timeout, increased from 60 after a zero-output initial query
+timed out before any device or test was reached. This is a finite scheduling
+policy, not a claim about the native service or a guarantee of success. It
+rejects completion or JSON parsing at or after the effective wait deadline
+before issuing the next command or selecting a device. There is no retry.
+Its other defaults remain 30 seconds, with 1,440 seconds
 of work and 180 seconds reserved for cleanup. Each command leaves up to 7 seconds
 inside its phase budget for existing TERM/KILL handling. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
 visible alongside secondary stop or receipt-write errors. These are cooperative
 deadline checks between operations; they do not preempt a blocked OS syscall.
+The effective initial wait is min(120, remaining work minus seven seconds);
+the stop reserve is additional to that wait but stays inside the work budget.
+Each extra second spent discovering runtimes reduces time available for later
+build, EN and RU work; their configured caps and the cleanup deadline do not grow.
 
 The first EN iPad XCTest command has a 600-second wait allowance instead of
 450, to allow more time for initial test-runner startup. A recorded run finished
