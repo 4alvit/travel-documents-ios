@@ -454,7 +454,7 @@ class Driver:
 
     def installed(self, label, required=False):
         # Fresh lookup every time: test-without-building may replace the container.
-        code, output = self.command(["xcrun", "simctl", "get_app_container", self.owned, BUNDLE_ID, "app"], label + "-lookup", check=False)
+        code, output = self.command(["xcrun", "simctl", "get_app_container", self.owned, BUNDLE_ID, "app"], label + "-lookup", timeout=60, check=False)
         if code:
             record = {"available": False, "lookup_exit_code": code}
             self.write(label + ".json", record)
