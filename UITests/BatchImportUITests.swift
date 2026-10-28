@@ -202,11 +202,16 @@ final class BatchImportUITests: XCTestCase {
         }
         capture(app, "Recovery export — full unencrypted-backup disclosure")
         app.buttons["Export…"].tap()
-        let saveToFiles = app.buttons["Save to Files"].firstMatch
-        // This native Save surface still needs first-run AX/pixel validation.
-        // Unknown layouts fail with captures; do not substitute coordinates.
-        try await wait("Share sheet has no visible Save to Files action", app: app) { saveToFiles.isHittable }
-        saveToFiles.tap()
+        // Keep the button contract and the named action cell observed in the native sheet.
+        let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
+            format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
+            NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
+            NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
+        ))
+        try await wait("Share sheet has no visible Save to Files action", app: app) {
+            saveToFiles.count == 1 && saveToFiles.element.isHittable
+        }
+        saveToFiles.element.tap()
         let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         let save = fileNavigation.buttons["Save"]

@@ -97,12 +97,14 @@ final class PrivacyTransitionUITests: XCTestCase {
         let app = try await launchLocked()
         defer { app.terminate() }
         try await unlockInitialFixture(app)
-        _ = try await openDraft(app)
+        let expected = try await openDraft(app)
         try await backgroundAndReturnLocked(app, checkpoint: "Unsaved document draft")
         try await requestBiometric("match", in: app)
         try await requireUnlocked(app)
-        // Privacy and availability are asserted here. Exact draft retention is
-        // a separate test below, so a lost draft cannot be reported as a leak.
+        let title = app.textFields["Document title"]
+        try await require("Ending input focus discarded or changed the unsaved editor", app: app) {
+            title.exists && title.value as? String == expected
+        }
         try await attachSettled(app, name: "Editor session after real authentication")
     }
 
@@ -212,6 +214,8 @@ final class PrivacyTransitionUITests: XCTestCase {
         title.tap()
         title.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (title.value as? String ?? "").count) + expected)
         try check(title.value as? String == expected, app: app, "Unable to establish the unsaved synthetic draft")
+        try check(app.keyboards.firstMatch.exists, app: app,
+                  "The draft scenario did not expose a software keyboard before backgrounding")
         try await attachSettled(app, name: "Unsaved synthetic document draft before background")
         return expected
     }
@@ -225,6 +229,21 @@ final class PrivacyTransitionUITests: XCTestCase {
         let end = origin.withOffset(CGVector(dx: app.frame.width / 2, dy: app.frame.height * 0.45))
         start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 1)
         try await attachSettled(app, name: "\(checkpoint) — App-switcher gesture — requires visual review")
+        // These identifiers are present in the retained failing iOS 27 switcher
+        // hierarchy. A gesture alone cannot establish the snapshot checkpoint.
+        let switcher = springboard.otherElements["AppSwitcherContentView"]
+        let cards = switcher.descendants(matching: .other).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "card:com.4alvit.tripfolio:sceneID:")
+        )
+        try check(switcher.exists && cards.count == 1
+                  && cards.element.frame.width > 0 && cards.element.frame.height > 0,
+                  app: app, "The actual TripDocket app-switcher card was not observed: \(checkpoint)")
+        try check(!app.keyboards.firstMatch.exists
+                  && !app.otherElements["Typing Predictions"].exists
+                  && !app.otherElements["UIKeyboardLayoutStar Preview"].exists,
+                  app: app, "Document keyboard or predictive text remains in the app-switcher card: \(checkpoint)")
+        // AX absence is necessary here; independent review of the already
+        // captured PNG must also reject keyboard or prediction pixels.
         try await require("Inactive privacy cover is absent: \(checkpoint)", app: app) {
             self.lockTitle(in: app).exists
         }

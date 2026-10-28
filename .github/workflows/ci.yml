@@ -37,12 +37,12 @@ jobs:
       - name: Simulator integration and StoreKit tests
         id: integration
         run: bash scripts/test-simulator.sh
-      - name: Extract existing Files-picker failure pair
+      - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 3
         run: python3 -B scripts/files_picker_failure.py --run
-      - name: Files-picker failure evidence
+      - name: Files/payment failure evidence
         if: ${{ always() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 2
@@ -53,6 +53,8 @@ jobs:
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure.png
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure-ax.txt
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/evidence.json
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure.png
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure-ax.txt
           if-no-files-found: warn
           retention-days: 7
       - name: Test evidence
