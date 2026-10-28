@@ -148,6 +148,52 @@ class PostKillOps(Ops):
         return self.kill_result if sig == signal.SIGKILL else 'syscall_returned'
 
 
+class PostTermOps(Ops):
+    """Pure clock model: post-TERM EPERM stays unknown until explicit absence."""
+    def __init__(self, reap_after=.1, absent_after=.2, probe_error=None, term_result='syscall_returned'):
+        super().__init__({'delay': float('inf'), 'ignore_all': True, 'exit': -15})
+        self.reap_after, self.absent_after = reap_after, absent_after
+        self.probe_error, self.term_result = probe_error, term_result
+        self.term_at, self.unknown_count, self.events = None, 0, []
+        self.after_poll = self.after_probe = self.after_send = lambda: None
+
+    def spawn(self, argv):
+        p = super().spawn(argv)
+        original_poll = p.poll
+        def poll():
+            self.events.append(('poll', self.t))
+            if self.term_at is not None and self.t - self.term_at >= self.reap_after:
+                p.dead = True
+            result = original_poll()
+            self.after_poll()
+            return result
+        p.poll = poll
+        return p
+
+    def absent(self, p):
+        self.events.append(('probe', self.t))
+        self.probes.append(p.pid)
+        p.probe_calls += 1
+        self.after_probe()
+        if self.term_at is None:
+            return False
+        if self.probe_error is not None:
+            raise self.probe_error
+        if self.t - self.term_at < self.absent_after:
+            self.unknown_count += 1
+            raise PermissionError(errno.EPERM, 'post-TERM unknown')
+        return True  # Model RealOps.absent's explicit ESRCH result only.
+
+    def send(self, p, sig):
+        assert sig == signal.SIGTERM, 'No escalation after TERM became unknown'
+        self.events.append(('signal', self.t))
+        super().send(p, sig)
+        if sig == signal.SIGTERM:
+            self.term_at = self.t
+        self.after_send()
+        return self.term_result if sig == signal.SIGTERM else 'syscall_returned'
+
+
 class BoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='trip-hosted-injected-')
@@ -425,6 +471,84 @@ class BoundaryTests(unittest.TestCase):
         self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
         self.assertNotIn('host_capability',r.report)
         self.assertEqual(r.limit,1380)
+
+    def delegated_capability_scan(self, stage):
+        r=self.runner(self.capability_ops());r.ops.t=100.
+        # The actual parent previously finished runtime discovery; only the
+        # delegated probe has a pending normal command (work107, stop115).
+        r.report['commands']=[{'id':'profile-runtimes','work_deadline':52.,'finish':80.}]
+        original_save=hosted.core.Recovery.save;original_stop=hosted.core.Recovery.stop
+        probe=None;fired=False;stopping=False;stop_intervals=[]
+        def save(subject):
+            nonlocal probe
+            value=original_save(subject)
+            if subject is not r and subject.out==r.out/'Capability':
+                probe=subject
+                if stage=='admission' and subject.report['commands']:
+                    row=subject.report['commands'][-1]
+                    if row['id']=='normal' and 'pgid' not in row and 'finish' not in row:
+                        r.ops.t=106.
+            return value
+        def stop(subject,p,deadline,record):
+            nonlocal stopping
+            stopping=True;began=r.ops.t
+            try:return original_stop(subject,p,deadline,record)
+            finally:
+                stop_intervals.append((began,r.ops.t,deadline));stopping=False
+                if stage=='finalization':r.ops.t=106.
+        def usage(_):
+            nonlocal fired
+            self.assertFalse(stopping,'Resource sampling must not enter process-stop grace')
+            if probe is not None and probe.report['commands'] and r.ops.t==106. and not fired:
+                fired=True;r.ops.t=107.
+            return SimpleNamespace(free=32*hosted.core.GIB)
+        if stage=='active':
+            r.ops.plans[0]['delay']=float('inf')
+            r.ops.on_spawn=lambda argv:setattr(r.ops,'t',106.)
+        with patch.object(hosted.core.Recovery,'save',save), \
+             patch.object(hosted.core.Recovery,'stop',stop), \
+             patch.object(hosted.core.shutil,'disk_usage',side_effect=usage):
+            with self.assertRaisesRegex(RuntimeError,'normal failed'):r.check_capability()
+        self.assertTrue(fired);self.assertIsNotNone(probe)
+        row=probe.report['commands'][0];failed=r.report['resource_scan_failure']
+        self.assertEqual((row['start'],row['work_deadline'],row['command_deadline']),(100.,107.,115.))
+        self.assertEqual(row['error'],"RuntimeError('Output scan deadline exceeded')")
+        self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),(106.,107.,107.))
+        self.assertEqual(failed['stage'],'free_space_before')
+        self.assertEqual(len(probe.report['commands']),1)
+        self.assertEqual(len(r.ops.processes),0 if stage=='admission' else 1)
+        self.assertFalse(probe.active);self.assertFalse(r.active)
+        self.assertNotIn('host_capability',r.report)
+        self.assertEqual((r.limit,r.final),(1380.,1500.))
+        self.assertEqual(probe.limit,160.)
+        if stage=='admission':self.assertEqual(stop_intervals,[])
+        else:
+            self.assertEqual(len(stop_intervals),1)
+            self.assertEqual(stop_intervals[0][2],115.)
+            self.assertLessEqual(stop_intervals[0][1],115.)
+        # No probe deadline remains installed on parent work after finally.
+        deadlines=[];original_scan=hosted.core.live_sizes
+        def scan(*args,**kwargs):
+            deadlines.append(args[3]);return original_scan(*args,**kwargs)
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):r.monitor()
+        self.assertEqual(deadlines,[112.])
+        self.assertEqual(r.report['resource_scan_failure'],failed)
+        return row
+
+    def test_delegated_capability_pending_admission_preserves_stop_reserve(self):
+        row=self.delegated_capability_scan('admission')
+        self.assertNotIn('pgid',row);self.assertNotIn('stop',row)
+
+    def test_delegated_capability_active_scan_preserves_stop_and_cleanup(self):
+        row=self.delegated_capability_scan('active')
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertNotIn('stop_error',row)
+
+    def test_delegated_capability_finalization_restores_parent_deadline(self):
+        row=self.delegated_capability_scan('finalization')
+        self.assertEqual(row['stop']['signals'],[])
+        self.assertEqual(row['finalization_error'],"RuntimeError('Output scan deadline exceeded')")
 
     def test_prep_cannot_spend_a_second_global_log_allowance(self):
         r=self.runner(Ops({'output':[('stdout',b'abcdef')]}))
@@ -720,24 +844,85 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(ops.events[-1][0], 'signal')
         self.assertTrue(all(t < 8. for _, t in ops.events))
 
-    def test_EPERM_after_TERM_identifies_group_probe_and_never_retries_stop(self):
+    def test_EPERM_after_TERM_can_confirm_without_another_signal(self):
         r=self.runner(Ops({'delay':float('inf'),'probe_errors':{2:PermissionError(errno.EPERM,'after TERM')}}))
         with self.assertRaises(RuntimeError):r.command('after-term',['synthetic'],30)
-        row=r.report['commands'][0];obs=row['process_observations'];p=r.ops.processes[0]
+        row=r.report['commands'][0];obs=row['process_observations']
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
         self.assertEqual(obs['stop.signal_15']['result'],'syscall_returned')
-        self.assertEqual(obs['stop.group_probe']['errno'],errno.EPERM)
-        self.assertEqual(obs['stop.group_probe']['calls'],2)
-        self.assertEqual(row['stop']['signals'],[15])
-        self.assertEqual(row['stop']['signals_semantics'],'send_wrapper_returned_not_delivery')
         self.assertNotIn('stop.signal_9',obs)
-        self.assertFalse(row['stop']['group_absent'])
-        self.assertIn(p.pid,r.active)
-        with self.assertRaisesRegex(RuntimeError,'No repeated signalling'):r.stop(p,60,row)
-        with self.assertRaisesRegex(RuntimeError,'Unowned group'):r.stop(SimpleNamespace(pid=p.pid),60,{})
-        with patch.object(r,'sim',side_effect=AssertionError('NO CLEANUP CHILD')) as sim:
-            r.cleanup();sim.assert_not_called()
-        self.assertFalse(r.report['cleanup_verified'])
-        self.assertEqual(len(r.ops.signals),1)
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertFalse(r.active)
+        self.assertNotIn('stop_error',row)
+        self.assertEqual(row['stop']['post_term_unknown_probes']['count'],1)
+        self.assertEqual(row['stop']['post_term_confirmation']['status'],'confirmed')
+
+    def test_post_term_transient_unknown_requires_both_actual_proofs(self):
+        ops=PostTermOps();r,p,row=self.owned_stop(ops)
+        r.stop(p,8.,row)
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertFalse(r.active)
+        self.assertEqual(row['stop']['post_term_confirmation'],{'deadline':5.,'status':'confirmed'})
+        self.assertEqual(row['stop']['post_term_unknown_probes']['count'],ops.unknown_count)
+        self.assertGreater(ops.unknown_count,1)
+        self.assertEqual(len(ops.signals),1)
+        self.assertNotIn('errno',row['process_observations']['stop.group_probe'])
+
+    def test_post_term_permanent_unknown_fails_at_same_grace_without_escalation(self):
+        ops=PostTermOps(absent_after=float('inf'));r,p,row=self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError,'Stop deadline reached'):r.stop(p,8.,row)
+        self.assertEqual(ops.t,5.);self.assertIs(r.active[p.pid],p)
+        self.assertTrue(row['stop']['leader_reaped']);self.assertFalse(row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertEqual(row['stop']['post_term_confirmation']['status'],'unconfirmed')
+        unknown=row['stop']['post_term_unknown_probes']
+        self.assertEqual(unknown['count'],ops.unknown_count);self.assertGreater(unknown['count'],50)
+        self.assertLess(len(json.dumps(unknown)),300)
+        self.assertTrue(all(t<5. for _,t in ops.events))
+        with self.assertRaisesRegex(RuntimeError,'No repeated signalling'):r.stop(p,20.,row)
+        self.assertEqual(len(ops.signals),1)
+
+    def test_post_term_absence_without_reap_is_still_unconfirmed(self):
+        ops=PostTermOps(reap_after=float('inf'),absent_after=.1);r,p,row=self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError,'Stop deadline reached'):r.stop(p,8.,row)
+        self.assertTrue(row['stop']['group_absent']);self.assertFalse(row['stop']['leader_reaped'])
+        self.assertIs(r.active[p.pid],p);self.assertEqual(len(ops.signals),1)
+        self.assertEqual(ops.t,5.)
+
+    def test_post_term_deadline_and_owner_are_not_relaxed(self):
+        ops=PostTermOps(absent_after=float('inf'));r,p,row=self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError,'Stop deadline reached'):r.stop(p,.15,row)
+        self.assertEqual(row['stop']['post_term_confirmation']['deadline'],.15)
+        self.assertEqual(ops.t,.15);self.assertTrue(all(t<.15 for _,t in ops.events))
+        ops=PostTermOps(reap_after=0,absent_after=0);r,p,row=self.owned_stop(ops)
+        def late():
+            if ops.term_at is not None:ops.t=5.
+        ops.after_probe=late
+        with self.assertRaisesRegex(RuntimeError,'Stop deadline reached'):r.stop(p,5.,row)
+        self.assertFalse(row['stop']['group_absent']);self.assertIs(r.active[p.pid],p)
+        ops=PostTermOps();r,p,row=self.owned_stop(ops)
+        def rebind():
+            if ops.term_at is not None:r.active[p.pid]=SimpleNamespace(pid=p.pid)
+        ops.after_probe=rebind
+        with self.assertRaisesRegex(RuntimeError,'Unowned group'):r.stop(p,8.,row)
+        self.assertNotIn('post_term_unknown_probes',row['stop']);self.assertEqual(len(ops.signals),1)
+
+    def test_post_term_only_group_probe_EPERM_after_successful_TERM_may_settle(self):
+        ops=Ops({'delay':float('inf'),'probe_error':True});r,p,row=self.owned_stop(ops)
+        with self.assertRaises(PermissionError):r.stop(p,8.,row)
+        self.assertEqual(ops.signals,[]);self.assertNotIn('post_term_confirmation',row['stop'])
+        denied=PostTermOps()
+        def poll_denied():
+            if denied.term_at is not None:raise PermissionError(errno.EPERM,'poll')
+        denied.after_poll=poll_denied
+        for ops in [denied,PostTermOps(probe_error=PermissionError(errno.EACCES,'probe')),PostTermOps(term_result='already_absent_ESRCH')]:
+            with self.subTest(kind=repr(ops.probe_error),result=ops.term_result):
+                r,p,row=self.owned_stop(ops)
+                with self.assertRaises(OSError):r.stop(p,8.,row)
+                self.assertNotIn('post_term_unknown_probes',row['stop'])
+                self.assertEqual(ops.t,0.);self.assertEqual(len(ops.signals),1)
 
     def test_signal_EPERM_is_distinct_from_probe_failure(self):
         r=self.runner(Ops({'delay':float('inf'),'signal_error':True}))
@@ -1142,6 +1327,118 @@ class BoundaryTests(unittest.TestCase):
             r.cleaning=True;r.interrupted=True
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
 
+    def test_scan_policy_clips_allowance_to_global_and_pending_command_work(self):
+        r=self.runner();deadlines=[]
+        def scan(root,identity,now,deadline,checkpoint,*,observation):
+            deadlines.append(deadline)
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()
+            r.report['commands'].append({'work_deadline':3,'command_deadline':11})
+            r.monitor()  # Includes admission before Popen, not only an active PID.
+            r.report['commands'][-1]['finish']=0
+            r.monitor()
+            r.limit=2;r.monitor()
+        self.assertEqual(deadlines,[5,3,5,2])
+        self.assertEqual(r.next_scan,1)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_scan_policy_delayed_disk_read_cannot_publish_or_restart_budget(self):
+        r=self.runner()
+        def usage(_):
+            r.ops.t+=5
+            return SimpleNamespace(free=32*hosted.core.GIB)
+        with patch.object(hosted.core.shutil,'disk_usage',side_effect=usage), \
+             patch.object(hosted.core,'live_sizes') as scan:
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+            first=copy.deepcopy(r.report['resource_scan_failure'])
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+            scan.assert_not_called()
+        self.assertEqual(r.report['resource_scan_failure'],first)
+        self.assertEqual(first['stage'],'free_space_before')
+        self.assertEqual((first['started_elapsed'],first['deadline_elapsed'],first['finished_elapsed']),(0,5,5))
+        self.assertTrue(first['partial_counts_are_not_valid_accounting'])
+        self.assertEqual(r.report['resources'],[]);self.assertEqual(r.next_scan,0)
+        self.assertEqual(r.ops.processes,[])
+
+    def test_scan_policy_late_final_disk_read_rejects_completed_traversal(self):
+        r=self.runner();calls=0
+        def usage(_):
+            nonlocal calls
+            calls+=1
+            if calls==2:r.ops.t=5
+            return SimpleNamespace(free=32*hosted.core.GIB)
+        with patch.object(hosted.core.shutil,'disk_usage',side_effect=usage):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        failed=r.report['resource_scan_failure']
+        self.assertEqual(failed['stage'],'free_space_after')
+        self.assertEqual(failed['traversal']['status'],'completed')
+        self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
+        self.assertEqual(r.report['resources'],[])
+
+    def test_scan_failure_keeps_original_error_and_first_bounded_progress(self):
+        r=self.runner();error=PermissionError(errno.EPERM,'synthetic denied')
+        def scan(*args,observation,**kwargs):
+            observation.update(status='failed',partial_totals={'entries':7,'logical':12,'allocated':512})
+            raise error
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            with self.assertRaises(PermissionError) as caught:r.monitor()
+        self.assertIs(caught.exception,error)
+        failed=copy.deepcopy(r.report['resource_scan_failure'])
+        self.assertEqual(failed['stage'],'traversal')
+        self.assertEqual(failed['traversal']['partial_totals']['entries'],7)
+        with patch.object(hosted.core,'live_sizes',side_effect=RuntimeError('later diagnostic scan')):
+            with self.assertRaisesRegex(RuntimeError,'later diagnostic scan'):r.monitor()
+        self.assertEqual(r.report['resource_scan_failure'],failed)
+        self.assertEqual(r.report['resources'],[])
+
+    def combined_scan_timeout(self, ops):
+        r=self.runner(ops);original=hosted.core.os.scandir;delayed=False
+        # A slow spawn returns within the existing cap, leaving two seconds
+        # before the command's work deadline and the unchanged eight for stop.
+        ops.on_spawn=lambda argv:setattr(ops,'t',50.)
+        def scandir(fd):
+            nonlocal delayed
+            result=original(fd)
+            if r.active and not delayed:
+                delayed=True;ops.t+=2.
+            return result
+        with patch.object(hosted.core.os,'scandir',side_effect=scandir):
+            with self.assertRaisesRegex(RuntimeError,'combined failed'):
+                r.command('combined',['synthetic-only'],60)
+        self.assertTrue(delayed)
+        row=r.report['commands'][0]
+        self.assertEqual(row['error'],"RuntimeError('Output scan deadline exceeded')")
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(52.,60.))
+        failed=r.report['resource_scan_failure']
+        self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),(50.,52.,52.))
+        self.assertEqual(failed['traversal']['last_operation']['operation'],'scandir_open')
+        self.assertEqual(failed['traversal']['partial_totals']['entries'],0)
+        self.assertEqual(row['stop']['signals'],[15])
+        self.assertEqual(row['stop']['post_term_confirmation']['deadline'],57.)
+        self.assertEqual(len(ops.processes),1)
+        self.assertEqual(json.loads((r.out/'receipt.json').read_text())['resource_scan_failure'],failed)
+        return r,row
+
+    def test_combined_scan_timeout_can_confirm_TERM_without_passing_command(self):
+        ops=PostTermOps();r,row=self.combined_scan_timeout(ops)
+        self.assertEqual(row['outcome'],'failed')
+        self.assertNotIn('stop_error',row)
+        self.assertEqual(row['stop']['post_term_confirmation']['status'],'confirmed')
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active);self.assertLess(ops.t,57.)
+        self.assertFalse(r.report['runtime_accepted'])
+
+    def test_combined_scan_timeout_unknown_TERM_preserves_owner_and_blocks_spawn(self):
+        ops=PostTermOps(absent_after=float('inf'));r,row=self.combined_scan_timeout(ops)
+        self.assertEqual(row['stop']['post_term_confirmation']['status'],'unconfirmed')
+        self.assertIn('Stop deadline reached',row['stop_error'])
+        self.assertEqual(ops.t,57.);self.assertEqual(len(r.active),1)
+        with self.assertRaisesRegex(RuntimeError,'Prior process ownership unresolved'):
+            r.command('withheld',['synthetic-only'],60)
+        self.assertEqual(len(ops.processes),1);self.assertEqual(len(ops.signals),1)
+        self.assertFalse(r.report['runtime_accepted'])
+
     def test_c12_cancel_during_stdout_finalization_stops_pair(self):
         r=self.runner();original=Path.read_text
         def read(path,*args,**kwargs):
@@ -1331,6 +1628,94 @@ class ResourceAccountingTests(unittest.TestCase):
     def test_scan_deadline_is_unchanged(self):
         with self.assertRaisesRegex(RuntimeError, 'Output scan deadline exceeded'):
             hosted.core.live_sizes(self.root, hosted.core.identity_of(self.root), lambda: 10, 10)
+
+    def timed_scan(self, *, delay, deadline, operation='stat', entries=1, error=None):
+        clock=[0.];observation={};stat_calls=[];next_calls=[]
+        def read(*,follow_symlinks):
+            stat_calls.append(follow_symlinks)
+            if operation=='stat':clock[0]+=delay
+            if error is not None:raise error
+            return self.metadata(size=4096,blocks=8)
+        children=[SimpleNamespace(name='synthetic-'+str(i),stat=read) for i in range(entries)]
+        def iterate():
+            for child in children:
+                next_calls.append(child.name)
+                if operation=='next':clock[0]+=delay
+                yield child
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(hosted.core,'identity_of',return_value=[1,1]))
+            stack.enter_context(patch.object(hosted.core.os,'open',return_value=123))
+            stack.enter_context(patch.object(hosted.core.os,'fstat',return_value=self.metadata(directory=True,inode=1,blocks=1)))
+            closed=stack.enter_context(patch.object(hosted.core.os,'close'))
+            stack.enter_context(patch.object(hosted.core.os,'scandir',side_effect=lambda fd:contextlib.nullcontext(iterate())))
+            try:
+                value=hosted.core.live_sizes(self.root,[1,1],lambda:clock[0],deadline,observation=observation)
+            except BaseException as caught:
+                value=caught
+            closed.assert_called_once_with(123)
+        return value,observation,stat_calls,next_calls
+
+    def test_finite_scan_policy_allows_slow_complete_accounting_but_still_times_out(self):
+        value,observation,stats,_=self.timed_scan(delay=2.5,deadline=hosted.core.CAPS['scan_seconds'])
+        self.assertEqual(value,{'logical':4096,'allocated':4608,'entries':1,'xcresults':{}})
+        self.assertEqual(stats,[False]);self.assertEqual(observation['status'],'completed')
+        self.assertEqual(observation['longest_operation']['duration_seconds'],2.5)
+        value,observation,_,_=self.timed_scan(delay=2.5,deadline=2)
+        self.assertIsInstance(value,RuntimeError)
+        self.assertEqual(observation['partial_totals']['entries'],0)
+        value,observation,_,_=self.timed_scan(delay=5,deadline=hosted.core.CAPS['scan_seconds'])
+        self.assertIsInstance(value,RuntimeError)
+        self.assertEqual(observation['status'],'failed')
+        self.assertEqual(observation['last_operation']['operation'],'entry_stat')
+        self.assertEqual(observation['last_operation']['duration_seconds'],5)
+
+    def test_scan_next_after_deadline_cannot_start_entry_stat(self):
+        value,observation,stats,nexts=self.timed_scan(delay=3,deadline=3,operation='next',entries=2)
+        self.assertIsInstance(value,RuntimeError)
+        self.assertEqual(stats,[]);self.assertEqual(len(nexts),1)
+        self.assertEqual(observation['last_operation']['operation'],'scandir_next')
+        self.assertEqual(observation['partial_totals'],{'logical':0,'allocated':512,'entries':0})
+
+    def test_scan_entry_permission_error_is_not_skipped(self):
+        error=PermissionError(errno.EACCES,'synthetic denied')
+        value,observation,stats,nexts=self.timed_scan(delay=.2,deadline=5,error=error,entries=2)
+        self.assertIs(value,error);self.assertEqual(stats,[False]);self.assertEqual(len(nexts),1)
+        self.assertEqual(observation['last_operation']['outcome'],'raised')
+        self.assertEqual(observation['last_operation']['operation'],'entry_stat')
+        self.assertEqual(observation['partial_totals']['entries'],0)
+
+    def test_scan_failure_observation_size_does_not_grow_per_entry(self):
+        value,observation,_,_=self.timed_scan(delay=.1,deadline=4.95,entries=60)
+        self.assertIsInstance(value,RuntimeError)
+        self.assertEqual(observation['partial_totals']['entries'],49)
+        self.assertEqual(set(observation),{'status','operation_count','max_depth','last_operation',
+            'longest_operation','error','duration_seconds','partial_totals','xcresult_count'})
+        self.assertLess(len(json.dumps(observation)),2048)
+
+    def test_scan_late_directory_open_closes_descriptor_without_fstat(self):
+        clock=[0.];observation={}
+        def opened(*args,**kwargs):clock[0]=5;return 123
+        with patch.object(hosted.core,'identity_of',return_value=[1,1]), \
+             patch.object(hosted.core.os,'open',side_effect=opened), \
+             patch.object(hosted.core.os,'close') as closed, \
+             patch.object(hosted.core.os,'fstat') as fstat:
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):
+                hosted.core.live_sizes(self.root,[1,1],lambda:clock[0],5,observation=observation)
+        closed.assert_called_once_with(123);fstat.assert_not_called()
+        self.assertEqual(observation['last_operation']['operation'],'directory_open')
+
+    def test_scan_final_root_identity_cannot_complete_after_deadline(self):
+        clock=[0.];calls=0;identity=hosted.core.identity_of(self.root);observation={}
+        def read(_):
+            nonlocal calls
+            calls+=1
+            if calls==2:clock[0]=5
+            return identity
+        with patch.object(hosted.core,'identity_of',side_effect=read):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):
+                hosted.core.live_sizes(self.root,identity,lambda:clock[0],5,observation=observation)
+        self.assertEqual(observation['status'],'failed')
+        self.assertEqual(observation['last_operation']['operation'],'root_identity')
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

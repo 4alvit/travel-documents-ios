@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = '25595a662bdcb4e2ae834467e2c116a2e3a01932b0761e8757337b1397c5e511'
+HELPER_SHA = 'af11075b0eba49d192368ad2d5e0e0b7362cc9c94d6e2f8abb268313582d7032'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
@@ -28,7 +28,7 @@ MIB = 1024 ** 2
 CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             phase_seconds=600, testcase_seconds=300, admission_free_bytes=16*GIB,
             work_free_bytes=8*GIB, output_bytes=8*GIB, xcresult_bytes=2*GIB,
-            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=2,
+            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 CASES = {
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -119,7 +119,7 @@ def tree_manifest(root, checkpoint=lambda: None, max_bytes=2*GIB):
     return result
 
 
-def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
+def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observation=None):
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
     Directory mtimes may change during a writer. Every encountered entry is
@@ -129,6 +129,29 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
     or scans. This is sampled accounting, not a quota or an instantaneous peak.
     """
     totals = {'logical': 0, 'allocated': 0, 'entries': 0, 'xcresults': {}}
+    observation = {} if observation is None else observation
+    started = now()
+    observation.update(status='running', operation_count=0, max_depth=0)
+    def observe(operation, relative, depth, call):
+        # These are elapsed operation spans (including scheduling), not syscall
+        # timings. Keep only the last and longest span, with bounded path/error.
+        path = '/'.join(relative) or '.'
+        span = dict(operation=operation, path=path[:256], path_truncated=len(path)>256,
+                    depth=depth, started_seconds=now()-started)
+        observation['operation_count'] += 1
+        observation['last_operation'] = span
+        try:
+            value = call()
+            span['outcome'] = 'returned'
+            return value
+        except BaseException as error:
+            span.update(outcome='raised', error=repr(error)[:512])
+            raise
+        finally:
+            span['finished_seconds'] = now()-started
+            span['duration_seconds'] = span['finished_seconds']-span['started_seconds']
+            if span['duration_seconds'] >= observation.get('longest_operation', {}).get('duration_seconds', -1):
+                observation['longest_operation'] = dict(span)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     def allocated_bytes(metadata):
         blocks = getattr(metadata, 'st_blocks', None)
@@ -139,11 +162,20 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
         require(now() < deadline, 'Output scan deadline exceeded')
     def walk(fd, depth, prefix=(), bundle=None):
         check()
+        observation['max_depth'] = max(observation['max_depth'], depth)
         require(depth <= CAPS['scan_depth'], 'Output scan depth exceeded')
-        with os.scandir(fd) as children:
-            for child in children:
+        with observe('scandir_open', prefix, depth, lambda: os.scandir(fd)) as children:
+            check()
+            iterator, exhausted = iter(children), object()
+            while True:
                 check()
-                s = child.stat(follow_symlinks=False)
+                child = observe('scandir_next', prefix, depth, lambda: next(iterator, exhausted))
+                check()
+                if child is exhausted:
+                    break
+                relative = prefix + (child.name,)
+                s = observe('entry_stat', relative, depth, lambda: child.stat(follow_symlinks=False))
+                check()
                 totals['entries'] += 1
                 require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
                 require(s.st_dev == root_id[0], 'Output filesystem boundary')
@@ -151,7 +183,6 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
                 allocated = allocated_bytes(s)
                 totals['logical'] += logical
                 totals['allocated'] += allocated
-                relative = prefix + (child.name,)
                 current = '/'.join(relative) if child.name.endswith('.xcresult') else bundle
                 if current:
                     row = totals['xcresults'].setdefault(current, {'logical': 0, 'allocated': 0})
@@ -160,27 +191,44 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None):
                     require(max(row.values()) <= CAPS['xcresult_bytes'], 'xcresult size cap exceeded')
                 require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
                 if stat.S_ISDIR(s.st_mode):
-                    nested = os.open(child.name,flags,dir_fd=fd)
+                    check()
+                    nested = observe('directory_open', relative, depth+1,
+                                     lambda: os.open(child.name,flags,dir_fd=fd))
                     try:
-                        opened = os.fstat(nested)
+                        check()
+                        opened = observe('directory_fstat', relative, depth+1, lambda: os.fstat(nested))
+                        check()
                         require((opened.st_dev,opened.st_ino)==(s.st_dev,s.st_ino), 'Output directory replaced')
                         walk(nested,depth+1,relative,current)
                     finally: os.close(nested)
                 else:
                     require(stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode), 'Unexpected output special file')
-    check()
-    require(identity_of(root) == root_id, 'Output root replaced')
-    fd = os.open(root,flags)
     try:
-        opened = os.fstat(fd)
-        require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
-        totals['allocated'] = allocated_bytes(opened)
-        require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
-        walk(fd,0)
-    finally: os.close(fd)
-    check()
-    require(identity_of(root) == root_id, 'Output root replaced')
-    return totals
+        check()
+        require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
+        check()
+        fd = observe('directory_open', (), 0, lambda: os.open(root,flags))
+        try:
+            check()
+            opened = observe('directory_fstat', (), 0, lambda: os.fstat(fd))
+            check()
+            require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
+            totals['allocated'] = allocated_bytes(opened)
+            require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
+            walk(fd,0)
+        finally: os.close(fd)
+        check()
+        require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
+        check()
+        observation['status'] = 'completed'
+        return totals
+    except BaseException as error:
+        observation.update(status='failed', error=repr(error)[:512])
+        raise
+    finally:
+        observation.update(duration_seconds=now()-started,
+            partial_totals={key:totals[key] for key in ('logical','allocated','entries')},
+            xcresult_count=len(totals['xcresults']))
 
 
 
@@ -227,20 +275,52 @@ class Recovery:
         require(self.ops.now() < self.limit, self.phase+' deadline reached')
         require(self.cleaning or not self.interrupted, 'Interrupted')
 
-    def checkpoint(self, *, force_resources=False):
+    def checkpoint(self, *, force_resources=False, command_owner=None):
         self.timecheck()
         if not self.cleaning and (force_resources or self.ops.now() >= self.next_scan):
-            self.monitor()
+            if command_owner is None:
+                self.monitor()
+            else:
+                self.monitor(command_owner=command_owner)
         if force_resources:
             self.timecheck()  # Include the final resource read in admission.
 
-    def monitor(self):
-        self.timecheck()
-        require(shutil.disk_usage(self.out).free >= CAPS['work_free_bytes'], 'Work free-space floor reached')
-        row = live_sizes(self.out, self.output_id, self.ops.now,
-                         min(self.limit,self.ops.now()+CAPS['scan_seconds']), self.timecheck)
-        row.update(elapsed=self.ops.now()-self.t0, free_bytes=shutil.disk_usage(self.out).free)
-        require(row['free_bytes'] >= CAPS['work_free_bytes'], 'Work free-space floor reached')
+    def monitor(self, *, command_owner=None):
+        started = self.ops.now()
+        deadline = min(self.limit, started+CAPS['scan_seconds'])
+        # A pending command's work deadline applies during admission, execution
+        # and finalization, including a capability probe delegating its scan.
+        # Pass context per checkpoint; never install a sticky parent deadline.
+        owner = self if command_owner is None else command_owner
+        deadline = min(deadline, owner.limit)
+        pending = owner.report['commands'][-1] if owner.report['commands'] else None
+        if pending is not None and 'finish' not in pending:
+            deadline = min(deadline, owner.t0+pending['work_deadline'])
+        observation = dict(started_elapsed=started-self.t0, deadline_elapsed=deadline-self.t0,
+                           stage='free_space_before', traversal={})
+        def check():
+            self.timecheck()
+            require(self.ops.now() < deadline, 'Output scan deadline exceeded')
+        try:
+            check()
+            require(shutil.disk_usage(self.out).free >= CAPS['work_free_bytes'], 'Work free-space floor reached')
+            check()
+            observation['stage'] = 'traversal'
+            row = live_sizes(self.out, self.output_id, self.ops.now, deadline, self.timecheck,
+                             observation=observation['traversal'])
+            check()
+            observation['stage'] = 'free_space_after'
+            free = shutil.disk_usage(self.out).free
+            check()
+            require(free >= CAPS['work_free_bytes'], 'Work free-space floor reached')
+            row.update(elapsed=self.ops.now()-self.t0, free_bytes=free)
+        except BaseException as error:
+            observation.update(status='failed', finished_elapsed=self.ops.now()-self.t0,
+                               error=repr(error)[:512], partial_counts_are_not_valid_accounting=True)
+            # Preserve the first failure if later evidence handling also scans.
+            # No I/O, extra probe or child process is added on this failure path.
+            self.report.setdefault('resource_scan_failure', observation)
+            raise
         self.report['resources'].append(row)
         self.next_scan = self.ops.now()+CAPS['scan_interval_seconds']
 

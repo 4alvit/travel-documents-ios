@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = '85898785abacb4517a8a1d5690c5a149e3dde18301c458c66647dc2cb816c548'
+CORE_SHA = 'd69696aad4f25b1f15048367c5377aa42d53f39df6ab2a7613baa72add311694'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -277,7 +277,11 @@ class HostedRecovery(core.Recovery):
             probe=core.Recovery(self.ops,self.out/'Capability',self.plan,self.host,self.folder_name.removeprefix('TripDocket-Recovery-'),
                                 self.t0,candidate=self.candidate,source_manifest=self.source_manifest)
             probe.limit=self.limit;probe.write_deadline=self.limit
-            probe.checkpoint=self.checkpoint;probe.log_total=self.log_total
+            # The parent owns the output tree; the probe owns the pending
+            # command and its stop reserve. Keep both contexts for each scan.
+            probe.checkpoint=lambda *,force_resources=False: self.checkpoint(
+                force_resources=force_resources,command_owner=probe)
+            probe.log_total=self.log_total
             probe.command('normal',[self.host['python'],'-I','-c',CAPABILITY_CHILD,'normal'],15)
             try:probe.command('controlled-timeout',[self.host['python'],'-I','-c',CAPABILITY_CHILD,'parent',CAPABILITY_CHILD],20)
             except RuntimeError:pass
