@@ -195,8 +195,9 @@ final class BatchImportUITests: XCTestCase {
         try check(export.isEnabled, app: app, "Free full-backup export is disabled")
         export.tap()
         let warning = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
+        let disclosure = app.staticTexts.matching(NSPredicate(format: "label == %@", warning))
         try await wait("Full-backup disclosure is missing", app: app) {
-            app.staticTexts["Export an unencrypted backup?"].exists && app.staticTexts[warning].exists
+            app.staticTexts["Export an unencrypted backup?"].exists && disclosure.count == 1
                 && app.buttons["Export…"].isHittable
         }
         capture(app, "Recovery export — full unencrypted-backup disclosure")
@@ -277,15 +278,21 @@ final class BatchImportUITests: XCTestCase {
             open.tap()
         }
         let replacementWarning = "This will replace all 0 current documents, trips and people with the selected backup. Export your current library first if you need to keep it. The backup is validated before replacement; a failed restore keeps your current library."
+        let replacementDisclosure = app.staticTexts.matching(NSPredicate(format: "label == %@", replacementWarning))
         try await wait("Empty-library replacement disclosure is missing", app: app) {
             app.staticTexts["Replace your entire library?"].exists
-                && app.staticTexts[replacementWarning].exists && replace.isHittable
+                && replacementDisclosure.count == 1 && replace.isHittable
         }
         capture(app, "Recovery restore — explicit replacement confirmation")
         replace.tap()
-        let notice = app.staticTexts["Backup restored and originals verified. Schedule reminders again on this device."]
+        let notices = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Backup restored and originals verified. Schedule reminders again on this device."
+        ))
+        let notice = notices.element
         try await reveal(notice, app: app, navigation: "Settings")
-        try await wait("The app did not verify and restore the backup", app: app) { notice.exists }
+        try await wait("The app did not verify and restore the backup", app: app) {
+            notices.count == 1 && notice.exists
+        }
         capture(app, "Recovery restore — successful app validation")
         try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
 
