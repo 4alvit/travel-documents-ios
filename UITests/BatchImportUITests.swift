@@ -394,12 +394,17 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func recoveryCounts(trips: Int, people: Int, documents: Int, app: XCUIApplication) async throws {
-        for (label, count) in [("Trips", trips), ("People", people), ("Documents", documents)] {
-            let rows = app.cells.containing(.staticText, identifier: label)
+        for (identifier, label, count) in [
+            ("settings.count.trips", "Trips", trips),
+            ("settings.count.people", "People", people),
+            ("settings.count.documents", "Documents", documents)
+        ] {
+            let rows = app.descendants(matching: .any).matching(identifier: identifier)
             let row = rows.firstMatch
             try await reveal(row, app: app, navigation: "Settings")
-            try await wait("Incorrect or ambiguous Settings count for \(label)", app: app) {
-                rows.count == 1 && row.staticTexts[String(count)].exists
+            try await wait("Incorrect or ambiguous Settings count for \(label); expected \(count)", app: app) {
+                rows.count == 1 && row.isHittable && row.label == label
+                    && (row.value as? String) == String(count)
             }
         }
     }

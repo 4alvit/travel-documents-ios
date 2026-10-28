@@ -935,9 +935,9 @@ private struct SettingsView: View {
                     Text(L10n.ui("backup.help", defaultValue: "TripDocket has no account or cloud sync. Export a backup to a place you trust before deleting the app or changing devices. A successful restore replaces the entire current library. Viewing, export and recovery do not require Pro."))
                 }
                 Section(L10n.ui("settings.device", defaultValue: "On this device")) {
-                    LabeledContent(L10n.ui("nav.trips", defaultValue: "Trips"), value: model.library.trips.count.formatted(.number.locale(L10n.formattingLocale())))
-                    LabeledContent(L10n.ui("nav.people", defaultValue: "People"), value: model.library.travelers.count.formatted(.number.locale(L10n.formattingLocale())))
-                    LabeledContent(L10n.ui("documents.title", defaultValue: "Documents"), value: model.library.documents.count.formatted(.number.locale(L10n.formattingLocale())))
+                    libraryCount(L10n.ui("nav.trips", defaultValue: "Trips"), count: model.library.trips.count, identifier: "settings.count.trips")
+                    libraryCount(L10n.ui("nav.people", defaultValue: "People"), count: model.library.travelers.count, identifier: "settings.count.people")
+                    libraryCount(L10n.ui("documents.title", defaultValue: "Documents"), count: model.library.documents.count, identifier: "settings.count.documents")
                     LabeledContent(L10n.ui("settings.originals", defaultValue: "Original files"), value: L10n.byteCount(Int64(model.library.documents.reduce(0) { $0 + $1.byteCount })))
                 }
                 Section(L10n.ui("settings.privacy", defaultValue: "Privacy & safe keeping")) {
@@ -988,6 +988,16 @@ private struct SettingsView: View {
             }
         }
     }
+
+    private func libraryCount(_ label: String, count: Int, identifier: String) -> some View {
+        let value = count.formatted(.number.locale(L10n.formattingLocale()))
+        return LabeledContent(label, value: value)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: label))
+            .accessibilityValue(Text(verbatim: value))
+            .accessibilityIdentifier(identifier)
+    }
+
 }
 
 #if DEBUG && targetEnvironment(simulator)
