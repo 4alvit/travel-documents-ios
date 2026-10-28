@@ -123,8 +123,10 @@ def tree_manifest(root, checkpoint=lambda: None, max_bytes=2*GIB):
 def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observation=None):
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
-    Directory mtimes may change during a writer. Every encountered entry is
-    measured; traversal errors/limits fail closed. The disk cap uses allocated
+    Directory mtimes may change during a writer. Every encountered entry consumes
+    the entry budget. Only confirmed absent regular compiler *.tmp leaves in
+    DerivedData/Build/Intermediates.noindex contribute no bytes; other traversal
+    errors/limits fail closed. The disk cap uses allocated
     512-byte blocks, not sparse logical lengths. Hardlinks are conservatively
     charged per entry with fresh stats, including growth seen on later aliases
     or scans. This is sampled accounting, not a quota or an instantaneous peak.
@@ -161,7 +163,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     def check():
         checkpoint()
         require(now() < deadline, 'Output scan deadline exceeded')
-    def walk(fd, depth, prefix=(), bundle=None):
+    def walk(fd, depth, prefix=(), bundle=None, pin=None):
         check()
         observation['max_depth'] = max(observation['max_depth'], depth)
         require(depth <= CAPS['scan_depth'], 'Output scan depth exceeded')
@@ -175,7 +177,52 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                 if child is exhausted:
                     break
                 relative = prefix + (child.name,)
-                s = observe('entry_stat', relative, depth, lambda: child.stat(follow_symlinks=False))
+                try:
+                    s = observe('entry_stat', relative, depth, lambda: child.stat(follow_symlinks=False))
+                except FileNotFoundError as error:
+                    if (error.errno != errno.ENOENT or bundle is not None
+                            or prefix[:3] != ('DerivedData', 'Build', 'Intermediates.noindex')
+                            or not child.name.endswith('.tmp')):
+                        raise
+                    check()
+                    # Missing entries still consume the encounter cap. A live
+                    # compiler may rename/unlink a temporary between enumeration
+                    # and stat; this is not permission to reuse partial accounting.
+                    totals['entries'] += 1
+                    require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
+                    def confirm_parent():
+                        check()
+                        require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id,
+                                'Output root replaced')
+                        check()
+                        metadata = observe('temporary_parent_fstat', prefix, depth, lambda: os.fstat(fd))
+                        check()
+                        require(stat.S_ISDIR(metadata.st_mode) and [metadata.st_dev, metadata.st_ino] == pin,
+                                'Output temporary parent descriptor replaced')
+                        require(observe('temporary_parent_identity', prefix, depth,
+                                        lambda: identity_of(Path(root).joinpath(*prefix))) == pin,
+                                'Output temporary parent replaced')
+                        check()
+                    confirm_parent()
+                    # A cached DirEntry kind may establish the vanished entry
+                    # was regular. Unknown kinds, links and directories fail.
+                    require(observe('temporary_entry_kind', relative, depth,
+                                    lambda: child.is_file(follow_symlinks=False)),
+                            'Missing compiler temporary is not a known regular entry')
+                    check()
+                    try:
+                        observe('temporary_absence_stat', relative, depth,
+                                lambda: os.stat(child.name, dir_fd=fd, follow_symlinks=False))
+                    except FileNotFoundError as absent:
+                        if absent.errno != errno.ENOENT: raise
+                    else:
+                        raise RuntimeError('Compiler temporary reappeared during absence confirmation')
+                    check()
+                    confirm_parent()
+                    totals['confirmed_absent_build_temporaries'] = totals.get('confirmed_absent_build_temporaries', 0) + 1
+                    observation['confirmed_absent_build_temporaries'] = totals['confirmed_absent_build_temporaries']
+                    observation['last_confirmed_absent_path'] = '/'.join(relative)[:256]
+                    continue
                 check()
                 totals['entries'] += 1
                 require(totals['entries'] <= CAPS['scan_entries'], 'Output scan entry cap exceeded')
@@ -200,7 +247,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                         opened = observe('directory_fstat', relative, depth+1, lambda: os.fstat(nested))
                         check()
                         require((opened.st_dev,opened.st_ino)==(s.st_dev,s.st_ino), 'Output directory replaced')
-                        walk(nested,depth+1,relative,current)
+                        walk(nested,depth+1,relative,current,[s.st_dev,s.st_ino])
                     finally: os.close(nested)
                 else:
                     require(stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode), 'Unexpected output special file')
@@ -216,7 +263,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
             require([opened.st_dev,opened.st_ino]==root_id,'Output root replaced at open')
             totals['allocated'] = allocated_bytes(opened)
             require(totals['allocated'] <= CAPS['output_bytes'], 'Owned output size cap exceeded')
-            walk(fd,0)
+            walk(fd,0,pin=root_id)
         finally: os.close(fd)
         check()
         require(observe('root_identity', (), 0, lambda: identity_of(root)) == root_id, 'Output root replaced')
