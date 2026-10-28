@@ -627,11 +627,11 @@ class BoundaryTests(unittest.TestCase):
         with patch.object(hosted,'toolchain_paths'),patch.object(hosted.core,'file_digest',return_value='a'*64):
             runner.discover_profile()
 
-    def test_first_runtime_query_gets_60_seconds_and_retains_toolchain_facts(self):
-        r=self.discovery_runner(delay=25)
+    def test_first_runtime_query_allows_70_seconds_inside_120_cap(self):
+        r=self.discovery_runner(delay=70)
         self.discover(r)
         rows=r.report['commands']
-        self.assertEqual([x['requested_cap_seconds'] for x in rows],[20,20,20,20,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in rows],[20,20,20,20,120])
         self.assertEqual(rows[-1]['argv'],['/usr/bin/xcrun','simctl','list','runtimes','--json'])
         self.assertEqual(len(r.ops.processes),5)
         self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
@@ -639,7 +639,10 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.report['profile_discovery']['sdk_version'],'18.5')
         self.assertEqual(r.report['profile_discovery']['runtime_inventory_status'],'returned')
         self.assertTrue((r.out/'resolved-profile.json').is_file())
-        self.assertAlmostEqual(rows[-1]['work_deadline']-rows[-1]['start'],52,places=6)
+        self.assertEqual(r.report['profile_discovery']['runtime_inventory_cap_seconds'],120)
+        self.assertAlmostEqual(rows[-1]['work_deadline']-rows[-1]['start'],112,places=6)
+        self.assertGreaterEqual(rows[-1]['finish']-rows[-1]['start'],70)
+        self.assertLess(rows[-1]['finish']-rows[-1]['start'],112)
         # The separate pre-create inventory and every other sim call keep 30s.
         with patch.object(r,'command',return_value='{}') as call:
             r.sim('runtime-inventory','list','runtimes','--json')
@@ -650,7 +653,7 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):self.discover(r)
         row=r.report['commands'][-1]
         self.assertEqual(row['error'],"RuntimeError('Command timeout')")
-        self.assertAlmostEqual(row['finish']-row['start'],52,places=6)
+        self.assertAlmostEqual(row['finish']-row['start'],112,places=6)
         self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         self.assertFalse(r.active)
         self.assertEqual(len(r.ops.processes),5)
@@ -662,22 +665,48 @@ class BoundaryTests(unittest.TestCase):
 
     def test_runtime_command_uses_remaining_global_budget_and_reserves_stop(self):
         r=self.runner(Ops({'delay':float('inf')}));r.ops.t=1370
-        with self.assertRaises(RuntimeError):r.sim('profile-runtimes','list','runtimes','--json',cap=60)
+        with self.assertRaises(RuntimeError):r.sim('profile-runtimes','list','runtimes','--json',cap=120)
         row=r.report['commands'][-1]
         self.assertEqual((row['work_deadline'],row['command_deadline']),(1372,1380))
         self.assertLessEqual(row['finish'],1380)
         self.assertEqual((r.limit,r.final),(1380,1500))
         r.ops.t=1372
         with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
-            r.sim('profile-runtimes','list','runtimes','--json',cap=60)
+            r.sim('profile-runtimes','list','runtimes','--json',cap=120)
         self.assertEqual(len(r.ops.processes),1)
+
+    def test_first_runtime_response_at_or_after_work_deadline_is_not_accepted(self):
+        for delay in (112.,112.01):
+            with self.subTest(delay=delay):
+                old=self.root;self.root=old/str(delay);self.root.mkdir()
+                r=self.discovery_runner(delay=delay)
+                with self.assertRaises(RuntimeError):self.discover(r)
+                self.assertNotIn('resolved_profile',r.report)
+                self.assertNotIn('host_capability',r.report)
+                self.assertEqual(r.report['profile_discovery']['runtime_inventory_status'],'pending')
+                self.assertEqual(len(r.ops.processes),5)
+                self.assertFalse(r.active)
+                self.assertLessEqual(r.report['commands'][-1]['finish'],120.)
+                self.root=old
+
+    def test_initial_runtime_timeout_keeps_TERM_KILL_inside_original_stop_reserve(self):
+        r=self.discovery_runner(delay=float('inf'),ignore_term=True)
+        with self.assertRaises(RuntimeError):self.discover(r)
+        row=r.report['commands'][-1]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(120,112,120))
+        self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertGreaterEqual(row['finish'],117)
+        self.assertLess(row['finish'],120)
+        self.assertEqual((r.limit,r.final,PROFILE['prep_seconds']),(1380,1500,60))
+        self.assertNotIn('resolved_profile',r.report);self.assertEqual(len(r.ops.processes),5)
 
     def test_runtime_output_cap_invalid_json_and_wrong_sdk_have_no_fallback(self):
         for kind in ['output','json','sdk']:
             with self.subTest(kind=kind):
                 old=self.root;self.root=old/kind;self.root.mkdir()
                 data=b'not json' if kind=='json' else json.dumps({'runtimes':[self.runtime('26.0')]}).encode()
-                r=self.discovery_runner(output=[('stdout',data)])
+                r=self.discovery_runner(delay=70,output=[('stdout',data)])
                 if kind=='output':
                     r.ops.on_spawn=lambda _:setattr(r,'log_total',64*hosted.core.MIB-1) if len(r.ops.processes)==4 else None
                 with self.assertRaises((RuntimeError,json.JSONDecodeError)):self.discover(r)
