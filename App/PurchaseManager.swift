@@ -267,10 +267,17 @@ struct PurchaseDiagnostic: Equatable {
         case notAllowed, verification, noEntitlement, unknownResult
     }
 
+    // Fixed vocabulary only: no reflection, descriptions or associated payloads.
+    enum StoreKitCase: String {
+        case unknown, userCancelled, notAvailableInStorefront, notEntitled
+        case unsupported, unrecognized
+    }
+
     let phase: Phase
     let category: Category
     let domain: String
     let code: Int?
+    let storeKitCase: StoreKitCase?
 
     init(phase: Phase, error: any Error) {
         self.phase = phase
@@ -279,16 +286,20 @@ struct PurchaseDiagnostic: Equatable {
             switch storeError {
             case .networkError(let underlying):
                 category = .network
+                storeKitCase = nil
                 detail = underlying
             case .systemError(let underlying):
                 category = .system
+                storeKitCase = nil
                 detail = underlying
             default:
                 category = .storekit
+                storeKitCase = Self.fixedCase(storeError)
                 detail = storeError
             }
         } else {
             category = .other
+            storeKitCase = nil
             detail = error
         }
         // Inspect only this error (or one public StoreKit associated value).
@@ -307,10 +318,23 @@ struct PurchaseDiagnostic: Equatable {
         self.category = category
         domain = "none"
         code = nil
+        storeKitCase = nil
+    }
+
+    private static func fixedCase(_ error: StoreKitError) -> StoreKitCase {
+        if #available(iOS 18.4, *), case .unsupported = error { return .unsupported }
+        switch error {
+        case .unknown: return .unknown
+        case .userCancelled: return .userCancelled
+        case .notAvailableInStorefront: return .notAvailableInStorefront
+        case .notEntitled: return .notEntitled
+        default: return .unrecognized
+        }
     }
 
     var accessibilityValue: String {
-        "purchase-diagnostic phase=\(phase.rawValue) category=\(category.rawValue) domain=\(domain) code=\(code.map(String.init) ?? "none")"
+        let base = "purchase-diagnostic phase=\(phase.rawValue) category=\(category.rawValue) domain=\(domain) code=\(code.map(String.init) ?? "none")"
+        return storeKitCase.map { base + " storekitCase=" + $0.rawValue } ?? base
     }
 }
 
