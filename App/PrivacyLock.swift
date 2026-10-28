@@ -228,8 +228,16 @@ private final class PrivacyLockController: NSObject {
     }
 
     private func updateShield() {
-        shieldController?.rootView = screen()
         let allowsContent = isSceneActive && isUnlocked
+        if !allowsContent {
+            // The system keyboard and its predictions are outside the document
+            // view covered below. Release input focus before the inactive card
+            // is captured; the model still owns every unsaved draft value.
+            UIView.performWithoutAnimation {
+                contentWindow?.endEditing(true)
+            }
+        }
+        shieldController?.rootView = screen()
         // Native presentations such as Quick Look are siblings of SwiftUI's
         // root. Hide their accessibility tree along with the covered window.
         contentWindow?.accessibilityElementsHidden = allowsContent ? contentAccessibilityWasHidden : true

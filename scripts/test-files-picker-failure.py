@@ -1,5 +1,6 @@
 """Pure controls for the actual evidence adapter; no native processes or signals."""
 import copy
+import errno
 import importlib.util
 import json
 import os
@@ -40,7 +41,7 @@ def tree(restore='Failed', imported='Failed'):
 
 def attachments(selected):
     rows = []
-    for kind, suffix, ext in [('png', '', 'png'), ('ax', ' — accessibility hierarchy', 'txt')]:
+    for kind, suffix, ext in [('png', '', 'png'), ('ax', selected.get('ax_suffix', ' — accessibility hierarchy'), 'txt')]:
         rows.append(dict(exportedFileName='synthetic.'+ext, deviceId=DEVICE['deviceId'],
                          configurationName=CONFIG['configurationName'], isAssociatedWithFailure=False,
                          suggestedHumanReadableName=selected['label']+suffix+'_0_'+DEVICE['deviceId']+'.'+ext))
@@ -109,8 +110,7 @@ class Controls(unittest.TestCase):
                 adapter.select_pair(data, selected)
 
     def test_actual_collect_exports_once_and_retains_only_pair_and_receipt(self):
-        for relative in ('scripts/files_picker_failure.py', 'scripts/recovery_core.py', 'scripts/recovery_process.py',
-                         'scripts/test-simulator.sh', 'UITests/AccessibilityUITests.swift', '.github/workflows/ci.yml'):
+        for relative in adapter.SOURCE_FILES:
             target = self.repo/relative; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b'Synthetic source binding fixture')
         tool = self.repo/'xcresulttool'; tool.write_bytes(b'synthetic never executed')
@@ -137,12 +137,211 @@ class Controls(unittest.TestCase):
         self.assertTrue(run.finish())
         self.assertEqual({p.name for p in run.public.iterdir()}, {'failure.png', 'failure-ax.txt', 'evidence.json'})
         receipt = json.loads((run.public/'evidence.json').read_text())
-        self.assertTrue(receipt['input_unchanged'] and receipt['all_owned_groups_closed']
+        self.assertTrue(receipt['cases']['files']['input_unchanged'] and receipt['all_owned_groups_closed']
                         and receipt['temporary_cleanup_verified'])
         self.assertFalse(receipt['runtime_acceptance'])
         self.assertNotIn(str(self.repo), (run.public/'evidence.json').read_text())
         self.assertFalse(run.out.exists())
-        self.assertEqual([r['requested_cap_seconds'] for r in run.report['commands']], [12, 12, 30, 60])
+        self.assertEqual([r['requested_cap_seconds'] for r in run.report['commands']], [30, 12, 30, 60])
+
+    def fixture_sources(self):
+        for relative in adapter.SOURCE_FILES:
+            target = self.repo/relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'Synthetic source binding fixture')
+
+    def test_checkout_failure_preserves_source_pins_primary_error_exit_and_stderr(self):
+        self.fixture_sources()
+        stderr = b'irrelevant prefix '*60+b'fatal: synthetic checkout failure\n'
+        ops = fakes.Ops(dict(exit=128, output=[('stderr', stderr)]))
+        run = self.runner(ops)
+        def on_spawn(argv):
+            self.assertEqual(set(run.evidence['source_files']), set(adapter.SOURCE_FILES))
+            self.assertFalse(run.evidence['checkout_verified'])
+        ops.on_spawn = on_spawn
+        with self.assertRaisesRegex(RuntimeError, 'checkout failed'):
+            run.collect()
+        self.assertFalse(run.finish())
+        receipt = json.loads((run.public/'evidence.json').read_text())
+        row = receipt['commands'][0]
+        self.assertEqual(row['returncode'], 128)
+        self.assertTrue(row['returncode_observed'])
+        self.assertIn('Nonzero command exit: 128', row['errors']['error'])
+        self.assertIn('fatal: synthetic checkout failure', row['stderr']['text'])
+        self.assertEqual(row['stderr']['retained_tail_bytes'], 512)
+        self.assertTrue(row['stderr']['truncated'])
+        self.assertEqual(row['stop'], dict(group_absent=True, leader_reaped=True, signals=[]))
+        self.assertTrue(receipt['temporary_cleanup_verified'] and receipt['all_owned_groups_closed'])
+        self.assertFalse(run.out.exists())
+        self.assertLessEqual((run.public/'evidence.json').stat().st_size, 16*1024)
+
+    def test_checkout_allocation_and_original_work_stop_deadline(self):
+        ops = fakes.Ops(dict(delay=10, output=[('stdout', b'passed')]), dict(delay=8))
+        run = self.runner(ops)
+        self.assertEqual(run.command('checkout', ['synthetic'], 30), 'passed')
+        self.assertEqual(run.report['commands'][0]['work_deadline'], 22)
+        self.assertEqual(run.report['commands'][0]['command_deadline'], 30)
+        ops.t = 85
+        with self.assertRaisesRegex(RuntimeError, 'checkout failed'):
+            run.command('checkout', ['synthetic'], 30)
+        row = run.report['commands'][-1]
+        self.assertEqual(row['work_deadline'], 92)
+        self.assertEqual(row['command_deadline'], 100)
+        self.assertLessEqual(ops.t, 100)
+        self.assertFalse(run.active)
+        self.assertEqual((run.limit, run.final_deadline), (100, 120))
+        self.assertIn('Command timeout', row['error'])
+        self.assertFalse(run.finish())
+        saved = run.evidence['commands'][-1]
+        self.assertIsNone(saved['returncode'])
+        self.assertFalse(saved['returncode_observed'])
+        self.assertEqual(saved['reaped_returncode'], 0)  # Explicit fake stop poll, not command completion.
+
+    def test_failed_stderr_is_only_exact_owned_regular_log(self):
+        run = self.runner()
+        outside = self.repo/'outside'; outside.write_bytes(b'private unrelated output')
+        row = dict(id='checkout', bytes=dict(stderr=outside.stat().st_size), logs=dict(stderr=str(outside)))
+        result = run.failed_stderr_tail(row, 1)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertNotIn('text', result)
+        owned = run.out/'1-stderr.log'; owned.symlink_to(outside)
+        row['logs']['stderr'] = str(owned)
+        result = run.failed_stderr_tail(row, 1)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertNotIn('text', result)
+        run.ops.t = adapter.WORK
+        with patch('os.open', side_effect=AssertionError('Late work I/O')):
+            self.assertEqual(run.failed_stderr_tail(row, 1)['reason'], 'original work deadline/interruption')
+
+    def test_payment_selection_exact_case_and_its_distinct_ax_suffix(self):
+        data = tree()
+        data['testNodes'].append(dict(nodeType='Test Case', nodeIdentifier=adapter.PAYMENT_CASES[0][0], result='Failed'))
+        selected = adapter.select_cases(data)
+        self.assertEqual([r['kind'] for r in selected], ['files', 'payment'])
+        self.assertEqual(selected[0]['case'], adapter.CASES[0][0])
+        self.assertEqual(selected[1]['ax_suffix'], ' — accessibility')
+        self.assertEqual(set(adapter.select_pair(attachments(selected[1]), selected[1])), {'png', 'ax'})
+        wrong = attachments(selected[1])
+        wrong[0]['attachments'][1]['suggestedHumanReadableName'] = wrong[0]['attachments'][1]['suggestedHumanReadableName'].replace(' — accessibility_', ' — accessibility hierarchy_')
+        with self.assertRaisesRegex(RuntimeError, 'Exact failed assertion pair missing'):
+            adapter.select_pair(wrong, selected[1])
+        data['testNodes'][-1]['result'] = 'Passed'
+        self.assertEqual(len(adapter.select_cases(data)), 1)
+        data = tree('Passed', 'Passed')
+        data['testNodes'].append(dict(nodeType='Test Case', nodeIdentifier=adapter.PAYMENT_CASES[0][0], result='Failed'))
+        self.assertEqual([r['kind'] for r in adapter.select_cases(data)], ['payment'])
+
+    def test_two_exact_exports_preserve_first_pair_if_second_fails(self):
+        for payment_fails in (False, True):
+            with self.subTest(payment_fails=payment_fails):
+                # Each synthetic run has its own original immutable scope.
+                env = dict(ENV, GITHUB_RUN_ATTEMPT='3' if payment_fails else '2')
+                self.fixture_sources()
+                tool = self.repo/'xcresulttool'; tool.write_bytes(b'synthetic never executed')
+                bundle = self.repo/'build/Tests-20261028T120000Z.xcresult'
+                bundle.mkdir(exist_ok=True); (bundle/'Info.plist').write_bytes(b'synthetic bundle')
+                data = tree('Passed')
+                data['testNodes'].append(dict(nodeType='Test Case', nodeIdentifier=adapter.PAYMENT_CASES[0][0], result='Failed'))
+                selected = {r['case']:r for r in adapter.select_cases(data)}
+                plans = [dict(output=[('stdout', v.encode())]) for v in (SHA+'\n', str(tool)+'\n', json.dumps(data), '')]
+                plans.append(dict(exit=1, output=[('stderr', b'synthetic second export rejected')]) if payment_fails else {})
+                ops = fakes.Ops(*plans)
+                run = adapter.Evidence(self.repo, env, ops)
+                exports = []
+                def on_spawn(argv):
+                    if 'export' not in argv:
+                        return
+                    exports.append(argv)
+                    if len(exports) == 2 and payment_fails:
+                        return
+                    item = selected[argv[-1]]
+                    dest = Path(argv[argv.index('--output-path')+1]); dest.mkdir()
+                    (dest/'manifest.json').write_text(json.dumps(attachments(item)))
+                    (dest/'synthetic.png').write_bytes(b'\x89PNG\r\n\x1a\n'+b'\0\0\0\rIHDR'+struct.pack('>II', 2, 3))
+                    (dest/'synthetic.txt').write_text('Synthetic owned failure hierarchy')
+                    (dest/'unrelated.log').write_text('Never publish')
+                ops.on_spawn = on_spawn
+                run.collect()
+                self.assertEqual(len(exports), 2)
+                self.assertEqual([r[-1] for r in exports], list(selected))
+                self.assertEqual(run.finish(), not payment_fails)
+                receipt = json.loads((run.public/'evidence.json').read_text())
+                self.assertEqual(receipt['cases']['files']['status'], 'complete')
+                expected = {'failure.png', 'failure-ax.txt', 'evidence.json'}
+                if payment_fails:
+                    self.assertEqual(receipt['status'], 'partial')
+                    self.assertEqual(receipt['cases']['payment']['failed_stage'], 'payment/export')
+                    self.assertIn('synthetic second export rejected', receipt['commands'][-1]['stderr']['text'])
+                else:
+                    expected.update(['payment-failure.png', 'payment-failure-ax.txt'])
+                    self.assertTrue(receipt['cases']['payment']['input_unchanged'])
+                self.assertEqual({p.name for p in run.public.iterdir()}, expected)
+                self.assertTrue(receipt['all_owned_groups_closed'] and receipt['temporary_cleanup_verified'])
+                self.assertLessEqual((run.public/'evidence.json').stat().st_size, 16*1024)
+
+    def test_first_export_failure_withholds_other_case_and_keeps_diagnosis(self):
+        self.fixture_sources()
+        tool = self.repo/'xcresulttool'; tool.write_bytes(b'synthetic never executed')
+        bundle = self.repo/'build/Tests-20261028T120000Z.xcresult'; bundle.mkdir()
+        (bundle/'Info.plist').write_bytes(b'synthetic bundle')
+        data = tree()
+        data['testNodes'].append(dict(nodeType='Test Case', nodeIdentifier=adapter.PAYMENT_CASES[0][0], result='Failed'))
+        ops = fakes.Ops(*[dict(output=[('stdout', text.encode())])
+                          for text in (SHA+'\n', str(tool)+'\n', json.dumps(data))],
+                        dict(exit=7, output=[('stderr', b'synthetic first export failure')]))
+        run = self.runner(ops)
+        run.collect()
+        self.assertEqual(len(ops.processes), 4)
+        self.assertEqual(run.evidence['cases']['files']['status'], 'failed')
+        self.assertEqual(run.evidence['cases']['payment']['status'], 'not_attempted')
+        self.assertFalse(run.finish())
+        self.assertEqual(run.evidence['commands'][-1]['returncode'], 7)
+        self.assertIn('synthetic first export failure', run.evidence['commands'][-1]['stderr']['text'])
+        self.assertTrue(run.evidence['all_owned_groups_closed'])
+
+    def test_stderr_close_error_still_closes_both_and_preserves_primary(self):
+        ops = fakes.Ops(dict(exit=7, output=[('stderr', b'synthetic primary failure')]))
+        run = self.runner(ops)
+        with self.assertRaisesRegex(RuntimeError, 'checkout failed'):
+            run.command('checkout', ['synthetic'], 30)
+        real_close = os.close
+        closed = []
+        def close_with_error(fd):
+            closed.append(fd)
+            real_close(fd)  # Avoid a real leak in the fake error control.
+            if len(closed) == 1:
+                raise OSError(errno.EIO, 'synthetic close uncertainty')
+        with patch.object(adapter.os, 'close', side_effect=close_with_error):
+            self.assertFalse(run.finish())
+        self.assertGreaterEqual(len(closed), 2)
+        self.assertNotEqual(closed[0], closed[1])
+        saved = json.loads((run.public/'evidence.json').read_text())
+        row = saved['commands'][0]
+        self.assertEqual(row['returncode'], 7)
+        self.assertIn('Nonzero command exit: 7', row['errors']['error'])
+        self.assertFalse(row['stderr']['fd_closure_confirmed'])
+        self.assertEqual(row['stderr']['secondary_close_errors'],
+                         [dict(descriptor='stderr', error_type='OSError', errno=errno.EIO)])
+        self.assertTrue(saved['temporary_cleanup_verified'] and saved['all_owned_groups_closed'])
+        self.assertFalse(run.out.exists())
+
+    def test_optional_diagnostics_exception_cannot_replace_primary_or_block_finalization(self):
+        ops = fakes.Ops(dict(exit=13))
+        run = self.runner(ops)
+        with self.assertRaisesRegex(RuntimeError, 'checkout failed'):
+            run.command('checkout', ['synthetic'], 30)
+        run.evidence.update(failed_stage='checkout', error_type='RuntimeError', error='checkout failed')
+        with patch.object(run, 'command_diagnostics', side_effect=RuntimeError('synthetic optional failure')):
+            self.assertFalse(run.finish())
+        saved = json.loads((run.public/'evidence.json').read_text())
+        self.assertEqual(saved['error'], 'checkout failed')
+        self.assertEqual(saved['failed_stage'], 'checkout')
+        self.assertEqual(saved['commands'][0]['returncode'], 13)
+        self.assertIn('Nonzero command exit: 13', saved['commands'][0]['errors']['error'])
+        self.assertEqual(saved['secondary_diagnostics_error'], dict(error_type='RuntimeError', errno=None))
+        self.assertTrue(saved['temporary_cleanup_verified'] and saved['all_owned_groups_closed'])
+        self.assertFalse(run.out.exists())
+        self.assertEqual((run.limit, run.final_deadline), (100, 120))
 
     def test_pending_scan_cannot_spend_command_stop_reserve(self):
         run = self.runner()
@@ -226,7 +425,7 @@ class Controls(unittest.TestCase):
         public = workflow.split('name: TripDocket-files-picker-failure-')[1].split('if-no-files-found')[0]
         self.assertNotIn('scratch', public)
         self.assertNotIn('*', public)
-        self.assertEqual(public.count('/public/'), 3)
+        self.assertEqual(public.count('/public/'), 5)
         self.assertEqual(workflow.count('timeout-minutes: 35'), 3)
 
 
