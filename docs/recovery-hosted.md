@@ -49,12 +49,20 @@ a SHA-256 manifest binds the tested copy. Links, submodules, unexpected paths,
 dirty source and a missing checked-in project fail. The tested snapshot and
 checkout bytes are rechecked throughout the sequence; final HEAD and clean
 status are checked too. No exported pre-commit candidate is described as a
-Git commit. Generated results live only under ignored `build/RecoveryHosted`.
+Git commit. Generated results live only under the ignored, run-and-attempt-specific
+`build/RecoveryHosted-<run-id>-<run-attempt>` directory.
 
-## One attempt and process capability
+## Explicit workflow attempts and process capability
 
 `python3 -B scripts/recovery_hosted.py` is inert without `--run`. Runtime also
-requires the expected CI job/repository/profile and `GITHUB_RUN_ATTEMPT=1`.
+requires the expected CI job/repository/profile and a positive canonical decimal
+`GITHUB_RUN_ATTEMPT` from the actual GitHub job. Standard explicitly requested
+GitHub reruns are admitted; each job still executes one bounded recovery sequence
+with one export case and one restore case. The owned-device identity, output
+directory, persisted job context and published artifact name bind the actual
+run and attempt. An existing directory for that same attempt is rejected, and
+evidence from a different attempt is never reused. All CI artifact names include
+the run ID and attempt so their evidence remains distinguishable.
 There is no separate local grant file, imported local capability record or
 automatic workflow rerun. These context checks are assertions about the job,
 not cryptographic remote attestation. The reviewed workflow plus the approved

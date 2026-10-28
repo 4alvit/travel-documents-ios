@@ -35,7 +35,9 @@ def job_context(env, profile, machine):
             and machine == profile['machine'],'Unexpected architecture')
     require(env.get('ImageOS','').startswith(profile['image_os_prefix']) and bool(env.get('ImageVersion')),
             'Missing or mismatched image identity')
-    require(env.get('GITHUB_RUN_ATTEMPT') == '1','No workflow reruns')
+    attempt=env.get('GITHUB_RUN_ATTEMPT')
+    require(isinstance(attempt,str) and re.fullmatch(r'[1-9][0-9]*',attempt) is not None,
+            'Invalid workflow run attempt')
     require(re.fullmatch(r'[0-9]+',env.get('GITHUB_RUN_ID','')) is not None,'Invalid run ID')
     require(env.get('GITHUB_EVENT_NAME') in ['pull_request','push','workflow_dispatch','merge_group'],'Unsupported event')
     require(re.fullmatch(r'[0-9a-f]{40}',env.get('GITHUB_SHA','')) is not None,'Invalid event SHA')
@@ -44,6 +46,13 @@ def job_context(env, profile, machine):
     return {k:env[k] for k in ['GITHUB_REPOSITORY','GITHUB_WORKFLOW','GITHUB_JOB','GITHUB_EVENT_NAME',
             'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_REF','GITHUB_SHA','ImageOS','ImageVersion',
             'TRIPDOCKET_RUNNER_LABEL','TRIPDOCKET_RUNNER_ARCH','TRIPDOCKET_RUNNER_ENVIRONMENT']}
+
+
+def attempt_output(workspace, job):
+    out=Path(workspace)/'build'/('RecoveryHosted-'+job['GITHUB_RUN_ID']+'-'+job['GITHUB_RUN_ATTEMPT'])
+    require(not os.path.lexists(out),'Existing recovery attempt is never reused')
+    out.parent.mkdir(exist_ok=True);core.identity_of(out.parent)
+    return out
 
 
 def parse_commit(raw, expected):
@@ -172,9 +181,10 @@ class HostedRecovery(core.Recovery):
         self.profile,self.job,self.event,self.workspace=profile,job,event,Path(workspace)
         plan={'runtime':'UNSELECTED','device_type':profile['device_type']}
         host={'machine':profile['machine'],'python':str(Path(sys.executable).resolve())}
-        run_id=str(uuid.uuid5(uuid.NAMESPACE_URL,job['GITHUB_REPOSITORY']+'/'+job['GITHUB_RUN_ID']+'/recovery'))
+        run_id=str(uuid.uuid5(uuid.NAMESPACE_URL,job['GITHUB_REPOSITORY']+'/'+job['GITHUB_RUN_ID']+'/recovery/'+job['GITHUB_RUN_ATTEMPT']))
         super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={})
         self.report['job']=job
+        self.save()  # Persist the actual run/attempt before any process acquisition.
 
     def sim(self,label,*args,cap=30):
         # Only the initial owned Files preparation gets a larger command cap.
@@ -339,9 +349,7 @@ def main(argv=None):
         require(HERE==workspace/'scripts','Entrypoint not from checked-out source')
         event=core.json_file(os.environ['GITHUB_EVENT_PATH'],8*core.MIB)
         require(shutil.disk_usage(workspace).free>=core.CAPS['admission_free_bytes'],'Hosted admission space below 16GiB')
-        out=workspace/'build/RecoveryHosted'
-        require(not os.path.lexists(out),'Existing recovery attempt is never reused')
-        out.parent.mkdir(exist_ok=True);core.identity_of(out.parent)
+        out=attempt_output(workspace,job)
         env={k:os.environ[k] for k in ['HOME','USER','TMPDIR','DEVELOPER_DIR'] if k in os.environ}
         env.update(PATH='/usr/bin:/bin:/usr/sbin:/sbin',GIT_OPTIONAL_LOCKS='0')
         runner=HostedRecovery(core.base.RealOps(env,workspace),out,profile,job,event,workspace,started)
