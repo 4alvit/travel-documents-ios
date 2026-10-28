@@ -397,6 +397,46 @@ class BoundaryTests(unittest.TestCase):
         r.report['source_manifest']={'path':'synthetic-only','sha256':'0'*64}
         return r
 
+    def test_recovery_index_policy_preserves_exact_phase_selection(self):
+        r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-0000-0000-000000000001'
+        for phase,case in hosted.core.CASES.items():
+            with self.subTest(phase=phase):
+                argv=r.phase_argv(phase)
+                self.assertEqual(argv.count('COMPILER_INDEX_STORE_ENABLE=NO'),1)
+                self.assertEqual([arg for arg in argv if arg.startswith('-only-testing:')],
+                                 ['-only-testing:TripfolioUITests/'+case.removesuffix('()')])
+                self.assertEqual(argv[argv.index('-configuration')+1],'Debug')
+                self.assertEqual(argv[argv.index('-derivedDataPath')+1],str(r.out/'DerivedData'))
+                self.assertEqual(argv[argv.index('-resultBundlePath')+1],str(r.out/(phase+'.xcresult')))
+                self.assertEqual(argv[argv.index('-parallel-testing-enabled')+1],'NO')
+                self.assertEqual(argv[argv.index('-maximum-concurrent-test-simulator-destinations')+1],'1')
+                self.assertEqual(argv[argv.index('-default-test-execution-time-allowance')+1],'300')
+                self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance')+1],'300')
+                self.assertEqual(argv[-2:],['CODE_SIGNING_ALLOWED=NO','test'])
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_seconds'],r.limit,r.final),(5,600,1380,1500))
+
+    def test_recovery_index_policy_keeps_phase_gates_and_command_budget(self):
+        r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-0000-0000-000000000001'
+        original_env,original_cwd=r.ops.env,r.ops.cwd
+        with patch.object(r,'verify_folder'),patch.object(r,'once') as once, \
+             patch.object(r,'authorize_restore') as authorize,patch.object(r,'command') as command, \
+             patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
+             patch.object(r,'read_result') as read,patch.object(r,'app_state',return_value='validated library'):
+            for phase in ['export','restore']:
+                def observed(label,argv,cap):
+                    self.assertEqual(label,'phase-'+phase);self.assertEqual(cap,600)
+                    self.assertIn('COMPILER_INDEX_STORE_ENABLE=NO',argv)
+                    self.assertEqual(r.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE'],phase)
+                    self.assertEqual(r.ops.cwd,r.candidate)
+                command.side_effect=observed
+                self.assertEqual(hosted.core.Recovery.run_phase(r,phase),'validated library')
+                once.assert_called_with('phase-'+phase);preserve.assert_called_with(phase)
+                read.assert_called_with(phase,r.out/'copy.xcresult')
+                self.assertIs(r.ops.env,original_env);self.assertIs(r.ops.cwd,original_cwd)
+            authorize.assert_called_once_with();self.assertEqual(command.call_count,2)
+            with self.assertRaisesRegex(RuntimeError,'Unknown phase'):hosted.core.Recovery.run_phase(r,'other')
+            self.assertEqual(command.call_count,2)
+
     def source_fixture(self,r):
         signed,head=self.commit(signed=True);merged,merge=self.commit([BASE,head])
         r.job['GITHUB_SHA']=merge;r.event=self.event(head)
