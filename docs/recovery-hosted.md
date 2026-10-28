@@ -104,8 +104,12 @@ work and the existing 8-second stop reserve. This is a finite cold-start policy
 allowance, changed from 60 seconds after two hosted attempts exhausted the old
 52-second work window with no output; another attempt launched successfully in
 30.44 seconds. The cause and whether 120 seconds suffices remain unestablished.
-The required final Files `terminate` keeps its 60-second cap. Other default
-command caps remain 30 seconds, including Files provider lookup. Global time,
+The required final Files `terminate` keeps its 60-second cap. The one exact owned Files
+group-container lookup has a 60-second cap (52 seconds of work plus the same
+8-second stop reserve), after a hosted query exhausted the prior 22-second work
+window with zero output. This finite policy does not establish the cause or
+guarantee completion. The export/restore AUT app and data container lookups
+and all other default command caps remain 30 seconds. Global time,
 ownership and cancellation checks can shorten or prevent any command. Files
 termination is still attempted after an uncertain launch outcome when those
 checks permit it; a secondary termination failure cannot replace the original
@@ -276,7 +280,7 @@ why the Files application had stopped or claim that recovery tests passed.
 The Files launch allowance does not extend the total work deadline. At the
 observed prelaunch elapsed time of 132.3 seconds, 1,247.7 seconds remain before
 the 1,380-second work limit. If launch/provider lookup/termination consume their
-full 120/30/60-second caps, only 1,037.7 seconds remain for export, restore and
+full 120/60/60-second caps, only 1,007.7 seconds remain for export, restore and
 evidence processing. The two 600-second phase caps therefore cannot both be
 consumed in full, even before parser/comparator work. They remain maxima clipped
 to the original remaining work time, not separately reserved allocations. Every
@@ -302,7 +306,9 @@ EN XCTest pass does not establish that the RU case executed or passed.
 
 
 Files provider readiness uses only the unused part of the original `files-group`
-lookup work deadline (22 seconds within its unchanged 30-second command cap).
+lookup work deadline (52 seconds within the 60-second Files group command cap).
+The clock starts when that original command starts; readiness never receives
+a renewed 52-second window after the lookup returns.
 After one successful launch and group lookup, the wrapper pins the exact owned
 group and observes only its `File Provider Storage` leaf. Initial leaf absence
 may settle within that existing deadline; the wrapper never creates the provider,
@@ -313,5 +319,5 @@ restored before the existing termination and cleanup paths. Bounded receipt
 fields retain the failure stage, safe owned-relative filename, observation count,
 and original deadline. This readiness policy does not establish that delayed
 provider initialization caused any earlier hosted failure. UI export/restore
-assertions, exclusive test-folder creation, all command caps, global budgets,
+assertions, exclusive test-folder creation, other command caps, global budgets,
 and cleanup proofs remain required.

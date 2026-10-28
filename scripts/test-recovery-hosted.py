@@ -1023,6 +1023,65 @@ class BoundaryTests(unittest.TestCase):
         r.owned,r.recovered=owned,True
         return r,provider
 
+    def test_files_group60_allows35seconds_and_reuses_original_lookup_work_deadline(self):
+        r,provider=self.files_runner(group={'delay':35});r.setup_files()
+        group=r.report['commands'][1]
+        self.assertEqual(group['argv'],['/usr/bin/xcrun','simctl','get_app_container',r.owned,hosted.core.FILES_BUNDLE,'groups'])
+        self.assertEqual(group['requested_cap_seconds'],60)
+        self.assertAlmostEqual(group['work_deadline']-group['start'],52)
+        self.assertAlmostEqual(group['command_deadline']-group['start'],60)
+        self.assertEqual(r.report['files_provider_readiness']['work_deadline'],group['work_deadline'])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,60,60])
+        self.assertEqual(r.folder,provider/r.folder_name);self.assertEqual(len(r.ops.processes),3)
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertFalse(r.active)
+
+    def test_files_group60_times_out_at52_keeps_primary_and_stop_proofs(self):
+        r,_=self.files_runner(group={'delay':52.5,'output':[]},
+                             terminate={'exit':3,'output':[('stderr',FILES_ALREADY_ABSENT)]})
+        with self.assertRaisesRegex(RuntimeError,'files-group failed'):r.setup_files()
+        group=r.report['commands'][1];terminate=r.report['commands'][2]
+        self.assertEqual(group['requested_cap_seconds'],60)
+        self.assertAlmostEqual(group['work_deadline']-group['start'],52)
+        self.assertEqual(group['stop_reserve_seconds'],8)
+        self.assertLessEqual(group['finish'],group['command_deadline'])
+        self.assertEqual(group['bytes']['stdout'],0)
+        self.assertTrue(group['stop']['leader_reaped'] and group['stop']['group_absent'])
+        self.assertEqual(r.report['files_setup_primary_error'],"RuntimeError('files-group failed')")
+        self.assertEqual(r.report['files_setup_failure']['stage'],'group_lookup')
+        self.assertNotIn('files_provider_readiness',r.report)
+        self.assertNotIn('accepted_nonzero_exit',terminate)
+        self.assertEqual(r.report['files_setup_terminate_error'],"RuntimeError('files-terminate failed')")
+        self.assertEqual(len(r.ops.processes),3);self.assertIsNone(r.folder)
+
+    def test_files_group60_clips_to_original_global_work_and_retains_cleanup(self):
+        r,_=self.files_runner(group={'delay':30,'output':[]});r.ops.t=1350
+        with self.assertRaisesRegex(RuntimeError,'files-group failed'):r.setup_files()
+        group=r.report['commands'][1]
+        self.assertEqual((group['requested_cap_seconds'],group['work_deadline'],group['command_deadline']),(60,1372,1380))
+        self.assertTrue(group['stop']['leader_reaped'] and group['stop']['group_absent'])
+        self.assertLessEqual(r.ops.t,1380);self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertEqual(len(r.ops.processes),2);self.assertFalse(r.active)
+        self.assertNotIn('files_provider_readiness',r.report)
+
+    def test_files_group60_scope_is_exact_and_other_app_state_lookups_stay30(self):
+        r=self.runner();r.owned='10000000-0000-0000-0000-000000000001'
+        wrong=[('get_app_container','other',hosted.core.FILES_BUNDLE,'groups'),
+               ('get_app_container',r.owned,hosted.core.BUNDLE,'groups'),
+               ('get_app_container',r.owned,hosted.core.FILES_BUNDLE,'app'),
+               ('launch',r.owned,hosted.core.FILES_BUNDLE)]
+        for argv in wrong:
+            with self.assertRaisesRegex(RuntimeError,'Unexpected Files group lookup'):r.sim('files-group',*argv)
+        with self.assertRaisesRegex(RuntimeError,'Unexpected Files group lookup'):
+            r.sim('files-group','get_app_container',r.owned,hosted.core.FILES_BUNDLE,'groups',cap=60)
+        self.assertEqual(r.ops.processes,[])
+        for label,kind in [('export-bundle','app'),('export-data','data'),('restore-bundle','app'),('restore-data','data')]:
+            r.sim(label,'get_app_container',r.owned,hosted.core.BUNDLE,kind)
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[30]*4)
+        r.ops.t=1372
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+            r.sim('files-group','get_app_container',r.owned,hosted.core.FILES_BUNDLE,'groups')
+        self.assertEqual(len(r.ops.processes),4)
+
     def test_provider_readiness_observes_exact_leaf_without_relaunch_or_bootstrap(self):
         r,provider=self.files_runner(group={'delay':3})
         provider.rmdir()
@@ -1040,13 +1099,13 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(observation['work_deadline'],r.report['commands'][1]['work_deadline'])
         self.assertLess(observation['finish'],observation['work_deadline'])
         self.assertEqual([x['id'] for x in r.report['commands']],['files-launch','files-group','files-terminate'])
-        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,60,60])
         self.assertEqual(r.folder,provider/r.folder_name)
         self.assertEqual((r.limit,r.final),(1380,1500))
         self.assertFalse(r.active)
 
     def test_provider_readiness_does_not_renew_lookup_work_deadline(self):
-        r,provider=self.files_runner(group={'delay':21})
+        r,provider=self.files_runner(group={'delay':51})
         provider.rmdir()
         with self.assertRaisesRegex(RuntimeError,'(?:provider readiness|work) deadline reached'):r.setup_files()
         observation=r.report['files_provider_readiness'];lookup=r.report['commands'][1]
@@ -1073,7 +1132,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertLessEqual(observation['probes'],445)
 
     def test_provider_readiness_rejects_appearance_at_original_deadline(self):
-        r,provider=self.files_runner(group={'delay':21});provider.rmdir()
+        r,provider=self.files_runner(group={'delay':51});provider.rmdir()
         original_sleep=r.ops.sleep
         def too_late(seconds):
             original_sleep(seconds)
@@ -1187,7 +1246,7 @@ class BoundaryTests(unittest.TestCase):
         r.setup_files()
         self.assertEqual(r.folder,provider/r.folder_name)
         self.assertEqual(list(r.folder.iterdir()),[])
-        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,60,60])
         self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
         self.assertFalse(r.active);self.assertEqual((r.limit,r.final),(1380,1500))
         with self.assertRaisesRegex(RuntimeError,'One-shot'):r.setup_files()
@@ -1270,7 +1329,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.folder,provider/r.folder_name)
         self.assertEqual(list(r.folder.iterdir()),[])
         self.assertEqual((r.out/'PhaseLogs/files-terminate-stderr.log').read_bytes(),FILES_ALREADY_ABSENT)
-        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,30,60])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[120,60,60])
         self.assertEqual(r.report['attempts'],{'files-launch':1,'files-terminate':1})
         self.assertEqual(len(r.ops.processes),3);self.assertFalse(r.ops.signals or r.active)
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])

@@ -193,6 +193,10 @@ class HostedRecovery(core.Recovery):
             require(self.owned and args==(action,self.owned,core.FILES_BUNDLE) and cap==30,
                     'Unexpected Files preparation command')
             cap=120 if label=='files-launch' else 60
+        if label=='files-group':
+            require(self.owned and args==('get_app_container',self.owned,core.FILES_BUNDLE,'groups') and cap==30,
+                    'Unexpected Files group lookup')
+            cap=60
         return super().sim(label,*args,cap=cap)
 
     def accept_nonzero_exit(self, p, record, handles):
