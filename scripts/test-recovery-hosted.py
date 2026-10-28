@@ -280,7 +280,11 @@ class BoundaryTests(unittest.TestCase):
     def test_ci_artifacts_bind_run_attempt_without_broadening_recovery_uploads(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         names=[line.strip() for line in workflow.splitlines() if 'name: TripDocket-' in line]
-        self.assertEqual(len(names),4)
+        self.assertEqual(len(names),5)
+        self.assertEqual({name.split('${{')[0].strip() for name in names},
+                         {'name: TripDocket-tests-', 'name: TripDocket-simulator-',
+                          'name: TripDocket-privacy-ipad-', 'name: TripDocket-recovery-',
+                          'name: TripDocket-files-picker-failure-'})
         self.assertTrue(all('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in name for name in names))
         prefix='build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/'
         paths=[line.strip() for line in workflow.splitlines() if 'build/RecoveryHosted' in line]
@@ -2050,12 +2054,12 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(path.stat().st_size, size)
         return path
 
-    def compiler_vanish_scan(self, *, relative=None, scenario='absent', **caps):
+    def derived_vanish_scan(self, *, relative=None, scenario='absent', **caps):
         relative=relative or 'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp'
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve();target=root/relative
         target.parent.mkdir(parents=True,exist_ok=True)
         directory=scenario in ('directory','directory_open')
-        target.mkdir() if directory else target.write_bytes(b'compiler temporary')
+        target.mkdir() if directory else target.symlink_to('missing-target') if scenario=='symlink' else target.write_bytes(b'mutable derived output')
         (root/'retained-output').write_bytes(b'x'*4096)
         if scenario=='late_dense_cap':
             caps['output_bytes']=sum(path.lstat().st_blocks*512 for path in [root]+list(root.rglob('*')) if path!=target)-1
@@ -2112,69 +2116,87 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertTrue(triggered[0]);self.assertCountEqual(opened,closed)
         return result,observation,root,absence_stats,clock[0]
 
-    def test_compiler_temporary_stat_race_confirms_absence_and_finishes_actual_accounting(self):
-        for suffix in ['OCRService-bf16349b.o.tmp','Tripfolio.swiftdeps.tmp']:
-            relative='DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/'+suffix
-            with self.subTest(suffix=suffix):
-                result,observation,root,probes,_=self.compiler_vanish_scan(relative=relative)
-                self.assertIsInstance(result,dict);self.assertEqual(probes,[suffix])
-                paths=[root]+list(root.rglob('*'))
-                self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in paths))
-                self.assertEqual(result['logical'],sum(p.stat().st_size for p in paths if p.is_file()))
-                self.assertEqual(result['entries'],len(paths)) # Includes the vanished encounter.
-                self.assertEqual(result['confirmed_absent_build_temporaries'],1)
+    def test_derived_leaf_stat_race_confirms_absence_and_finishes_actual_accounting(self):
+        paths = [
+            'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp',
+            'DerivedData/Index.noindex/DataStore/v5/_strings-252B4LO3KJQZ2.pcm-1XFHK3MYD85V5-a4840fb3',
+            'DerivedData/Index.noindex/DataStore/v5/records/AB/Tripfolio-record',
+            'DerivedData/ModuleCache.noindex/AB/Tripfolio.pcm',
+            'DerivedData/Build/Intermediates.noindex/Tripfolio.swiftdeps',
+        ]
+        for relative in paths:
+            with self.subTest(relative=relative):
+                result,observation,root,probes,_=self.derived_vanish_scan(relative=relative)
+                self.assertIsInstance(result,dict);self.assertEqual(probes,[Path(relative).name])
+                retained=[root]+list(root.rglob('*'))
+                self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in retained))
+                self.assertEqual(result['logical'],sum(p.stat().st_size for p in retained if p.is_file()))
+                self.assertEqual(result['entries'],len(retained)) # Includes the vanished encounter.
+                self.assertEqual(result['confirmed_absent_derived_entries'],1)
                 self.assertEqual(observation['status'],'completed')
                 self.assertEqual(observation['last_confirmed_absent_path'],relative)
 
-    def test_compiler_temporary_absence_scope_excludes_other_outputs_and_non_tmp(self):
-        for relative in ['evidence.xcresult/result.o.tmp','DerivedData/Index.noindex/record.tmp','Source/input.tmp',
-                         'DerivedData/Build/Intermediates.noindex/object.o']:
+    def test_derived_leaf_absence_scope_excludes_products_xcresults_and_outside(self):
+        for relative in [
+                'evidence.xcresult/result.o.tmp', 'Source/input.tmp', 'Cache/Index.noindex/record.tmp',
+                'DerivedData/Build/Products/Debug-iphonesimulator/Tripfolio.app/Tripfolio',
+                'DerivedData/Build/Products',
+                'DerivedData/evidence.xcresult/result.o.tmp',
+                'DerivedData/Build/Intermediates.noindex/evidence.xcresult/result.tmp',
+                'DerivedData/ModuleCache.noindex/final.xcresult']:
             with self.subTest(relative=relative):
-                result,observation,_,probes,_=self.compiler_vanish_scan(relative=relative)
+                result,observation,_,probes,_=self.derived_vanish_scan(relative=relative)
                 self.assertIsInstance(result,FileNotFoundError);self.assertEqual(probes,[])
                 self.assertEqual(observation['status'],'failed')
-                self.assertNotIn('confirmed_absent_build_temporaries',observation)
+                self.assertNotIn('confirmed_absent_derived_entries',observation)
 
-    def test_compiler_temporary_absence_never_suppresses_permission_or_other_errno(self):
-        for scenario in ['entry_permission','entry_other_errno','confirmation_permission','confirmation_other_errno']:
-            with self.subTest(scenario=scenario):
-                result,observation,_,_,_=self.compiler_vanish_scan(scenario=scenario)
-                self.assertIsInstance(result,OSError);self.assertNotEqual(result.errno,errno.ENOENT)
+    def test_derived_leaf_absence_never_suppresses_permission_or_other_errno(self):
+        for relative in [None,'DerivedData/Index.noindex/DataStore/v5/index-record']:
+            for scenario in ['entry_permission','entry_other_errno','confirmation_permission','confirmation_other_errno']:
+                with self.subTest(relative=relative,scenario=scenario):
+                    result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario=scenario)
+                    self.assertIsInstance(result,OSError);self.assertNotEqual(result.errno,errno.ENOENT)
+                    self.assertEqual(observation['status'],'failed')
+
+    def test_derived_leaf_absence_rejects_root_parent_and_descriptor_replacement(self):
+        for relative in [None,'DerivedData/ModuleCache.noindex/AB/Tripfolio.pcm']:
+            for scenario in ['root_replaced','parent_replaced','fd_replaced','final_root_replaced']:
+                with self.subTest(relative=relative,scenario=scenario):
+                    result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario=scenario)
+                    self.assertIsInstance(result,RuntimeError);self.assertIn('replaced',str(result))
+                    self.assertEqual(observation['status'],'failed')
+                    self.assertNotIn('confirmed_absent_derived_entries',observation)
+
+    def test_derived_leaf_absence_requires_known_regular_kind_and_strict_directory_open(self):
+        for relative in [None,'DerivedData/Index.noindex/DataStore/v5/index-record']:
+            for scenario in ['directory','symlink','unknown_kind','directory_open']:
+                with self.subTest(relative=relative,scenario=scenario):
+                    result,observation,_,probes,_=self.derived_vanish_scan(relative=relative,scenario=scenario)
+                    self.assertIsInstance(result,(RuntimeError,FileNotFoundError));self.assertEqual(probes,[])
+                    self.assertEqual(observation['status'],'failed')
+
+    def test_derived_leaf_reappearance_never_rebinds_or_accepts_partial_scan(self):
+        for relative in [None,'DerivedData/Index.noindex/DataStore/v5/index-record']:
+            with self.subTest(relative=relative):
+                result,observation,_,probes,_=self.derived_vanish_scan(relative=relative,scenario='reappeared')
+                self.assertIsInstance(result,RuntimeError);self.assertIn('reappeared',str(result))
+                self.assertEqual(len(probes),1);self.assertEqual(observation['status'],'failed')
+                self.assertNotIn('confirmed_absent_derived_entries',observation)
+
+    def test_derived_leaf_absence_preserves_encounter_deadline_and_allocation_caps(self):
+        for relative,cap in [(None,8),('DerivedData/Index.noindex/DataStore/v5/index-record',4)]:
+            with self.subTest(relative=relative):
+                result,observation,_,probes,_=self.derived_vanish_scan(relative=relative,scan_entries=cap)
+                self.assertIsInstance(result,RuntimeError);self.assertIn('entry cap',str(result));self.assertEqual(probes,[])
+                for scenario,expected_probes in [('late_entry',0),('late_confirmation',1)]:
+                    with self.subTest(scenario=scenario):
+                        result,observation,_,probes,elapsed=self.derived_vanish_scan(relative=relative,scenario=scenario)
+                        self.assertIsInstance(result,RuntimeError);self.assertIn('deadline',str(result))
+                        self.assertEqual(elapsed,10.);self.assertEqual(len(probes),expected_probes)
+                        self.assertEqual(observation['status'],'failed')
+                result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario='late_dense_cap')
+                self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
                 self.assertEqual(observation['status'],'failed')
-
-    def test_compiler_temporary_absence_rejects_root_parent_and_descriptor_replacement(self):
-        for scenario in ['root_replaced','parent_replaced','fd_replaced','final_root_replaced']:
-            with self.subTest(scenario=scenario):
-                result,observation,_,_,_=self.compiler_vanish_scan(scenario=scenario)
-                self.assertIsInstance(result,RuntimeError);self.assertIn('replaced',str(result))
-                self.assertEqual(observation['status'],'failed')
-                self.assertNotIn('confirmed_absent_build_temporaries',observation)
-
-    def test_compiler_temporary_absence_requires_known_regular_kind_and_strict_directory_open(self):
-        for scenario in ['directory','unknown_kind','directory_open']:
-            with self.subTest(scenario=scenario):
-                result,observation,_,probes,_=self.compiler_vanish_scan(scenario=scenario)
-                self.assertIsInstance(result,(RuntimeError,FileNotFoundError));self.assertEqual(probes,[])
-                self.assertEqual(observation['status'],'failed')
-
-    def test_compiler_temporary_reappearance_never_rebinds_or_accepts_partial_scan(self):
-        result,observation,_,probes,_=self.compiler_vanish_scan(scenario='reappeared')
-        self.assertIsInstance(result,RuntimeError);self.assertIn('reappeared',str(result))
-        self.assertEqual(len(probes),1);self.assertEqual(observation['status'],'failed')
-        self.assertNotIn('confirmed_absent_build_temporaries',observation)
-
-    def test_compiler_temporary_absence_preserves_encounter_deadline_and_allocation_caps(self):
-        result,observation,_,probes,_=self.compiler_vanish_scan(scan_entries=8)
-        self.assertIsInstance(result,RuntimeError);self.assertIn('entry cap',str(result));self.assertEqual(probes,[])
-        for scenario,expected_probes in [('late_entry',0),('late_confirmation',1)]:
-            with self.subTest(scenario=scenario):
-                result,observation,_,probes,elapsed=self.compiler_vanish_scan(scenario=scenario)
-                self.assertIsInstance(result,RuntimeError);self.assertIn('deadline',str(result))
-                self.assertEqual(elapsed,10.);self.assertEqual(len(probes),expected_probes)
-                self.assertEqual(observation['status'],'failed')
-        result,observation,_,_,_=self.compiler_vanish_scan(scenario='late_dense_cap')
-        self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
-        self.assertEqual(observation['status'],'failed')
 
     def test_sparse_derived_data_uses_allocated_disk_budget(self):
         sparse = self.sparse(self.root / 'DerivedData' / 'index')
