@@ -177,15 +177,70 @@ class BoundaryTests(unittest.TestCase):
              patch.object(hosted.core.base,'RealOps',side_effect=AssertionError('NO BOUNDARY')) as boundary:
             self.assertEqual(hosted.main(['--run']),1);boundary.assert_not_called()
 
-    def test_job_requires_matching_host_profile_and_first_attempt(self):
+    def test_job_requires_matching_host_profile_and_valid_attempt(self):
         env=self.env();hosted.job_context(env,PROFILE,'arm64')
         for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_REPOSITORY','other/repo'),('GITHUB_JOB','validate'),
                           ('TRIPDOCKET_RUNNER_LABEL','macos-15-intel'),('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted'),
-                          ('TRIPDOCKET_RUNNER_ARCH','X64'),('GITHUB_RUN_ATTEMPT','2'),('ImageVersion',''),
+                          ('TRIPDOCKET_RUNNER_ARCH','X64'),('GITHUB_RUN_ATTEMPT','0'),('ImageVersion',''),
                           ('ImageOS','macos14'),('GITHUB_EVENT_NAME','pull_request_target'),('GITHUB_SHA','bad'),
                           ('SIMCTL_CHILD_TEST','1'),('DYLD_INSERT_LIBRARIES','/tmp/example')]:
             with self.subTest(key=key),self.assertRaises(RuntimeError):hosted.job_context({**env,key:value},PROFILE,'arm64')
         with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'x86_64')
+
+    def test_explicit_workflow_attempt_metadata_is_positive_and_canonical(self):
+        for attempt in ('1', '2', '17'):
+            with self.subTest(attempt=attempt):
+                env={**self.env(),'GITHUB_RUN_ATTEMPT':attempt}
+                self.assertEqual(hosted.job_context(env,PROFILE,'arm64')['GITHUB_RUN_ATTEMPT'],attempt)
+        for attempt in (None, '', '0', '-1', '+2', '02', '2.0', '2 ', ' 2', '2\n', '٢', 2):
+            with self.subTest(attempt=attempt),self.assertRaises(RuntimeError):
+                hosted.job_context({**self.env(),'GITHUB_RUN_ATTEMPT':attempt},PROFILE,'arm64')
+        env=self.env();del env['GITHUB_RUN_ATTEMPT']
+        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'arm64')
+
+    def test_explicit_attempts_keep_distinct_owned_identity_and_receipts(self):
+        workspace=self.root/'repo';workspace.mkdir()
+        runners=[];original=[]
+        for run,attempt in [('123','1'),('123','2'),('124','2')]:
+            env={**self.env(),'GITHUB_RUN_ID':run,'GITHUB_RUN_ATTEMPT':attempt}
+            job=hosted.job_context(env,PROFILE,'arm64')
+            out=hosted.attempt_output(workspace,job)
+            r=hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0)
+            receipt=(out/'receipt.json').read_bytes()
+            self.assertEqual(json.loads(receipt)['job']['GITHUB_RUN_ID'],run)
+            self.assertEqual(json.loads(receipt)['job']['GITHUB_RUN_ATTEMPT'],attempt)
+            with self.assertRaisesRegex(RuntimeError,'never reused'):
+                hosted.attempt_output(workspace,job)
+            with self.assertRaises(FileExistsError):
+                hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0)
+            runners.append(r);original.append(receipt)
+        self.assertEqual(len({r.out for r in runners}),3)
+        self.assertEqual(len({r.folder_name for r in runners}),3)
+        for r,receipt in zip(runners,original):
+            self.assertEqual((r.out/'receipt.json').read_bytes(),receipt)
+            self.assertEqual(r.ops.processes,[])
+
+    def test_attempt_output_rejects_dangling_evidence_and_symlink_parent(self):
+        workspace=self.root/'repo';workspace.mkdir();job=hosted.job_context(self.env(),PROFILE,'arm64')
+        out=hosted.attempt_output(workspace,job)
+        out.symlink_to(self.root/'missing')
+        with self.assertRaisesRegex(RuntimeError,'never reused'):hosted.attempt_output(workspace,job)
+        out.unlink();out.parent.rmdir()
+        target=self.root/'other';target.mkdir();(workspace/'build').symlink_to(target,target_is_directory=True)
+        with self.assertRaises(RuntimeError):hosted.attempt_output(workspace,job)
+        self.assertEqual(list(target.iterdir()),[])
+
+    def test_ci_artifacts_bind_run_attempt_without_broadening_recovery_uploads(self):
+        workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
+        names=[line.strip() for line in workflow.splitlines() if 'name: TripDocket-' in line]
+        self.assertEqual(len(names),4)
+        self.assertTrue(all('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in name for name in names))
+        prefix='build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/'
+        paths=[line.strip() for line in workflow.splitlines() if 'build/RecoveryHosted' in line]
+        self.assertTrue(all(path.startswith(prefix) for path in paths))
+        self.assertEqual({path[len(prefix):] for path in paths},
+                         {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
+        self.assertNotIn('/*.log',workflow)
 
     def runtime(self,version='18.5'):
         return {'version':version,'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-'+version.replace('.','-'),
@@ -339,8 +394,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(list((r.out/'PhaseLogs').glob('*')),[])
         self.assertEqual(ps.read_text(),'private process listing')
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
-        self.assertNotIn('build/RecoveryHosted/*.log',workflow)
-        self.assertIn('build/RecoveryHosted/PhaseLogs/',workflow)
+        self.assertNotIn('/*.log',workflow)
+        self.assertIn('build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/PhaseLogs/',workflow)
 
     def test_only_xcode_phase_logs_enter_public_directory(self):
         r=self.runner();ps=r.out/'2-stdout.log';ps.write_text('private process listing')

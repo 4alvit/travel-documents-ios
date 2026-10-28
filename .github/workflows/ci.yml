@@ -40,14 +40,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-tests-${{ github.sha }}
+          name: TripDocket-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/*.xcresult
           if-no-files-found: warn
           retention-days: 7
       - name: Simulator artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-simulator-${{ github.sha }}
+          name: TripDocket-simulator-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/ci-preview/TripDocket-Simulator.zip
             build/ci-preview/provenance.json
@@ -73,7 +73,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-privacy-ipad-${{ github.sha }}
+          name: TripDocket-privacy-ipad-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/PrivacySupport-iPad/
           if-no-files-found: warn
           retention-days: 7
@@ -102,15 +102,15 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-recovery-${{ github.sha }}-${{ github.run_attempt }}
+          name: TripDocket-recovery-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/RecoveryHosted/*.json
-            build/RecoveryHosted/PhaseLogs/
-            build/RecoveryHosted/Capability/
-            build/RecoveryHosted/*.xcresult/
-            build/RecoveryHosted/BeforeReset/
-            build/RecoveryHosted/AfterRestore/
-            build/RecoveryHosted/*-attachments/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/PhaseLogs/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/Capability/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*.xcresult/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/BeforeReset/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/AfterRestore/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*-attachments/
           if-no-files-found: warn
           retention-days: 7
           include-hidden-files: true
