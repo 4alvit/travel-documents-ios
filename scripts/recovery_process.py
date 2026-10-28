@@ -118,7 +118,7 @@ class Smoke:
         require(not stop.get('attempted'), 'No repeated signalling after stop attempt')
         stop['attempted'] = True
         stop['signals_semantics'] = 'send_wrapper_returned_not_delivery'
-        confirmation_end = None
+        confirmation_end = confirmation_kind = term_end = None
         try:
             def check():
                 require(self.active.get(p.pid) is p, 'Unowned group')
@@ -126,6 +126,7 @@ class Smoke:
                         'Stop deadline reached')
 
             def done():
+                nonlocal confirmation_end, confirmation_kind
                 check()
                 reaped = observed(self, record, 'stop', 'poll', p.poll) is not None
                 check()
@@ -136,13 +137,19 @@ class Smoke:
                     try:
                         absent = observed(self, record, 'stop', 'group_probe', lambda: self.ops.absent(p))
                     except PermissionError as error:
-                        if confirmation_end is None or error.errno != errno.EPERM:
+                        if error.errno != errno.EPERM or (confirmation_end is None and term_end is None):
                             raise
+                        if confirmation_end is None:
+                            # After TERM becomes unknown, observe only; never escalate.
+                            check()
+                            require(self.ops.now() < term_end, 'Stop deadline reached')
+                            confirmation_end, confirmation_kind = term_end, 'term'
+                            stop['post_term_confirmation'] = {'deadline': term_end - self.t0, 'status': 'pending'}
                         check()
                         # Unknown is never absence. Keep bounded history while the
-                        # same owned child settles after the one successful KILL.
+                        # same owned child settles after the successful signal.
                         probe = record['process_observations']['stop.group_probe']
-                        unknown = stop.setdefault('post_kill_unknown_probes',
+                        unknown = stop.setdefault('post_' + confirmation_kind + '_unknown_probes',
                                                   {'count': 0, 'first_start': probe['last_start'],
                                                    'exception_type': 'PermissionError', 'errno': errno.EPERM})
                         unknown.update(count=unknown['count'] + 1, last_start=probe['last_start'],
@@ -160,6 +167,8 @@ class Smoke:
             complete = done()
             if not complete:
                 for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+                    if sig == signal.SIGKILL:
+                        term_end = None
                     check()
                     sent = None
                     if not stop['group_absent']:
@@ -167,8 +176,10 @@ class Smoke:
                                         lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))
                     end = min(deadline, self.ops.now() + grace)
+                    if sig == signal.SIGTERM and sent == 'syscall_returned':
+                        term_end = end
                     if sig == signal.SIGKILL and sent == 'syscall_returned':
-                        confirmation_end = end
+                        confirmation_end, confirmation_kind = end, 'kill'
                         stop['post_kill_confirmation'] = {'deadline': end - self.t0, 'status': 'pending'}
                     check()
                     while self.ops.now() < end:
@@ -186,11 +197,11 @@ class Smoke:
             check()
             require(complete, 'Group absence/reap unconfirmed')
             if confirmation_end is not None:
-                stop['post_kill_confirmation']['status'] = 'confirmed'
+                stop['post_' + confirmation_kind + '_confirmation']['status'] = 'confirmed'
             self.active.pop(p.pid)
         except BaseException as error:
             if confirmation_end is not None:
-                stop['post_kill_confirmation']['status'] = 'unconfirmed'
+                stop['post_' + confirmation_kind + '_confirmation']['status'] = 'unconfirmed'
             stop['error'] = repr(error)
             raise
 

@@ -99,8 +99,7 @@ termination is still attempted after an uncertain launch outcome when those
 checks permit it; a secondary termination failure cannot replace the original
 launch/provider failure. No command or Simulator creation is retried. Before spawning, work commands force one existing
 resource scan after intent/log setup and recheck cancellation and the remaining
-stop reserve. Ordinary sampled scans, scan bounds and the cleanup bypass do not
-change. Command failures retain the primary cause plus separate log-close,
+stop reserve. Ordinary sampled scans and the cleanup bypass remain enabled. Command failures retain the primary cause plus separate log-close,
 stdout-read, receipt, finalization and cap errors. Both log closes are attempted.
 The capability validator rejects any such secondary failure even when the main
 failure is the deliberately expected timeout.
@@ -111,6 +110,17 @@ and the actual failed CLI result together; an earlier receipt is not a success
 signal. These source changes do not establish the cause or resolution of the
 previous output-scan deadline or EPERM failures.
 
+Recovery process cleanup also retains read-only confirmation after a successful
+TERM wrapper if a subsequent group probe reports EPERM. This UNKNOWN state may
+settle only within the original five-second TERM grace and original stop
+deadline, with the exact owned Popen object. Confirmation requires both actual
+leader reaping and ESRCH-derived group absence. Once TERM becomes unknown, no
+KILL escalation is allowed; unknown at the deadline fails closed and keeps
+ownership unresolved. EPERM before TERM, from signal delivery or from polling,
+and other probe errors remain failures. The existing post-KILL confirmation and
+capability acceptance rules are unchanged. This secondary cleanup correction
+cannot erase the primary scan failure or prove cleanup for an older run.
+
 The separate iPad guidance driver gives only its initial runtime query a
 60-second wait timeout. Its other defaults remain 30 seconds, with 1,440 seconds
 of work and 180 seconds reserved for cleanup. Each command leaves up to 7 seconds
@@ -119,6 +129,33 @@ the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
 visible alongside secondary stop or receipt-write errors. These are cooperative
 deadline checks between operations; they do not preempt a blocked OS syscall.
+
+One complete resource sample has a fixed five-second cooperative allowance,
+clipped to the overall work limit and any pending command's original work
+deadline. It covers both free-space reads and the full output traversal; it is
+never restarted within a sample. The next ordinary sample remains due one
+second after a completed sample. This is an explicit scheduling policy change
+from two seconds, while all byte, entry, depth, command, phase and cleanup limits
+remain fixed. A failed hosted scan exceeded the old allowance after 328 complete
+samples; the last completed sample counted 5,132 entries and 307,924,992 allocated
+bytes. The old receipt did not retain failed-scan progress, so it establishes
+neither the cause of the delay nor that five seconds would have sufficed.
+
+Capability commands keep their own pending-command context when delegating a
+resource checkpoint to the parent output scanner. Their admission, execution
+and finalization scans use the probe's original work deadline and the parent's
+preparation limit. This context is passed for each call, so it cannot leave a
+stale deadline on later parent work or change the process-stop grace.
+
+A failed sample is never appended to completed resource accounting. The first
+failure retains one bounded diagnostic record: stage, partial counts, relative
+path (at most 256 characters), and last/longest filesystem-operation spans.
+These elapsed spans include scheduling and wrapper time, not just syscall time.
+Only the last and longest spans are retained; there is no per-entry history or
+extra diagnostic filesystem probe. Permission, identity, traversal and resource
+errors still fail closed. All existing directory handles are closed on failure.
+Checks before and after operations cannot preempt a blocked OS call, and partial
+counts never establish compliance or UI acceptance.
 
 The work free-space floor is 8 GiB. The 8 GiB owned-output disk limit uses
 allocated 512-byte blocks, so a sparse DerivedData file's logical length alone
