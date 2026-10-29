@@ -506,17 +506,28 @@ class Controls(unittest.TestCase):
 
     def test_workflow_preserves_original_result_and_full_bundle_upload(self):
         workflow = (HERE.parent/'.github/workflows/ci.yml').read_text()
-        original = workflow.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
-        self.assertIn('id: integration', original)
-        self.assertIn('run: bash scripts/test-simulator.sh', original)
-        self.assertNotIn('continue-on-error', original)
-        self.assertIn("if: ${{ failure() && steps.integration.outcome == 'failure' }}", workflow)
-        self.assertIn('path: build/*.xcresult', workflow)
-        public = workflow.split('name: TripDocket-files-picker-failure-')[1].split('if-no-files-found')[0]
-        self.assertNotIn('scratch', public)
-        self.assertNotIn('*', public)
-        self.assertEqual(public.count('/public/'), 5)
-        self.assertEqual(workflow.count('timeout-minutes: 35'), 3)
+        jobs={job:workflow.split('  '+job+':\n',1)[1].split('\n  '+following+':\n',1)[0]
+              for job,following in [('validate','ui_guidance'),('ui_guidance','privacy_ipad')]}
+        for job,cohort in [('validate','core-purchase'),('ui_guidance','ui-guidance')]:
+            body=jobs[job]
+            original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
+            self.assertIn('id: integration',original)
+            self.assertIn('run: bash scripts/test-simulator.sh --cohort '+cohort,original)
+            self.assertNotIn('continue-on-error',original)
+            self.assertIn("if: ${{ failure() && steps.integration.outcome == 'failure' }}",body)
+            self.assertIn('path: build/*.xcresult',body)
+            public=body.split('name: TripDocket-files-picker-failure-'+cohort+'-')[1].split('if-no-files-found')[0]
+            self.assertNotIn('scratch',public);self.assertNotIn('*',public)
+            paths=[line.strip() for line in public.splitlines() if '/public/' in line]
+            prefix='build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/'
+            self.assertEqual(paths,[prefix+name for name in
+                ['failure.png','failure-ax.txt','evidence.json','payment-failure.png','payment-failure-ax.txt']])
+        # Four definitions expand to five macOS jobs: the two locales remain
+        # serial within the iPad matrix; both Main cohorts are independent.
+        self.assertEqual(workflow.count('timeout-minutes: 35'),4)
+        ipad=workflow.split('  privacy_ipad:\n',1)[1].split('  recovery:\n',1)[0]
+        self.assertIn('max-parallel: 1',ipad);self.assertIn('fail-fast: false',ipad)
+        self.assertIn('locale: [en-US, ru-RU]',ipad)
 
 
 if __name__ == '__main__':

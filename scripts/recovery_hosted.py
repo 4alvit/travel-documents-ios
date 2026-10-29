@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'ea6c5d426245c4923e0bd23dd27e7c03183acd085e79fa0d1a3b162b5815f012'
+CORE_SHA = '3449acdcd09afe2d1ea83c93975e16a0e0259815a1506517ccb54cb2ae3a56db'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')

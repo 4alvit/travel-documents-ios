@@ -7,6 +7,8 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 import signal
 import stat
@@ -280,11 +282,14 @@ class BoundaryTests(unittest.TestCase):
     def test_ci_artifacts_bind_run_attempt_without_broadening_recovery_uploads(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         names=[line.strip() for line in workflow.splitlines() if 'name: TripDocket-' in line]
-        self.assertEqual(len(names),5)
+        self.assertEqual(len(names),7)
+        self.assertEqual(len(set(names)),7)
         self.assertEqual({name.split('${{')[0].strip() for name in names},
-                         {'name: TripDocket-tests-', 'name: TripDocket-simulator-',
-                          'name: TripDocket-privacy-ipad-', 'name: TripDocket-recovery-',
-                          'name: TripDocket-files-picker-failure-'})
+                         {'name: TripDocket-tests-core-purchase-', 'name: TripDocket-tests-ui-guidance-',
+                          'name: TripDocket-simulator-', 'name: TripDocket-privacy-ipad-',
+                          'name: TripDocket-recovery-',
+                          'name: TripDocket-files-picker-failure-core-purchase-',
+                          'name: TripDocket-files-picker-failure-ui-guidance-'})
         self.assertTrue(all('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in name for name in names))
         prefix='build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/'
         paths=[line.strip() for line in workflow.splitlines() if 'build/RecoveryHosted' in line]
@@ -292,6 +297,50 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual({path[len(prefix):] for path in paths},
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
+
+    def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
+        driver=(HERE/'test-simulator.sh').read_text()
+        plan=json.loads((HERE.parent/'Tripfolio.xctestplan').read_text())
+        targets={row['target']['name'] for row in plan['testTargets']}
+        self.assertEqual(targets,{'TripfolioTests','TripfolioUITests'})
+        arrays=[shlex.split(body) for body in re.findall(r'TEST_ARGUMENTS=\(([^)]*)\)',driver)]
+        self.assertEqual(arrays,[['test'],
+            ['test','-only-testing:TripfolioTests','-only-testing:TripfolioUITests/PurchaseUITests',
+             '-only-testing:TripfolioUITests/TripfolioUITests'],
+            ['test','-only-testing:TripfolioUITests','-skip-testing:TripfolioUITests/PurchaseUITests',
+             '-skip-testing:TripfolioUITests/TripfolioUITests']])
+        # Evaluate the actual fixed selectors on current classes and future
+        # classes: neither cohort can silently drop newly added test methods.
+        cases={target+'/FutureTests/testFuture' for target in targets}
+        cases.update('TripfolioUITests/'+name+'/testExample' for name in
+                     ['PurchaseUITests','TripfolioUITests','AccessibilityUITests',
+                      'BatchImportUITests','LocalizationUITests','PrivacySupportUITests',
+                      'PrivacyTransitionUITests'])
+        def selected(argv,case):
+            included=[arg.split(':',1)[1] for arg in argv if arg.startswith('-only-testing:')]
+            excluded=[arg.split(':',1)[1] for arg in argv if arg.startswith('-skip-testing:')]
+            matches=lambda prefix:case==prefix or case.startswith(prefix+'/')
+            return any(map(matches,included)) and not any(map(matches,excluded))
+        cohorts=[{case for case in cases if selected(argv,case)} for argv in arrays[1:]]
+        self.assertFalse(cohorts[0]&cohorts[1]);self.assertEqual(cohorts[0]|cohorts[1],cases)
+        parser=driver.split('xcodegen generate',1)[0]
+        self.assertIn('if [[ $# -ne 0 ]]; then',parser)
+        self.assertIn('if [[ $# -ne 2 || "$1" != "--cohort" ]]; then',parser)
+        self.assertEqual(parser.count('exit 2'),2)
+        self.assertEqual(re.findall(r'^    ([a-z-]+)\)$',parser,re.MULTILINE),['core-purchase','ui-guidance'])
+        self.assertIn('CODE_SIGNING_ALLOWED=NO "${TEST_ARGUMENTS[@]}"',driver)
+        for bound in ['-parallel-testing-enabled NO','-maximum-concurrent-test-simulator-destinations 1',
+                      '-default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 480']:
+            self.assertIn(bound,driver)
+        workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
+        self.assertEqual(workflow.count('bash scripts/verify.sh'),1)
+        self.assertEqual(workflow.count('bash scripts/package-ci-preview.sh'),1)
+        gate=workflow.split('  gate:\n',1)[1]
+        self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
+        for variable,job in [('CORE_PURCHASE_RESULT','validate'),('UI_GUIDANCE_RESULT','ui_guidance'),
+                             ('IPAD_RESULT','privacy_ipad'),('RECOVERY_RESULT','recovery')]:
+            self.assertIn(variable+': ${{ needs.'+job+'.result }}',gate)
+            self.assertIn('test "$'+variable+'" = success',gate)
 
     def test_settings_counts_bind_real_model_to_localized_visible_and_accessible_value(self):
         source=(HERE.parent/'App/Views.swift').read_text()
@@ -1154,6 +1203,139 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_ui_created_empty_folder()
         self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
 
+
+    def changed_files_inventory(self, groups, action):
+        original=hosted.core.os.scandir
+        calls=[]
+        @contextlib.contextmanager
+        def scan(path):
+            with original(path) as entries:
+                yield entries
+            if path==groups:
+                calls.append(path)
+                action(len(calls))
+        return scan,calls
+
+    def test_ui_baseline_timestamp_change_discards_then_completes_fresh_pass(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        new_group=groups/'30000000-0000-0000-0000-000000000003'
+        def change(n):
+            if n==1:new_group.mkdir()
+        scan,calls=self.changed_files_inventory(groups,change)
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):r.prepare_files_ui_baseline()
+        obs=r.report['files_discovery']['baseline']
+        self.assertEqual((obs['status'],obs['passes'],obs['restarts'],obs['entries']),('complete',2,1,3))
+        self.assertEqual(obs['work_deadline'],5)
+        self.assertTrue(r.report['files_ui_baseline']['absent']);self.assertEqual(len(calls),2)
+        self.assertEqual(r.ops.processes,[]);self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_ui_baseline_timestamp_change_repeated_is_failure_without_partial_baseline(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        def change(n):
+            metadata=groups.stat();os.utime(groups,ns=(metadata.st_atime_ns,metadata.st_mtime_ns+1000000))
+        scan,calls=self.changed_files_inventory(groups,change)
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'inventory changed'):r.prepare_files_ui_baseline()
+        self.assertEqual(len(calls),2);self.assertNotIn('files_ui_baseline',r.report)
+        self.assertEqual(r.report['files_discovery']['baseline']['status'],'failed')
+
+    def test_ui_baseline_restart_shares_scan_global_deadline_and_encounter_cap(self):
+        for start,delay,cap,error in [(0,5.1,100000,'deadline'),(1379.9,.2,100000,'deadline'),(0,0,2,'entry cap')]:
+            with self.subTest(start=start,cap=cap):
+                # Independent fixtures retain exact first-pass and second-pass counts.
+                with tempfile.TemporaryDirectory() as temporary:
+                    old_root=self.root;self.root=Path(temporary).resolve()
+                    try:
+                        r,provider=self.files_runner();groups=provider.parent.parent;r.ops.t=start
+                        def change(n):
+                            if n==1:(groups/'30000000-0000-0000-0000-000000000003').mkdir()
+                            else:r.ops.t+=delay
+                        scan,calls=self.changed_files_inventory(groups,change)
+                        with patch.dict(hosted.core.CAPS,scan_entries=cap),patch.object(hosted.core.os,'scandir',side_effect=scan):
+                            with self.assertRaisesRegex(RuntimeError,error):r.prepare_files_ui_baseline()
+                        obs=r.report['files_discovery']['baseline']
+                        self.assertEqual(obs['work_deadline'],min(1380,start+5))
+                        self.assertEqual(obs['status'],'failed');self.assertLessEqual(obs['entries'],cap)
+                        self.assertNotIn('files_ui_baseline',r.report);self.assertEqual((r.limit,r.final),(1380,1500))
+                    finally:self.root=old_root
+
+    def test_ui_baseline_changed_inventory_cannot_forget_seen_owned_folder(self):
+        r,provider=self.files_runner();groups=provider.parent.parent;folder=provider/r.folder_name;folder.mkdir()
+        original=hosted.core.identity_of;seen=[False]
+        def identity(path):
+            value=original(path)
+            if path==folder:seen[0]=True
+            elif seen[0] and path==provider:
+                folder.rmdir();(groups/'30000000-0000-0000-0000-000000000003').mkdir();seen[0]=False
+            return value
+        with patch.object(hosted.core,'identity_of',side_effect=identity):
+            with self.assertRaisesRegex(RuntimeError,'already exists'):r.prepare_files_ui_baseline()
+        self.assertFalse(folder.exists());self.assertEqual(r.report['files_discovery']['baseline']['passes'],1)
+        self.assertNotIn('files_ui_baseline',r.report)
+
+    def test_ui_baseline_restart_finds_owned_folder_in_new_group(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        def change(n):
+            if n==1:(groups/'30000000-0000-0000-0000-000000000003'/'File Provider Storage'/r.folder_name).mkdir(parents=True)
+        scan,calls=self.changed_files_inventory(groups,change)
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'already exists'):r.prepare_files_ui_baseline()
+        self.assertEqual(len(calls),2);self.assertNotIn('files_ui_baseline',r.report)
+
+    def test_ui_baseline_root_replacement_never_restarts(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        def replace(n):
+            groups.rename(groups.with_name('OldAppGroup'))
+            (groups/provider.parent.name/'File Provider Storage').mkdir(parents=True)
+        scan,calls=self.changed_files_inventory(groups,replace)
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'root identity changed'):r.prepare_files_ui_baseline()
+        self.assertEqual(len(calls),1);self.assertEqual(r.report['files_discovery']['baseline']['restarts'],0)
+        self.assertNotIn('files_ui_baseline',r.report)
+
+    def test_ui_baseline_link_permission_type_errors_never_restart(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        with patch.object(hosted.core.os,'scandir',side_effect=PermissionError(errno.EACCES,'denied')) as scan:
+            with self.assertRaises(PermissionError):r.prepare_files_ui_baseline()
+        self.assertEqual(scan.call_count,1);self.assertEqual(r.report['files_discovery']['baseline']['restarts'],0)
+        for kind in ['file','link']:
+            with self.subTest(kind=kind):
+                r.report['attempts']={};bad=groups/'30000000-0000-0000-0000-000000000003'
+                if kind=='file':bad.write_text('unexpected')
+                else:bad.symlink_to(provider,target_is_directory=True)
+                try:
+                    with self.assertRaisesRegex(RuntimeError,'entry type'):r.prepare_files_ui_baseline()
+                    self.assertEqual(r.report['files_discovery']['baseline']['passes'],1)
+                    self.assertEqual(r.report['files_discovery']['baseline']['restarts'],0)
+                    self.assertNotIn('files_ui_baseline',r.report)
+                finally:bad.unlink()
+
+    def test_ui_baseline_ancestor_replacement_between_passes_never_succeeds(self):
+        r,provider=self.files_runner();groups=provider.parent.parent
+        original=hosted.core.identity_of;calls=[0]
+        def identity(path):
+            value=original(path)
+            if path==groups:
+                calls[0]+=1
+                if calls[0]==2:
+                    shared=groups.parent;shared.rename(shared.with_name('OldShared'))
+                    (groups/provider.parent.name/'File Provider Storage').mkdir(parents=True)
+            return value
+        def change(n):
+            if n==1:(groups/'30000000-0000-0000-0000-000000000003').mkdir()
+        scan,_=self.changed_files_inventory(groups,change)
+        with patch.object(hosted.core.os,'scandir',side_effect=scan),patch.object(hosted.core,'identity_of',side_effect=identity):
+            with self.assertRaisesRegex(RuntimeError,'ancestor changed'):r.prepare_files_ui_baseline()
+        self.assertNotIn('files_ui_baseline',r.report)
+
+    def test_ui_created_folder_discovery_remains_strict_single_pass(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        (provider/r.folder_name).mkdir();groups=provider.parent.parent
+        scan,calls=self.changed_files_inventory(groups,lambda n:(groups/'30000000-0000-0000-0000-000000000003').mkdir())
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'inventory changed'):r.bind_ui_created_empty_folder()
+        self.assertEqual(len(calls),1);self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report)
+        self.assertEqual(r.report['files_discovery']['created_folder']['restarts'],0)
 
     def test_ui_prepare_actual_command_records_shared_remaining_budget(self):
         r,provider=self.files_runner();r.prepare_files_ui_baseline()
