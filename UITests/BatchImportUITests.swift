@@ -213,43 +213,66 @@ final class BatchImportUITests: XCTestCase {
             newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
         }
         newFolder.element.tap()
-        let fields = app.alerts.textFields
-        try await wait("Native folder-name dialog is ambiguous", app: app) {
-            fields.count == 1 && fields.element.isEnabled && fields.element.isHittable
+        // Files on iOS18.5 creates folders with a selected inline TextView, not an
+        // alert. Keep the alert contract for native layouts that expose it,
+        // but require exactly one supported editor; the export filename field
+        // is deliberately outside both queries.
+        let inlineNames = picker.element.collectionViews.matching(identifier: "File View")
+            .cells.matching(identifier: "Folder").textViews.matching(identifier: "DOC.inlineRenameField")
+        let alertNames = app.alerts.textFields
+        var folderName: XCUIElement?
+        var inlineNaming = false
+        try await wait("Native folder-name editor is ambiguous", app: app) {
+            let inlineCount = inlineNames.count
+            let alertCount = alertNames.count
+            guard inlineCount + alertCount == 1 else { return false }
+            let candidate = inlineCount == 1 ? inlineNames.element : alertNames.element
+            guard candidate.isEnabled && candidate.isHittable else { return false }
+            inlineNaming = inlineCount == 1
+            folderName = candidate
+            return true
         }
-        let field = fields.element
-        field.tap()
-        if let previous = field.value as? String, !previous.isEmpty {
-            field.press(forDuration: 1.1)
-            let selectAll = app.menuItems.matching(NSPredicate(format: "label == %@", "Select All"))
-            try await wait("Folder name cannot be selected completely", app: app) {
-                selectAll.count == 1 && selectAll.element.isEnabled && selectAll.element.isHittable
+        let field = try XCTUnwrap(folderName)
+        if !inlineNaming {
+            field.tap()
+            if let previous = field.value as? String, !previous.isEmpty {
+                field.press(forDuration: 1.1)
+                let selectAll = app.menuItems.matching(NSPredicate(format: "label == %@", "Select All"))
+                try await wait("Folder name cannot be selected completely", app: app) {
+                    selectAll.count == 1 && selectAll.element.isEnabled && selectAll.element.isHittable
+                }
+                selectAll.element.tap()
             }
-            selectAll.element.tap()
         }
+        // The observed inline editor already selects the complete default name.
+        // Do not tap and collapse that selection. Exact value verification below
+        // rejects a native layout that did not preserve complete replacement.
         field.typeText(recoveryFolder)
         try check(field.value as? String == recoveryFolder, app: app, "Native folder name differs from the exact owned UUID name")
-        let create = app.alerts.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "Done", "Create"))
+        let create = inlineNaming
+            ? app.keyboards.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", "Done", "done"))
+            : app.alerts.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "Done", "Create"))
         try await wait("Native folder creation has no unique confirmation", app: app) {
             create.count == 1 && create.element.isEnabled && create.element.isHittable
         }
         create.element.tap()
         try await wait("Created folder or its exact title did not appear", app: app) {
-            self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
-                || (directory.count == 1 && directory.element.isHittable)
+            inlineNames.count == 0 && (self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
+                || (directory.count == 1 && directory.element.isHittable))
         }
         if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
         try await wait("Native Files did not open the created owned folder", app: app) {
             self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
         }
-        capture(app, "Recovery prepare — unique created Files destination before Cancel")
-        let cancel = navigation.element.buttons["Cancel"]
-        try check(cancel.exists && cancel.isEnabled && cancel.isHittable, app: app, "Prepared Files destination has no Cancel action")
-        cancel.tap()
-        try await wait("Files preparation cancellation did not return to Settings", app: app) {
-            !picker.element.exists && app.navigationBars["Settings"].exists
+        capture(app, "Recovery prepare — exact created Files destination before fixture shutdown")
+        // Preparation establishes a UI-created folder, not Save-picker Cancel
+        // coverage. Stop this fixture without tapping Save; the next phase
+        // launches afresh only after the host proves this exact folder empty.
+        app.terminate()
+        try await wait("Preparation fixture did not stop before host empty-folder verification", app: app) {
+            app.state == .notRunning
         }
-        capture(app, "Recovery prepare — cancelled without saving, host empty-folder proof pending")
+        // The existing defer remains cleanup on every success/failure path.
         // Host must now prove this exact folder is empty before export starts.
     }
 

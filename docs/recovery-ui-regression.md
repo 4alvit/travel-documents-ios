@@ -12,8 +12,10 @@ Run three explicitly ordered selected cases in `BatchImportUITests`:
 
 1. `testRecoveryCreateOwnedFilesDestination`: existing synthetic demo, Free
    counts and disclosure, real Save to Files, native creation of the exact
-   `TripDocket-Recovery-<run-UUID>` folder, then Cancel without saving. The case
-   terminates the app and must pass before the host proceeds.
+   `TripDocket-Recovery-<run-UUID>` folder. After exact committed folder/title
+   proof and capture, the case terminates the fixture without tapping Save,
+   verifies the app stopped and must pass before the host proceeds. This
+   preparation boundary does not claim Save-picker Cancel coverage.
 2. Host discovers exactly one matching folder under the owned simulator local
    provider. Named paths and open descriptors must keep their identities, and
    a complete stable directory iteration must prove the folder empty. There
@@ -86,8 +88,9 @@ source-only.
 1. Create/boot the admitted new simulator and bind its UUID and baseline
    inventory. A bounded read-only scan first proves the exact run folder name
    absent. The prepare case opens the real Save UI, creates that exact folder
-   through native New Folder, verifies its navigation title and cancels without
-   Save. After its exact single-case PASS, a bounded no-follow host scan finds
+   through native New Folder, verifies the committed name and navigation title,
+   captures that state, then terminates the fixture without tapping Save. After
+   its exact single-case PASS and stopped-app check, a bounded no-follow host scan finds
    the unique local-provider folder and proves it empty, with group/provider/
    folder descriptor and named-path identities. Missing/ambiguous/nonempty or
    changed directories fail. The host does not call DocumentsApp group lookup,
@@ -195,7 +198,7 @@ source-only.
 
 ## Source and evidence limits
 
-New Folder/name selection/Cancel, Save-to-Files, exact folder navigation,
+New Folder/name selection/commit and fixture shutdown, Save-to-Files, exact folder navigation,
 Settings counts and single-file selection require current runtime confirmation. Before Save,
 file selection or an optional Open, recovery requires the exact owned folder
 name as a visible static text in the Files navigation bar. Save is scoped to
