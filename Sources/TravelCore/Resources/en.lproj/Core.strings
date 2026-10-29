@@ -1,0 +1,26 @@
+// Core presentation strings. Keys are not persisted model values.
+"documentKind.passport" = "Passport";
+"documentKind.insurance" = "Insurance";
+"documentKind.ticket" = "Ticket";
+"documentKind.booking" = "Booking";
+"documentKind.other" = "Other";
+"repositoryError.invalidImportCount" = "Choose between 1 and 10 documents for one import.";
+"repositoryError.invalidName" = "Enter a nonempty name of at most 200 characters and use a simple filename.";
+"repositoryError.unsupportedFileType" = "Only PDF, JPEG, and PNG originals are supported.";
+"repositoryError.invalidFile" = "This file cannot be opened safely. Use an unlocked PDF or a complete JPEG/PNG image of at most 32 megapixels.";
+"repositoryError.documentTooLarge" = "Each original must be no larger than 16 MiB.";
+"repositoryError.libraryTooLarge" = "This library exceeds its storage or item limit. Export a backup before removing documents.";
+"repositoryError.archiveTooLarge" = "The backup exceeds the 96 MiB input limit.";
+"repositoryError.invalidArchive" = "The backup is incomplete or invalid. Your current library has not been replaced.";
+"repositoryError.invalidCatalog" = "The saved library cannot be read safely. Keep your backup and try restoring it.";
+"repositoryError.unsupportedSchema" = "This library uses an unsupported format version.";
+"repositoryError.missingReference" = "A referenced trip or traveler does not exist.";
+"repositoryError.duplicateIdentifier" = "The library contains duplicate identifiers or stored filenames.";
+"repositoryError.documentNotFound" = "This document no longer exists in the library.";
+"repositoryError.tripNotFound" = "This trip no longer exists in the library.";
+"repositoryError.travelerNotFound" = "This traveler no longer exists in the library.";
+"repositoryError.originalMissing" = "The complete original is missing. Restore it from a backup.";
+"repositoryError.originalModified" = "The complete original has changed or is damaged. Restore it from a backup.";
+"repositoryError.unreadableOriginal" = "The complete original cannot be read. Unlock your device and try again.";
+"repositoryError.storageUnavailable" = "Local storage cannot be accessed. Unlock your device and try again.";
+"repositoryError.saveFailed" = "The change could not be saved. Check available storage and try again; the previous library is preserved.";

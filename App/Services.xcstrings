@@ -1,0 +1,1274 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "services.model.free.trip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Free includes one trip. Pro adds more trips; your existing documents remain available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В бесплатной версии доступна одна поездка. Pro позволяет добавлять больше поездок; сохранённые документы остаются доступны."
+          }
+        }
+      }
+    },
+    "services.model.free.travelers": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Free includes two travelers. Pro adds more people."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В бесплатной версии доступны два путешественника. Pro позволяет добавлять больше."
+          }
+        }
+      }
+    },
+    "services.model.edit.finishBatch": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish or cancel the current file batch before editing a document."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Прежде чем редактировать документ, завершите или отмените текущий групповой импорт."
+          }
+        }
+      }
+    },
+    "services.model.edit.documentChanged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This document changed while you were editing. Open its current details and try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Документ изменился во время редактирования. Откройте его текущие данные и повторите попытку."
+          }
+        }
+      }
+    },
+    "services.model.edit.updated": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Details updated. Schedule the reminder again if needed."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Данные обновлены. При необходимости настройте напоминание заново."
+          }
+        }
+      }
+    },
+    "services.model.free.documentsAccess": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Free includes eight documents. Pro adds more; viewing, export and recovery stay available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В бесплатной версии доступны восемь документов. Pro позволяет добавлять больше; просмотр, экспорт и восстановление остаются доступны."
+          }
+        }
+      }
+    },
+    "services.model.import.originalCopied": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original copied into the local library. Run the offline check before you travel."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Оригинал скопирован в локальную библиотеку. Перед поездкой проверьте доступность документов без интернета."
+          }
+        }
+      }
+    },
+    "services.model.free.documents": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Free includes eight documents. Pro adds more documents."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В бесплатной версии доступны восемь документов. Pro позволяет добавлять больше."
+          }
+        }
+      }
+    },
+    "services.model.import.saved": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Document saved on this device."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Документ сохранён на этом устройстве."
+          }
+        }
+      }
+    },
+    "services.model.readiness.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add documents before running an offline check."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Добавьте документы, прежде чем проверять их доступность без интернета."
+          }
+        }
+      }
+    },
+    "services.model.restore.completed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Backup restored and originals verified. Schedule reminders again on this device."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Резервная копия восстановлена, оригиналы проверены. Настройте напоминания на этом устройстве заново."
+          }
+        }
+      }
+    },
+    "services.model.import.sizeError": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a complete file. Documents are limited to 16 MB; backup files to 96 MB. Download cloud files in Files before importing if they are not available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выберите полный файл. Максимальный размер документа — 16 МБ, резервной копии — 96 МБ. Если облачные файлы недоступны, перед импортом загрузите их в приложении «Файлы»."
+          }
+        }
+      }
+    },
+    "services.model.batch.finishEdit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish or cancel the document edit before starting a file batch."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Прежде чем начать групповой импорт, завершите или отмените редактирование документа."
+          }
+        }
+      }
+    },
+    "services.model.batch.finishCurrent": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish or cancel the current file batch before starting another."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Прежде чем начать новый групповой импорт, завершите или отмените текущий."
+          }
+        }
+      }
+    },
+    "services.model.batch.cancelled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saving was cancelled before the batch was committed. No files were added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сохранение отменено до завершения группового импорта. Файлы не добавлены."
+          }
+        }
+      }
+    },
+    "services.model.open.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The local library could not be opened. Your existing files have not been replaced. %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось открыть локальную библиотеку. Сохранённые файлы не заменены. %@"
+          }
+        }
+      }
+    },
+    "services.model.restore.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore did not replace your library. %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Восстановление не заменило вашу библиотеку. %@"
+          }
+        }
+      }
+    },
+    "services.model.readiness.verified": {
+      "extractionState": "manual",
+      "comment": "Argument 1 is the number of verified originals. Argument 2 is the total; the original noun varies with argument 2. Do not translate document titles.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld of %#@total@ verified on this device. Review any missing or changed files, then open each document to confirm its contents are the ones you need."
+          },
+          "substitutions": {
+            "total": {
+              "argNum": 2,
+              "formatSpecifier": "lld",
+              "variations": {
+                "plural": {
+                  "one": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg original"
+                    }
+                  },
+                  "other": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg originals"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "На этом устройстве проверено %1$lld из %#@total@. Проверьте отсутствующие или изменённые файлы, затем откройте каждый документ и убедитесь, что в нём нужное содержимое."
+          },
+          "substitutions": {
+            "total": {
+              "argNum": 2,
+              "formatSpecifier": "lld",
+              "variations": {
+                "plural": {
+                  "one": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg оригинала"
+                    }
+                  },
+                  "few": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg оригиналов"
+                    }
+                  },
+                  "many": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg оригиналов"
+                    }
+                  },
+                  "other": {
+                    "stringUnit": {
+                      "state": "translated",
+                      "value": "%arg оригинала"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "services.model.batch.saved": {
+      "extractionState": "manual",
+      "comment": "Number of complete originals committed atomically in one batch. Integer argument 1 selects the plural.",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld original file saved on this device. Run the offline check before you travel."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld original files saved together on this device. Run the offline check before you travel."
+                }
+              }
+            }
+          }
+        },
+        "ru": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "На этом устройстве сохранён %lld оригинал. Перед поездкой проверьте доступность документов без интернета."
+                }
+              },
+              "few": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "На этом устройстве вместе сохранены %lld оригинала. Перед поездкой проверьте доступность документов без интернета."
+                }
+              },
+              "many": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "На этом устройстве вместе сохранено %lld оригиналов. Перед поездкой проверьте доступность документов без интернета."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "На этом устройстве вместе сохранено %lld оригинала. Перед поездкой проверьте доступность документов без интернета."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "services.demo.warning": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SYNTHETIC DEMO — NOT VALID FOR TRAVEL"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "УЧЕБНЫЙ ПРИМЕР — НЕ ДЕЙСТВИТЕЛЕН ДЛЯ ПОЕЗДКИ"
+          }
+        }
+      }
+    },
+    "services.demo.reservation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sample reservation %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пример бронирования %@"
+          }
+        }
+      },
+      "comment": "The reservation code is synthetic fixture data and must not be translated."
+    },
+    "services.demo.explanation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This is a fictional fixture for screenshots and tests."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Это вымышленный пример для снимков экрана и тестов."
+          }
+        }
+      }
+    },
+    "services.batch.proRequired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pro is required to prepare and save multiple files. No files were added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для подготовки и сохранения нескольких файлов требуется Pro. Файлы не добавлены."
+          }
+        }
+      }
+    },
+    "services.batch.invalidSelection": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose between 1 and 10 files. No files were prepared or added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выберите от 1 до 10 файлов. Ни один файл не подготовлен и не добавлен."
+          }
+        }
+      }
+    },
+    "services.batch.noSpace": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These files exceed the remaining space in the 64 MiB library. Choose fewer or smaller files. No files were added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для этих файлов недостаточно места в библиотеке объёмом 64 МиБ. Выберите меньше файлов или файлы меньшего размера. Файлы не добавлены."
+          }
+        }
+      }
+    },
+    "services.batch.invalidFilename": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A selected filename cannot be imported. Rename it in Files and choose the files again. No files were added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Название одного из выбранных файлов не подходит для импорта. Переименуйте файл в приложении «Файлы» и выберите файлы заново. Файлы не добавлены."
+          }
+        }
+      }
+    },
+    "services.batch.invalidMetadata": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a title of at most 200 characters without control characters, and confirm a valid expiry date if you need one."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Введите название длиной не более 200 символов без управляющих символов. При необходимости укажите и подтвердите корректную дату окончания срока действия."
+          }
+        }
+      }
+    },
+    "services.batch.missingTraveler": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a person currently in the library or Everyone / unassigned."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выберите путешественника из библиотеки или «Все / не назначено»."
+          }
+        }
+      }
+    },
+    "services.batch.reviewRequired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review and confirm every remaining document before saving."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Перед сохранением проверьте и подтвердите каждый оставшийся документ."
+          }
+        }
+      }
+    },
+    "services.batch.libraryChanged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The library changed while you were preparing files. Start a new batch using its current trips and people. No files were added."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Библиотека изменилась во время подготовки файлов. Начните новый групповой импорт, используя текущие поездки и путешественников. Файлы не добавлены."
+          }
+        }
+      }
+    },
+    "services.purchase.priceUnavailable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The App Store price is unavailable. Try again when connected. Your existing documents remain available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Цена в App Store недоступна. Подключитесь к интернету и повторите попытку. Сохранённые документы остаются доступны."
+          }
+        }
+      }
+    },
+    "services.purchase.notAllowed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchases are not allowed on this device. Check its Screen Time or account restrictions."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупки на этом устройстве запрещены. Проверьте ограничения в настройках «Экранное время» или учётной записи."
+          }
+        }
+      }
+    },
+    "services.purchase.unverified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The App Store could not verify this purchase. No new Pro access was granted. Try Restore Purchases."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Store не смог проверить покупку. Новый доступ к Pro не предоставлен. Нажмите «Восстановить покупки»."
+          }
+        }
+      }
+    },
+    "services.purchase.ready": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro is ready. Thank you!"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro готов к работе. Спасибо!"
+          }
+        }
+      }
+    },
+    "services.purchase.noEntitlement": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The purchase did not provide an active Pro entitlement. Try Restore Purchases."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупка не предоставила действующий доступ к Pro. Нажмите «Восстановить покупки»."
+          }
+        }
+      }
+    },
+    "services.purchase.pending": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your purchase is awaiting approval. Pro unlocks when the App Store confirms it."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупка ожидает одобрения. Pro станет доступен после подтверждения App Store."
+          }
+        }
+      }
+    },
+    "services.purchase.cancelledFree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchase cancelled. You can continue using the free features."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупка отменена. Вы можете продолжать пользоваться бесплатными функциями."
+          }
+        }
+      }
+    },
+    "services.purchase.unknownState": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The App Store returned an unknown purchase state. Try Restore Purchases before purchasing again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Store вернул неизвестный статус покупки. Прежде чем покупать снова, нажмите «Восстановить покупки»."
+          }
+        }
+      }
+    },
+    "services.purchase.cancelled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchase cancelled."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупка отменена."
+          }
+        }
+      }
+    },
+    "services.purchase.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The purchase could not be completed. Check your connection and App Store account, then try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось завершить покупку. Проверьте подключение к интернету и учётную запись App Store, затем повторите попытку."
+          }
+        }
+      }
+    },
+    "services.purchase.restore.completed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro purchases restored."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Покупки TripDocket Pro восстановлены."
+          }
+        }
+      }
+    },
+    "services.purchase.restore.notFound": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No active TripDocket Pro purchase was found for this App Store account."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для этой учётной записи App Store не найдена действующая покупка TripDocket Pro."
+          }
+        }
+      }
+    },
+    "services.purchase.restore.cancelled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore cancelled."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Восстановление покупок отменено."
+          }
+        }
+      }
+    },
+    "services.purchase.restore.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not sync with the App Store. Existing verified access and your documents remain available. Try again when connected."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось синхронизироваться с App Store. Подтверждённый доступ и ваши документы остаются доступны. Подключитесь к интернету и повторите попытку."
+          }
+        }
+      }
+    },
+    "services.purchase.entitlementUnverified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your Pro purchase could not be verified. Try Restore Purchases when connected. Your saved documents remain available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось проверить покупку Pro. Подключитесь к интернету и нажмите «Восстановить покупки». Сохранённые документы остаются доступны."
+          }
+        }
+      }
+    },
+    "services.purchase.revoked": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pro access was revoked by the App Store. Your existing documents, basic export, and recovery remain available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Store отозвал доступ к Pro. Сохранённые документы, базовый экспорт и восстановление остаются доступны."
+          }
+        }
+      }
+    },
+    "services.purchase.active": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro is active."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro активен."
+          }
+        }
+      }
+    },
+    "services.purchase.updateUnverified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An App Store update could not be verified. Try Restore Purchases."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось проверить обновление данных из App Store. Нажмите «Восстановить покупки»."
+          }
+        }
+      }
+    },
+    "services.privacy.keepLocked": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Locked"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Оставить закрытым"
+          }
+        }
+      }
+    },
+    "services.privacy.passcodeRequired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set a device passcode in Settings to unlock your documents. If authentication is temporarily unavailable, try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Чтобы открыть документы, установите код-пароль устройства в Настройках. Если проверка личности временно недоступна, повторите попытку."
+          }
+        }
+      }
+    },
+    "services.privacy.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock your private travel documents."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Откройте доступ к своим личным документам для поездок."
+          }
+        }
+      }
+    },
+    "services.privacy.incomplete": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authentication did not complete. Your documents remain locked."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Проверка личности не завершена. Документы остаются закрыты."
+          }
+        }
+      }
+    },
+    "services.privacy.retry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your documents remain locked. Tap Unlock to try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Документы остаются закрыты. Нажмите «Открыть доступ», чтобы повторить попытку."
+          }
+        }
+      }
+    },
+    "services.privacy.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket is locked"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket закрыт"
+          }
+        }
+      }
+    },
+    "services.privacy.explanation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your travel documents stay private until you unlock."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ваши документы для поездок скрыты, пока вы не откроете к ним доступ."
+          }
+        }
+      }
+    },
+    "services.privacy.authenticating": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authenticating…"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Проверка личности…"
+          }
+        }
+      }
+    },
+    "services.privacy.unlock": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть доступ"
+          }
+        }
+      }
+    },
+    "services.reminder.missingExpiry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm an expiry date before scheduling a reminder."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Прежде чем настроить напоминание, подтвердите дату окончания срока действия."
+          }
+        }
+      }
+    },
+    "services.reminder.expired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This document expires too soon to schedule a reminder. Review its confirmed expiry date."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Срок действия документа истекает слишком скоро для напоминания. Проверьте подтверждённую дату окончания срока действия."
+          }
+        }
+      }
+    },
+    "services.reminder.permissionDenied": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are disabled. Enable TripDocket notifications in Settings, then try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Уведомления отключены. Разрешите уведомления TripDocket в Настройках, затем повторите попытку."
+          }
+        }
+      }
+    },
+    "services.reminder.dateUnavailable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A reminder date could not be calculated. Check the expiry date and try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось определить дату напоминания. Проверьте дату окончания срока действия и повторите попытку."
+          }
+        }
+      }
+    },
+    "services.reminder.proRequired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TripDocket Pro is required to create a reminder. Your documents and existing reminders remain available."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Для создания напоминания требуется TripDocket Pro. Ваши документы и существующие напоминания остаются доступны."
+          }
+        }
+      }
+    },
+    "services.reminder.documentChanged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This document or reminder request changed. Open its current details and confirm the expiry date again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Документ или запрос напоминания изменился. Откройте текущие данные документа и снова подтвердите дату окончания срока действия."
+          }
+        }
+      }
+    },
+    "services.scanner.pageLimit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan between 1 and 25 pages at a time."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сканируйте от 1 до 25 страниц за раз."
+          }
+        }
+      }
+    },
+    "services.scanner.fileLimit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This scan is larger than 16 MB. Try fewer pages."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Размер скана превышает 16 МБ. Попробуйте уменьшить количество страниц."
+          }
+        }
+      }
+    },
+    "services.ocr.unreadable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file could not be read for text recognition. You can still import it and enter its details yourself."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось прочитать файл для распознавания текста. Вы по-прежнему можете импортировать его и ввести данные вручную."
+          }
+        }
+      }
+    },
+    "services.ocr.noText": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No text was found. You can enter the document details yourself."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Текст не найден. Вы можете ввести данные документа вручную."
+          }
+        }
+      }
+    },
+    "services.ocr.unsupportedSize": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a complete file no larger than 16 MB. Download cloud files in Files before trying text recognition."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выберите полный файл размером не более 16 МБ. Перед распознаванием текста загрузите облачные файлы в приложении «Файлы»."
+          }
+        }
+      }
+    },
+    "services.model.finishDraft": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish or cancel the current document draft before starting another."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Завершите или отмените текущий черновик документа, прежде чем начинать другой."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}
