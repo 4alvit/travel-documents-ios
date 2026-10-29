@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'ad5e52c8dc5e897f4eb53302cf7e127dc726b54c7ee03aa7702ed79bce4d3feb'
+CORE_SHA = 'ea6c5d426245c4923e0bd23dd27e7c03183acd085e79fa0d1a3b162b5815f012'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -470,7 +470,7 @@ def main(argv=None):
         require(sys.version_info[:2]>=tuple(profile['python_minimum']),'Python version unsupported')
         require((profile['total_seconds'],profile['cleanup_seconds'],profile['minimum_admission_free_GiB'],
                  profile['minimum_work_free_GiB'],profile['maximum_output_GiB'],profile['maximum_xcresult_GiB'])
-                ==(1500,120,16,8,8,2) and profile['prep_seconds']==60 and profile['case_attempts']=={'export':1,'restore':1},'Policy changed')
+                ==(1500,120,16,8,8,2) and profile['prep_seconds']==60 and profile['case_attempts']=={'prepare':1,'export':1,'restore':1},'Policy changed')
         job=job_context(os.environ,profile,platform.machine())
         workspace=Path(os.environ['GITHUB_WORKSPACE']);core.identity_of(workspace)
         require(HERE==workspace/'scripts','Entrypoint not from checked-out source')

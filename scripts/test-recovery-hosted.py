@@ -410,14 +410,15 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual(argv[argv.index('-resultBundlePath')+1],str(r.out/(phase+'.xcresult')))
                 self.assertEqual(argv[argv.index('-parallel-testing-enabled')+1],'NO')
                 self.assertEqual(argv[argv.index('-maximum-concurrent-test-simulator-destinations')+1],'1')
-                self.assertEqual(argv[argv.index('-default-test-execution-time-allowance')+1],'300')
-                self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance')+1],'300')
+                self.assertEqual(argv[argv.index('-default-test-execution-time-allowance')+1],'120' if phase=='prepare' else '300')
+                self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance')+1],'120' if phase=='prepare' else '300')
                 self.assertEqual(argv[-2:],['CODE_SIGNING_ALLOWED=NO','test'])
         self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_seconds'],r.limit,r.final),(5,600,1380,1500))
 
     def test_recovery_index_policy_keeps_phase_gates_and_command_budget(self):
         r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-0000-0000-000000000001'
         original_env,original_cwd=r.ops.env,r.ops.cwd
+        r.report['phase_passed']={'prepare':True}
         with patch.object(r,'verify_folder'),patch.object(r,'once') as once, \
              patch.object(r,'authorize_restore') as authorize,patch.object(r,'command') as command, \
              patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
@@ -1081,6 +1082,113 @@ class BoundaryTests(unittest.TestCase):
         self.assertLess(len(json.dumps(obs)),3000)
         self.assertEqual(save.call_count,3)
         self.assertFalse(r.ops.signals)
+
+    def test_ui_files_prepare_boundary_pins_actual_empty_folder_without_RPC(self):
+        r,provider=self.files_runner()
+        r.prepare_files_ui_baseline()
+        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
+        folder=provider/r.folder_name;folder.mkdir()
+        with self.assertRaisesRegex(RuntimeError,'did not pass'):r.bind_ui_created_empty_folder()
+        r.report['phase_passed']={'prepare':True}
+        r.bind_ui_created_empty_folder()
+        self.assertEqual(r.folder,folder)
+        self.assertTrue(r.report['files_folder']['initially_empty'])
+        self.assertEqual(r.report['files_folder']['empty_boundary'],'after prepare case, before export case')
+        self.assertEqual(r.ops.processes,[]);self.assertEqual((r.limit,r.final),(1380,1500))
+        with self.assertRaisesRegex(RuntimeError,'One-shot'):r.prepare_files_ui_baseline()
+
+    def test_ui_files_prepare_refuses_existing_and_missing_destinations(self):
+        r,provider=self.files_runner();(provider/r.folder_name).mkdir()
+        with self.assertRaisesRegex(RuntimeError,'already exists'):r.prepare_files_ui_baseline()
+        self.assertNotIn('files_ui_baseline',r.report);self.assertEqual(r.ops.processes,[])
+        (provider/r.folder_name).rmdir()
+        r.report['attempts']={};r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        with self.assertRaisesRegex(RuntimeError,'Missing unique'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder)
+
+    def test_ui_files_prepare_refuses_nonempty_before_any_export(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        folder=provider/r.folder_name;folder.mkdir();(folder/'Documents.tripbackup').write_bytes(b'not accepted')
+        r.report['phase_passed']={'prepare':True}
+        with self.assertRaisesRegex(RuntimeError,'was not empty'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report);self.assertEqual(r.ops.processes,[])
+
+    def test_ui_files_prepare_refuses_duplicate_or_linked_destinations(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        folder=provider/r.folder_name;folder.mkdir()
+        other=provider.parent.parent/'30000000-0000-0000-0000-000000000003'/'File Provider Storage'
+        other.mkdir(parents=True);(other/r.folder_name).mkdir()
+        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):r.bind_ui_created_empty_folder()
+        (other/r.folder_name).rmdir();other.rmdir();other.parent.rmdir()
+        folder.rmdir();folder.symlink_to(provider,target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError,'Unresolved/symlink'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
+
+    def test_ui_files_prepare_preserves_deadline_and_permission_failures(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        (provider/r.folder_name).mkdir()
+        with patch.object(hosted.core.os,'scandir',side_effect=PermissionError(errno.EACCES,'denied')):
+            with self.assertRaises(PermissionError):r.bind_ui_created_empty_folder()
+        original=hosted.core.os.scandir
+        def slow(path):
+            result=original(path);r.ops.t+=5.1;return result
+        with patch.object(hosted.core.os,'scandir',side_effect=slow):
+            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report)
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertEqual(r.ops.processes,[])
+
+    def test_ui_files_prepare_detects_baseline_ancestor_replacement(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        groups=provider.parent.parent;old=groups.with_name('OldAppGroup');groups.rename(old)
+        new=groups/provider.parent.name/'File Provider Storage';new.mkdir(parents=True);(new/r.folder_name).mkdir()
+        with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
+
+    def test_ui_files_prepare_retains_original_global_deadline(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
+        (provider/r.folder_name).mkdir();r.ops.t=1379.9
+        original=hosted.core.os.scandir
+        def delayed(path):
+            result=original(path);r.ops.t+=.2;return result
+        with patch.object(hosted.core.os,'scandir',side_effect=delayed):
+            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_ui_created_empty_folder()
+        self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
+
+
+    def test_ui_prepare_actual_command_records_shared_remaining_budget(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.plans=[{'delay':35}];r.ops.t=155.9
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read),patch.object(r,'app_state') as state:
+            self.assertIsNone(hosted.core.Recovery.run_phase(r,'prepare'))
+        state.assert_not_called();self.assertEqual(len(r.ops.processes),1)
+        row=r.report['commands'][-1];budget=r.report['phase_budget']['prepare']
+        self.assertEqual(row['requested_cap_seconds'],600)
+        self.assertAlmostEqual(row['work_deadline'],747.9)
+        self.assertEqual(row['stop_reserve_seconds'],8)
+        self.assertEqual(budget['original_work_deadline_elapsed'],1380)
+        self.assertEqual(budget['selected_case_max_seconds'],120)
+        self.assertAlmostEqual(budget['remaining_work_before_seconds'],1224.1)
+        self.assertLess(budget['remaining_work_after_command_seconds'],1190)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+
+    def test_ui_prepare_actual_command_clips_to_original_work_and_stop_reserve(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.plans=[{'delay':35}];r.ops.t=1360
+        with patch.object(r,'failure_evidence'),patch.object(r,'preserve_result') as preserve:
+            with self.assertRaisesRegex(RuntimeError,'phase-prepare failed'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_not_called();row=r.report['commands'][-1]
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+        self.assertEqual(row['command_deadline'],1380);self.assertEqual(row['work_deadline'],1372)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertNotIn('prepare',r.report.get('phase_passed',{}))
+        self.assertEqual(len(r.ops.processes),1)
 
     def files_runner(self, group=None):
         home=self.root/'home'
@@ -2112,7 +2220,8 @@ class ResourceAccountingTests(unittest.TestCase):
                 entries=sorted(iterator,key=lambda entry:entry.name=='retained-output')
                 yield (SimpleNamespace(name=e.name,
                     stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
-                    is_file=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_file(follow_symlinks=follow_symlinks)) for e in entries)
+                    is_file=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_file(follow_symlinks=follow_symlinks),
+                    is_dir=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_dir(follow_symlinks=follow_symlinks)) for e in entries)
         def metadata(path,*args,**kwargs):
             if path==target.name and kwargs.get('dir_fd') is not None:
                 self.assertIs(kwargs.get('follow_symlinks'),False);absence_stats.append(path)
@@ -2225,20 +2334,22 @@ class ResourceAccountingTests(unittest.TestCase):
                 self.assertEqual(observation['status'],'failed')
 
     def xcresult_rescan_fixture(self, *, repeated=False, end_first=False,
-                                end_second=False, entry_cap=100000, dense_cap=None):
+                                end_second=False, entry_cap=100000, dense_cap=None, staging=False, directory=False):
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve()
-        data=root/'Tests.xcresult'/'Data';data.mkdir(parents=True)
+        data=root/'Tests.xcresult'/('Staging' if staging else 'Data');data.mkdir(parents=True)
         stable=root/'00-stable';stable.write_bytes(b'old')
-        first=data/'_tmp.IJNVOw';first.write_bytes(b'first incomplete writer entry')
-        second=data/'_tmp.second'
-        if repeated:second.write_bytes(b'second incomplete writer entry')
+        first=data/('9C21B21B-53DF-40FE-85BF-38A7361D7DD0' if staging else '_tmp.IJNVOw')
+        first.mkdir() if directory else first.write_bytes(b'first incomplete writer entry')
+        second=data/('11111111-1111-4111-8111-111111111111' if staging else '_tmp.second')
+        if repeated:second.mkdir() if directory else second.write_bytes(b'second incomplete writer entry')
         identity=hosted.core.identity_of(root);clock=[0.];observation={}
         root_passes=[0];seen=[];triggered=set();opened=[];closed=[]
         real_scan,real_open,real_close=os.scandir,os.open,os.close
         def entry_stat(entry,*,follow_symlinks):
             seen.append((root_passes[0],entry.name))
-            if entry.name.startswith('_tmp.') and entry.name not in triggered:
-                triggered.add(entry.name);(data/entry.name).unlink()
+            if entry.name in (first.name,second.name) and entry.name not in triggered:
+                triggered.add(entry.name)
+                (data/entry.name).rmdir() if directory else (data/entry.name).unlink()
                 stable.write_bytes(b'fresh complete sample'*4096)
             return entry.stat(follow_symlinks=follow_symlinks)
         @contextlib.contextmanager
@@ -2251,7 +2362,8 @@ class ResourceAccountingTests(unittest.TestCase):
                 rows=sorted(iterator,key=lambda e:e.name)
                 yield (SimpleNamespace(name=e.name,
                     stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
-                    is_file=lambda *,follow_symlinks,e=e:e.is_file(follow_symlinks=follow_symlinks)) for e in rows)
+                    is_file=lambda *,follow_symlinks,e=e:e.is_file(follow_symlinks=follow_symlinks),
+                    is_dir=lambda *,follow_symlinks,e=e:e.is_dir(follow_symlinks=follow_symlinks)) for e in rows)
         def open_fd(path,*args,**kwargs):
             fd=real_open(path,*args,**kwargs);opened.append(fd);return fd
         def close_fd(fd):
@@ -2266,6 +2378,56 @@ class ResourceAccountingTests(unittest.TestCase):
             except BaseException as error:result=error
         self.assertCountEqual(opened,closed)
         return result,observation,root,root_passes[0],seen,clock[0]
+
+    def test_staging_disappearance_discards_partial_and_requires_complete_fresh_pass(self):
+        for directory in [False,True]:
+            with self.subTest(directory=directory):
+                result,observation,root,passes,seen,_=self.xcresult_rescan_fixture(staging=True,directory=directory)
+                self.assertIsInstance(result,dict);self.assertEqual(passes,2)
+                paths=[root]+list(root.rglob('*'))
+                self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in paths))
+                self.assertEqual(result['logical'],sum(p.stat().st_size for p in paths if p.is_file()))
+                self.assertEqual(result['entries'],len(paths)-1)
+                self.assertTrue(observation['discarded_scan']['partial_counts_are_not_valid_accounting'])
+                self.assertNotEqual(observation['discarded_scan']['partial_totals']['logical'],result['logical'])
+                self.assertEqual(result['complete_scan_attempts'],2)
+                self.assertEqual([n for _,n in seen].count('00-stable'),2)
+                self.assertEqual(observation['status'],'completed')
+
+
+    def test_staging_churn_exhausts_one_restart_without_partial_success(self):
+        for directory in [False,True]:
+            result,observation,_,passes,_,_=self.xcresult_rescan_fixture(staging=True,directory=directory,repeated=True)
+            self.assertIsInstance(result,FileNotFoundError);self.assertEqual(passes,2)
+            self.assertEqual(observation['status'],'failed');self.assertEqual(observation['traversal_attempts'],2)
+
+
+    def test_staging_restart_preserves_original_deadline_encounter_and_byte_caps(self):
+        for options,expected in [({'end_first':True},'deadline'),({'end_second':True},'deadline'),
+                                ({'entry_cap':6},'entry cap'),({'dense_cap':32768},'size cap')]:
+            with self.subTest(options=options):
+                result,observation,_,passes,_,elapsed=self.xcresult_rescan_fixture(staging=True,**options)
+                self.assertIsInstance(result,RuntimeError);self.assertIn(expected,str(result))
+                self.assertLessEqual(passes,2);self.assertEqual(observation['status'],'failed')
+                if 'deadline'==expected:self.assertEqual(elapsed,10.)
+
+
+    def test_staging_restart_remains_owned_scoped_and_type_identity_error_strict(self):
+        relative='Tests.xcresult/Staging/9C21B21B-53DF-40FE-85BF-38A7361D7DD0'
+        for scenario in ['symlink','unknown_kind','directory_open','reappeared','root_replaced',
+                         'parent_replaced','fd_replaced','final_root_replaced','entry_permission',
+                         'entry_other_errno','confirmation_permission','confirmation_other_errno',
+                         'late_entry','late_confirmation']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario=scenario,allow_xcresult_restart=True)
+                self.assertIsInstance(result,(OSError,RuntimeError));self.assertEqual(observation['status'],'failed')
+                self.assertEqual(observation['traversal_attempts'],1);self.assertNotIn('discarded_scan',observation)
+        for path,enabled in [(relative,False),('Source/Staging/entry',True),('Tests.xcresult/Staging',True),
+                             ('Tests.xcresult/Data/final-record',True),('nested/Tests.xcresult/Staging/entry',True)]:
+            result,observation,_,probes,_=self.derived_vanish_scan(relative=path,allow_xcresult_restart=enabled)
+            self.assertIsInstance(result,FileNotFoundError);self.assertEqual(probes,[])
+            self.assertNotIn('discarded_scan',observation)
+
 
     def test_xcresult_temp_disappearance_restarts_complete_accounting_once(self):
         result,observation,root,passes,seen,_=self.xcresult_rescan_fixture()

@@ -1,25 +1,33 @@
 # Full-backup recovery UI regression
 
-Status: source candidate only. No Swift compilation, native execution, new CI,
-StoreKit replay or pixel acceptance is claimed. The accepted `674cbb6` checkout
-and its Release artifacts remain unchanged. This patch must first be integrated
-into a separate candidate checkout and assigned its own source identity.
+Status: the three-phase preparation policy is a source candidate. It has not
+yet passed a native run or independent pixel review. The current hosted driver
+is `python3 -B scripts/recovery_hosted.py --run` in the Recovery CI job; it binds
+the actual checkout, runner profile and attempt before any simulator action.
+This document does not authorize a local invocation or claim release acceptance.
 
 ## What this closes when actually executed
 
-Run two explicitly ordered, selected cases in `BatchImportUITests`, with a
-host snapshot between them:
+Run three explicitly ordered selected cases in `BatchImportUITests`:
 
-1. `testRecoveryExportFullBackupThroughFiles`: existing synthetic demo plus one
+1. `testRecoveryCreateOwnedFilesDestination`: existing synthetic demo, Free
+   counts and disclosure, real Save to Files, native creation of the exact
+   `TripDocket-Recovery-<run-UUID>` folder, then Cancel without saving. The case
+   terminates the app and must pass before the host proceeds.
+2. Host discovers exactly one matching folder under the owned simulator local
+   provider. Named paths and open descriptors must keep their identities, and
+   a complete stable directory iteration must prove the folder empty. There
+   is no observation race with the still-running preparation test.
+3. `testRecoveryExportFullBackupThroughFiles`: existing synthetic demo plus one
    unassigned person, observed Free gate, full-backup disclosure, actual share
    sheet, Save to Files, exact fresh owned folder.
-2. Host compares the resulting backup to the active source catalog and original
+4. Host compares the resulting backup to the active source catalog and original
    bytes, saves immutable evidence and pins its manifest hash **before reset**.
-3. `testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal`: reset to an empty
+5. `testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal`: reset to an empty
    Free library, actual Files import, replacement disclosure, application
    validation, successful restore, relaunch without fixtures, original readiness
    check and Quick Look preview.
-4. Host compares all restored catalog metadata and original bytes with the
+6. Host compares all restored catalog metadata and original bytes with the
    pre-reset snapshot; independent review checks the actual PDF pixels and
    ordered UI evidence.
 
@@ -29,61 +37,63 @@ Booking, assigned to Alex, no expiry). The unattached person distinguishes a
 complete backup from a selected-trip export. UUIDs, dates and PDF bytes are
 generated at runtime; capture them, never hardcode a reference hash.
 
-No new application hooks are added. Existing Debug `--demo` seeds only phase 1;
-`--ui-testing-reset` is used only in phase 2; phase 1 requires the newly created simulator; `--ui-testing-unlocked` skips device
-authentication. All export/restore paths and their validation remain real.
-Neither new case invokes `localStoreSession`, `buyProduct`, transaction clearing
+No new application hooks are added. Existing Debug `--demo` seeds the empty
+preparation library; export reuses it without resetting. `--ui-testing-reset`
+is used only in restore. All phases share the newly created simulator.
+`--ui-testing-unlocked` skips device authentication. All export/restore paths
+and their validation remain real. No recovery case invokes `localStoreSession`, `buyProduct`, transaction clearing
 or Restore purchases. Startup may query StoreKit; this is not a network-isolation
 test. A clean dedicated simulator and visible second-trip Free gates establish
 the entitlement scope. App-data reset alone does not clear purchase history.
 
 ## Admission before any native action
 
-The current packet authorizes source preparation and offline verifier tests
-only. A future coordinator must allocate a resource slot and approve an exact
-bounded executor. This document is not that executor or a permission to run
-ad-hoc terminal commands. The existing batch driver is a navigation/ownership
-reference, not an approved recovery runner.
+The hosted entrypoint validates the admitted CI event/profile, exact source
+manifest and host process capability. A separate local run still requires an
+exact approved bounded controller and resource admission. This document is
+not permission to run ad-hoc commands or reuse an existing simulator.
 
 Before admission, bind the candidate commit/tree and input hashes, Xcode path,
 runtime identifier, device type, unique result root and unique folder name
-`TripDocket-Recovery-<run-UUID>`. Verify the final patch and native compilation.
+`TripDocket-Recovery-<run-UUID>`. Record the actual native compilation outcome. No successful build is assumed.
 Use one newly created simulator with no prior app or StoreKit history; never
 adopt an existing UUID, booted device, folder, result bundle or baseline. No
 purchase tests may run in this attempt. Do not share the simulator with CI.
 
-The future wrapper needs recorded command deadlines, output and disk caps,
-process ownership/reaping, a cleanup reserve, and fresh host checks approved
-for this host. Per UI phase set both XCTest default and maximum to 300 seconds;
-the plan's default 30/maximum 60 would otherwise truncate this case. Provisional
-outer budgets are 600 seconds per xcodebuild invocation and 1,500 seconds total,
-including 120 seconds reserved for cleanup. Proposed hard caps are 16 MiB per
-command log, 2 GiB per xcresult, 8 GiB for the complete owned result root
-(including DerivedData and copied evidence), and at least 16 GiB of free space
-at admission, aborting work below 8 GiB free. The future executor must enforce
-these with bounded checks and reserve cleanup time; the source packet does not
-implement that executor. These caps do not measure the whole simulator device.
-The coordinator must approve all limits against actual host conditions before
-execution. No retries or automatic slot expansion. A failure ends the attempt
-after evidence/cleanup.
+The driver records original command deadlines, output and disk caps, ownership,
+reaping and cleanup. The prepare case uses a 120-second XCTest maximum;
+export/restore retain 300 seconds each. Every xcodebuild invocation retains a
+600-second ceiling, clipped to the original remaining work deadline with an
+8-second owned stop reserve. Total time remains 1,500 seconds: 1,380 seconds of
+work and 120 seconds reserved for cleanup. These three command ceilings cannot
+all be consumed. No phase resets the clock; phase_budget records remaining
+work before/after the command and evidence handling.
 
-## Ordered inputs and command templates for the future wrapper
+All three invocations reuse the same DerivedData directory with compiler index
+generation disabled; no clean or duplicate cold build is requested. Incremental
+reuse and total fit require actual runtime evidence. The original limits remain
+16 MiB per stream, 64 MiB aggregate logs, 2 GiB per xcresult, 8 GiB complete owned
+output (including DerivedData and evidence copies), 16 GiB admission free space
+and 8 GiB continuing free space. A failed operation ends the attempt after
+bounded evidence/cleanup. There are no automatic retries or slot expansion.
+
+## Ordered inputs and hosted command construction
 
 Arguments below are arrays, not shell fragments. Substitute only recorded,
 validated identifiers/absolute paths. Do not execute while this packet remains
 source-only.
 
-1. Create/boot the approved new simulator, record its UUID and pre-attempt
-   inventory. Resolve the local Files group using:
-   `['xcrun', 'simctl', 'get_app_container', UUID, 'com.apple.DocumentsApp', 'groups']`.
-   Parse exactly one `group.com.apple.FileProvider.LocalStorage` entry. Require
-   its resolved path under this UUID, then the `File Provider Storage` directory.
-   Create the unique folder there with exclusive mkdir and record parent/folder
-   device+inode. It starts empty; do not put a host-generated backup in it.
-   If the provider is unavailable, stop; any bootstrap must be separately
-   specified in the wrapper, not improvised by launching arbitrary apps.
+1. Create/boot the admitted new simulator and bind its UUID and baseline
+   inventory. A bounded read-only scan first proves the exact run folder name
+   absent. The prepare case opens the real Save UI, creates that exact folder
+   through native New Folder, verifies its navigation title and cancels without
+   Save. After its exact single-case PASS, a bounded no-follow host scan finds
+   the unique local-provider folder and proves it empty, with group/provider/
+   folder descriptor and named-path identities. Missing/ambiguous/nonempty or
+   changed directories fail. The host does not call DocumentsApp group lookup,
+   launch Files, create Apple storage, or prepopulate a backup.
 
-2. Phase 1 environment additions (preserve only reviewed base environment):
+2. Export environment additions (preserve only reviewed base environment):
 
    ```json
    {
@@ -104,10 +114,16 @@ source-only.
     "-maximum-concurrent-test-simulator-destinations", "1", "-collect-test-diagnostics", "never",
     "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "300",
     "-derivedDataPath", "<RESULT_ROOT>/DerivedData",
-    "-resultBundlePath", "<RESULT_ROOT>/Export.xcresult",
+    "-resultBundlePath", "<RESULT_ROOT>/export.xcresult",
     "-only-testing:TripfolioUITests/BatchImportUITests/testRecoveryExportFullBackupThroughFiles",
-    "CODE_SIGNING_ALLOWED=NO", "test"]
+    "COMPILER_INDEX_STORE_ENABLE=NO", "CODE_SIGNING_ALLOWED=NO", "test"]
    ```
+
+   Preparation uses the same constructed argv and DerivedData, with phase
+   `prepare`, result `prepare.xcresult`, selected case
+   `testRecoveryCreateOwnedFilesDestination`, and both XCTest allowances 120.
+   Export uses `export.xcresult`; restore uses `restore.xcresult`. The driver
+   constructs these arrays from its fixed CASES map, not user-supplied shell text.
 
 3. After xcodebuild exits, preserve the original xcresult and record a complete
    file manifest before invoking any result reader. Read only a separately
@@ -117,7 +133,8 @@ source-only.
    zero skips, with no extra executed tests. Parse summary and tests from that
    verified copy and preserve raw bounded outputs. A skipped opt-in is not
    success. Confirm the app is stopped after the test's defer and record
-   app-bundle identity. Apply this same evidence-preservation rule to phase 2.
+   app-bundle identity. Apply this evidence-preservation rule to all three phases. Preparation
+   does not take an application-library snapshot.
 
 4. Recheck Files folder ownership and require exactly `Documents.tripbackup`, a
    regular file. Resolve app data via
@@ -135,19 +152,19 @@ source-only.
 
    Require exit zero and comparison PASS. Independently hash the four evidence
    files plus manifest; pin the returned manifest SHA in the wrapper receipt
-   before phase 2. Record original UI-exported backup SHA, folder identity and
+   before restore. Record original UI-exported backup SHA, folder identity and
    source `active.json` generation. The verifier reads the pointer's generation,
    not the newest directory. Never reset if this snapshot is incomplete.
 
-5. Phase 2: same device, candidate app identity, owned Files folder and pinned
+5. Restore: same device, candidate app identity, owned Files folder and pinned
    baseline. Change only environment phase to `restore`, result path to
-   `Restore.xcresult`, and `-only-testing` to
+   `restore.xcresult`, and `-only-testing` to
    `TripfolioUITests/BatchImportUITests/testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal`.
    Same exact zero-failure/zero-skip/single-case acceptance. The test resets via
    the existing Debug flag, proves zero counts and performs the real import.
    Do not install a host-made catalog or invoke repository APIs from this test.
 
-6. Re-resolve app data after phase 2 (do not assume the container path survived
+6. Re-resolve app data after restore (do not assume the container path survived
    installation), recheck candidate identity and folder device+inode, then:
 
    ```json
@@ -164,7 +181,7 @@ source-only.
    the wrapper receipt before deleting the simulator. This copy step belongs
    to the future wrapper; the comparison utility is read-only in compare mode.
 
-7. Extract ordered PNG and AX attachments from both actual xcresults for
+7. Extract ordered PNG and AX attachments from all three actual xcresults for
    independent inspection: Free gates; complete export warning and Export
    action; selected owned destination; empty restore library; exact backup
    selection; zero-library replacement warning; successful restore; both
@@ -178,8 +195,8 @@ source-only.
 
 ## Source and evidence limits
 
-Save-to-Files, exact current-folder navigation title, Settings count-row and
-single-file selection selectors still need runtime confirmation. Before Save,
+New Folder/name selection/Cancel, Save-to-Files, exact folder navigation,
+Settings counts and single-file selection require current runtime confirmation. Before Save,
 file selection or an optional Open, recovery requires the exact owned folder
 name as a visible static text in the Files navigation bar. Save is scoped to
 that same bar. Tapping the folder row alone does not authorize either action. The shared Files folder navigation comes from the
@@ -201,7 +218,7 @@ Coverage stays narrow: one valid PDF and two people, one unassigned. This does
 not add UI evidence for JPEG/PNG, multiple originals, confirmed non-nil expiry,
 corrupt backups, libraries above Free limits, reminders, real device lock,
 physical offline mode, purchases, migration, TestFlight or App Store readiness.
-Source is a Debug candidate, not the previously accepted Release binary.
+Source is a Debug candidate, not acceptance of any Release binary.
 
 Offline self-check only:
 `python3 -B scripts/test-verify-recovery-evidence.py`.

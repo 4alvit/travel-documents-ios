@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Portable two-phase recovery core extracted from the reviewed source-only executor."""
+"""Portable prepare/export/restore core with a deterministic empty-folder boundary."""
 import argparse
+from contextlib import ExitStack
 import errno
 import hashlib
 import importlib.util
@@ -32,6 +33,7 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 CASES = {
+    'prepare': 'BatchImportUITests/testRecoveryCreateOwnedFilesDestination()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
     'restore': 'BatchImportUITests/testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal()',
 }
@@ -129,7 +131,9 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     build/cache output contribute no bytes, excluding Build/Products and every
     xcresult bundle. Only an explicitly active owned test writer may request one
     complete fresh traversal after confirmed absence of a regular direct
-    <root>.xcresult/Data/_tmp. leaf. Both passes share the original deadline and
+    <root>.xcresult/Data/_tmp. leaf or a known regular/directory entry below the
+    same top-level bundle Staging directory. No staging entry is skipped.
+    Both passes share the original deadline and
     encounter cap; no partial accounting is accepted. Other errors fail closed.
     The disk cap uses allocated
     512-byte blocks, not sparse logical lengths. Hardlinks are conservatively
@@ -199,10 +203,13 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                             and bundle == prefix[0] and prefix[0].endswith('.xcresult')
                             and prefix[1] == 'Data' and child.name.startswith('_tmp.')
                             and len(child.name) > len('_tmp.'))
+                    result_staging = (allow_xcresult_restart and len(prefix) >= 2
+                            and bundle == prefix[0] and prefix[0].endswith('.xcresult')
+                            and prefix[1] == 'Staging')
                     derived_leaf = (bundle is None and prefix and prefix[0] == 'DerivedData'
                             and relative[:3] != ('DerivedData', 'Build', 'Products')
                             and not child.name.endswith('.xcresult'))
-                    if error.errno != errno.ENOENT or not (result_temp or derived_leaf):
+                    if error.errno != errno.ENOENT or not (result_temp or result_staging or derived_leaf):
                         raise
                     check()
                     # Count every missing encounter, including any discarded pass.
@@ -222,11 +229,16 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                                 'Output absent-entry parent replaced')
                         check()
                     confirm_parent()
-                    # A cached DirEntry kind may establish the vanished entry
-                    # was regular. Unknown kinds, links and directories fail.
-                    require(observe('absent_entry_kind', relative, depth,
-                                    lambda: child.is_file(follow_symlinks=False)),
-                            'Missing entry is not a known regular entry')
+                    # Cached DirEntry kind must identify a real entry. A vanished
+                    # staging directory can request a full restart, never a skip.
+                    # Data temp and DerivedData handling remain regular-file only.
+                    known_regular = observe('absent_entry_kind', relative, depth,
+                                            lambda: child.is_file(follow_symlinks=False))
+                    known_directory = result_staging and not known_regular and observe(
+                            'absent_staging_directory_kind', relative, depth,
+                            lambda: child.is_dir(follow_symlinks=False))
+                    require(known_regular or known_directory,
+                            'Missing entry is not a known permitted entry kind')
                     check()
                     try:
                         observe('absence_stat', relative, depth,
@@ -237,7 +249,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                         raise RuntimeError('Entry reappeared during absence confirmation')
                     check()
                     confirm_parent()
-                    if result_temp:
+                    if result_temp or result_staging:
                         # Never skip an xcresult entry or return this partial sample.
                         # All open traversal descriptors unwind before a fresh pass.
                         raise RestartScan(error, relative)
@@ -300,7 +312,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                         'Output root replaced before complete rescan')
                 check()
                 observation['discarded_scan'] = {
-                    'reason': 'Confirmed absent regular xcresult Data/_tmp. leaf',
+                    'reason': 'Confirmed absent xcresult Data temporary leaf or Staging entry',
                     'path': '/'.join(restart.relative)[:256],
                     'error': repr(restart.error)[:512],
                     'partial_counts_are_not_valid_accounting': True,
@@ -385,9 +397,9 @@ class Recovery:
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
-        # Only the two disposable native test phases receive this explicit
-        # sampling allowance. Preparation, capability and evidence stay at5s.
-        phase_scan = unfinished and pending.get('id') in ('phase-export', 'phase-restore')
+        # Native prepare/export/restore builds share the existing15s scan
+        # allowance. Non-native preparation/capability/evidence stay at5s.
+        phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         allowance = CAPS['phase_scan_seconds'] if phase_scan else CAPS['scan_seconds']
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
@@ -399,7 +411,7 @@ class Recovery:
             deadline = min(deadline, self.t0+primary['work_deadline'])
         def active_test_writer(context, record):
             if (record is None or 'finish' in record or record.get('id') not in
-                    ('phase-export', 'phase-restore', 'selected-tests')):
+                    ('phase-prepare', 'phase-export', 'phase-restore', 'selected-tests')):
                 return False
             pid = record.get('pgid')
             process = context.active.get(pid)
@@ -511,7 +523,149 @@ class Recovery:
         self.owned_root()
         self.sim('boot','boot',self.owned)
         self.sim('boot-ready','bootstatus',self.owned,'-b',cap=120)
-        self.setup_files()
+        self.prepare_files_ui_baseline()
+
+    def discover_ui_files_folder(self, deadline=None):
+        """One bounded, read-only traversal of direct local-provider roots.
+
+        This discovers only the exact UI-created UUID folder. It never creates
+        Apple storage, calls a container RPC, or accepts the first match.
+        """
+        root = self.owned_root()
+        deadline = min(self.limit, self.ops.now()+CAPS['scan_seconds']) if deadline is None else min(self.limit,deadline)
+        anchors, candidates = {}, []
+        def check():
+            self.timecheck()
+            require(self.ops.now()<deadline,'Files folder discovery deadline reached')
+            require(self.owned_root()==root,'Owned root changed during Files discovery')
+        def directory(path):
+            check()
+            value = identity_of(path)
+            check()
+            return value
+        parent = root
+        for part in ('data','Containers','Shared','AppGroup'):
+            parent = parent/part
+            check()
+            try: current = directory(parent)
+            except FileNotFoundError as error:
+                if error.errno != errno.ENOENT: raise
+                # Missing container ancestors are permitted only before the
+                # UI-created folder exists. Existing baseline anchors remain strict.
+                check()
+                for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
+                    require(directory(root/relative)==pin,'Files baseline ancestor changed')
+                return candidates,anchors
+            anchors[parent.relative_to(root).as_posix()] = current
+        groups = parent
+        root_before = groups.stat()
+        names = []
+        with os.scandir(groups) as entries:
+            for entry in entries:
+                check()
+                require(len(names)<CAPS['scan_entries'],'Files group entry cap exceeded')
+                metadata = entry.stat(follow_symlinks=False)
+                check()
+                require(stat.S_ISDIR(metadata.st_mode),'Unexpected Files group entry type')
+                uuid.UUID(entry.name)
+                names.append(entry.name)
+        for name in sorted(names):
+            group = groups/name
+            group_id = directory(group)
+            provider = group/'File Provider Storage'
+            try: provider_id = directory(provider)
+            except FileNotFoundError as error:
+                if error.errno != errno.ENOENT: raise
+                require(directory(group)==group_id,'Files group changed during discovery')
+                continue
+            folder = provider/self.folder_name
+            try: folder_id = directory(folder)
+            except FileNotFoundError as error:
+                if error.errno != errno.ENOENT: raise
+            else:
+                candidates.append({'path':str(folder),'identity':folder_id,
+                                   'provider_identity':provider_id,'group_identity':group_id})
+                require(len(candidates)<=1,'Ambiguous UI-created Files destination')
+            require(directory(provider)==provider_id and directory(group)==group_id,
+                    'Files ancestor changed during discovery')
+        check()
+        root_after = groups.stat()
+        require((root_before.st_dev,root_before.st_ino,root_before.st_mtime_ns,root_before.st_ctime_ns)
+                ==(root_after.st_dev,root_after.st_ino,root_after.st_mtime_ns,root_after.st_ctime_ns),
+                'Files group inventory changed during discovery')
+        for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
+            require(directory(root/relative)==pin,'Files baseline ancestor changed')
+        for relative,pin in anchors.items():
+            require(directory(root/relative)==pin,'Files ancestor changed after discovery')
+        check()
+        return candidates,anchors
+
+    def prepare_files_ui_baseline(self):
+        self.once('files-ui-baseline')
+        candidates,anchors = self.discover_ui_files_folder()
+        require(not candidates,'Owned Files name already exists before UI preparation')
+        self.report['files_ui_baseline'] = {'owned_root_identity':self.root_id,
+            'folder_name':self.folder_name,'absent':True,'anchors':anchors}
+        self.save()
+
+    def bind_ui_created_empty_folder(self):
+        require(self.report.get('phase_passed',{}).get('prepare') is True,
+                'UI folder preparation did not pass')
+        baseline = self.report.get('files_ui_baseline',{})
+        require(baseline.get('absent') is True and baseline.get('folder_name')==self.folder_name
+                and baseline.get('owned_root_identity')==self.root_id,'Files baseline is unbound')
+        deadline = min(self.limit,self.ops.now()+CAPS['scan_seconds'])
+        candidates,_ = self.discover_ui_files_folder(deadline)
+        require(len(candidates)==1,'Missing unique UI-created Files destination')
+        selected = candidates[0]
+        folder = Path(selected['path'])
+        def check():
+            self.timecheck()
+            require(self.ops.now()<deadline,'Empty Files folder verification deadline reached')
+            self.owned_root()
+        # All reader descriptors close even if another close raises. The UI
+        # test is already terminal; no poll/bridge race or inferred empty state.
+        with ExitStack() as descriptors:
+            opened = []
+            for path,pin in [(folder.parent.parent,selected['group_identity']),
+                             (folder.parent,selected['provider_identity']),
+                             (folder,selected['identity'])]:
+                check()
+                fd = os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                descriptors.callback(os.close,fd)
+                opened.append((fd,path,pin))
+                check()
+                metadata = os.fstat(fd)
+                require([metadata.st_dev,metadata.st_ino]==pin and identity_of(path)==pin,
+                        'UI-created Files directory changed before pin')
+                check()
+            empty_fd = fd
+            before = os.fstat(empty_fd)
+            check()
+            with os.scandir(empty_fd) as entries:
+                for _ in entries:
+                    check()
+                    raise RuntimeError('UI-created Files folder was not empty')
+            check()
+            after = os.fstat(empty_fd)
+            require((before.st_dev,before.st_ino,before.st_mtime_ns,before.st_ctime_ns)
+                    ==(after.st_dev,after.st_ino,after.st_mtime_ns,after.st_ctime_ns),
+                    'UI-created Files folder changed during empty verification')
+            for descriptor,path,pin in opened:
+                check()
+                final_metadata = os.fstat(descriptor)
+                require(stat.S_ISDIR(final_metadata.st_mode)
+                        and [final_metadata.st_dev,final_metadata.st_ino]==pin,
+                        'UI-created Files descriptor changed after pin')
+                check()
+                require(identity_of(path)==pin,'UI-created Files path changed after pin')
+            check()
+        self.folder,self.folder_id,self.provider_id = folder,selected['identity'],selected['provider_identity']
+        self.files_group_id = selected['group_identity']
+        self.report['files_folder'] = {**selected,'initially_empty':True,
+            'creation':'real Files UI prepare case','empty_boundary':'after prepare case, before export case'}
+        self.save()
+
 
     def wait_files_provider(self, group, deadline):
         # Observe only the existing provider leaf within the original lookup
@@ -643,6 +797,8 @@ class Recovery:
         self.owned_root()
         require(self.folder is not None and identity_of(self.folder)==self.folder_id
                 and identity_of(self.folder.parent)==self.provider_id,'Files ownership changed')
+        if hasattr(self,'files_group_id'):
+            require(identity_of(self.folder.parent.parent)==self.files_group_id,'Files group ownership changed')
 
     def copy_tree(self, source, target, manifest):
         self.checkpoint()
@@ -733,11 +889,12 @@ class Recovery:
         return root
 
     def phase_argv(self, phase):
+        testcase = '120' if phase=='prepare' else '300'
         return [self.host['developer_dir']+'/usr/bin/xcodebuild','-project','Tripfolio.xcodeproj','-scheme','Tripfolio',
                 '-configuration','Debug','-destination','platform=iOS Simulator,id='+self.owned,
                 '-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1',
-                '-collect-test-diagnostics','never','-default-test-execution-time-allowance','300',
-                '-maximum-test-execution-time-allowance','300','-derivedDataPath',str(self.out/'DerivedData'),
+                '-collect-test-diagnostics','never','-default-test-execution-time-allowance',testcase,
+                '-maximum-test-execution-time-allowance',testcase,'-derivedDataPath',str(self.out/'DerivedData'),
                 '-resultBundlePath',str(self.out/(phase+'.xcresult')),
                 '-only-testing:TripfolioUITests/'+CASES[phase].removesuffix('()'),
                 'COMPILER_INDEX_STORE_ENABLE=NO','CODE_SIGNING_ALLOWED=NO','test']
@@ -745,8 +902,25 @@ class Recovery:
     def run_phase(self, phase):
         require(phase in CASES,'Unknown phase')
         if phase=='restore': self.authorize_restore()
-        self.verify_folder()
+        if phase=='prepare':
+            require(self.folder is None and self.report.get('files_ui_baseline',{}).get('absent') is True,
+                    'UI folder preparation requires an absent owned destination')
+        else:
+            require(self.report.get('phase_passed',{}).get('prepare') is True,
+                    'Deterministic UI preparation boundary missing')
+            self.verify_folder()
         self.once('phase-'+phase)
+        # Observations are bounded to these three one-shot phases. The shared
+        # original work deadline is never reset or extended for preparation.
+        started = self.ops.now()
+        budget = {'started_elapsed':started-self.t0,
+                  'original_work_deadline_elapsed':self.limit-self.t0,
+                  'remaining_work_before_seconds':self.limit-started,
+                  'requested_command_cap_seconds':CAPS['phase_seconds'],
+                  'selected_case_max_seconds':120 if phase=='prepare' else 300,
+                  'stop_reserve_seconds':8,
+                  'command_deadline_ceiling_elapsed':min(self.limit,started+CAPS['phase_seconds'])-self.t0}
+        self.report.setdefault('phase_budget',{})[phase] = budget
         old_env,old_cwd = self.ops.env,self.ops.cwd
         self.ops.env = {**old_env,'TEST_RUNNER_TRIPDOCKET_RECOVERY_UI':'1',
                         'TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE':phase,'TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER':self.folder_name,
@@ -759,8 +933,11 @@ class Recovery:
             raise
         finally:
             self.ops.env,self.ops.cwd = old_env,old_cwd
+            budget['remaining_work_after_command_seconds'] = self.limit-self.ops.now()
         copy = self.preserve_result(phase)
         self.read_result(phase,copy)
+        budget['remaining_work_after_evidence_seconds'] = self.limit-self.ops.now()
+        if phase=='prepare': return None
         return self.app_state(phase)
 
     def failure_evidence(self, phase):
@@ -826,6 +1003,8 @@ class Recovery:
 
     def work(self):
         self.setup()
+        self.run_phase('prepare')
+        self.bind_ui_created_empty_folder()
         library = self.run_phase('export')
         self.take_snapshot(library)
         library = self.run_phase('restore')
