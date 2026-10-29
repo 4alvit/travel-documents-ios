@@ -127,9 +127,10 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
     Directory mtimes may change during a writer. Every encountered entry consumes
-    the entry budget. Confirmed absent regular leaves in mutable DerivedData
+    the entry budget. Confirmed absent known regular or symbolic-link leaves in mutable DerivedData
     build/cache output contribute no bytes, excluding Build/Products and every
-    xcresult bundle. Only an explicitly active owned test writer may request one
+    xcresult bundle. Link targets are never followed, read, or counted. Unknown
+    entry kinds remain hard failures. Only an explicitly active owned test writer may request one
     complete fresh traversal after confirmed absence of a regular direct
     <root>.xcresult/Data/_tmp. leaf or a known regular/directory entry below the
     same top-level bundle Staging directory. No staging entry is skipped.
@@ -231,13 +232,16 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                     confirm_parent()
                     # Cached DirEntry kind must identify a real entry. A vanished
                     # staging directory can request a full restart, never a skip.
-                    # Data temp and DerivedData handling remain regular-file only.
+                    # Data temp remains regular-file only. Mutable DerivedData
+                    # also accounts known symlinks without ever following targets.
                     known_regular = observe('absent_entry_kind', relative, depth,
                                             lambda: child.is_file(follow_symlinks=False))
+                    known_symlink = derived_leaf and not known_regular and observe(
+                            'absent_symlink_kind', relative, depth, child.is_symlink)
                     known_directory = result_staging and not known_regular and observe(
                             'absent_staging_directory_kind', relative, depth,
                             lambda: child.is_dir(follow_symlinks=False))
-                    require(known_regular or known_directory,
+                    require(known_regular or known_directory or known_symlink,
                             'Missing entry is not a known permitted entry kind')
                     check()
                     try:

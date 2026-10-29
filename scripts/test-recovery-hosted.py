@@ -2369,12 +2369,12 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(path.stat().st_size, size)
         return path
 
-    def derived_vanish_scan(self, *, relative=None, scenario='absent', allow_xcresult_restart=False, **caps):
+    def derived_vanish_scan(self, *, relative=None, scenario='absent', entry_kind=None, allow_xcresult_restart=False, **caps):
         relative=relative or 'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp'
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve();target=root/relative
         target.parent.mkdir(parents=True,exist_ok=True)
         directory=scenario in ('directory','directory_open')
-        target.mkdir() if directory else target.symlink_to('missing-target') if scenario=='symlink' else target.write_bytes(b'mutable derived output')
+        target.mkdir() if directory else target.symlink_to('missing-target') if scenario=='symlink' or entry_kind=='symlink' else target.write_bytes(b'mutable derived output')
         (root/'retained-output').write_bytes(b'x'*4096)
         if scenario=='late_dense_cap':
             caps['output_bytes']=sum(path.lstat().st_blocks*512 for path in [root]+list(root.rglob('*')) if path!=target)-1
@@ -2403,7 +2403,8 @@ class ResourceAccountingTests(unittest.TestCase):
                 yield (SimpleNamespace(name=e.name,
                     stat=lambda *,follow_symlinks,e=e:entry_stat(e,follow_symlinks=follow_symlinks),
                     is_file=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_file(follow_symlinks=follow_symlinks),
-                    is_dir=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_dir(follow_symlinks=follow_symlinks)) for e in entries)
+                    is_dir=lambda *,follow_symlinks,e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_dir(follow_symlinks=follow_symlinks),
+                    is_symlink=lambda e=e:False if scenario=='unknown_kind' and e.name==target.name else e.is_symlink()) for e in entries)
         def metadata(path,*args,**kwargs):
             if path==target.name and kwargs.get('dir_fd') is not None:
                 self.assertIs(kwargs.get('follow_symlinks'),False);absence_stats.append(path)
@@ -2484,9 +2485,9 @@ class ResourceAccountingTests(unittest.TestCase):
                     self.assertEqual(observation['status'],'failed')
                     self.assertNotIn('confirmed_absent_derived_entries',observation)
 
-    def test_derived_leaf_absence_requires_known_regular_kind_and_strict_directory_open(self):
+    def test_derived_leaf_absence_requires_known_leaf_kind_and_strict_directory_open(self):
         for relative in [None,'DerivedData/Index.noindex/DataStore/v5/index-record']:
-            for scenario in ['directory','symlink','unknown_kind','directory_open']:
+            for scenario in ['directory','unknown_kind','directory_open']:
                 with self.subTest(relative=relative,scenario=scenario):
                     result,observation,_,probes,_=self.derived_vanish_scan(relative=relative,scenario=scenario)
                     self.assertIsInstance(result,(RuntimeError,FileNotFoundError));self.assertEqual(probes,[])
@@ -2514,6 +2515,73 @@ class ResourceAccountingTests(unittest.TestCase):
                 result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario='late_dense_cap')
                 self.assertIsInstance(result,RuntimeError);self.assertIn('size cap',str(result))
                 self.assertEqual(observation['status'],'failed')
+
+    def test_derived_cached_symlink_absence_uses_fresh_nofollow_proof(self):
+        for relative in ['DerivedData/ModuleCache.noindex/KEZDL5D6U2O9/OpenGLES-1PP0Q99TYP0SR.pcm.lock',
+                         'DerivedData/Index.noindex/DataStore/v5/cache-link']:
+            with self.subTest(relative=relative):
+                result,observation,root,probes,_=self.derived_vanish_scan(relative=relative,entry_kind='symlink')
+                self.assertIsInstance(result,dict);self.assertEqual(probes,[Path(relative).name])
+                retained=[root]+list(root.rglob('*'))
+                self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in retained))
+                self.assertEqual(result['logical'],4096)
+                self.assertEqual(result['entries'],len(retained)) # Missing link encounter is charged.
+                self.assertEqual(result['confirmed_absent_derived_entries'],1)
+                self.assertEqual(observation['status'],'completed')
+                self.assertEqual(observation['traversal_attempts'],1)
+
+    def test_derived_cached_symlink_absence_keeps_strict_scope(self):
+        for relative in ['Source/source-link','Other/cache-link',
+                         'DerivedData/Build/Products/App.app/payload-link',
+                         'DerivedData/result.xcresult/Data/_tmp.link',
+                         'Tests.xcresult/Staging/link']:
+            with self.subTest(relative=relative):
+                result,observation,_,probes,_=self.derived_vanish_scan(
+                    relative=relative,entry_kind='symlink',allow_xcresult_restart=True)
+                self.assertIsInstance(result,(FileNotFoundError,RuntimeError));self.assertEqual(probes,[])
+                self.assertEqual(observation['status'],'failed')
+                self.assertNotIn('confirmed_absent_derived_entries',observation)
+
+    def test_derived_cached_symlink_unknown_kind_and_reappearance_fail(self):
+        for scenario in ['unknown_kind','reappeared']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,probes,_=self.derived_vanish_scan(
+                    relative='DerivedData/ModuleCache.noindex/Module.pcm.lock',entry_kind='symlink',scenario=scenario)
+                self.assertIsInstance(result,RuntimeError);self.assertEqual(observation['status'],'failed')
+                self.assertIn('known permitted' if scenario=='unknown_kind' else 'reappeared',str(result))
+                self.assertEqual(len(probes),0 if scenario=='unknown_kind' else 1)
+                self.assertNotIn('confirmed_absent_derived_entries',observation)
+
+    def test_derived_cached_symlink_parent_root_and_fd_identity_remain_strict(self):
+        for scenario in ['root_replaced','parent_replaced','fd_replaced','final_root_replaced']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.derived_vanish_scan(
+                    relative='DerivedData/ModuleCache.noindex/Module.pcm.lock',entry_kind='symlink',scenario=scenario)
+                self.assertIsInstance(result,RuntimeError);self.assertIn('replaced',str(result))
+                self.assertEqual(observation['status'],'failed')
+                self.assertNotIn('confirmed_absent_derived_entries',observation)
+
+    def test_derived_cached_symlink_permissions_and_non_enoent_remain_strict(self):
+        for scenario in ['entry_permission','entry_other_errno','confirmation_permission','confirmation_other_errno']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.derived_vanish_scan(
+                    relative='DerivedData/ModuleCache.noindex/Module.pcm.lock',entry_kind='symlink',scenario=scenario)
+                self.assertIsInstance(result,OSError);self.assertNotEqual(result.errno,errno.ENOENT)
+                self.assertEqual(observation['status'],'failed')
+
+    def test_derived_cached_symlink_keeps_deadline_encounter_and_disk_caps(self):
+        path='DerivedData/ModuleCache.noindex/AB/Module.pcm.lock'
+        for cap in [3,4]:
+            result,observation,_,_,_=self.derived_vanish_scan(relative=path,entry_kind='symlink',scan_entries=cap)
+            self.assertIsInstance(result,RuntimeError);self.assertIn('entry cap',str(result))
+            self.assertEqual(observation['encounter_count'],cap+1);self.assertEqual(observation['status'],'failed')
+        for scenario in ['late_entry','late_confirmation','late_dense_cap']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,elapsed=self.derived_vanish_scan(relative=path,entry_kind='symlink',scenario=scenario)
+                self.assertIsInstance(result,RuntimeError)
+                self.assertIn('size cap' if scenario=='late_dense_cap' else 'deadline',str(result))
+                self.assertEqual(observation['status'],'failed')
+                if scenario!='late_dense_cap':self.assertEqual(elapsed,10.)
 
     def xcresult_rescan_fixture(self, *, repeated=False, end_first=False,
                                 end_second=False, entry_cap=100000, dense_cap=None, staging=False, directory=False):

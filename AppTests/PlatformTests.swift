@@ -618,6 +618,7 @@ final class PurchaseFeedbackTests: XCTestCase {
             diagnostics.recordCatalog(URLError(.notConnectedToInternet))
             diagnostics.recordPurchase(phase: .purchase, error: URLError(.timedOut))
             diagnostics.recordPurchase(category: .verification)
+            diagnostics.observe(.purchase, stage: .finish)
             XCTAssertNil(diagnostics.accessibilityValue)
             XCTAssertNil(diagnostics.stateAccessibilityValue(isPro: true, isBusy: true))
         }
@@ -627,7 +628,7 @@ final class PurchaseFeedbackTests: XCTestCase {
         for isPro in [false, true] {
             for isBusy in [false, true] {
                 XCTAssertEqual(enabled.stateAccessibilityValue(isPro: isPro, isBusy: isBusy),
-                               "purchase-state isPro=\(isPro) isBusy=\(isBusy)")
+                               "purchase-state isPro=\(isPro) isBusy=\(isBusy) load=notStarted purchase=notStarted restore=notStarted")
             }
         }
     }
@@ -716,6 +717,14 @@ final class PurchaseFeedbackTests: XCTestCase {
 
     func testLatestPurchaseSurvivesBackgroundCatalogButNewOperationClearsIt() {
         var diagnostics = PurchaseDiagnostics(arguments: [diagnosticFlag])
+        diagnostics.observe(.purchase, stage: .purchase)
+        diagnostics.observe(.load, stage: .catalog)
+        diagnostics.observe(.restore, stage: .sync)
+        XCTAssertEqual(diagnostics.stateAccessibilityValue(isPro: false, isBusy: true),
+                       "purchase-state isPro=false isBusy=true load=catalog purchase=purchase restore=sync")
+        diagnostics.observe(.load, stage: .returned)
+        XCTAssertEqual(diagnostics.stateAccessibilityValue(isPro: false, isBusy: true),
+                       "purchase-state isPro=false isBusy=true load=returned purchase=purchase restore=sync")
         diagnostics.recordPurchase(phase: .purchase, error: URLError(.notConnectedToInternet))
         let purchase = diagnostics.accessibilityValue
         diagnostics.beginCatalog()
@@ -729,9 +738,25 @@ final class PurchaseFeedbackTests: XCTestCase {
         diagnostics.recordPurchase(category: .verification)
         XCTAssertEqual(diagnostics.accessibilityValue,
                        "purchase-diagnostic phase=purchase category=verification domain=none code=none")
+        // Error classification/clearing never fabricates a completed await.
+        XCTAssertEqual(diagnostics.stateAccessibilityValue(isPro: false, isBusy: true),
+                       "purchase-state isPro=false isBusy=true load=returned purchase=purchase restore=sync")
+        diagnostics.observe(.purchase, stage: .returned)
+        XCTAssertTrue(diagnostics.stateAccessibilityValue(isPro: false, isBusy: false)?
+            .contains("purchase=returned") == true)
     }
 
     func testDiagnosticSizeIsBoundedAndCannotMimicThePaymentSheetMarker() {
+        var diagnostics = PurchaseDiagnostics(arguments: [diagnosticFlag])
+        for stage in PurchaseDiagnostics.AwaitStage.allCases {
+            diagnostics.observe(.load, stage: stage)
+            diagnostics.observe(.purchase, stage: stage)
+            diagnostics.observe(.restore, stage: stage)
+            let value = diagnostics.stateAccessibilityValue(isPro: false, isBusy: false)!
+            XCTAssertLessThanOrEqual(value.utf8.count, 192)
+            XCTAssertTrue(value.unicodeScalars.allSatisfy { $0.isASCII })
+            XCTAssertFalse(value.localizedCaseInsensitiveContains("Xcode"))
+        }
         for code in [Int.min, 0, Int.max] {
             let value = PurchaseDiagnostic(phase: .purchase,
                 error: NSError(domain: "NSCocoaErrorDomain", code: code)).accessibilityValue
