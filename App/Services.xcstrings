@@ -1251,6 +1251,23 @@
           }
         }
       }
+    },
+    "services.model.finishDraft": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish or cancel the current document draft before starting another."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Завершите или отмените текущий черновик документа, прежде чем начинать другой."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

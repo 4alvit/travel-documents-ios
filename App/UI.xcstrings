@@ -4322,6 +4322,40 @@
           }
         }
       }
+    },
+    "selection.allMatches": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select all results"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выбрать все результаты"
+          }
+        }
+      }
+    },
+    "selection.noneMatches": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deselect results"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Снять выделение с результатов"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

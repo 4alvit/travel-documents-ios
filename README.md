@@ -146,11 +146,16 @@ one can read it. Choose the destination and recipients deliberately. An exported
 copy cannot be remotely revoked. Originals stay in the source app when imported.
 The privacy cover does not prevent somebody photographing an unlocked screen.
 
-An unfinished document edit survives background locking in RAM within the same
+An unfinished document import or edit survives background locking in RAM within the same
 running process. The sensitive view is removed while locked and recreated after
-authentication. Save persists the edit; Cancel discards it. Process termination
-loses an unsaved edit. Deleting/changing its source or successfully restoring a
-backup invalidates the old draft.
+authentication. Save persists the document; Cancel discards the draft. Process termination
+loses an unsaved draft. Deleting/changing its source or successfully restoring a
+backup invalidates the old draft. An import keeps its chosen file reference or
+scanned bytes, editable details and OCR text only in memory until Save.
+
+When selecting documents for export, searching limits both **Select all results**
+and the exported selection to visible matches. Filtering out a selected document
+removes it from the selection; clearing the search does not select it again.
 
 See [privacy policy](docs/privacy.md), [support](docs/support.md),
 [product scope](docs/product-scope.md), and [release checklist](docs/release-checklist.md).

@@ -3,6 +3,31 @@ import Observation
 import TravelCore
 import UIKit
 
+/// A single-file import survives privacy-driven view teardown, in RAM only.
+@MainActor @Observable
+final class DocumentImportDraft: Identifiable {
+    nonisolated let id = UUID()
+    let tripID: UUID
+    let sourceLibrary: LibrarySnapshot
+    var title = ""
+    var kind: DocumentKind = .other
+    var travelerID: UUID?
+    var hasExpiry = false
+    var expiryDate = Date()
+    fileprivate(set) var fileURL: URL?
+    fileprivate(set) var scannedData: Data?
+    fileprivate(set) var filename = ""
+    var recognizedText = ""
+    fileprivate(set) var isRecognizing = false
+    var errorMessage: String?
+    var hasSource: Bool { fileURL != nil || scannedData != nil }
+
+    init(tripID: UUID, sourceLibrary: LibrarySnapshot) {
+        self.tripID = tripID
+        self.sourceLibrary = sourceLibrary
+    }
+}
+
 /// A single unsaved editor survives privacy-driven view teardown in memory only.
 /// It is never serialized and is discarded when its source changes or is removed.
 @MainActor @Observable
@@ -30,11 +55,15 @@ final class DocumentEditDraft: Identifiable {
 final class AppModel {
     var library = LibrarySnapshot.empty {
         didSet {
+            if let draft = documentImportDraft, draft.sourceLibrary != library {
+                documentImportDraft = nil
+            }
             invalidateStaleDocumentEdit()
             invalidateStaleBatchImport()
         }
     }
     private(set) var documentEditDraft: DocumentEditDraft?
+    private(set) var documentImportDraft: DocumentImportDraft?
     private(set) var batchImportDraft: BatchImportDraft?
     var readiness: [UUID: DocumentReadiness] = [:]
     var isBusy = false
@@ -166,6 +195,7 @@ final class AppModel {
     }
 
     func beginEditingDocument(_ document: TravelDocument) {
+        guard documentImportDraft == nil else { reportUnfinishedImport(); return }
         guard batchImportDraft == nil else {
             errorMessage = L10n.service("services.model.edit.finishBatch", defaultValue: "Finish or cancel the current file batch before editing a document.")
             return
@@ -201,6 +231,91 @@ final class AppModel {
         }
     }
 
+    func beginDocumentImport(tripID: UUID) {
+        guard !isBusy else { return }
+        guard documentImportDraft == nil, documentEditDraft == nil, batchImportDraft == nil else {
+            reportUnfinishedImport()
+            return
+        }
+        guard repository != nil, library.trips.contains(where: { $0.id == tripID }) else {
+            errorMessage = RepositoryError.tripNotFound.localizedDescription
+            return
+        }
+        guard canAddDocument else {
+            errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available.")
+            return
+        }
+        documentImportDraft = DocumentImportDraft(tripID: tripID, sourceLibrary: library)
+    }
+
+    func cancelDocumentImport(draftID: UUID) {
+        guard !isBusy, documentImportDraft?.id == draftID else { return }
+        documentImportDraft = nil
+    }
+
+    func selectImportFile(_ url: URL, draftID: UUID) {
+        guard let draft = documentImportDraft, draft.id == draftID, !isBusy, !draft.isRecognizing else { return }
+        draft.fileURL = url
+        draft.scannedData = nil
+        draft.filename = url.lastPathComponent
+        draft.title = url.deletingPathExtension().lastPathComponent
+        draft.recognizedText = ""
+        draft.errorMessage = nil
+    }
+
+    func selectImportScan(_ data: Data, draftID: UUID) {
+        guard let draft = documentImportDraft, draft.id == draftID, !isBusy, !draft.isRecognizing else { return }
+        guard data.count <= Self.documentLimit else {
+            draft.errorMessage = RepositoryError.documentTooLarge.localizedDescription
+            return
+        }
+        draft.scannedData = data
+        draft.fileURL = nil
+        draft.filename = "Scanned document.pdf"
+        draft.title = L10n.ui("scan.defaultTitle", defaultValue: "Scanned document")
+        draft.recognizedText = ""
+        draft.errorMessage = nil
+    }
+
+    func recognizeDocumentImport(draftID: UUID) async {
+        guard let draft = documentImportDraft, draft.id == draftID,
+              draft.hasSource, !isBusy, !draft.isRecognizing else { return }
+        draft.isRecognizing = true
+        draft.errorMessage = nil
+        defer { draft.isRecognizing = false }
+        do {
+            let text: String
+            if let data = draft.scannedData { text = try await OCRService.recognizeText(in: data) }
+            else if let url = draft.fileURL { text = try await OCRService.recognizeText(at: url) }
+            else { return }
+            guard documentImportDraft === draft else { return }
+            draft.recognizedText = text
+        } catch {
+            if documentImportDraft === draft { draft.errorMessage = error.localizedDescription }
+        }
+    }
+
+    func saveDocumentImport(draftID: UUID) async {
+        guard let draft = documentImportDraft, draft.id == draftID,
+              draft.sourceLibrary == library, !isBusy, !draft.isRecognizing else { return }
+        let saved: Bool
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = draft.scannedData {
+            saved = await importData(data, filename: draft.filename, tripID: draft.tripID,
+                travelerID: draft.travelerID, title: title, kind: draft.kind,
+                expiryDate: draft.hasExpiry ? draft.expiryDate : nil)
+        } else if let url = draft.fileURL {
+            saved = await importFile(url: url, tripID: draft.tripID,
+                travelerID: draft.travelerID, title: title, kind: draft.kind,
+                expiryDate: draft.hasExpiry ? draft.expiryDate : nil)
+        } else { return }
+        if saved, documentImportDraft === draft { documentImportDraft = nil }
+    }
+
+    private func reportUnfinishedImport() {
+        errorMessage = L10n.service("services.model.finishDraft", defaultValue: "Finish or cancel the current document draft before starting another.")
+    }
+
     @discardableResult
     func updateDocument(id: UUID, title: String, travelerID: UUID?, kind: DocumentKind, expiryDate: Date?) async -> Bool {
         guard !isBusy, let repository else { return false }
@@ -215,9 +330,10 @@ final class AppModel {
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
-    func importFile(url: URL, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async {
-        guard !isBusy, let repository else { return }
-        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available."); return }
+    @discardableResult
+    func importFile(url: URL, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async -> Bool {
+        guard !isBusy, let repository else { return false }
+        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available."); return false }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -229,20 +345,23 @@ final class AppModel {
             // originals and recovery never depend on this addition right.
             guard canAddDocument else {
                 errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available.")
-                return
+                return false
             }
             _ = try await repository.importDocument(data: data, originalFilename: url.lastPathComponent, tripID: tripID, travelerID: travelerID, title: title, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
             library = try await repository.load()
             readiness = [:]
             notice = L10n.service("services.model.import.originalCopied", defaultValue: "Original copied into the local library. Run the offline check before you travel.")
+            return true
         } catch is CancellationError {
             // No storage mutation was submitted; keep the current library.
         } catch { errorMessage = error.localizedDescription }
+        return false
     }
 
-    func importData(_ data: Data, filename: String, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async {
-        guard !isBusy, let repository else { return }
-        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documents", defaultValue: "Free includes eight documents. Pro adds more documents."); return }
+    @discardableResult
+    func importData(_ data: Data, filename: String, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async -> Bool {
+        guard !isBusy, let repository else { return false }
+        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documents", defaultValue: "Free includes eight documents. Pro adds more documents."); return false }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -250,7 +369,8 @@ final class AppModel {
             library = try await repository.load()
             readiness = [:]
             notice = L10n.service("services.model.import.saved", defaultValue: "Document saved on this device.")
-        } catch { errorMessage = error.localizedDescription }
+            return true
+        } catch { errorMessage = error.localizedDescription; return false }
     }
 
     func checkReadiness(tripID: UUID) async {
@@ -297,6 +417,7 @@ final class AppModel {
             let data = try await readExternalFile(url, Self.backupLimit)
             try Task.checkCancellation()
             library = try await repository.restoreBackup(data)
+            documentImportDraft = nil
             documentEditDraft = nil
             if let draft = batchImportDraft { discardBatchImport(draftID: draft.id) }
             readiness = [:]
@@ -430,6 +551,7 @@ extension AppModel {
 
     func beginBatchImport(tripID: UUID) {
         guard !isBusy else { return }
+        guard documentImportDraft == nil else { reportUnfinishedImport(); return }
         guard documentEditDraft == nil else {
             errorMessage = L10n.service("services.model.batch.finishEdit", defaultValue: "Finish or cancel the document edit before starting a file batch.")
             return
