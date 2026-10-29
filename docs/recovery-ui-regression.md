@@ -85,9 +85,12 @@ Arguments below are arrays, not shell fragments. Substitute only recorded,
 validated identifiers/absolute paths. Do not execute while this packet remains
 source-only.
 
-1. Create/boot the admitted new simulator and bind its UUID and baseline
-   inventory. A bounded read-only scan first proves the exact run folder name
-   absent. The prepare case opens the real Save UI, creates that exact folder
+1. Create the admitted new simulator and bind its UUID and baseline inventory.
+   Before first boot starts populating AppGroup, a bounded read-only scan proves
+   the exact run folder name absent and pins any existing ancestors. Then boot
+   the device and wait for boot readiness. Those pins remain mandatory after
+   preparation; newly created ancestors do not replace an existing pin. The
+   prepare case opens the real Save UI, creates that exact folder
    through native New Folder, verifies the committed name and navigation title,
    captures that state, then terminates the fixture without tapping Save. After
    its exact single-case PASS and stopped-app check, a bounded no-follow host scan finds

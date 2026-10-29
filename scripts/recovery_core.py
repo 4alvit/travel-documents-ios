@@ -525,9 +525,11 @@ class Recovery:
         self.recover(json.loads(self.sim('created-inventory','list','devices','--json')))
         require(self.owned == claimed,'Create output/inventory mismatch')
         self.owned_root()
+        # Establish the run-specific absence proof before first boot starts
+        # populating AppGroup. Its ancestor pins still apply after the UI phase.
+        self.prepare_files_ui_baseline()
         self.sim('boot','boot',self.owned)
         self.sim('boot-ready','bootstatus',self.owned,'-b',cap=120)
-        self.prepare_files_ui_baseline()
 
     def discover_ui_files_folder(self, deadline=None, *, allow_inventory_restart=False):
         """A complete bounded, read-only traversal of direct local-provider roots.
