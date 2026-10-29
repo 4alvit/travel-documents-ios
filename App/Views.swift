@@ -39,6 +39,15 @@ struct RootView: View {
             Text(model.errorMessage ?? L10n.ui("common.tryAgain", defaultValue: "Please try again."))
         }
         .sheet(item: Binding(
+            get: { model.documentImportDraft },
+            set: { _ in
+                // Privacy teardown is not a user cancellation. Keep the source
+                // and editable details until explicit Cancel or successful Save.
+            }
+        )) { draft in
+            ImportDocumentView(draft: draft)
+        }
+        .sheet(item: Binding(
             get: { model.documentEditDraft },
             set: { _ in
                 // Privacy removes this view while locked. Only explicit Cancel
@@ -234,12 +243,17 @@ private struct NewTripView: View {
     }
 }
 
+enum DocumentSelection {
+    static func togglingAll(selected: Set<UUID>, visible: Set<UUID>) -> Set<UUID> {
+        visible.isSubset(of: selected) ? [] : visible
+    }
+}
+
 private struct TripDetailView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let tripID: UUID
-    @State private var showsImport = false
     @State private var showsPro = false
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -265,7 +279,15 @@ private struct TripDetailView: View {
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
-    private var exportIDs: Set<UUID> { selecting ? selectedIDs : Set(documents.map(\.id)) }
+    private var visibleIDs: Set<UUID> { Set(filteredDocuments.map(\.id)) }
+    private var isFiltering: Bool { !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var exportIDs: Set<UUID> { selecting ? selectedIDs.intersection(visibleIDs) : Set(documents.map(\.id)) }
+    private var selectAllTitle: String {
+        if visibleIDs.isSubset(of: selectedIDs) {
+            return isFiltering ? L10n.ui("selection.noneMatches", defaultValue: "Deselect results") : L10n.ui("selection.none", defaultValue: "Deselect all")
+        }
+        return isFiltering ? L10n.ui("selection.allMatches", defaultValue: "Select all results") : L10n.ui("selection.all", defaultValue: "Select all")
+    }
 
     var body: some View {
         List {
@@ -338,12 +360,12 @@ private struct TripDetailView: View {
                     }
                 } header: {
                     HStack {
-                        Text(selecting ? L10n.ui("selection.count", defaultValue: "\(selectedIDs.count) selected") : L10n.ui("documents.title", defaultValue: "Documents"))
+                        Text(selecting ? L10n.ui("selection.count", defaultValue: "\(exportIDs.count) selected") : L10n.ui("documents.title", defaultValue: "Documents"))
                         Spacer()
                         if selecting {
-                            Button(selectedIDs.count == documents.count ? L10n.ui("selection.none", defaultValue: "Deselect all") : L10n.ui("selection.all", defaultValue: "Select all")) {
-                                selectedIDs = selectedIDs.count == documents.count ? [] : Set(documents.map(\.id))
-                            }
+                            Button(selectAllTitle) {
+                                selectedIDs = DocumentSelection.togglingAll(selected: selectedIDs, visible: visibleIDs)
+                            }.disabled(visibleIDs.isEmpty)
                         }
                     }
                 } footer: {
@@ -366,6 +388,11 @@ private struct TripDetailView: View {
         }
         .navigationTitle(trip?.title ?? L10n.ui("trip.fallback", defaultValue: "Trip"))
         .searchable(text: $searchText, prompt: L10n.ui("search.prompt", defaultValue: "Title, person or document type"))
+        .onChange(of: visibleIDs) { _, current in
+            // A selected packet must never silently include hidden search
+            // results or documents removed since the selection was made.
+            selectedIDs.formIntersection(current)
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -383,7 +410,6 @@ private struct TripDetailView: View {
                     .disabled(model.isBusy)
             }
         }
-        .sheet(isPresented: $showsImport) { ImportDocumentView(tripID: tripID) }
         .sheet(isPresented: $showsPro) { ProView() }
         .sheet(item: $editingTrip) { trip in NewTripView(trip: trip) }
         .modifier(TripDeletionConfirmation(pendingTrip: $deletingTrip, didDelete: { dismiss() }))
@@ -457,7 +483,7 @@ private struct TripDetailView: View {
     }
 
     private func addDocument() {
-        if model.canAddDocument { showsImport = true } else { showsPro = true }
+        if model.canAddDocument { model.beginDocumentImport(tripID: tripID) } else { showsPro = true }
     }
     private func toggleSelection(_ id: UUID) {
         if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
@@ -544,24 +570,11 @@ private struct DocumentRow: View {
 
 private struct ImportDocumentView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-    let tripID: UUID
-    @State private var title = ""
-    @State private var kind: DocumentKind = .other
-    @State private var travelerID: UUID?
-    @State private var hasExpiry = false
-    @State private var expiryDate = Date()
-    @State private var fileURL: URL?
-    @State private var scannedData: Data?
-    @State private var filename = ""
+    @Bindable var draft: DocumentImportDraft
     @State private var showsFiles = false
     @State private var showsScanner = false
-    @State private var recognizing = false
-    @State private var recognizedText = ""
-    @State private var localError: String?
 
-    private var hasSource: Bool { fileURL != nil || scannedData != nil }
-    private var busy: Bool { recognizing || model.isBusy }
+    private var busy: Bool { draft.isRecognizing || model.isBusy }
 
     var body: some View {
         NavigationStack {
@@ -576,47 +589,47 @@ private struct ImportDocumentView: View {
                         Label(L10n.ui("import.scanUnsupported", defaultValue: "Scanning needs a supported device"), systemImage: "doc.viewfinder")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    if hasSource {
-                        Label(filename, systemImage: "checkmark.circle.fill")
+                    if draft.hasSource {
+                        Label(draft.filename, systemImage: "checkmark.circle.fill")
                             .font(.subheadline).foregroundStyle(TripStyle.accent)
                     }
                 } header: { Text(L10n.ui("original.file", defaultValue: "Original file")) } footer: {
                     Text(L10n.ui("import.help", defaultValue: "PDF, JPEG or PNG, up to 16 MB each. Import copies the full file into TripDocket. Files stored in a cloud provider may need internet to download first."))
                 }
-                if hasSource {
+                if draft.hasSource {
                     Section(L10n.ui("document.details", defaultValue: "Document details")) {
-                        TextField(L10n.ui("document.title", defaultValue: "Document title"), text: $title).accessibilityLabel(L10n.ui("document.title", defaultValue: "Document title"))
-                        Picker(L10n.ui("document.type", defaultValue: "Type"), selection: $kind) {
+                        TextField(L10n.ui("document.title", defaultValue: "Document title"), text: $draft.title).accessibilityLabel(L10n.ui("document.title", defaultValue: "Document title"))
+                        Picker(L10n.ui("document.type", defaultValue: "Type"), selection: $draft.kind) {
                             ForEach(DocumentKind.allCases, id: \.self) { kind in
                                 Text(kind.displayName).tag(kind)
                             }
                         }
-                        Picker(L10n.ui("document.person", defaultValue: "Person"), selection: $travelerID) {
+                        Picker(L10n.ui("document.person", defaultValue: "Person"), selection: $draft.travelerID) {
                             Text(L10n.ui("document.unassigned", defaultValue: "Everyone / unassigned")).tag(Optional<UUID>.none)
                             ForEach(model.library.travelers, id: \.id) { traveler in
                                 Text(traveler.name).tag(Optional(traveler.id))
                             }
                         }
-                        Toggle(L10n.ui("document.addExpiry", defaultValue: "Add confirmed expiry date"), isOn: $hasExpiry)
-                        if hasExpiry {
-                            DatePicker(L10n.ui("document.expiry", defaultValue: "Expiry date"), selection: $expiryDate, displayedComponents: .date)
+                        Toggle(L10n.ui("document.addExpiry", defaultValue: "Add confirmed expiry date"), isOn: $draft.hasExpiry)
+                        if draft.hasExpiry {
+                            DatePicker(L10n.ui("document.expiry", defaultValue: "Expiry date"), selection: $draft.expiryDate, displayedComponents: .date)
                             Text(L10n.ui("document.dateHelp", defaultValue: "Check the date against the original. TripDocket does not determine whether this document meets travel requirements."))
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                     }
                     Section {
-                        Button(action: recognizeText) {
+                        Button { Task { await model.recognizeDocumentImport(draftID: draft.id) } } label: {
                             HStack {
-                                Label(recognizing ? L10n.ui("ocr.working", defaultValue: "Reading text on this device…") : L10n.ui("ocr.action", defaultValue: "Find text on this device"), systemImage: "text.viewfinder")
-                                if recognizing { Spacer(); ProgressView() }
+                                Label(draft.isRecognizing ? L10n.ui("ocr.working", defaultValue: "Reading text on this device…") : L10n.ui("ocr.action", defaultValue: "Find text on this device"), systemImage: "text.viewfinder")
+                                if draft.isRecognizing { Spacer(); ProgressView() }
                             }
                         }.disabled(busy)
-                        if !recognizedText.isEmpty {
-                            TextEditor(text: $recognizedText).frame(minHeight: 150)
+                        if !draft.recognizedText.isEmpty {
+                            TextEditor(text: $draft.recognizedText).frame(minHeight: 150)
                                 .accessibilityLabel(L10n.ui("ocr.editorAX", defaultValue: "Recognized text, editable suggestion"))
                             Button(L10n.ui("ocr.useTitle", defaultValue: "Use first line as title")) {
-                                if let first = recognizedText.split(whereSeparator: \.isNewline).first {
-                                    title = String(first.prefix(160))
+                                if let first = draft.recognizedText.split(whereSeparator: \.isNewline).first {
+                                    draft.title = String(first.prefix(160))
                                 }
                             }
                         }
@@ -624,36 +637,37 @@ private struct ImportDocumentView: View {
                         Text(L10n.ui("ocr.help", defaultValue: "Suggestions can be wrong. Edit them before use. Only the title you choose is saved; the extracted text is discarded. Recognition checks up to the first 3 PDF pages and never fills in dates."))
                     }
                 }
-                if let localError {
+                if let localError = draft.errorMessage {
                     Section { Label(localError, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.footnote) }
                 }
                 InlineErrorRow()
             }
+            .disabled(model.isBusy)
             .navigationTitle(L10n.ui("document.importTitle", defaultValue: "Add document")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(L10n.ui("common.cancel", defaultValue: "Cancel")) { dismiss() }.disabled(busy) }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.ui("common.cancel", defaultValue: "Cancel")) { model.cancelDocumentImport(draftID: draft.id) }.disabled(busy)
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(L10n.ui("common.save", defaultValue: "Save"), action: save)
-                        .disabled(!hasSource || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+                    Button(L10n.ui("common.save", defaultValue: "Save")) {
+                        Task { await model.saveDocumentImport(draftID: draft.id) }
+                    }.disabled(!draft.hasSource || draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
                 }
             }
-            .interactiveDismissDisabled(busy)
+            .interactiveDismissDisabled()
             .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.pdf, .jpeg, .png], allowsMultipleSelection: false) { result in
                 do {
                     guard let url = try result.get().first else { return }
-                    fileURL = url; scannedData = nil; filename = url.lastPathComponent
-                    title = url.deletingPathExtension().lastPathComponent
-                    recognizedText = ""; localError = nil
-                } catch { localError = error.localizedDescription }
+                    model.selectImportFile(url, draftID: draft.id)
+                } catch { draft.errorMessage = error.localizedDescription }
             }
             .fullScreenCover(isPresented: $showsScanner) {
                 DocumentScanner { result in
                     showsScanner = false
                     switch result {
                     case .success(let data):
-                        scannedData = data; fileURL = nil; filename = "Scanned document.pdf"
-                        title = L10n.ui("scan.defaultTitle", defaultValue: "Scanned document"); recognizedText = ""; localError = nil
-                    case .failure(let error): localError = error.localizedDescription
+                        model.selectImportScan(data, draftID: draft.id)
+                    case .failure(let error): draft.errorMessage = error.localizedDescription
                     }
                 } onCancel: { showsScanner = false }
                     .ignoresSafeArea()
@@ -661,34 +675,6 @@ private struct ImportDocumentView: View {
         }
     }
 
-    private func recognizeText() {
-        recognizing = true
-        localError = nil
-        Task {
-            defer { recognizing = false }
-            do {
-                if let scannedData { recognizedText = try await OCRService.recognizeText(in: scannedData) }
-                else if let fileURL {
-                    recognizedText = try await OCRService.recognizeText(at: fileURL)
-                }
-            } catch { localError = error.localizedDescription }
-        }
-    }
-
-    private func save() {
-        Task {
-            let count = model.library.documents.count
-            let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let scannedData {
-                await model.importData(scannedData, filename: filename, tripID: tripID, travelerID: travelerID,
-                    title: cleanedTitle, kind: kind, expiryDate: hasExpiry ? expiryDate : nil)
-            } else if let fileURL {
-                await model.importFile(url: fileURL, tripID: tripID, travelerID: travelerID,
-                    title: cleanedTitle, kind: kind, expiryDate: hasExpiry ? expiryDate : nil)
-            }
-            if model.library.documents.count > count { dismiss() }
-        }
-    }
 }
 
 private struct TravelersView: View {

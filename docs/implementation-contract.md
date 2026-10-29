@@ -169,6 +169,12 @@ preparation task. File-picker, cancel and commit entry points carry the draft ID
 so a late callback from an old picker cannot change a newer draft. Each item
 stores a confirmation snapshot; changing metadata removes its confirmation.
 Pro gates new batch preparation and save, never old-data access or recovery.
-The batch editor and existing-document editor are mutually exclusive. Privacy
+The batch editor, single-file import and existing-document editor are mutually exclusive. Privacy
 view teardown keeps the model draft; explicit cancel, completed save or source
 library changes discard it. Individual previews follow existing cache cleanup.
+
+Single-file imports use a model-owned `DocumentImportDraft` with the selected
+file reference or bounded scanned data, metadata and editable OCR text. File,
+scan, save and cancel callbacks carry its ID; OCR publishes only to the same
+active draft. The form disables editing during a save so an in-flight provider
+read cannot discard later edits. A failed save preserves the draft for correction.

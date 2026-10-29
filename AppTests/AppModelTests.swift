@@ -5,6 +5,193 @@ import TravelCore
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testSingleImportDraftRetainsSourceAndEditsAcrossRefresh() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(rootURL: root)
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        let trip = try XCTUnwrap(model.library.trips.first)
+        model.beginDocumentImport(tripID: trip.id)
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        let source = root.appendingPathComponent("Synthetic ticket.pdf")
+        model.selectImportFile(source, draftID: draft.id)
+        draft.title = "Билет домой"
+        draft.kind = .ticket
+        draft.hasExpiry = true
+        draft.expiryDate = Date(timeIntervalSince1970: 2_000_000_000)
+        draft.recognizedText = "Editable suggestion"
+
+        // RootView is reconstructed and refreshes after the privacy lock.
+        await model.refresh()
+        XCTAssertTrue(model.documentImportDraft === draft)
+        XCTAssertEqual(draft.fileURL, source)
+        XCTAssertEqual(draft.title, "Билет домой")
+        XCTAssertEqual(draft.kind, .ticket)
+        XCTAssertTrue(draft.hasExpiry)
+        XCTAssertEqual(draft.expiryDate, Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertEqual(draft.recognizedText, "Editable suggestion")
+        XCTAssertTrue(model.library.documents.isEmpty, "An unsaved draft must not publish a document")
+
+        let relaunched = AppModel(rootURL: root)
+        await relaunched.refresh()
+        XCTAssertNil(relaunched.documentImportDraft, "Unsaved import details are RAM-only")
+        XCTAssertTrue(relaunched.library.documents.isEmpty)
+    }
+
+    func testCancelledImportCallbacksCannotChangeReplacementDraft() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(rootURL: root)
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        let trip = try XCTUnwrap(model.library.trips.first)
+        model.beginDocumentImport(tripID: trip.id)
+        let old = try XCTUnwrap(model.documentImportDraft)
+        model.cancelDocumentImport(draftID: old.id)
+        XCTAssertNil(model.documentImportDraft)
+        model.beginDocumentImport(tripID: trip.id)
+        let current = try XCTUnwrap(model.documentImportDraft)
+        current.title = "Keep this draft"
+        model.selectImportFile(root.appendingPathComponent("late.pdf"), draftID: old.id)
+        model.selectImportScan(samplePDF(), draftID: old.id)
+        model.cancelDocumentImport(draftID: old.id)
+        await model.saveDocumentImport(draftID: old.id)
+        XCTAssertTrue(model.documentImportDraft === current)
+        XCTAssertFalse(current.hasSource)
+        XCTAssertEqual(current.title, "Keep this draft")
+        XCTAssertTrue(model.library.documents.isEmpty)
+    }
+
+    func testSingleImportFailureKeepsDraftAndSuccessPublishesOnce() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(rootURL: root)
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        model.beginDocumentImport(tripID: try XCTUnwrap(model.library.trips.first?.id))
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        model.selectImportScan(Data("Not a PDF".utf8), draftID: draft.id)
+        await model.saveDocumentImport(draftID: draft.id)
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertTrue(model.documentImportDraft === draft)
+        XCTAssertTrue(model.library.documents.isEmpty)
+
+        model.errorMessage = nil
+        let original = samplePDF()
+        model.selectImportScan(original, draftID: draft.id)
+        draft.title = "Confirmed synthetic ticket"
+        draft.kind = .ticket
+        await model.saveDocumentImport(draftID: draft.id)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.documentImportDraft)
+        let document = try XCTUnwrap(model.library.documents.first)
+        XCTAssertEqual(document.title, "Confirmed synthetic ticket")
+        XCTAssertEqual(document.kind, .ticket)
+        let repository = try DocumentRepository(rootURL: root)
+        let saved = try await repository.documentData(id: document.id)
+        XCTAssertEqual(saved, original)
+        await model.saveDocumentImport(draftID: draft.id)
+        XCTAssertEqual(model.library.documents.count, 1)
+    }
+
+    func testSingleImportRemainsBusyAndKeepsItsDraftDuringProviderRead() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let barrier = ExternalReadBarrier()
+        let model = AppModel(rootURL: root, readExternal: { url, maximum in
+            try await barrier.read(url, maximum: maximum)
+        })
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        model.beginDocumentImport(tripID: try XCTUnwrap(model.library.trips.first?.id))
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        let source = root.appendingPathComponent("Synthetic ticket.pdf")
+        model.selectImportFile(source, draftID: draft.id)
+        draft.title = "Confirmed ticket"
+        draft.kind = .ticket
+        let operation = Task { await model.saveDocumentImport(draftID: draft.id) }
+        defer { operation.cancel(); Task { await barrier.cancel() } }
+        let request = try await barrier.waitForRequest()
+
+        XCTAssertEqual(request.url, source)
+        XCTAssertTrue(model.isBusy, "The import form must stay disabled while a provider read is pending")
+        XCTAssertTrue(model.documentImportDraft === draft)
+        XCTAssertTrue(model.library.documents.isEmpty)
+        model.cancelDocumentImport(draftID: draft.id)
+        model.selectImportFile(root.appendingPathComponent("Late replacement.pdf"), draftID: draft.id)
+        XCTAssertTrue(model.documentImportDraft === draft)
+        XCTAssertEqual(draft.fileURL, source)
+
+        await barrier.release(samplePDF())
+        await operation.value
+        XCTAssertFalse(model.isBusy)
+        XCTAssertNil(model.documentImportDraft)
+        XCTAssertEqual(model.library.documents.count, 1)
+        XCTAssertEqual(model.library.documents.first?.title, "Confirmed ticket")
+        XCTAssertEqual(model.library.documents.first?.kind, .ticket)
+    }
+
+    func testLibraryReplacementInvalidatesImportEvenWithIdenticalContent() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(rootURL: root)
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        let trip = try XCTUnwrap(model.library.trips.first)
+        let repository = try DocumentRepository(rootURL: root)
+        let backup = root.appendingPathComponent("Synthetic.tripbackup")
+        try await repository.exportBackup(documentIDs: nil).write(to: backup)
+        model.beginDocumentImport(tripID: trip.id)
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        model.selectImportFile(root.appendingPathComponent("unsaved.pdf"), draftID: draft.id)
+        await model.restoreBackup(url: backup)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.documentImportDraft)
+        await model.saveDocumentImport(draftID: draft.id)
+        XCTAssertTrue(model.library.documents.isEmpty)
+    }
+
+    func testImportDraftDoesNotOverlapExistingEditorOrBatch() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (model, document, _) = try await editableDocument(at: root)
+        model.beginDocumentImport(tripID: document.tripID)
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        model.beginEditingDocument(document)
+        model.beginBatchImport(tripID: document.tripID)
+        XCTAssertTrue(model.documentImportDraft === draft)
+        XCTAssertNil(model.documentEditDraft)
+        XCTAssertNil(model.batchImportDraft)
+        model.cancelDocumentImport(draftID: draft.id)
+        model.beginEditingDocument(document)
+        model.beginDocumentImport(tripID: document.tripID)
+        XCTAssertNotNil(model.documentEditDraft)
+        XCTAssertNil(model.documentImportDraft)
+    }
+
+    func testDeletingImportTripInvalidatesDraftAndLateSelection() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(rootURL: root)
+        await model.createTrip(title: "Synthetic trip", departureDate: nil)
+        let trip = try XCTUnwrap(model.library.trips.first)
+        model.beginDocumentImport(tripID: trip.id)
+        let draft = try XCTUnwrap(model.documentImportDraft)
+        model.selectImportScan(samplePDF(), draftID: draft.id)
+        await model.deleteTrip(id: trip.id)
+        XCTAssertNil(model.documentImportDraft)
+        model.selectImportFile(root.appendingPathComponent("late.pdf"), draftID: draft.id)
+        await model.saveDocumentImport(draftID: draft.id)
+        XCTAssertNil(model.documentImportDraft)
+        XCTAssertTrue(model.library.trips.isEmpty)
+        XCTAssertTrue(model.library.documents.isEmpty)
+    }
+
+    func testSelectAllSearchResultsNeverAddsHiddenOriginals() {
+        let visible = UUID(), hidden = UUID()
+        XCTAssertEqual(DocumentSelection.togglingAll(selected: [], visible: [visible]), [visible])
+        XCTAssertEqual(DocumentSelection.togglingAll(selected: [hidden], visible: [visible]), [visible])
+        XCTAssertEqual(DocumentSelection.togglingAll(selected: [visible, hidden], visible: [visible]), [])
+        XCTAssertEqual(DocumentSelection.togglingAll(selected: [hidden], visible: []), [])
+        XCTAssertEqual(DocumentSelection.togglingAll(selected: [], visible: [visible, hidden]), [visible, hidden])
+    }
+
     func testDeniedCacheCleanupPreservesExistingLibraryAndRecovery() async throws {
         let fm = FileManager.default
         let workspace = temporaryRoot()
