@@ -1132,6 +1132,64 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(save.call_count,3)
         self.assertFalse(r.ops.signals)
 
+    def test_setup_proves_files_absent_before_boot_writers_start(self):
+        r,provider=self.files_runner()
+        # An unbooted device may not have populated its group containers yet.
+        provider.rmdir();provider.parent.rmdir();provider.parent.parent.rmdir()
+        owned=r.owned;r.owned=None;r.recovered=False
+        calls=[]
+        def sim(label,*args,cap=30):
+            calls.append(label)
+            if label=='runtime-inventory':
+                return json.dumps({'runtimes':[{'identifier':r.plan['runtime'],'isAvailable':True,
+                    'supportedArchitectures':[r.host['machine']],
+                    'supportedDeviceTypes':[{'identifier':r.plan['device_type']}]}]})
+            if label=='baseline-inventory':return json.dumps({'devices':{r.plan['runtime']:[]}})
+            if label=='create':return owned
+            if label=='created-inventory':
+                return json.dumps({'devices':{r.plan['runtime']:[{'udid':owned,
+                    'name':r.intent['name'],'deviceTypeIdentifier':r.intent['type']}]}})
+            if label=='boot':
+                self.assertTrue(r.report.get('files_ui_baseline',{}).get('absent'),
+                    'The absence proof must finish before boot starts changing AppGroup')
+                self.assertNotIn('data/Containers/Shared/AppGroup',r.report['files_ui_baseline']['anchors'])
+                # System apps can add unrelated containers during their first boot.
+                provider.mkdir(parents=True)
+                (provider.parent.parent/'30000000-0000-0000-0000-000000000003').mkdir()
+                return ''
+            if label=='boot-ready':return ''
+            self.fail('Unexpected setup command: '+label)
+        with patch.object(r,'source'),patch.object(r,'sim',side_effect=sim):
+            hosted.core.Recovery.setup(r)
+        self.assertEqual(calls,['runtime-inventory','baseline-inventory','create','created-inventory','boot','boot-ready'])
+        self.assertEqual(r.report['files_discovery']['baseline']['passes'],1)
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertEqual(r.ops.processes,[])
+        (provider/r.folder_name).mkdir()
+        r.report['phase_passed']={'prepare':True};r.bind_ui_created_empty_folder()
+        self.assertTrue(r.report['files_folder']['initially_empty'])
+
+    def test_setup_absence_failure_does_not_boot_the_device(self):
+        r,provider=self.files_runner()
+        (provider/r.folder_name).mkdir()
+        owned=r.owned;r.owned=None;r.recovered=False
+        calls=[]
+        def sim(label,*args,cap=30):
+            calls.append(label)
+            if label=='runtime-inventory':
+                return json.dumps({'runtimes':[{'identifier':r.plan['runtime'],'isAvailable':True,
+                    'supportedArchitectures':[r.host['machine']],
+                    'supportedDeviceTypes':[{'identifier':r.plan['device_type']}]}]})
+            if label=='baseline-inventory':return json.dumps({'devices':{r.plan['runtime']:[]}})
+            if label=='create':return owned
+            if label=='created-inventory':
+                return json.dumps({'devices':{r.plan['runtime']:[{'udid':owned,
+                    'name':r.intent['name'],'deviceTypeIdentifier':r.intent['type']}]}})
+            return ''
+        with patch.object(r,'source'),patch.object(r,'sim',side_effect=sim):
+            with self.assertRaisesRegex(RuntimeError,'already exists'):hosted.core.Recovery.setup(r)
+        self.assertNotIn('boot',calls);self.assertNotIn('boot-ready',calls)
+        self.assertNotIn('files_ui_baseline',r.report);self.assertEqual(r.ops.processes,[])
+
     def test_ui_files_prepare_boundary_pins_actual_empty_folder_without_RPC(self):
         r,provider=self.files_runner()
         r.prepare_files_ui_baseline()
