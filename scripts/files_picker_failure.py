@@ -14,7 +14,7 @@ import sys
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'f1f21348a04c67964876e5b122e0738e83ddba4c59d4a73c50c8fa795971c7f6'
+CORE_SHA = 'ad5e52c8dc5e897f4eb53302cf7e127dc726b54c7ee03aa7702ed79bce4d3feb'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Evidence helper changed before import')
 spec = importlib.util.spec_from_file_location('files_failure_core', HERE/'recovery_core.py')
@@ -23,6 +23,7 @@ spec.loader.exec_module(core)
 require = core.require
 MIB = 1024**2
 WHOLE, WORK, OUTPUT, FLOOR = 120, 100, 32*MIB, 8*1024**3
+INPUT, OWNED, CACHE = 128*MIB, 512*MIB, 32*MIB
 core.base.PER_LOG, core.base.ALL_LOG = MIB, 8*MIB
 core.CAPS.update(scan_entries=4096, scan_depth=40)
 CASES = [
@@ -160,6 +161,8 @@ class Evidence(core.base.Smoke):
         self.out.mkdir(mode=0o700)
         self.public.mkdir(mode=0o700)
         self.out_id, self.public_id = core.identity_of(self.out), core.identity_of(self.public)
+        self.working = self.root/'inspection.xcresult'
+        self.working_id = None
         if ops is None:
             # Keep decoder caches and temporary output inside the owned subtree.
             (self.out/'home').mkdir(mode=0o700)
@@ -171,7 +174,8 @@ class Evidence(core.base.Smoke):
         self.evidence = dict(status='failed', runtime_acceptance=False, original_test_result='failure',
                              run_id=run, run_attempt=attempt, checkout_sha=checkout,
                              limits=dict(whole_seconds=WHOLE, work_seconds=WORK, cleanup_seconds=WHOLE-WORK,
-                                         sampled_output_bytes=OUTPUT, free_floor_bytes=FLOOR),
+                                         sampled_output_bytes=OUTPUT, sampled_owned_bytes=OWNED,
+                                         input_bytes=INPUT, disposable_cache_bytes=CACHE, free_floor_bytes=FLOOR),
                              helper_sha256=CORE_SHA, process_helper_sha256=core.HELPER_SHA,
                              temporary_cleanup_verified=False)
         self.active, self.absent_groups = {}, set()
@@ -200,7 +204,18 @@ class Evidence(core.base.Smoke):
             check()
             row = core.live_sizes(self.root, self.root_id, self.ops.now, end, check)
             check()
-            require(max(row['logical'], row['allocated']) <= OUTPUT, 'Evidence output cap')
+            require(max(row['logical'], row['allocated']) <= OWNED, 'Evidence owned cap')
+            # The copied input is fully included above. Native output, logs and
+            # public evidence retain their original combined 32 MiB allowance.
+            output = [core.live_sizes(path, identity, self.ops.now, end, check)
+                      for path, identity in ((self.out, self.out_id), (self.public, self.public_id))]
+            check()
+            root = os.stat(self.root, follow_symlinks=False)
+            check()
+            require([root.st_dev, root.st_ino] == self.root_id, 'Evidence root changed')
+            require(max(sum(r['logical'] for r in output)+root.st_size,
+                        sum(r['allocated'] for r in output)+root.st_blocks*512) <= OUTPUT,
+                    'Evidence output cap')
             self.peak = max(self.peak, row['allocated'])
             self.next_scan = self.ops.now()+.25
 
@@ -247,9 +262,14 @@ class Evidence(core.base.Smoke):
                     bundles.append(Path(entry.path))
         require(len(bundles) == 1, 'Expected one integration result bundle')
         bundle = bundles[0]
-        original = core.tree_manifest(bundle, self.checkpoint, 512*MIB)
+        original = core.tree_manifest(bundle, self.checkpoint, INPUT)
         self.evidence['input'] = dict(bundle=bundle.name, manifest_sha256=digest(core.encoded(original)),
                                       entries=len(original), bytes=sum(r.get('bytes', 0) for r in original.values()))
+        self.stage = 'input-copy'
+        self.input_id = core.identity_of(bundle)
+        core.Recovery.copy_tree(self, bundle, self.working, original)
+        self.working_id = core.identity_of(self.working)
+        self.evidence['disposable_input'] = dict(copy_verified=True, original_unchanged=True)
         self.stage = 'tool'
         self.tool = Path(self.command('find-tool', ['/usr/bin/xcrun', '--find', 'xcresulttool'], 12).strip())
         require(self.tool.is_absolute() and self.tool.resolve(strict=True) == self.tool
@@ -257,7 +277,8 @@ class Evidence(core.base.Smoke):
         self.tool_sha = core.file_digest(self.tool, self.checkpoint)
         self.evidence['tool'] = dict(name='xcresulttool', sha256=self.tool_sha)
         self.stage = 'test-tree'
-        raw = self.tool_command('test-tree', ['get', 'test-results', 'tests', '--path', str(bundle), '--compact'], 30)
+        raw = self.tool_command('test-tree', ['get', 'test-results', 'tests', '--path', str(self.working), '--compact'], 30)
+        self.verify_inputs(bundle, original)
         selected = select_cases(parse(raw))
         self.evidence.update(selected=selected, test_tree_sha256=digest(raw.encode()),
                              cases={item['kind']: dict(status='not_attempted') for item in selected})
@@ -282,7 +303,7 @@ class Evidence(core.base.Smoke):
         kind = selected['kind']
         self.stage = kind+'/export'
         exported = self.out/('exported-'+kind)
-        self.tool_command('export-'+kind, ['export', 'attachments', '--path', str(bundle),
+        self.tool_command('export-'+kind, ['export', 'attachments', '--path', str(self.working),
                                     '--output-path', str(exported), '--test-id', selected['case']], 60)
         self.checkpoint(force_resources=True)
         exported_id = core.identity_of(exported)
@@ -309,7 +330,7 @@ class Evidence(core.base.Smoke):
             payloads[target] = raw
             retained[kind] = dict(file=target, bytes=len(raw), sha256=digest(raw), attachment=row)
         self.stage = selected['kind']+'/input-recheck'
-        require(core.tree_manifest(bundle, self.checkpoint, 512*MIB) == original, 'Input result changed')
+        self.verify_inputs(bundle, original)
         self.stage = selected['kind']+'/publication'
         for target, raw in payloads.items():
             self.checkpoint()
@@ -319,6 +340,26 @@ class Evidence(core.base.Smoke):
             self.checkpoint()
             require(core.identity_of(self.public) == self.public_id, 'Public directory changed')
         result.update(status='complete', retained=retained, input_unchanged=True)
+
+    def verify_inputs(self, bundle, original):
+        self.checkpoint()
+        require(core.identity_of(bundle) == self.input_id, 'Original result directory changed')
+        require(core.tree_manifest(bundle, self.checkpoint, INPUT) == original, 'Input result changed')
+        require(core.identity_of(bundle) == self.input_id, 'Original result directory changed')
+        require(core.identity_of(self.working) == self.working_id, 'Disposable result directory changed')
+        after = core.tree_manifest(self.working, self.checkpoint, INPUT+CACHE)
+        changes = []
+        for name in sorted(set(original) | set(after)):
+            self.checkpoint()
+            if original.get(name) == after.get(name):
+                continue
+            item = after.get(name)
+            require(name == 'database.sqlite3' and item is not None and item['kind'] == 'file'
+                    and item['bytes'] <= CACHE, 'Non-cache disposable input changed')
+            changes.append(dict(path=name, before=original.get(name), after=item))
+        require(core.identity_of(self.working) == self.working_id, 'Disposable result directory changed')
+        self.evidence['disposable_input'].update(original_unchanged=True, changes=changes,
+                                                manifest_sha256=digest(core.encoded(after)))
 
     def command_summary(self):
         """Capture primary outcomes in memory before optional diagnostic I/O."""
@@ -450,10 +491,13 @@ class Evidence(core.base.Smoke):
             opened = os.fstat(fd)
             require([opened.st_dev, opened.st_ino] == self.root_id, 'Cleanup root FD changed')
             remove(fd, 'scratch')
+            self.check(final=True)
+            if os.path.lexists(self.working):
+                remove(fd, self.working.name)
         finally:
             os.close(fd)
         self.check(final=True)
-        require(not self.out.exists(), 'Scratch remains')
+        require(not self.out.exists() and not os.path.lexists(self.working), 'Scratch remains')
         self.check(final=True)
         self.evidence['temporary_cleanup_verified'] = True
 

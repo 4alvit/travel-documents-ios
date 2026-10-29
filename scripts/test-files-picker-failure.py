@@ -144,6 +144,96 @@ class Controls(unittest.TestCase):
         self.assertFalse(run.out.exists())
         self.assertEqual([r['requested_cap_seconds'] for r in run.report['commands']], [30, 12, 30, 60])
 
+    def disposable_fixture(self, attempt='2', mutate=None):
+        self.fixture_sources()
+        tool = self.repo/'xcresulttool'; tool.write_bytes(b'synthetic never executed')
+        bundle = self.repo/'build/Tests-20261028T120000Z.xcresult'
+        bundle.mkdir(exist_ok=True); (bundle/'Info.plist').write_bytes(b'original immutable result')
+        (bundle/'Info.plist').chmod(0o644)
+        data = tree('Passed'); selected = adapter.select_case(data)
+        ops = fakes.Ops(*[dict(output=[('stdout', text.encode())])
+                          for text in (SHA+'\n', str(tool)+'\n', json.dumps(data), '')])
+        run = adapter.Evidence(self.repo, dict(ENV, GITHUB_RUN_ATTEMPT=attempt), ops)
+        paths = []
+        def on_spawn(argv):
+            if '--path' not in argv:
+                return
+            working = Path(argv[argv.index('--path')+1]); paths.append(working)
+            self.assertEqual(working, run.working)
+            self.assertNotEqual(working, bundle)
+            if mutate is not None:
+                mutate(bundle, working, argv)
+            if 'export' in argv:
+                dest = Path(argv[argv.index('--output-path')+1]); dest.mkdir()
+                (dest/'manifest.json').write_text(json.dumps(attachments(selected)))
+                (dest/'synthetic.png').write_bytes(b'\x89PNG\r\n\x1a\n'+b'\0\0\0\rIHDR'+struct.pack('>II', 2, 3))
+                (dest/'synthetic.txt').write_text('Synthetic failed Import hierarchy')
+        ops.on_spawn = on_spawn
+        return run, bundle, paths
+
+    def test_actual_cache_creation_uses_copy_preserves_original_and_retains_pair(self):
+        def cache(original, working, argv):
+            (working/'database.sqlite3').write_bytes(b'bounded synthetic decoder cache')
+        run, bundle, paths = self.disposable_fixture(mutate=cache)
+        original = adapter.core.tree_manifest(bundle)
+        run.collect()
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(adapter.core.tree_manifest(bundle), original)
+        self.assertFalse((bundle/'database.sqlite3').exists())
+        self.assertEqual(run.evidence['disposable_input']['changes'][0]['path'], 'database.sqlite3')
+        self.assertIsNone(run.evidence['disposable_input']['changes'][0]['before'])
+        self.assertTrue(run.finish())
+        self.assertEqual({p.name for p in run.public.iterdir()}, {'failure.png','failure-ax.txt','evidence.json'})
+        self.assertFalse(run.working.exists())
+        self.assertEqual(adapter.core.tree_manifest(bundle), original)
+
+    def test_original_content_mode_deletion_and_noncache_copy_changes_refuse(self):
+        changes = [lambda o,w: (o/'Info.plist').write_bytes(b'changed'),
+                   lambda o,w: (o/'Info.plist').chmod(0o600),
+                   lambda o,w: (o/'Info.plist').unlink(),
+                   lambda o,w: (w/'Info.plist').write_bytes(b'changed')]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                run, bundle, paths = self.disposable_fixture(str(10+index),
+                    lambda o,w,a: change(o,w) if 'get' in a else None)
+                with self.assertRaisesRegex(RuntimeError, 'Input result changed|Non-cache disposable input changed'):
+                    run.collect()
+                self.assertEqual(len(paths), 1)  # No export after invalid test-tree input.
+                self.assertFalse(run.finish())
+                self.assertEqual({p.name for p in run.public.iterdir()}, {'evidence.json'})
+                self.assertFalse(run.working.exists())
+
+    def test_copy_input_limit_and_original_work_deadline_are_not_renewed(self):
+        run, bundle, _ = self.disposable_fixture()
+        with patch.object(adapter, 'INPUT', 4), self.assertRaisesRegex(RuntimeError, 'Manifest size cap'):
+            run.collect()
+        self.assertEqual(len(run.ops.processes), 1)  # Only existing checkout; no native decoder.
+        self.assertFalse(run.finish())
+        run, bundle, _ = self.disposable_fixture('3')
+        copy_tree = adapter.core.Recovery.copy_tree
+        def late_copy(owner, source, target, manifest):
+            owner.ops.t = adapter.WORK
+            return copy_tree(owner, source, target, manifest)
+        with patch.object(adapter.core.Recovery, 'copy_tree', side_effect=late_copy), \
+                self.assertRaisesRegex(RuntimeError, 'Original evidence deadline'):
+            run.collect()
+        self.assertEqual((run.limit, run.final_deadline), (100, 120))
+        self.assertEqual(len(run.ops.processes), 1)
+        self.assertFalse(run.finish())
+        self.assertFalse(run.working.exists())
+
+    def test_complete_owned_and_original_output_caps_are_both_enforced(self):
+        run = self.runner()
+        def size(n): return dict(logical=n, allocated=n, entries=1)
+        with patch.object(adapter.core, 'live_sizes', side_effect=[size(100*adapter.MIB),size(1),size(1)]):
+            run.checkpoint(force_resources=True)
+        with patch.object(adapter.core, 'live_sizes', return_value=size(adapter.OWNED+1)), \
+                self.assertRaisesRegex(RuntimeError, 'Evidence owned cap'):
+            run.checkpoint(force_resources=True)
+        with patch.object(adapter.core, 'live_sizes', side_effect=[size(100*adapter.MIB),size(adapter.OUTPUT),size(1)]), \
+                self.assertRaisesRegex(RuntimeError, 'Evidence output cap'):
+            run.checkpoint(force_resources=True)
+
     def fixture_sources(self):
         for relative in adapter.SOURCE_FILES:
             target = self.repo/relative

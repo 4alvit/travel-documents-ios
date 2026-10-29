@@ -590,15 +590,11 @@ class Recovery:
                 self.limit = original_limit
 
     def setup_files(self):
-        self.once('files-launch')
+        self.once('files-group')
         provider_fd = None
-        primary_error = None
-        stage = 'launch'
+        stage = 'group_lookup'
         try:
             try:
-                launched = self.sim('files-launch','launch',self.owned,FILES_BUNDLE)
-                require(re.fullmatch(re.escape(FILES_BUNDLE)+r': [1-9][0-9]*',launched.strip()),'Files launch PID missing')
-                stage = 'group_lookup'
                 output = self.sim('files-group','get_app_container',self.owned,FILES_BUNDLE,'groups')
                 lookup_deadline = self.t0+self.report['commands'][-1]['work_deadline']
                 stage = 'group_parse'
@@ -611,7 +607,6 @@ class Recovery:
                 stage = 'provider_readiness'
                 provider,self.provider_id,provider_fd = self.wait_files_provider(group,lookup_deadline)
             except BaseException as error:
-                primary_error = error
                 self.report['files_setup_primary_error'] = repr(error)
                 diagnostic = {'stage':stage,'type':type(error).__name__,'errno':getattr(error,'errno',None)}
                 filename = getattr(error,'filename',None)
@@ -624,17 +619,8 @@ class Recovery:
                         diagnostic['provider_leaf_filename'] = filename
                 self.report['files_setup_failure'] = diagnostic
                 raise
-            finally:
-                if not self.active and not self.unknown_spawn:
-                    try:
-                        self.once('files-terminate')
-                        self.sim('files-terminate','terminate',self.owned,FILES_BUNDLE)
-                    except BaseException as error:
-                        self.report['files_setup_terminate_error'] = repr(error)
-                        if primary_error is None:
-                            raise
-            # The async termination boundary cannot turn a checked pathname
-            # into permission to create a folder through a replaced symlink.
+            # Readiness, not prior process startup, authorizes only this owned
+            # empty folder. Recheck both named provider and its held descriptor.
             self.owned_root()
             require(identity_of(provider)==self.provider_id,'Provider changed before mkdir')
             st = os.fstat(provider_fd)
