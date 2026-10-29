@@ -2,6 +2,7 @@ import Foundation
 import StoreKit
 import StoreKitTest
 import XCTest
+import UIKit
 
 /// Functional coverage at standard text size. Batch import seeds named synthetic
 /// PDFs into real Files and obtains Pro through local StoreKit. Paired recovery
@@ -155,9 +156,129 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
-    // Opt-in paired phases. The host must snapshot the actual UI-exported file
-    // and active library between them; see docs/recovery-ui-regression.md.
-    // No StoreKit session or transaction is created by either recovery case.
+    // Opt-in prepare/export/restore phases. Preparation returns before the host
+    // proves the exact UI-created folder empty. Export/restore retain the file
+    // and library snapshot boundary. No StoreKit transaction is created.
+    func testRecoveryCreateOwnedFilesDestination() async throws {
+        let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--demo"]
+        app.launch()
+        try await wait("The preparation demo did not finish loading", app: app) {
+            app.staticTexts["Coast weekend"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
+        try await presentRecoverySave(app)
+        let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
+        try await wait("Real Files preparation picker did not open", app: app) {
+            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
+        }
+        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let location = app.cells.matching(NSPredicate(
+            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
+        ))
+        if !isRecoveryFolder(localTitle, navigation: navigation.element) {
+            if !(location.count == 1 && location.element.isHittable) {
+                try await wait("Files preparation has no unique Browse action", app: app) {
+                    browse.count == 1 && browse.element.isEnabled && browse.element.isHittable
+                }
+                browse.element.tap()
+            }
+            if !isRecoveryFolder(localTitle, navigation: navigation.element) {
+                try await wait("Files preparation local location is unavailable", app: app) {
+                    location.count == 1 && location.element.isEnabled && location.element.isHittable
+                }
+                location.element.tap()
+            }
+        }
+        try await wait("Files preparation did not reach the local root", app: app) {
+            self.isRecoveryFolder(localTitle, navigation: navigation.element)
+        }
+        let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
+        try check(directory.count == 0, app: app, "Owned folder already exists before UI creation")
+        let more = app.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "More", "More Actions"))
+        try await wait("Files local root has no unique More action", app: app) {
+            self.isRecoveryFolder(localTitle, navigation: navigation.element)
+                && more.count == 1 && more.element.isEnabled && more.element.isHittable
+        }
+        more.element.tap()
+        let newFolder = app.buttons.matching(NSPredicate(format: "label == %@", "New Folder"))
+        try await wait("Native New Folder action is unavailable", app: app) {
+            newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
+        }
+        newFolder.element.tap()
+        let fields = app.alerts.textFields
+        try await wait("Native folder-name dialog is ambiguous", app: app) {
+            fields.count == 1 && fields.element.isEnabled && fields.element.isHittable
+        }
+        let field = fields.element
+        field.tap()
+        if let previous = field.value as? String, !previous.isEmpty {
+            field.press(forDuration: 1.1)
+            let selectAll = app.menuItems.matching(NSPredicate(format: "label == %@", "Select All"))
+            try await wait("Folder name cannot be selected completely", app: app) {
+                selectAll.count == 1 && selectAll.element.isEnabled && selectAll.element.isHittable
+            }
+            selectAll.element.tap()
+        }
+        field.typeText(recoveryFolder)
+        try check(field.value as? String == recoveryFolder, app: app, "Native folder name differs from the exact owned UUID name")
+        let create = app.alerts.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "Done", "Create"))
+        try await wait("Native folder creation has no unique confirmation", app: app) {
+            create.count == 1 && create.element.isEnabled && create.element.isHittable
+        }
+        create.element.tap()
+        try await wait("Created folder or its exact title did not appear", app: app) {
+            self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
+                || (directory.count == 1 && directory.element.isHittable)
+        }
+        if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
+        try await wait("Native Files did not open the created owned folder", app: app) {
+            self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
+        }
+        capture(app, "Recovery prepare — unique created Files destination before Cancel")
+        let cancel = navigation.element.buttons["Cancel"]
+        try check(cancel.exists && cancel.isEnabled && cancel.isHittable, app: app, "Prepared Files destination has no Cancel action")
+        cancel.tap()
+        try await wait("Files preparation cancellation did not return to Settings", app: app) {
+            !picker.element.exists && app.navigationBars["Settings"].exists
+        }
+        capture(app, "Recovery prepare — cancelled without saving, host empty-folder proof pending")
+        // Host must now prove this exact folder is empty before export starts.
+    }
+
+
+    private func presentRecoverySave(_ app: XCUIApplication) async throws {
+        let export = app.buttons["Export full backup"]
+        try await reveal(export, app: app, navigation: "Settings")
+        try check(export.isEnabled, app: app, "Free full-backup export is disabled")
+        export.tap()
+        let warning = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
+        let disclosure = app.staticTexts.matching(NSPredicate(format: "label == %@", warning))
+        try await wait("Full-backup disclosure is missing", app: app) {
+            app.staticTexts["Export an unencrypted backup?"].exists && disclosure.count == 1
+                && app.buttons["Export…"].isHittable
+        }
+        capture(app, "Recovery export — full unencrypted-backup disclosure")
+        app.buttons["Export…"].tap()
+        // Keep the button contract and the named action cell observed in the native sheet.
+        let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
+            format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
+            NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
+            NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
+        ))
+        try await wait("Share sheet has no visible Save to Files action", app: app) {
+            saveToFiles.count == 1 && saveToFiles.element.isHittable
+        }
+        saveToFiles.element.tap()
+    }
+
     func testRecoveryExportFullBackupThroughFiles() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "export")
         let app = XCUIApplication()
@@ -190,28 +311,7 @@ final class BatchImportUITests: XCTestCase {
         try await recoveryTab("Settings", app: app)
         try await recoveryFreeCard(app)
         try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
-        let export = app.buttons["Export full backup"]
-        try await reveal(export, app: app, navigation: "Settings")
-        try check(export.isEnabled, app: app, "Free full-backup export is disabled")
-        export.tap()
-        let warning = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
-        let disclosure = app.staticTexts.matching(NSPredicate(format: "label == %@", warning))
-        try await wait("Full-backup disclosure is missing", app: app) {
-            app.staticTexts["Export an unencrypted backup?"].exists && disclosure.count == 1
-                && app.buttons["Export…"].isHittable
-        }
-        capture(app, "Recovery export — full unencrypted-backup disclosure")
-        app.buttons["Export…"].tap()
-        // Keep the button contract and the named action cell observed in the native sheet.
-        let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
-            format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
-            NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
-            NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
-        ))
-        try await wait("Share sheet has no visible Save to Files action", app: app) {
-            saveToFiles.count == 1 && saveToFiles.element.isHittable
-        }
-        saveToFiles.element.tap()
+        try await presentRecoverySave(app)
         let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         let save = fileNavigation.buttons["Save"]
@@ -369,7 +469,7 @@ final class BatchImportUITests: XCTestCase {
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
             throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
         }
-        executionTimeAllowance = 300
+        executionTimeAllowance = phase == "prepare" ? 120 : 300
         continueAfterFailure = false
         return value
     }

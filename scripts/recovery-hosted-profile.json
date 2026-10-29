@@ -15,6 +15,7 @@
   "runtime_selection": "exact full numeric iphonesimulator SDK version; one available runtime; no fallback/download",
   "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro",
   "case_attempts": {
+    "prepare": 1,
     "export": 1,
     "restore": 1
   },
