@@ -216,40 +216,80 @@ final class PrivacySupportUITests: XCTestCase {
     private func selectTab(
         _ title: String, navigationTitle: String, failure: String, in app: XCUIApplication
     ) async throws {
-        let exactTitle = NSPredicate(format: "label == %@", title)
-        func leaves() -> [XCUIElement] {
-            // iPad exposes a tab as nested same-label Buttons. Choose the action
-            // leaf; an unrelated second leaf is ambiguous and must fail closed.
-            app.buttons.matching(exactTitle).allElementsBoundByIndex.filter {
-                $0.exists && $0.buttons.matching(exactTitle).count == 0
-            }
-        }
         let clock = ContinuousClock()
+        func observation(until deadline: ContinuousClock.Instant)
+            throws -> (element: XCUIElement, selected: Bool)? {
+            // One AX snapshot supplies all hierarchy/geometry facts. Repeated
+            // exists/count calls previously spent the five-second readiness
+            // budget before the unique visible iPad action could be tapped.
+            guard clock.now < deadline else { return nil }
+            let root = try app.snapshot()
+            guard clock.now < deadline else { return nil }
+            var visited = 0
+            var matches = 0
+            var leaves: [(node: XCUIElementSnapshot, parent: XCUIElementSnapshot?)] = []
+            func visit(_ node: XCUIElementSnapshot, parent: XCUIElementSnapshot?, depth: Int) -> Bool? {
+                guard clock.now < deadline, depth <= 40, visited < 1_000 else {
+                    return nil
+                }
+                visited += 1
+                let matching = node.elementType == .button && node.label == title
+                if matching { matches += 1 }
+                var descendantMatches = false
+                for child in node.children {
+                    guard let found = visit(child, parent: node, depth: depth + 1) else { return nil }
+                    if found { descendantMatches = true }
+                }
+                if matching && !descendantMatches { leaves.append((node, parent)) }
+                return matching || descendantMatches
+            }
+            guard visit(root, parent: nil, depth: 0) != nil else { return nil }
+            guard clock.now < deadline, leaves.count == 1, let leaf = leaves.first else { return nil }
+            let frame = leaf.node.frame
+            guard !frame.isNull, !frame.isInfinite, frame.width > 0, frame.height > 0,
+                  root.frame.contains(frame), leaf.node.isEnabled else { return nil }
+            let exactAction = NSPredicate(format: "label == %@ AND identifier == %@", title, leaf.node.identifier)
+            let buttons = app.buttons.matching(exactAction)
+            let action: XCUIElementQuery
+            if matches == 1 {
+                action = buttons
+            } else if matches == 2, let parent = leaf.parent,
+                      parent.elementType == .button, parent.label == title,
+                      parent.identifier == leaf.node.identifier, parent.frame == frame {
+                // The observed iPad representation is one exact parent/child
+                // pair, not two independent actions. Any other shape fails.
+                action = buttons.children(matching: .button).matching(exactAction)
+            } else {
+                return nil
+            }
+            guard clock.now < deadline else { return nil }
+            // .element preserves the query's unique-match requirement; no
+            // index, firstMatch or coordinate substitutes for the actual action.
+            return (action.element, leaf.node.isSelected)
+        }
         let readinessDeadline = clock.now.advanced(by: .seconds(5))
         var target: XCUIElement?
         while clock.now < readinessDeadline {
-            let candidates = leaves()
-            if candidates.count == 1 {
-                let candidate = candidates[0]
-                if candidate.isEnabled && candidate.isHittable && clock.now < readinessDeadline {
-                    target = candidate
-                    break
-                }
+            if let current = try observation(until: readinessDeadline),
+               clock.now < readinessDeadline && current.element.isEnabled,
+               clock.now < readinessDeadline && current.element.isHittable,
+               clock.now < readinessDeadline {
+                target = current.element
+                break
             }
             let remaining = clock.now.duration(to: readinessDeadline)
             if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
         }
-        guard let target else {
+        guard let target, clock.now < readinessDeadline else {
             try require(false, app: app, title + " tab is not uniquely reachable")
             return
         }
         target.tap() // One real action; never retry an ignored tap or use coordinates.
         let transitionDeadline = clock.now.advanced(by: .seconds(5))
         while clock.now < transitionDeadline {
-            let candidates = leaves()
-            let navigation = app.navigationBars[navigationTitle]
-            if candidates.count == 1 && candidates[0].isSelected
-                && navigation.exists && clock.now < transitionDeadline {
+            if let current = try observation(until: transitionDeadline), current.selected,
+               clock.now < transitionDeadline && app.navigationBars[navigationTitle].exists,
+               clock.now < transitionDeadline {
                 return
             }
             let remaining = clock.now.duration(to: transitionDeadline)

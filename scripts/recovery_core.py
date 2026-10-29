@@ -525,15 +525,22 @@ class Recovery:
         self.sim('boot-ready','bootstatus',self.owned,'-b',cap=120)
         self.prepare_files_ui_baseline()
 
-    def discover_ui_files_folder(self, deadline=None):
-        """One bounded, read-only traversal of direct local-provider roots.
+    def discover_ui_files_folder(self, deadline=None, *, allow_inventory_restart=False):
+        """A complete bounded, read-only traversal of direct local-provider roots.
 
-        This discovers only the exact UI-created UUID folder. It never creates
-        Apple storage, calls a container RPC, or accepts the first match.
+        Only pre-UI baseline discovery may discard one timestamp-unstable pass.
+        Both passes share the original deadline and cumulative entry cap. Root,
+        ancestor, type, link and syscall failures remain fatal; a seen owned
+        folder is never forgotten. Post-prepare discovery remains single-pass.
+        No Apple storage creation, container RPC or first-match selection.
         """
         root = self.owned_root()
         deadline = min(self.limit, self.ops.now()+CAPS['scan_seconds']) if deadline is None else min(self.limit,deadline)
-        anchors, candidates = {}, []
+        fixed_anchors = {}
+        observation = {'status':'running','passes':0,'restarts':0,'entries':0,
+                       'work_deadline':deadline-self.t0}
+        key = 'baseline' if allow_inventory_restart else 'created_folder'
+        self.report.setdefault('files_discovery',{})[key] = observation
         def check():
             self.timecheck()
             require(self.ops.now()<deadline,'Files folder discovery deadline reached')
@@ -543,66 +550,95 @@ class Recovery:
             value = identity_of(path)
             check()
             return value
-        parent = root
-        for part in ('data','Containers','Shared','AppGroup'):
-            parent = parent/part
+        def complete_pass():
+            anchors, candidates = {}, []
+            parent = root
+            for part in ('data','Containers','Shared','AppGroup'):
+                parent = parent/part
+                check()
+                try: current = directory(parent)
+                except FileNotFoundError as error:
+                    if error.errno != errno.ENOENT: raise
+                    # Missing container ancestors are permitted only before the
+                    # UI-created folder exists. Existing baseline anchors remain strict.
+                    check()
+                    for relative,pin in {**self.report.get('files_ui_baseline',{}).get('anchors',{}),**fixed_anchors}.items():
+                        require(directory(root/relative)==pin,'Files baseline ancestor changed')
+                    return candidates,anchors,True
+                relative = parent.relative_to(root).as_posix()
+                if relative in fixed_anchors:
+                    require(current==fixed_anchors[relative],'Files baseline ancestor changed between discovery passes')
+                anchors[relative] = current
+            groups = parent
+            root_before = groups.stat()
+            names = []
+            with os.scandir(groups) as entries:
+                for entry in entries:
+                    check()
+                    require(observation['entries']<CAPS['scan_entries'],'Files group entry cap exceeded')
+                    observation['entries'] += 1
+                    metadata = entry.stat(follow_symlinks=False)
+                    check()
+                    require(stat.S_ISDIR(metadata.st_mode),'Unexpected Files group entry type')
+                    uuid.UUID(entry.name)
+                    names.append(entry.name)
+            for name in sorted(names):
+                group = groups/name
+                group_id = directory(group)
+                provider = group/'File Provider Storage'
+                try: provider_id = directory(provider)
+                except FileNotFoundError as error:
+                    if error.errno != errno.ENOENT: raise
+                    require(directory(group)==group_id,'Files group changed during discovery')
+                    continue
+                folder = provider/self.folder_name
+                try: folder_id = directory(folder)
+                except FileNotFoundError as error:
+                    if error.errno != errno.ENOENT: raise
+                else:
+                    candidates.append({'path':str(folder),'identity':folder_id,
+                                       'provider_identity':provider_id,'group_identity':group_id})
+                    require(len(candidates)<=1,'Ambiguous UI-created Files destination')
+                require(directory(provider)==provider_id and directory(group)==group_id,
+                        'Files ancestor changed during discovery')
             check()
-            try: current = directory(parent)
-            except FileNotFoundError as error:
-                if error.errno != errno.ENOENT: raise
-                # Missing container ancestors are permitted only before the
-                # UI-created folder exists. Existing baseline anchors remain strict.
+            root_after = groups.stat()
+            require(stat.S_ISDIR(root_before.st_mode) and stat.S_ISDIR(root_after.st_mode)
+                    and [root_before.st_dev,root_before.st_ino]==anchors[groups.relative_to(root).as_posix()]
+                    and [root_after.st_dev,root_after.st_ino]==anchors[groups.relative_to(root).as_posix()],
+                    'Files group root identity changed during discovery')
+            stable = ((root_before.st_mtime_ns,root_before.st_ctime_ns)
+                      ==(root_after.st_mtime_ns,root_after.st_ctime_ns))
+            for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
+                require(directory(root/relative)==pin,'Files baseline ancestor changed')
+            for relative,pin in anchors.items():
+                require(directory(root/relative)==pin,'Files ancestor changed after discovery')
+            check()
+            return candidates,anchors,stable
+        try:
+            for attempt in range(2 if allow_inventory_restart else 1):
                 check()
-                for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
-                    require(directory(root/relative)==pin,'Files baseline ancestor changed')
-                return candidates,anchors
-            anchors[parent.relative_to(root).as_posix()] = current
-        groups = parent
-        root_before = groups.stat()
-        names = []
-        with os.scandir(groups) as entries:
-            for entry in entries:
+                observation['passes'] += 1
+                candidates,anchors,stable = complete_pass()
+                if allow_inventory_restart:
+                    require(not candidates,'Owned Files name already exists before UI preparation')
+                if stable:
+                    observation['status'] = 'complete'
+                    return candidates,anchors
+                require(allow_inventory_restart and attempt==0,
+                        'Files group inventory changed during discovery')
+                # No candidate/partial result survives. These already verified
+                # ancestor identities must also hold throughout the fresh pass.
+                fixed_anchors = anchors
+                observation['restarts'] += 1
                 check()
-                require(len(names)<CAPS['scan_entries'],'Files group entry cap exceeded')
-                metadata = entry.stat(follow_symlinks=False)
-                check()
-                require(stat.S_ISDIR(metadata.st_mode),'Unexpected Files group entry type')
-                uuid.UUID(entry.name)
-                names.append(entry.name)
-        for name in sorted(names):
-            group = groups/name
-            group_id = directory(group)
-            provider = group/'File Provider Storage'
-            try: provider_id = directory(provider)
-            except FileNotFoundError as error:
-                if error.errno != errno.ENOENT: raise
-                require(directory(group)==group_id,'Files group changed during discovery')
-                continue
-            folder = provider/self.folder_name
-            try: folder_id = directory(folder)
-            except FileNotFoundError as error:
-                if error.errno != errno.ENOENT: raise
-            else:
-                candidates.append({'path':str(folder),'identity':folder_id,
-                                   'provider_identity':provider_id,'group_identity':group_id})
-                require(len(candidates)<=1,'Ambiguous UI-created Files destination')
-            require(directory(provider)==provider_id and directory(group)==group_id,
-                    'Files ancestor changed during discovery')
-        check()
-        root_after = groups.stat()
-        require((root_before.st_dev,root_before.st_ino,root_before.st_mtime_ns,root_before.st_ctime_ns)
-                ==(root_after.st_dev,root_after.st_ino,root_after.st_mtime_ns,root_after.st_ctime_ns),
-                'Files group inventory changed during discovery')
-        for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
-            require(directory(root/relative)==pin,'Files baseline ancestor changed')
-        for relative,pin in anchors.items():
-            require(directory(root/relative)==pin,'Files ancestor changed after discovery')
-        check()
-        return candidates,anchors
+        except Exception as error:
+            observation.update(status='failed',error=repr(error)[:256])
+            raise
 
     def prepare_files_ui_baseline(self):
         self.once('files-ui-baseline')
-        candidates,anchors = self.discover_ui_files_folder()
+        candidates,anchors = self.discover_ui_files_folder(allow_inventory_restart=True)
         require(not candidates,'Owned Files name already exists before UI preparation')
         self.report['files_ui_baseline'] = {'owned_root_identity':self.root_id,
             'folder_name':self.folder_name,'absent':True,'anchors':anchors}

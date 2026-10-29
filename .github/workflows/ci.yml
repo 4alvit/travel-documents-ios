@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    name: Swift and iOS build
+    name: Swift, hosted tests and purchase UI
     runs-on: macos-15
     timeout-minutes: 35
     steps:
@@ -36,7 +36,7 @@ jobs:
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh
+        run: bash scripts/test-simulator.sh --cohort core-purchase
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -48,7 +48,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-files-picker-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: TripDocket-files-picker-failure-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure.png
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure-ax.txt
@@ -61,7 +61,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: TripDocket-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/*.xcresult
           if-no-files-found: warn
           retention-days: 7
@@ -74,6 +74,50 @@ jobs:
             build/ci-preview/provenance.json
             build/ci-preview/SHA256SUMS
           if-no-files-found: error
+          retention-days: 7
+  ui_guidance:
+    name: Accessibility, localization and guidance UI
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p build/ci-toolchain
+          xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          swift --version | tee build/ci-toolchain/swift.txt
+          brew install xcodegen
+      - name: Simulator integration and StoreKit tests
+        id: integration
+        run: bash scripts/test-simulator.sh --cohort ui-guidance
+      - name: Extract existing Files/payment failure pairs
+        if: ${{ failure() && steps.integration.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python3 -B scripts/files_picker_failure.py --run
+      - name: Files/payment failure evidence
+        if: ${{ always() && steps.integration.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-files-picker-failure-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure.png
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/failure-ax.txt
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/evidence.json
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure.png
+            build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure-ax.txt
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TripDocket-tests-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/*.xcresult
+          if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
     name: iPad privacy and support (${{ matrix.locale }})
@@ -145,16 +189,18 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [validate, privacy_ipad, recovery]
+    needs: [validate, ui_guidance, privacy_ipad, recovery]
     runs-on: ubuntu-latest
     steps:
       - name: Require successful validation
         env:
-          PHONE_RESULT: ${{ needs.validate.result }}
+          CORE_PURCHASE_RESULT: ${{ needs.validate.result }}
+          UI_GUIDANCE_RESULT: ${{ needs.ui_guidance.result }}
           # Aggregate matrix result requires both fixed locales to succeed.
           IPAD_RESULT: ${{ needs.privacy_ipad.result }}
           RECOVERY_RESULT: ${{ needs.recovery.result }}
         run: |
-          test "$PHONE_RESULT" = success
+          test "$CORE_PURCHASE_RESULT" = success
+          test "$UI_GUIDANCE_RESULT" = success
           test "$IPAD_RESULT" = success
           test "$RECOVERY_RESULT" = success
