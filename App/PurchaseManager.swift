@@ -39,6 +39,10 @@ final class PurchaseManager {
     /// Safe to repeat on foreground entry. Reading local entitlements does not
     /// ask for an Apple Account login or require fetching a product price.
     func load() async {
+        #if DEBUG && targetEnvironment(simulator)
+        purchaseDiagnostics.observe(.load, stage: .entitlements)
+        defer { purchaseDiagnostics.observe(.load, stage: .returned) }
+        #endif
         await refreshEntitlements()
         guard !isBusy else { return }
         isBusy = true
@@ -47,6 +51,9 @@ final class PurchaseManager {
         #endif
         defer { isBusy = false }
         do {
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.observe(.load, stage: .catalog)
+            #endif
             try await loadProduct()
         } catch {
             #if DEBUG && targetEnvironment(simulator)
@@ -64,6 +71,8 @@ final class PurchaseManager {
         #if DEBUG && targetEnvironment(simulator)
         purchaseDiagnostics.beginPurchaseOrRestore()
         var purchasePhase: PurchaseDiagnostic.Phase = .catalog
+        purchaseDiagnostics.observe(.purchase, stage: .catalog)
+        defer { purchaseDiagnostics.observe(.purchase, stage: .returned) }
         #endif
         defer { isBusy = false }
 
@@ -80,12 +89,16 @@ final class PurchaseManager {
             guard let product else { throw PurchaseError.unavailable }
             #if DEBUG && targetEnvironment(simulator)
             purchasePhase = .purchase
+            purchaseDiagnostics.observe(.purchase, stage: .purchase)
             #endif
             switch try await product.purchase() {
             case .success(let result):
                 guard case .verified(let transaction) = result,
                       transaction.productID == Self.productID,
                       transaction.productType == .nonConsumable else {
+                    #if DEBUG && targetEnvironment(simulator)
+                    purchaseDiagnostics.observe(.purchase, stage: .entitlements)
+                    #endif
                     await refreshEntitlements()
                     statusMessage = PurchaseFailure.unverified.message
                     #if DEBUG && targetEnvironment(simulator)
@@ -93,7 +106,13 @@ final class PurchaseManager {
                     #endif
                     return .unverified
                 }
+                #if DEBUG && targetEnvironment(simulator)
+                purchaseDiagnostics.observe(.purchase, stage: .entitlements)
+                #endif
                 await refreshEntitlements()
+                #if DEBUG && targetEnvironment(simulator)
+                purchaseDiagnostics.observe(.purchase, stage: .finish)
+                #endif
                 await transaction.finish()
                 statusMessage = isPro
                     ? L10n.service("services.purchase.ready", defaultValue: "TripDocket Pro is ready. Thank you!")
@@ -134,10 +153,15 @@ final class PurchaseManager {
         statusMessage = nil
         #if DEBUG && targetEnvironment(simulator)
         purchaseDiagnostics.beginPurchaseOrRestore()
+        purchaseDiagnostics.observe(.restore, stage: .sync)
+        defer { purchaseDiagnostics.observe(.restore, stage: .returned) }
         #endif
         defer { isBusy = false }
         do {
             try await AppStore.sync()
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.observe(.restore, stage: .entitlements)
+            #endif
             await refreshEntitlements()
             statusMessage = isPro
                 ? L10n.service("services.purchase.restore.completed", defaultValue: "TripDocket Pro purchases restored.")
@@ -146,6 +170,9 @@ final class PurchaseManager {
             statusMessage = L10n.service("services.purchase.restore.cancelled", defaultValue: "Restore cancelled.")
         } catch {
             // A failed network sync must not wipe an already verified local right.
+            #if DEBUG && targetEnvironment(simulator)
+            purchaseDiagnostics.observe(.restore, stage: .entitlements)
+            #endif
             await refreshEntitlements()
             statusMessage = L10n.service("services.purchase.restore.failed", defaultValue: "Could not sync with the App Store. Existing verified access and your documents remain available. Try again when connected.")
         }
@@ -340,9 +367,17 @@ struct PurchaseDiagnostic: Equatable {
 
 /// Two latest failures at most; a background price load cannot erase a purchase failure.
 struct PurchaseDiagnostics {
+    enum Operation { case load, purchase, restore }
+    enum AwaitStage: String, CaseIterable {
+        case notStarted, entitlements, catalog, purchase, finish, sync, returned
+    }
+
     private let enabled: Bool
     private var catalog: PurchaseDiagnostic?
     private var purchase: PurchaseDiagnostic?
+    private var loadStage: AwaitStage = .notStarted
+    private var purchaseStage: AwaitStage = .notStarted
+    private var restoreStage: AwaitStage = .notStarted
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         enabled = arguments.contains("--ui-testing-purchase-diagnostics")
@@ -372,10 +407,22 @@ struct PurchaseDiagnostics {
 
     var accessibilityValue: String? { (purchase ?? catalog)?.accessibilityValue }
 
+    /// Last observed transition per operation, not an atomic StoreKit state or
+    /// acceptance result. Independent slots keep a load from erasing purchase
+    /// progress. Reentrant calls of one operation share its latest observation.
+    mutating func observe(_ operation: Operation, stage: AwaitStage) {
+        guard enabled else { return }
+        switch operation {
+        case .load: loadStage = stage
+        case .purchase: purchaseStage = stage
+        case .restore: restoreStage = stage
+        }
+    }
+
     /// Last rendered app state only; this performs no StoreKit lookup or refresh.
     func stateAccessibilityValue(isPro: Bool, isBusy: Bool) -> String? {
         guard enabled else { return nil }
-        return "purchase-state isPro=\(isPro) isBusy=\(isBusy)"
+        return "purchase-state isPro=\(isPro) isBusy=\(isBusy) load=\(loadStage.rawValue) purchase=\(purchaseStage.rawValue) restore=\(restoreStage.rawValue)"
     }
 }
 #endif

@@ -20,6 +20,7 @@ final class PurchaseUITests: XCTestCase {
             session.clearTransactions()
             session.resetToDefaultState()
         }
+        recordCancellationSessionSettings(session, point: .beforeLaunch)
 
         app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-purchase-diagnostics"]
         app.launch()
@@ -45,8 +46,16 @@ final class PurchaseUITests: XCTestCase {
 
         // Require positive evidence of Xcode's payment UI. Never interact with
         // an Apple Account login or a Sandbox/production payment sheet.
-        try await require("No Xcode payment sheet appeared", app: app, springboard: springboard) {
-            self.xcodeMarker(in: app).exists || self.xcodeMarker(in: springboard).exists
+        do {
+            try await require("No Xcode payment sheet appeared", app: app, springboard: springboard) {
+                self.xcodeMarker(in: app).exists || self.xcodeMarker(in: springboard).exists
+            }
+        } catch {
+            // A complete, allowlisted value avoids debugDescription truncation.
+            // These observations neither replace nor relax the failed UI gate.
+            recordCancellationSessionSettings(session, point: .missingSheet)
+            recordFullPurchaseState(app)
+            throw error
         }
         let paymentSurface = xcodeMarker(in: app).exists ? app : springboard
         var cancel: XCUIElement?
@@ -242,12 +251,54 @@ final class PurchaseUITests: XCTestCase {
         let elements = app.buttons.matching(identifier: "purchase.state")
         guard elements.count == 1 else { return .unknownMissingOrAmbiguous }
         // Never copy arbitrary AX values into the bounded record.
-        switch elements.element(boundBy: 0).value as? String {
-        case "purchase-state isPro=false isBusy=false": return .known(isPro: false, isBusy: false)
-        case "purchase-state isPro=false isBusy=true": return .known(isPro: false, isBusy: true)
-        case "purchase-state isPro=true isBusy=false": return .known(isPro: true, isBusy: false)
-        case "purchase-state isPro=true isBusy=true": return .known(isPro: true, isBusy: true)
-        default: return .unknownUnrecognized
+        guard let state = PurchaseStateObservation.parse(elements.element(boundBy: 0).value as? String) else {
+            return .unknownUnrecognized
+        }
+        return .known(isPro: state.isPro, isBusy: state.isBusy)
+    }
+
+    private enum CancellationObservationPoint: String { case beforeLaunch, missingSheet }
+
+    private func recordCancellationSessionSettings(
+        _ session: SKTestSession, point: CancellationObservationPoint
+    ) {
+        // Read-only settings; no errors, transactions or associated payloads.
+        recordPurchaseObservation(
+            "purchase-session observationOnly=true point=\(point.rawValue) disableDialogs=\(session.disableDialogs) askToBuyEnabled=\(session.askToBuyEnabled) interruptedPurchasesEnabled=\(session.interruptedPurchasesEnabled)",
+            name: "Cancellation session settings"
+        )
+    }
+
+    private func recordFullPurchaseState(_ app: XCUIApplication) {
+        let elements = app.buttons.matching(identifier: "purchase.state")
+        let value: String
+        if elements.count != 1 {
+            value = "unknown-missing-or-ambiguous"
+        } else if let state = PurchaseStateObservation.parse(elements.element(boundBy: 0).value as? String) {
+            value = state.value
+        } else {
+            value = "unknown-unrecognized"
+        }
+        recordPurchaseObservation("purchase-observation observationOnly=true \(value)",
+                                  name: "Full purchase state observation")
+    }
+
+    private struct PurchaseStateObservation {
+        let isPro: Bool
+        let isBusy: Bool
+        let value: String
+
+        static func parse(_ value: String?) -> Self? {
+            guard let value, value.utf8.count <= 192 else { return nil }
+            let fields = value.split(separator: " ", omittingEmptySubsequences: false)
+            guard fields.count == 6, fields[0] == "purchase-state",
+                  ["isPro=false", "isPro=true"].contains(String(fields[1])),
+                  ["isBusy=false", "isBusy=true"].contains(String(fields[2])) else { return nil }
+            let stages = ["notStarted", "entitlements", "catalog", "purchase", "finish", "sync", "returned"]
+            for (index, key) in [(3, "load"), (4, "purchase"), (5, "restore")] {
+                guard stages.contains(where: { fields[index] == "\(key)=\($0)" }) else { return nil }
+            }
+            return Self(isPro: fields[1] == "isPro=true", isBusy: fields[2] == "isBusy=true", value: value)
         }
     }
 
@@ -482,6 +533,25 @@ final class PurchaseUITests: XCTestCase {
     }
 
     func testPurchasePostconditionRejectsKnownProAndPreservesUnknownState() {
+        let validObservation = "purchase-state isPro=true isBusy=true load=catalog purchase=purchase restore=notStarted"
+        let parsed = PurchaseStateObservation.parse(validObservation)
+        XCTAssertEqual(parsed?.isPro, true)
+        XCTAssertEqual(parsed?.isBusy, true)
+        XCTAssertEqual(parsed?.value, validObservation)
+        for isPro in [false, true] {
+            for isBusy in [false, true] {
+                let state = "purchase-state isPro=\(isPro) isBusy=\(isBusy) load=returned purchase=finish restore=returned"
+                XCTAssertEqual(PurchaseStateObservation.parse(state)?.isPro, isPro)
+                XCTAssertEqual(PurchaseStateObservation.parse(state)?.isBusy, isBusy)
+            }
+        }
+        for invalid in [nil, "", validObservation + " account=PRIVATE",
+                        validObservation.replacingOccurrences(of: "purchase=purchase", with: "purchase=PRIVATE"),
+                        validObservation.replacingOccurrences(of: "isPro=true", with: "isPro=unknown"),
+                        validObservation.replacingOccurrences(of: " ", with: "\n"),
+                        String(repeating: "x", count: 193)] as [String?] {
+            XCTAssertNil(PurchaseStateObservation.parse(invalid))
+        }
         let valid = expectedHistory([])
         for busy in [false, true] {
             let pro = PurchaseAppState.known(isPro: true, isBusy: busy)
