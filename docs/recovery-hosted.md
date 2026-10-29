@@ -99,21 +99,22 @@ not establish the cause or that 120 seconds would suffice. There is no retry,
 warmup query, runtime fallback or download. The separate capability preparation
 stage remains limited to 60 seconds.
 
-The initial owned Files `launch` has a 120-second command cap: 112 seconds of
-work and the existing 8-second stop reserve. This is a finite cold-start policy
-allowance, changed from 60 seconds after two hosted attempts exhausted the old
-52-second work window with no output; another attempt launched successfully in
-30.44 seconds. The cause and whether 120 seconds suffices remain unestablished.
-The required final Files `terminate` keeps its 60-second cap. The one exact owned Files
-group-container lookup has a 60-second cap (52 seconds of work plus the same
-8-second stop reserve), after a hosted query exhausted the prior 22-second work
-window with zero output. This finite policy does not establish the cause or
-guarantee completion. The export/restore AUT app and data container lookups
-and all other default command caps remain 30 seconds. Global time,
-ownership and cancellation checks can shorten or prevent any command. Files
-termination is still attempted after an uncertain launch outcome when those
-checks permit it; a secondary termination failure cannot replace the original
-launch/provider failure. No command or Simulator creation is retried. Before spawning, work commands force one existing
+Files preparation performs one exact owned Files group-container lookup, with
+its existing 60-second cap (52 seconds of work plus the 8-second stop reserve).
+It no longer launches or terminates the Files application before the export
+case. The current hosted failure exhausted the forced launch's 112-second work
+window with no output, before any build or UI test. A Files process PID is not
+used by later acceptance: preparation instead requires the exact group and
+provider identity, an exclusively created empty test folder, then the existing
+real Files UI and exported/restored byte checks. This is a preparation-policy
+change, not proof that provider initialization or the later UI will succeed.
+If the group or provider is unavailable, preparation fails within the original
+lookup/readiness deadline; it does not bootstrap an Apple directory, launch an
+alternate service, retry a command, or select another location.
+
+The export/restore AUT app and data container lookups and all other default
+command caps remain 30 seconds. Global time, ownership and cancellation checks
+can shorten or prevent any command. Before spawning, work commands force one existing
 resource scan after intent/log setup and recheck cancellation and the remaining
 stop reserve. Ordinary sampled scans and the cleanup bypass remain enabled. Command failures retain the primary cause plus separate log-close,
 stdout-read, receipt, finalization and cap errors. Both log closes are attempted.
@@ -309,33 +310,23 @@ capability-proof and artifact-exclusion boundaries. They deliberately forbid
 real process creation/signals. They do not establish host readiness or replace
 the inherited recovery tests and independent native UI review.
 
-The initial Files preparation treats one specific `simctl terminate` reply as
-already stopped: exit 3 with the exact `NSPOSIXErrorDomain` code 3 diagnostic
-that says `found nothing to terminate` for `com.apple.DocumentsApp`. This
-classification applies only inside the current preparation after its successful
-owned-device launch and group-container lookup. It requires the original owned
-command process to be reaped, its process group confirmed absent, empty stdout,
-and the complete matching stderr from the same bounded log file. The raw exit
-code and diagnostic hash remain in `accepted_nonzero_exit`; the raw diagnostic
-still follows the Files-only publication allowlist.
+The retained command-level classifier for the exact already-stopped Files
+termination diagnostic is not used by provider-only preparation. Its strict
+owned-command, complete-log, exit, deadline and closure checks remain unchanged;
+it does not permit a nonzero group lookup. The existing Files log-publication
+allowlist is also unchanged. Group lookup output remains a private root log,
+not a new public artifact route.
 
-The command must still pass stop, stream closure, resource/finalization, receipt
-and deadline checks. All other nonzero responses, permission errors and timeouts
-fail. No command, retry or budget is added. Provider and folder identity checks,
-export/restore assertions, final simulator cleanup and independent UI/pixel
-review remain required. This handles the terminal response; it does not establish
-why the Files application had stopped or claim that recovery tests passed.
-
-The Files launch allowance does not extend the total work deadline. At the
-observed prelaunch elapsed time of 132.3 seconds, 1,247.7 seconds remain before
-the 1,380-second work limit. If launch/provider lookup/termination consume their
-full 120/60/60-second caps, only 1,007.7 seconds remain for export, restore and
-evidence processing. The two 600-second phase caps therefore cannot both be
-consumed in full, even before parser/comparator work. They remain maxima clipped
-to the original remaining work time, not separately reserved allocations. Every
-command still needs more than its 8-second stop reserve before admission and
-again before spawn. Cleanup retains its original 120 seconds within the same
-1,500-second executor limit; no retry or extra worker is introduced.
+Removing the forced 120-second launch and 60-second termination does not extend
+the total work deadline or reserve new time for a later phase. At the observed
+preparation start of 148.57 seconds, 1,231.43 seconds remain before the original
+1,380-second work limit. A full 60-second group lookup leaves at most 1,171.43
+seconds for export, restore and evidence processing; the two 600-second phase
+caps still cannot both be consumed in full. They remain maxima clipped to the
+original remaining work time. Every command still needs more than its 8-second
+stop reserve before admission and again before spawn. Cleanup retains its
+original 120 seconds within the same 1,500-second executor limit. No additional
+worker, Simulator, test attempt or runtime fallback is introduced.
 
 Each iPad guidance locale now runs in a separate fresh driver and owned device.
 The fixed EN/RU CI matrix has `max-parallel: 1` and `fail-fast: false`: a failed
@@ -378,13 +369,13 @@ Files provider readiness uses only the unused part of the original `files-group`
 lookup work deadline (52 seconds within the 60-second Files group command cap).
 The clock starts when that original command starts; readiness never receives
 a renewed 52-second window after the lookup returns.
-After one successful launch and group lookup, the wrapper pins the exact owned
+After the single successful group lookup, the wrapper pins the exact owned
 group and observes only its `File Provider Storage` leaf. Initial leaf absence
 may settle within that existing deadline; the wrapper never creates the provider,
 relaunches Files, repeats a command, chooses another provider, or renews the clock.
 A missing/replaced group, symlink, permission error, or disappearance after the
 provider identity was observed fails immediately. The original work limit is
-restored before the existing termination and cleanup paths. Bounded receipt
+restored before subsequent preparation and the existing cleanup paths. Bounded receipt
 fields retain the failure stage, safe owned-relative filename, observation count,
 and original deadline. This readiness policy does not establish that delayed
 provider initialization caused any earlier hosted failure. UI export/restore

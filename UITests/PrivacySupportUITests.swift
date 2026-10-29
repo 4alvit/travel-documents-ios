@@ -44,9 +44,8 @@ final class PrivacySupportUITests: XCTestCase {
         defer { app.terminate() }
         try require(app.navigationBars["TripDocket"].waitForExistence(timeout: 15),
                     app: app, "Fresh library did not open")
-        try selectTab(copy.settings, in: app)
-        try require(app.navigationBars[copy.settings].waitForExistence(timeout: 5),
-                    app: app, "Settings did not open")
+        try await selectTab(copy.settings, navigationTitle: copy.settings,
+                            failure: "Settings did not open", in: app)
         // Resetting library data does not reset StoreKit entitlements. Fail this
         // precondition explicitly rather than revoking or fabricating an entitlement.
         let free = app.staticTexts[copy.freeTitle]
@@ -145,9 +144,8 @@ final class PrivacySupportUITests: XCTestCase {
         try await scrollTo(free, in: app, navigationTitle: copy.settings,
                            description: "Free state after guidance", preferWholeFrame: true, searchDown: false)
         try require(free.exists && free.isHittable, app: app, "Free state changed during guidance")
-        try selectTab(copy.trips, in: app)
-        try require(app.navigationBars["TripDocket"].waitForExistence(timeout: 5),
-                    app: app, "Trips did not return after guidance")
+        try await selectTab(copy.trips, navigationTitle: "TripDocket",
+                            failure: "Trips did not return after guidance", in: app)
         attach(app, name: "Guidance completed and returned to Trips")
     }
 
@@ -215,11 +213,49 @@ final class PrivacySupportUITests: XCTestCase {
         throw LayoutFailure(message: "Did not expose the entire text after 20 bounded slices: " + name)
     }
 
-    private func selectTab(_ title: String, in app: XCUIApplication) throws {
-        let tab = app.buttons[title].firstMatch
-        try require(tab.waitForExistence(timeout: 5) && tab.isHittable,
-                    app: app, title + " tab is not reachable")
-        tab.tap()
+    private func selectTab(
+        _ title: String, navigationTitle: String, failure: String, in app: XCUIApplication
+    ) async throws {
+        let exactTitle = NSPredicate(format: "label == %@", title)
+        func leaves() -> [XCUIElement] {
+            // iPad exposes a tab as nested same-label Buttons. Choose the action
+            // leaf; an unrelated second leaf is ambiguous and must fail closed.
+            app.buttons.matching(exactTitle).allElementsBoundByIndex.filter {
+                $0.exists && $0.buttons.matching(exactTitle).count == 0
+            }
+        }
+        let clock = ContinuousClock()
+        let readinessDeadline = clock.now.advanced(by: .seconds(5))
+        var target: XCUIElement?
+        while clock.now < readinessDeadline {
+            let candidates = leaves()
+            if candidates.count == 1 {
+                let candidate = candidates[0]
+                if candidate.isEnabled && candidate.isHittable && clock.now < readinessDeadline {
+                    target = candidate
+                    break
+                }
+            }
+            let remaining = clock.now.duration(to: readinessDeadline)
+            if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
+        }
+        guard let target else {
+            try require(false, app: app, title + " tab is not uniquely reachable")
+            return
+        }
+        target.tap() // One real action; never retry an ignored tap or use coordinates.
+        let transitionDeadline = clock.now.advanced(by: .seconds(5))
+        while clock.now < transitionDeadline {
+            let candidates = leaves()
+            let navigation = app.navigationBars[navigationTitle]
+            if candidates.count == 1 && candidates[0].isSelected
+                && navigation.exists && clock.now < transitionDeadline {
+                return
+            }
+            let remaining = clock.now.duration(to: transitionDeadline)
+            if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
+        }
+        try require(false, app: app, failure)
     }
 
     private func scrollTo(

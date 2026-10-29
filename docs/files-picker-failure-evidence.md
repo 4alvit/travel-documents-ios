@@ -15,8 +15,12 @@ Manual `keepAlways` attachments may have `isAssociatedWithFailure: false`; the
 receipt records that value and does not relabel it.
 
 `xcresulttool` is resolved from the selected installed Xcode, hashed before use,
-and checked before and after each invocation. The existing result bundle has a
-strict complete manifest before and after decoding. The receipt binds the actual
+and checked before and after each invocation. Before the first decoder command,
+a verified disposable copy is made inside the owned directory. The original
+result retains strict directory identity and complete content/mode checks.
+Only the copy may add or change a regular root `database.sqlite3` cache, up to
+32 MiB; the receipt records its before/after hashes and all other copy members
+remain exact. Every decoder command reads the copy, never the original. The receipt binds the actual
 checkout, run and attempt, relevant source hashes, bundle manifest, parsed test
 tree, actual case/device/configuration and exact retained file hashes. This is
 diagnostic provenance, not runtime or release acceptance.
@@ -29,11 +33,15 @@ There is no retry, deadline reset, additional job or simulator worker. The
 existing job deadline can preempt this diagnostic, particularly on cancellation;
 successful extraction is not guaranteed.
 
-New output is sampled against both 32 MiB logical and allocated bytes, 4,096
-entries and depth 40, with an 8 GiB free-space floor. This is sampled accounting,
+The input manifest is limited to 128 MiB and 4,096 entries. The complete owned
+directory, including the disposable copy, is sampled against 512 MiB logical
+and allocated bytes. Native output, logs and public evidence retain a separate
+combined 32 MiB limit; the copy is fully counted in the total, not excluded.
+The unchanged entry cap is 4,096, depth 40 and free-space floor 8 GiB. All
+scans share the original command/work deadline. This is sampled accounting,
 not an instantaneous quota. Each stdout/stderr log is at most 1 MiB, all logs
-together at most 8 MiB. Input manifest content is limited to 512 MiB and 4,096
-entries without copying the xcresult. Exported JSON is limited to 1 MiB, the
+together at most 8 MiB. Copying and verification spend the same 100-second work
+allowance; insufficient time or space fails without a retry. Exported JSON is limited to 1 MiB, the
 selected PNG to 8 MiB, AX to 2 MiB and public receipt to 16 KiB. Unknown schemas,
 ambiguous cases or pairs, links, mismatched identities and incomplete process
 cleanup fail closed. Temporary output is removed only after owned-process
