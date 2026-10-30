@@ -295,7 +295,7 @@ class BoundaryTests(unittest.TestCase):
         paths=[line.strip() for line in workflow.splitlines() if 'build/RecoveryHosted' in line]
         self.assertTrue(all(path.startswith(prefix) for path in paths))
         self.assertEqual({path[len(prefix):] for path in paths},
-                         {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
+                         {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/','CommitObservationPublic/'})
         self.assertNotIn('/*.log',workflow)
 
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):

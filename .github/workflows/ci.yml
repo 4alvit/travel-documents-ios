@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, diagnostic/files-commit-observation-20261030]
   pull_request:
   workflow_dispatch:
   merge_group:
@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/diagnostic/files-commit-observation-20261030' }}
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15
     timeout-minutes: 35
@@ -76,6 +77,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   ui_guidance:
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/diagnostic/files-commit-observation-20261030' }}
     name: Accessibility, localization and guidance UI
     runs-on: macos-15
     timeout-minutes: 35
@@ -120,6 +122,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/diagnostic/files-commit-observation-20261030' }}
     name: iPad privacy and support (${{ matrix.locale }})
     strategy:
       fail-fast: false
@@ -148,6 +151,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   recovery:
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/diagnostic/files-commit-observation-20261030' || (github.event_name == 'push' && github.run_attempt == 1 && github.event.created == true && github.event.deleted == false && github.event.forced == false) }}
     name: Free backup and recovery
     runs-on: macos-15
     timeout-minutes: 35
@@ -163,12 +167,19 @@ jobs:
         run: |
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py
+          python3 -B scripts/test-files-commit-observer.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
         env:
           TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
           TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: python3 -B scripts/recovery_hosted.py --run
+          TRIPDOCKET_FILES_COMMIT_OBSERVATION: ${{ github.event_name == 'push' && github.ref == 'refs/heads/diagnostic/files-commit-observation-20261030' }}
+        run: |
+          if [ "$TRIPDOCKET_FILES_COMMIT_OBSERVATION" = true ]; then
+            python3 -B scripts/observe_files_commit.py --run
+          else
+            python3 -B scripts/recovery_hosted.py --run
+          fi
       - name: Recovery evidence
         if: always()
         timeout-minutes: 5
@@ -183,6 +194,7 @@ jobs:
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/BeforeReset/
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/AfterRestore/
             build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/*-attachments/
+            build/RecoveryHosted-${{ github.run_id }}-${{ github.run_attempt }}/CommitObservationPublic/
           if-no-files-found: warn
           retention-days: 7
           include-hidden-files: true
