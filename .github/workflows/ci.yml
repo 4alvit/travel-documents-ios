@@ -163,6 +163,7 @@ jobs:
         run: |
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py
+          python3 -B scripts/test-files-readiness.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
         env:

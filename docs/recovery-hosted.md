@@ -99,18 +99,22 @@ not establish the cause or that 120 seconds would suffice. There is no retry,
 warmup query, runtime fallback or download. The separate capability preparation
 stage remains limited to 60 seconds.
 
-Files preparation performs one exact owned Files group-container lookup, with
-its existing 60-second cap (52 seconds of work plus the 8-second stop reserve).
-It no longer launches or terminates the Files application before the export
-case. The current hosted failure exhausted the forced launch's 112-second work
-window with no output, before any build or UI test. A Files process PID is not
-used by later acceptance: preparation instead requires the exact group and
-provider identity, an exclusively created empty test folder, then the existing
-real Files UI and exported/restored byte checks. This is a preparation-policy
-change, not proof that provider initialization or the later UI will succeed.
-If the group or provider is unavailable, preparation fails within the original
-lookup/readiness deadline; it does not bootstrap an Apple directory, launch an
-alternate service, retry a command, or select another location.
+Files preparation first runs the real provider initialization UI case, which
+reaches the exact local root, proves the run-UUID name absent and stops the
+fixture. After its exact PASS and process cleanup, the host performs one exact
+owned DocumentsApp group-container lookup with the existing 60-second cap
+(52 seconds of work plus the 8-second stop reserve). It pins the existing local
+provider, exclusively creates only an empty run-UUID leaf and independently
+rechecks its original inode, all ancestors and complete emptiness before export.
+It does not launch or terminate Files separately, create Apple roots, adopt an
+existing name or prepare any backup bytes. Provider readiness uses only the
+unused lookup work budget. No total, case or cleanup limit is increased.
+
+Native Apple Files New Folder/name-commit remains unverified; failed diagnostic
+attempts are not product acceptance. Folder creation is now deterministic test
+setup, while the actual app Save-to-Files, import/restore, catalog/original-byte
+comparisons and rendered PDF checks remain mandatory. This source policy is
+still pending native end-to-end acceptance.
 
 The export/restore AUT app and data container lookups and all other default
 command caps remain 30 seconds. Global time, ownership and cancellation checks

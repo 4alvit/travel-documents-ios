@@ -468,6 +468,7 @@ class BoundaryTests(unittest.TestCase):
         r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-0000-0000-000000000001'
         original_env,original_cwd=r.ops.env,r.ops.cwd
         r.report['phase_passed']={'prepare':True}
+        r.report['files_folder']={'fixture_verified':True}
         with patch.object(r,'verify_folder'),patch.object(r,'once') as once, \
              patch.object(r,'authorize_restore') as authorize,patch.object(r,'command') as command, \
              patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
@@ -1164,8 +1165,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(calls,['runtime-inventory','baseline-inventory','create','created-inventory','boot','boot-ready'])
         self.assertEqual(r.report['files_discovery']['baseline']['passes'],1)
         self.assertEqual((r.limit,r.final),(1380,1500));self.assertEqual(r.ops.processes,[])
-        (provider/r.folder_name).mkdir()
-        r.report['phase_passed']={'prepare':True};r.bind_ui_created_empty_folder()
+        r.report['phase_passed']={'prepare':True};r.create_owned_files_fixture()
         self.assertTrue(r.report['files_folder']['initially_empty'])
 
     def test_setup_absence_failure_does_not_boot_the_device(self):
@@ -1190,77 +1190,128 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('boot',calls);self.assertNotIn('boot-ready',calls)
         self.assertNotIn('files_ui_baseline',r.report);self.assertEqual(r.ops.processes,[])
 
-    def test_ui_files_prepare_boundary_pins_actual_empty_folder_without_RPC(self):
+    def prepared_files_runner(self):
         r,provider=self.files_runner()
         r.prepare_files_ui_baseline()
-        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
-        folder=provider/r.folder_name;folder.mkdir()
-        with self.assertRaisesRegex(RuntimeError,'did not pass'):r.bind_ui_created_empty_folder()
         r.report['phase_passed']={'prepare':True}
-        r.bind_ui_created_empty_folder()
-        self.assertEqual(r.folder,folder)
-        self.assertTrue(r.report['files_folder']['initially_empty'])
-        self.assertEqual(r.report['files_folder']['empty_boundary'],'after prepare case, before export case')
-        self.assertEqual(r.ops.processes,[]);self.assertEqual((r.limit,r.final),(1380,1500))
-        with self.assertRaisesRegex(RuntimeError,'One-shot'):r.prepare_files_ui_baseline()
+        return r,provider
 
-    def test_ui_files_prepare_refuses_existing_and_missing_destinations(self):
-        r,provider=self.files_runner();(provider/r.folder_name).mkdir()
-        with self.assertRaisesRegex(RuntimeError,'already exists'):r.prepare_files_ui_baseline()
-        self.assertNotIn('files_ui_baseline',r.report);self.assertEqual(r.ops.processes,[])
-        (provider/r.folder_name).rmdir()
-        r.report['attempts']={};r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        with self.assertRaisesRegex(RuntimeError,'Missing unique'):r.bind_ui_created_empty_folder()
+    def test_owned_fixture_requires_real_prepare_before_any_lookup_or_mkdir(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        with self.assertRaisesRegex(RuntimeError,'did not pass'):r.create_owned_files_fixture()
+        self.assertFalse((provider/r.folder_name).exists());self.assertEqual(r.ops.processes,[])
+        r.report['phase_passed']={'prepare':True};r.unknown_spawn=True
+        with self.assertRaisesRegex(RuntimeError,'ownership unresolved'):r.create_owned_files_fixture()
+        self.assertFalse((provider/r.folder_name).exists());self.assertEqual(r.ops.processes,[])
+
+    def test_owned_fixture_integrates_exclusive_create_and_independent_empty_proof(self):
+        r,provider=self.prepared_files_runner();r.create_owned_files_fixture()
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual(list(r.folder.iterdir()),[])
+        self.assertEqual(r.folder.stat().st_mode & 0o777,0o700)
+        self.assertTrue(r.report['files_folder']['fixture_verified'])
+        self.assertEqual(r.report['files_fixture_creation']['identity'],hosted.core.identity_of(r.folder))
+        self.assertEqual(r.report['files_folder']['empty_boundary'],'after prepare case, before export case')
+        self.assertEqual([x['id'] for x in r.report['commands']],['files-group'])
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        with self.assertRaisesRegex(RuntimeError,'already initialized'):r.create_owned_files_fixture()
+
+    def test_owned_fixture_never_adopts_existing_leaf_or_lookup_race(self):
+        r,provider=self.prepared_files_runner();folder=provider/r.folder_name;folder.mkdir()
+        with self.assertRaisesRegex(RuntimeError,'already exists'):r.create_owned_files_fixture()
+        self.assertEqual(r.ops.processes,[]);folder.rmdir()
+        original=r.wait_files_provider
+        def race(*args):
+            result=original(*args);folder.mkdir();return result
+        with patch.object(r,'wait_files_provider',side_effect=race):
+            with self.assertRaises(FileExistsError):r.create_owned_files_fixture()
+        self.assertNotIn('files_fixture_creation',r.report)
+        self.assertIsNone(r.folder);self.assertEqual(list(folder.iterdir()),[])
+
+    def test_owned_fixture_binding_requires_exclusive_creation_evidence(self):
+        r,provider=self.prepared_files_runner();(provider/r.folder_name).mkdir()
+        with self.assertRaisesRegex(RuntimeError,'exclusive fixture creation proof'):r.bind_created_empty_folder()
         self.assertIsNone(r.folder)
 
-    def test_ui_files_prepare_refuses_nonempty_before_any_export(self):
-        r,provider=self.files_runner();r.prepare_files_ui_baseline()
-        folder=provider/r.folder_name;folder.mkdir();(folder/'Documents.tripbackup').write_bytes(b'not accepted')
-        r.report['phase_passed']={'prepare':True}
-        with self.assertRaisesRegex(RuntimeError,'was not empty'):r.bind_ui_created_empty_folder()
-        self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report);self.assertEqual(r.ops.processes,[])
+    def test_owned_fixture_rejects_replacement_after_create_without_adopting(self):
+        r,provider=self.prepared_files_runner();r.setup_files()
+        expected=r.report['files_fixture_creation']['identity']
+        r.folder.rename(provider/'retained-original');r.folder.mkdir()
+        with self.assertRaisesRegex(RuntimeError,'fixture identity changed'):r.bind_created_empty_folder()
+        self.assertEqual(r.report['files_fixture_creation']['identity'],expected)
+        self.assertNotIn('fixture_verified',r.report['files_folder'])
 
-    def test_ui_files_prepare_refuses_duplicate_or_linked_destinations(self):
-        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        folder=provider/r.folder_name;folder.mkdir()
+    def test_owned_fixture_refuses_nonempty_before_any_export(self):
+        r,provider=self.prepared_files_runner();r.setup_files()
+        (r.folder/'Documents.tripbackup').write_bytes(b'not accepted')
+        with self.assertRaisesRegex(RuntimeError,'was not empty'):r.bind_created_empty_folder()
+        self.assertNotIn('fixture_verified',r.report['files_folder'])
+        with self.assertRaisesRegex(RuntimeError,'verification missing'):
+            hosted.core.Recovery.run_phase(r,'export')
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_owned_fixture_refuses_duplicate_or_linked_destinations(self):
+        r,provider=self.prepared_files_runner();r.setup_files()
         other=provider.parent.parent/'30000000-0000-0000-0000-000000000003'/'File Provider Storage'
         other.mkdir(parents=True);(other/r.folder_name).mkdir()
-        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):r.bind_ui_created_empty_folder()
+        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):r.bind_created_empty_folder()
         (other/r.folder_name).rmdir();other.rmdir();other.parent.rmdir()
-        folder.rmdir();folder.symlink_to(provider,target_is_directory=True)
-        with self.assertRaisesRegex(RuntimeError,'Unresolved/symlink'):r.bind_ui_created_empty_folder()
-        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
+        r.folder.rmdir();r.folder.symlink_to(provider,target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError,'Unresolved/symlink'):r.bind_created_empty_folder()
+        self.assertNotIn('fixture_verified',r.report['files_folder'])
 
-    def test_ui_files_prepare_preserves_deadline_and_permission_failures(self):
-        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        (provider/r.folder_name).mkdir()
+    def test_owned_fixture_preserves_deadline_and_permission_failures(self):
+        r,provider=self.prepared_files_runner();r.setup_files()
         with patch.object(hosted.core.os,'scandir',side_effect=PermissionError(errno.EACCES,'denied')):
-            with self.assertRaises(PermissionError):r.bind_ui_created_empty_folder()
+            with self.assertRaises(PermissionError):r.bind_created_empty_folder()
         original=hosted.core.os.scandir
         def slow(path):
             result=original(path);r.ops.t+=5.1;return result
         with patch.object(hosted.core.os,'scandir',side_effect=slow):
-            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_ui_created_empty_folder()
-        self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report)
-        self.assertEqual((r.limit,r.final),(1380,1500));self.assertEqual(r.ops.processes,[])
+            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_created_empty_folder()
+        self.assertNotIn('fixture_verified',r.report['files_folder'])
+        self.assertEqual((r.limit,r.final),(1380,1500))
 
-    def test_ui_files_prepare_detects_baseline_ancestor_replacement(self):
-        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        groups=provider.parent.parent;old=groups.with_name('OldAppGroup');groups.rename(old)
-        new=groups/provider.parent.name/'File Provider Storage';new.mkdir(parents=True);(new/r.folder_name).mkdir()
-        with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed'):r.bind_ui_created_empty_folder()
-        self.assertIsNone(r.folder);self.assertEqual(r.ops.processes,[])
+    def test_owned_fixture_detects_baseline_ancestor_replacement_before_mkdir(self):
+        r,provider=self.prepared_files_runner()
+        groups=provider.parent.parent;groups.rename(groups.with_name('OldAppGroup'))
+        new=groups/provider.parent.name/'File Provider Storage';new.mkdir(parents=True)
+        with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed'):r.create_owned_files_fixture()
+        self.assertFalse((new/r.folder_name).exists());self.assertEqual(r.ops.processes,[])
 
-    def test_ui_files_prepare_retains_original_global_deadline(self):
-        r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        (provider/r.folder_name).mkdir();r.ops.t=1379.9
+    def test_owned_fixture_rechecks_baseline_after_group_lookup_before_mkdir(self):
+        r,provider=self.prepared_files_runner()
+        original=r.wait_files_provider
+        def replace_ancestor(*args):
+            result=original(*args)
+            shared=provider.parent.parent.parent
+            previous=shared.with_name('OldShared')
+            shared.rename(previous);shared.mkdir()
+            (previous/'AppGroup').rename(shared/'AppGroup')
+            return result
+        with patch.object(r,'wait_files_provider',side_effect=replace_ancestor):
+            with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed before mkdir'):
+                r.create_owned_files_fixture()
+        self.assertFalse((provider/r.folder_name).exists())
+        self.assertNotIn('files_fixture_creation',r.report)
+
+    def test_prepare_failure_prevents_fixture_and_export_in_real_work_sequence(self):
+        r,provider=self.files_runner()
+        with patch.object(r,'setup'),patch.object(r,'run_phase',side_effect=RuntimeError('native prepare failed')) as phase, \
+             patch.object(r,'create_owned_files_fixture') as create,patch.object(r,'take_snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError,'native prepare failed'):hosted.core.Recovery.work(r)
+        phase.assert_called_once_with('prepare');create.assert_not_called();snapshot.assert_not_called()
+        self.assertFalse((provider/r.folder_name).exists())
+
+    def test_owned_fixture_retains_original_global_deadline(self):
+        r,provider=self.prepared_files_runner();r.setup_files();r.ops.t=1379.9
         original=hosted.core.os.scandir
         def delayed(path):
             result=original(path);r.ops.t+=.2;return result
         with patch.object(hosted.core.os,'scandir',side_effect=delayed):
-            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_ui_created_empty_folder()
-        self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
-
+            with self.assertRaisesRegex(RuntimeError,'deadline'):r.bind_created_empty_folder()
+        self.assertNotIn('fixture_verified',r.report['files_folder'])
+        self.assertEqual((r.limit,r.final),(1380,1500))
 
     def changed_files_inventory(self, groups, action):
         original=hosted.core.os.scandir
@@ -1388,11 +1439,11 @@ class BoundaryTests(unittest.TestCase):
 
     def test_ui_created_folder_discovery_remains_strict_single_pass(self):
         r,provider=self.files_runner();r.prepare_files_ui_baseline();r.report['phase_passed']={'prepare':True}
-        (provider/r.folder_name).mkdir();groups=provider.parent.parent
+        r.setup_files();groups=provider.parent.parent
         scan,calls=self.changed_files_inventory(groups,lambda n:(groups/'30000000-0000-0000-0000-000000000003').mkdir())
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
-            with self.assertRaisesRegex(RuntimeError,'inventory changed'):r.bind_ui_created_empty_folder()
-        self.assertEqual(len(calls),1);self.assertIsNone(r.folder);self.assertNotIn('files_folder',r.report)
+            with self.assertRaisesRegex(RuntimeError,'inventory changed'):r.bind_created_empty_folder()
+        self.assertEqual(len(calls),1);self.assertNotIn('fixture_verified',r.report['files_folder'])
         self.assertEqual(r.report['files_discovery']['created_folder']['restarts'],0)
 
     def test_ui_prepare_actual_command_records_shared_remaining_budget(self):
