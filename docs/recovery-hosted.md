@@ -406,3 +406,33 @@ as the xcresult writer. The scan remains limited to five seconds and to both
 the primary and child original work deadlines; neither stop reserve may be
 borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
+
+### Guarded Files background diagnostic
+
+The one-shot `diagnostic/files-editor-offset-20261031` hypothesis ends inline
+folder naming through one geometric
+background tap. Keyboard Done and semantic Return left the editor open. Later
+candidates stopped before a gesture because passive navigation, footer or
+collection elements did not expose a semantic hittable point. These failures do
+not establish whether the independent background point commits a name.
+
+The exact unique `1 item` footer in the local provider's `File View` identifies
+that point. The active owned editor must exist, be enabled and hit-testable; its
+origin anchors an offset to the independent footer center. The collection and
+passive label must exist with valid geometry, but are not required to expose a
+semantic hit point. The exact owned inline name and sole `Folder` cell, finite
+contained frames, eight-point exclusion margin, maximum 64 exclusions, absence
+of alerts/menus/popovers, and a 16-point hit region inside the footer/collection/app
+remain required. Editor, collection, target and exclusion geometry are checked
+again before the single dispatch. There is no fallback gesture.
+
+Apple documents coordinates relative to element frames and additional offsets.
+An editor's semantic hittability is not a target-point hit test, and the API does
+not promise Files rename behavior or atomicity across layout changes. This is a
+bounded observed-layout hypothesis, not guaranteed interaction or acceptance.
+
+The original 15-second editor-disappearance/created-folder condition, exact folder
+opening, host empty-folder proof, full backup, restore and cleanup remain required.
+The alert path retains one button tap. Global navigation, production behavior and
+timing budgets are unchanged. The reviewed branch, parent, tree and signed message
+permit only its first-push attempt 1; historical branches must not be rerun.
