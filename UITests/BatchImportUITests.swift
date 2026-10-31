@@ -157,9 +157,9 @@ final class BatchImportUITests: XCTestCase {
     }
 
     // Opt-in prepare/export/restore phases. Preparation returns before the host
-    // proves the exact UI-created folder empty. Export/restore retain the file
-    // and library snapshot boundary. No StoreKit transaction is created.
-    func testRecoveryCreateOwnedFilesDestination() async throws {
+    // creates and verifies the exclusively owned empty folder. Export/restore
+    // retain the file and library snapshot boundary. No StoreKit transaction is created.
+    func testRecoveryPrepareFilesProvider() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
         let app = XCUIApplication()
         app.terminate()
@@ -183,97 +183,19 @@ final class BatchImportUITests: XCTestCase {
         let location = app.cells.matching(NSPredicate(
             format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
         ))
-        if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-            if !(location.count == 1 && location.element.isHittable) {
-                try await wait("Files preparation has no unique Browse action", app: app) {
-                    browse.count == 1 && browse.element.isEnabled && browse.element.isHittable
-                }
-                browse.element.tap()
-            }
-            if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-                try await wait("Files preparation local location is unavailable", app: app) {
-                    location.count == 1 && location.element.isEnabled && location.element.isHittable
-                }
-                location.element.tap()
-            }
-        }
-        try await wait("Files preparation did not reach the local root", app: app) {
-            self.isRecoveryFolder(localTitle, navigation: navigation.element)
-        }
+        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
         let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
-        try check(directory.count == 0, app: app, "Owned folder already exists before UI creation")
-        let more = app.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "More", "More Actions"))
-        try await wait("Files local root has no unique More action", app: app) {
-            self.isRecoveryFolder(localTitle, navigation: navigation.element)
-                && more.count == 1 && more.element.isEnabled && more.element.isHittable
-        }
-        more.element.tap()
-        let newFolder = app.buttons.matching(NSPredicate(format: "label == %@", "New Folder"))
-        try await wait("Native New Folder action is unavailable", app: app) {
-            newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
-        }
-        newFolder.element.tap()
-        // Files on iOS18.5 creates folders with a selected inline TextView, not an
-        // alert. Keep the alert contract for native layouts that expose it,
-        // but require exactly one supported editor; the export filename field
-        // is deliberately outside both queries.
-        let inlineNames = picker.element.collectionViews.matching(identifier: "File View")
-            .cells.matching(identifier: "Folder").textViews.matching(identifier: "DOC.inlineRenameField")
-        let alertNames = app.alerts.textFields
-        var folderName: XCUIElement?
-        var inlineNaming = false
-        try await wait("Native folder-name editor is ambiguous", app: app) {
-            let inlineCount = inlineNames.count
-            let alertCount = alertNames.count
-            guard inlineCount + alertCount == 1 else { return false }
-            let candidate = inlineCount == 1 ? inlineNames.element : alertNames.element
-            guard candidate.isEnabled && candidate.isHittable else { return false }
-            inlineNaming = inlineCount == 1
-            folderName = candidate
-            return true
-        }
-        let field = try XCTUnwrap(folderName)
-        if !inlineNaming {
-            field.tap()
-            if let previous = field.value as? String, !previous.isEmpty {
-                field.press(forDuration: 1.1)
-                let selectAll = app.menuItems.matching(NSPredicate(format: "label == %@", "Select All"))
-                try await wait("Folder name cannot be selected completely", app: app) {
-                    selectAll.count == 1 && selectAll.element.isEnabled && selectAll.element.isHittable
-                }
-                selectAll.element.tap()
-            }
-        }
-        // The observed inline editor already selects the complete default name.
-        // Do not tap and collapse that selection. Exact value verification below
-        // rejects a native layout that did not preserve complete replacement.
-        field.typeText(recoveryFolder)
-        try check(field.value as? String == recoveryFolder, app: app, "Native folder name differs from the exact owned UUID name")
-        let create = inlineNaming
-            ? app.keyboards.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", "Done", "done"))
-            : app.alerts.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "Done", "Create"))
-        try await wait("Native folder creation has no unique confirmation", app: app) {
-            create.count == 1 && create.element.isEnabled && create.element.isHittable
-        }
-        create.element.tap()
-        try await wait("Created folder or its exact title did not appear", app: app) {
-            inlineNames.count == 0 && (self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
-                || (directory.count == 1 && directory.element.isHittable))
-        }
-        if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
-        try await wait("Native Files did not open the created owned folder", app: app) {
-            self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
-        }
-        capture(app, "Recovery prepare — exact created Files destination before fixture shutdown")
-        // Preparation establishes a UI-created folder, not Save-picker Cancel
-        // coverage. Stop this fixture without tapping Save; the next phase
-        // launches afresh only after the host proves this exact folder empty.
+        try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
+        capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
+        // Native New Folder/rename is not a product acceptance requirement.
+        // The host creates only an exclusive empty run-UUID leaf after this
+        // real provider initialization and proven fixture stop; never a backup.
         app.terminate()
-        try await wait("Preparation fixture did not stop before host empty-folder verification", app: app) {
+        try await wait("Preparation fixture did not stop before host fixture creation", app: app) {
             app.state == .notRunning
         }
         // The existing defer remains cleanup on every success/failure path.
-        // Host must now prove this exact folder is empty before export starts.
+        // Host must now create and independently prove the exact folder empty.
     }
 
 
@@ -460,6 +382,35 @@ final class BatchImportUITests: XCTestCase {
         done.tap()
         // The host now compares the active catalog and original bytes against
         // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private func reachRecoveryLocalRoot(_ localTitle: String, navigation: XCUIElementQuery,
+                                        location: XCUIElementQuery, browse: XCUIElementQuery,
+                                        app: XCUIApplication) async throws {
+        let atRoot = { self.isRecoveryFolder(localTitle, navigation: navigation.element) }
+        let locationReady = { location.count == 1 && location.element.isEnabled && location.element.isHittable }
+        let browseReady = { browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        if !atRoot() {
+            // The picker can reach its remembered local root while appearing.
+            // Reconsider that verified destination during the same bounded wait.
+            try await wait("Files preparation has no supported local route", app: app) {
+                atRoot() || locationReady() || browseReady()
+            }
+            if !atRoot() && !locationReady() {
+                try check(browseReady(), app: app, "Files preparation Browse action changed")
+                if !atRoot() { browse.element.tap() }
+            }
+            if !atRoot() {
+                try await wait("Files preparation local location is unavailable", app: app) {
+                    atRoot() || locationReady()
+                }
+                if !atRoot() {
+                    try check(locationReady(), app: app, "Files preparation local location changed")
+                    if !atRoot() { location.element.tap() }
+                }
+            }
+        }
+        try await wait("Files preparation did not reach the local root", app: app) { atRoot() }
     }
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {

@@ -33,7 +33,7 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 CASES = {
-    'prepare': 'BatchImportUITests/testRecoveryCreateOwnedFilesDestination()',
+    'prepare': 'BatchImportUITests/testRecoveryPrepareFilesProvider()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
     'restore': 'BatchImportUITests/testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal()',
 }
@@ -566,7 +566,7 @@ class Recovery:
                 except FileNotFoundError as error:
                     if error.errno != errno.ENOENT: raise
                     # Missing container ancestors are permitted only before the
-                    # UI-created folder exists. Existing baseline anchors remain strict.
+                    # owned folder exists. Existing baseline anchors remain strict.
                     check()
                     for relative,pin in {**self.report.get('files_ui_baseline',{}).get('anchors',{}),**fixed_anchors}.items():
                         require(directory(root/relative)==pin,'Files baseline ancestor changed')
@@ -604,7 +604,7 @@ class Recovery:
                 else:
                     candidates.append({'path':str(folder),'identity':folder_id,
                                        'provider_identity':provider_id,'group_identity':group_id})
-                    require(len(candidates)<=1,'Ambiguous UI-created Files destination')
+                    require(len(candidates)<=1,'Ambiguous owned Files destination')
                 require(directory(provider)==provider_id and directory(group)==group_id,
                         'Files ancestor changed during discovery')
             check()
@@ -650,16 +650,37 @@ class Recovery:
             'folder_name':self.folder_name,'absent':True,'anchors':anchors}
         self.save()
 
-    def bind_ui_created_empty_folder(self):
+    def create_owned_files_fixture(self):
+        # The real picker initialized its provider and the exact selected case
+        # proved the fixture stopped. Only then create this run's empty leaf.
         require(self.report.get('phase_passed',{}).get('prepare') is True,
-                'UI folder preparation did not pass')
+                'UI provider preparation did not pass')
+        require(not self.active and not self.unknown_spawn,'Preparation writer ownership unresolved')
         baseline = self.report.get('files_ui_baseline',{})
         require(baseline.get('absent') is True and baseline.get('folder_name')==self.folder_name
                 and baseline.get('owned_root_identity')==self.root_id,'Files baseline is unbound')
+        require(self.folder is None,'Owned fixture already initialized')
+        candidates,_ = self.discover_ui_files_folder()
+        require(not candidates,'Owned Files name already exists after UI preparation')
+        self.setup_files()
+        self.bind_created_empty_folder()
+
+    def bind_created_empty_folder(self):
+        require(self.report.get('phase_passed',{}).get('prepare') is True,
+                'UI provider preparation did not pass')
+        baseline = self.report.get('files_ui_baseline',{})
+        require(baseline.get('absent') is True and baseline.get('folder_name')==self.folder_name
+                and baseline.get('owned_root_identity')==self.root_id,'Files baseline is unbound')
+        expected = self.report.get('files_fixture_creation')
+        require(isinstance(expected,dict) and expected.get('exclusive_mkdir') is True,
+                'Missing exclusive fixture creation proof')
         deadline = min(self.limit,self.ops.now()+CAPS['scan_seconds'])
         candidates,_ = self.discover_ui_files_folder(deadline)
-        require(len(candidates)==1,'Missing unique UI-created Files destination')
+        require(len(candidates)==1,'Missing unique owned Files destination')
         selected = candidates[0]
+        require(all(selected.get(key)==expected.get(key) for key in
+                    ('path','identity','provider_identity','group_identity')),
+                'Exclusively created Files fixture identity changed')
         folder = Path(selected['path'])
         def check():
             self.timecheck()
@@ -679,7 +700,7 @@ class Recovery:
                 check()
                 metadata = os.fstat(fd)
                 require([metadata.st_dev,metadata.st_ino]==pin and identity_of(path)==pin,
-                        'UI-created Files directory changed before pin')
+                        'Owned Files directory changed before pin')
                 check()
             empty_fd = fd
             before = os.fstat(empty_fd)
@@ -687,25 +708,26 @@ class Recovery:
             with os.scandir(empty_fd) as entries:
                 for _ in entries:
                     check()
-                    raise RuntimeError('UI-created Files folder was not empty')
+                    raise RuntimeError('Owned Files folder was not empty')
             check()
             after = os.fstat(empty_fd)
             require((before.st_dev,before.st_ino,before.st_mtime_ns,before.st_ctime_ns)
                     ==(after.st_dev,after.st_ino,after.st_mtime_ns,after.st_ctime_ns),
-                    'UI-created Files folder changed during empty verification')
+                    'Owned Files folder changed during empty verification')
             for descriptor,path,pin in opened:
                 check()
                 final_metadata = os.fstat(descriptor)
                 require(stat.S_ISDIR(final_metadata.st_mode)
                         and [final_metadata.st_dev,final_metadata.st_ino]==pin,
-                        'UI-created Files descriptor changed after pin')
+                        'Owned Files descriptor changed after pin')
                 check()
-                require(identity_of(path)==pin,'UI-created Files path changed after pin')
+                require(identity_of(path)==pin,'Owned Files path changed after pin')
             check()
         self.folder,self.folder_id,self.provider_id = folder,selected['identity'],selected['provider_identity']
         self.files_group_id = selected['group_identity']
         self.report['files_folder'] = {**selected,'initially_empty':True,
-            'creation':'real Files UI prepare case','empty_boundary':'after prepare case, before export case'}
+            'creation':'exclusive host mkdir after real Files provider preparation',
+            'empty_boundary':'after prepare case, before export case','fixture_verified':True}
         self.save()
 
 
@@ -771,7 +793,7 @@ class Recovery:
                     group_fd = None
                     os.close(closing_group)
                     self.timecheck()
-                    observation.update(status='ready',finish=self.ops.now()-self.t0)
+                    observation.update(status='ready',finish=self.ops.now()-self.t0,group_identity=group_id)
                     return provider,provider_id,provider_fd
                 except BaseException:
                     os.close(provider_fd)
@@ -817,19 +839,32 @@ class Recovery:
                 raise
             # Readiness, not prior process startup, authorizes only this owned
             # empty folder. Recheck both named provider and its held descriptor.
-            self.owned_root()
+            root = self.owned_root()
+            for relative,pin in self.report.get('files_ui_baseline',{}).get('anchors',{}).items():
+                self.timecheck()
+                require(identity_of(root/relative)==pin,'Files baseline ancestor changed before mkdir')
+            self.files_group_id = self.report['files_provider_readiness']['group_identity']
+            require(identity_of(group)==self.files_group_id,'Files group changed before mkdir')
             require(identity_of(provider)==self.provider_id,'Provider changed before mkdir')
             st = os.fstat(provider_fd)
             require([st.st_dev,st.st_ino]==self.provider_id,'Pinned provider descriptor changed')
+            self.timecheck()
             os.mkdir(self.folder_name,mode=0o700,dir_fd=provider_fd)
+            self.timecheck()
             child_fd = os.open(self.folder_name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=provider_fd)
             try:
                 child = os.fstat(child_fd)
                 self.folder_id = [child.st_dev,child.st_ino]
-                require(not os.listdir(child_fd),'Owned folder did not start empty')
+                self.timecheck()
+                with os.scandir(child_fd) as entries:
+                    require(next(entries,None) is None,'Owned folder did not start empty')
+                self.timecheck()
             finally: os.close(child_fd)
             self.folder = provider/self.folder_name
             self.verify_folder()
+            self.report['files_fixture_creation'] = {'path':str(self.folder),
+                'identity':self.folder_id,'provider_identity':self.provider_id,
+                'group_identity':self.files_group_id,'exclusive_mkdir':True}
             self.report['files_folder'] = {'path':str(self.folder),'identity':self.folder_id,'provider_identity':self.provider_id,'initially_empty':True}
             self.save()
         finally:
@@ -950,6 +985,8 @@ class Recovery:
         else:
             require(self.report.get('phase_passed',{}).get('prepare') is True,
                     'Deterministic UI preparation boundary missing')
+            require(self.report.get('files_folder',{}).get('fixture_verified') is True,
+                    'Exclusive empty fixture verification missing')
             self.verify_folder()
         self.once('phase-'+phase)
         # Observations are bounded to these three one-shot phases. The shared
@@ -1046,7 +1083,7 @@ class Recovery:
     def work(self):
         self.setup()
         self.run_phase('prepare')
-        self.bind_ui_created_empty_folder()
+        self.create_owned_files_fixture()
         library = self.run_phase('export')
         self.take_snapshot(library)
         library = self.run_phase('restore')

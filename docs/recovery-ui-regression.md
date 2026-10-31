@@ -1,6 +1,6 @@
 # Full-backup recovery UI regression
 
-Status: the three-phase preparation policy is a source candidate. It has not
+Status: the three-phase deterministic fixture policy is a source candidate. It has not
 yet passed a native run or independent pixel review. The current hosted driver
 is `python3 -B scripts/recovery_hosted.py --run` in the Recovery CI job; it binds
 the actual checkout, runner profile and attempt before any simulator action.
@@ -10,16 +10,18 @@ This document does not authorize a local invocation or claim release acceptance.
 
 Run three explicitly ordered selected cases in `BatchImportUITests`:
 
-1. `testRecoveryCreateOwnedFilesDestination`: existing synthetic demo, Free
-   counts and disclosure, real Save to Files, native creation of the exact
-   `TripDocket-Recovery-<run-UUID>` folder. After exact committed folder/title
-   proof and capture, the case terminates the fixture without tapping Save,
-   verifies the app stopped and must pass before the host proceeds. This
-   preparation boundary does not claim Save-picker Cancel coverage.
-2. Host discovers exactly one matching folder under the owned simulator local
-   provider. Named paths and open descriptors must keep their identities, and
-   a complete stable directory iteration must prove the folder empty. There
-   is no observation race with the still-running preparation test.
+1. `testRecoveryPrepareFilesProvider`: existing synthetic demo, Free counts
+   and disclosure, real Save to Files and exact local-provider root. The unique
+   `TripDocket-Recovery-<run-UUID>` name must be absent. The case captures this
+   state, terminates the fixture without tapping Save, verifies it stopped and
+   must pass before host fixture creation. This is not Save-picker Cancel coverage.
+2. Host performs one exact DocumentsApp group lookup and pins the existing
+   local provider. An exclusive `mkdir` through its no-follow directory descriptor
+   creates only the empty run-UUID leaf with mode 0700. Existing names are never
+   adopted. A separate bounded scan must rediscover the same group/provider/leaf
+   identities and a complete stable iteration must prove the leaf empty. It
+   never creates Apple roots or prepopulates a backup. Export cannot start until
+   this independent proof passes.
 3. `testRecoveryExportFullBackupThroughFiles`: existing synthetic demo plus one
    unassigned person, observed Free gate, full-backup disclosure, actual share
    sheet, Save to Files, exact fresh owned folder.
@@ -90,14 +92,15 @@ source-only.
    the exact run folder name absent and pins any existing ancestors. Then boot
    the device and wait for boot readiness. Those pins remain mandatory after
    preparation; newly created ancestors do not replace an existing pin. The
-   prepare case opens the real Save UI, creates that exact folder
-   through native New Folder, verifies the committed name and navigation title,
-   captures that state, then terminates the fixture without tapping Save. After
-   its exact single-case PASS and stopped-app check, a bounded no-follow host scan finds
-   the unique local-provider folder and proves it empty, with group/provider/
-   folder descriptor and named-path identities. Missing/ambiguous/nonempty or
-   changed directories fail. The host does not call DocumentsApp group lookup,
-   launch Files, create Apple storage, or prepopulate a backup.
+   prepare case opens the real Save UI, reaches the exact local root, proves
+   the run folder absent, captures that state and terminates the fixture without
+   tapping Save. After its exact single-case PASS and stopped-app check, one
+   DocumentsApp group lookup selects the existing local provider. An exclusive
+   descriptor-relative mkdir creates the run folder. A bounded no-follow host
+   scan must find exactly that created inode and prove it empty, with unchanged
+   group/provider/folder descriptors and named paths. Missing/ambiguous/nonempty,
+   pre-existing or replaced directories fail. The host never launches Files,
+   creates Apple storage roots, adopts a different folder or writes backup bytes.
 
 2. Export environment additions (preserve only reviewed base environment):
 
@@ -127,7 +130,7 @@ source-only.
 
    Preparation uses the same constructed argv and DerivedData, with phase
    `prepare`, result `prepare.xcresult`, selected case
-   `testRecoveryCreateOwnedFilesDestination`, and both XCTest allowances 120.
+   `testRecoveryPrepareFilesProvider`, and both XCTest allowances 120.
    Export uses `export.xcresult`; restore uses `restore.xcresult`. The driver
    constructs these arrays from its fixed CASES map, not user-supplied shell text.
 
@@ -201,7 +204,19 @@ source-only.
 
 ## Source and evidence limits
 
-New Folder/name selection/commit and fixture shutdown, Save-to-Files, exact folder navigation,
+Native Apple Files New Folder/name-commit remains **unverified**. Earlier
+bounded diagnostics failed to commit its inline editor. This fixture policy
+removes that operating-system UI operation from test setup; it does not claim
+that operation was fixed. The application delegates export/import to native
+pickers and does not implement folder creation. Actual Save, import, replacement,
+byte equality, relaunch and rendered original remain mandatory product checks.
+The owned empty directory is only a destination fixture; it contains no prepared
+backup and cannot satisfy any export/restore assertion by itself.
+Directory identity checks protect this controlled owned-simulator fixture; they
+are not a confinement boundary against a hostile process with host access.
+
+
+Real provider initialization and fixture shutdown, Save-to-Files, exact folder navigation,
 Settings counts and single-file selection require current runtime confirmation. Before Save,
 file selection or an optional Open, recovery requires the exact owned folder
 name as a visible static text in the Files navigation bar. Save is scoped to
