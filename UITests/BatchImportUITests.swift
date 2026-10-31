@@ -161,6 +161,13 @@ final class BatchImportUITests: XCTestCase {
     // and library snapshot boundary. No StoreKit transaction is created.
     func testRecoveryCreateOwnedFilesDestination() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        let observationID = String(recoveryFolder.suffix(36))
+        func observeCommit(_ stage: String) {
+            guard ProcessInfo.processInfo.environment["TRIPDOCKET_FILES_COMMIT_OBSERVATION"] == "1" else { return }
+            print("TD_FILES_COMMIT_V1|\(observationID)|\(stage)|\(Date().timeIntervalSince1970)")
+        }
+        observeCommit("start")
+        defer { observeCommit("end") }
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -183,23 +190,8 @@ final class BatchImportUITests: XCTestCase {
         let location = app.cells.matching(NSPredicate(
             format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
         ))
-        if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-            if !(location.count == 1 && location.element.isHittable) {
-                try await wait("Files preparation has no unique Browse action", app: app) {
-                    browse.count == 1 && browse.element.isEnabled && browse.element.isHittable
-                }
-                browse.element.tap()
-            }
-            if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-                try await wait("Files preparation local location is unavailable", app: app) {
-                    location.count == 1 && location.element.isEnabled && location.element.isHittable
-                }
-                location.element.tap()
-            }
-        }
-        try await wait("Files preparation did not reach the local root", app: app) {
-            self.isRecoveryFolder(localTitle, navigation: navigation.element)
-        }
+        try await reachRecoveryLocalRoot(localTitle, navigation: navigation,
+                                         location: location, browse: browse, app: app)
         let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
         try check(directory.count == 0, app: app, "Owned folder already exists before UI creation")
         let more = app.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "More", "More Actions"))
@@ -255,11 +247,19 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Native folder creation has no unique confirmation", app: app) {
             create.count == 1 && create.element.isEnabled && create.element.isHittable
         }
-        create.element.tap()
-        try await wait("Created folder or its exact title did not appear", app: app) {
+        observeCommit(inlineNaming ? "editor_inline" : "editor_alert")
+        observeCommit("before_done")
+        try confirmRecoveryFolderName(field, recoveryFolder: recoveryFolder,
+                                      inlineNaming: inlineNaming, inlineNames: inlineNames,
+                                      alertNames: alertNames, create: create, picker: picker,
+                                      navigation: navigation, localTitle: localTitle, app: app)
+        observeCommit("after_done")
+        try await wait("Created folder or its exact title did not appear", app: app,
+                       onTimeout: { observeCommit("postcondition_failed") }) {
             inlineNames.count == 0 && (self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
                 || (directory.count == 1 && directory.element.isHittable))
         }
+        observeCommit("postcondition_passed")
         if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
         try await wait("Native Files did not open the created owned folder", app: app) {
             self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
@@ -276,6 +276,157 @@ final class BatchImportUITests: XCTestCase {
         // Host must now prove this exact folder is empty before export starts.
     }
 
+
+    private func confirmRecoveryFolderName(
+        _ field: XCUIElement, recoveryFolder: String, inlineNaming: Bool, inlineNames: XCUIElementQuery,
+        alertNames: XCUIElementQuery, create: XCUIElementQuery, picker: XCUIElementQuery,
+        navigation: XCUIElementQuery, localTitle: String, app: XCUIApplication
+    ) throws {
+        // typeText above requires keyboard focus and no input action intervenes.
+        // Revalidate the exact editor and title immediately before the one
+        // confirmation action; do not tap to focus or fall back to another action.
+        try check(field.exists && field.isEnabled && field.isHittable
+                  && field.value as? String == recoveryFolder,
+                  app: app, "Native folder editor changed before confirmation")
+        try check(create.count == 1 && create.element.isEnabled && create.element.isHittable,
+                  app: app, "Native folder confirmation changed before dispatch")
+        if inlineNaming {
+            try check(inlineNames.count == 1 && alertNames.count == 0
+                      && field.identifier == "DOC.inlineRenameField"
+                      && inlineNames.element.value as? String == recoveryFolder,
+                      app: app, "Exact inline folder editor is no longer unique")
+            // Diagnostic hypothesis: end inline naming by one tap on the known
+            // collection footer. The footer is not a file, Save or a keyboard key.
+            // Retain the native created-folder postcondition as the only success.
+            try blurRecoveryInlineNaming(field, recoveryFolder: recoveryFolder,
+                                         picker: picker, navigation: navigation,
+                                         localTitle: localTitle, app: app)
+        } else {
+            try check(inlineNames.count == 0 && alertNames.count == 1,
+                      app: app, "Exact alert folder editor is no longer unique")
+            create.element.tap()
+        }
+    }
+
+    private func blurRecoveryInlineNaming(
+        _ field: XCUIElement, recoveryFolder: String, picker: XCUIElementQuery,
+        navigation: XCUIElementQuery, localTitle: String, app: XCUIApplication
+    ) throws {
+        try check(app.alerts.count == 0 && app.menus.count == 0 && app.popovers.count == 0
+                  && hasRecoveryLocalRootIdentity(localTitle, picker: picker, navigation: navigation, app: app),
+                  app: app, "Files local root changed before ending inline naming")
+        let roots = picker.element.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle)
+        try check(roots.count == 1, app: app, "Local Files provider root is ambiguous")
+        let collections = roots.element.collectionViews.matching(identifier: "File View")
+        try check(collections.count == 1, app: app, "Local Files collection is ambiguous")
+        let files = collections.element
+        // The gesture belongs to the collection background. The count label
+        // only locates a visible region; passive text need not be hit-testable.
+        try check(files.exists && files.isEnabled && files.isHittable,
+                  app: app, "Files collection has no available hit target")
+        let cells = files.cells
+        try check(cells.count == 1 && cells.element.identifier == "Folder",
+                  app: app, "Inline naming requires only the owned folder cell")
+        let editors = cells.element.textViews.matching(identifier: "DOC.inlineRenameField")
+        try check(editors.count == 1 && editors.element.frame == field.frame
+                  && editors.element.value as? String == recoveryFolder,
+                  app: app, "Owned folder editor no longer belongs to the sole cell")
+        let footers = files.otherElements.matching(identifier: "DOCItemCollectionViewFooterViewIdentifier")
+        try check(footers.count == 1, app: app, "Files item-count footer is ambiguous")
+        let footer = footers.element
+        let labels = footer.staticTexts.matching(NSPredicate(format: "label == %@", "1 item"))
+        try check(footer.staticTexts.count == 1 && labels.count == 1
+                  && labels.element.exists,
+                  app: app, "Files footer has no unique one-item label")
+        try check(footer.buttons.count == 0 && footer.cells.count == 0
+                  && footer.textFields.count == 0 && footer.textViews.count == 0
+                  && footer.searchFields.count == 0,
+                  app: app, "Files footer unexpectedly contains interactive content")
+        let label = labels.element
+        let target = label.frame
+        func finiteNonempty(_ frame: CGRect) -> Bool {
+            frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+                && frame.width > 0 && frame.height > 0
+        }
+        try check(finiteNonempty(target) && finiteNonempty(footer.frame)
+                  && finiteNonempty(files.frame) && finiteNonempty(app.frame)
+                  && footer.frame.contains(target) && files.frame.contains(target)
+                  && app.frame.contains(target),
+                  app: app, "Files footer target is outside its verified collection")
+        // Validate the entire label plus margin, not a guessed screen coordinate.
+        // A changed layout must fail before a gesture can hit Save or another file.
+        let excluded = cells.allElementsBoundByIndex
+            + picker.element.buttons.allElementsBoundByIndex
+            + picker.element.textFields.allElementsBoundByIndex
+            + picker.element.textViews.allElementsBoundByIndex
+            + picker.element.searchFields.allElementsBoundByIndex
+            + navigation.allElementsBoundByIndex + app.keyboards.allElementsBoundByIndex
+        try check(excluded.count <= 64, app: app, "Files footer exclusion inventory is unexpectedly large")
+        let protectedTarget = target.insetBy(dx: -8, dy: -8)
+        let excludedFrames = excluded.map { $0.frame }
+        for frame in excludedFrames {
+            try check(frame.origin.x.isFinite && frame.origin.y.isFinite
+                      && frame.width.isFinite && frame.height.isFinite,
+                      app: app, "Files exclusion geometry is not finite")
+            try check(frame.isEmpty || !frame.intersects(protectedTarget),
+                      app: app, "Files footer overlaps an interactive control")
+        }
+        let collectionFrame = files.frame
+        let point = CGPoint(x: target.midX, y: target.midY)
+        let hitRegion = CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16)
+        try check(footer.frame.contains(hitRegion) && collectionFrame.contains(hitRegion)
+                  && app.frame.contains(hitRegion),
+                  app: app, "Files background hit region leaves its visible footer")
+        let offset = CGVector(dx: (point.x - collectionFrame.minX) / collectionFrame.width,
+                              dy: (point.y - collectionFrame.minY) / collectionFrame.height)
+        try check(offset.dx.isFinite && offset.dy.isFinite
+                  && (0...1).contains(offset.dx) && (0...1).contains(offset.dy),
+                  app: app, "Files background coordinate is outside its collection")
+        let coordinate = files.coordinate(withNormalizedOffset: offset)
+        let screenPoint = coordinate.screenPoint
+        try check(screenPoint.x.isFinite && screenPoint.y.isFinite
+                  && abs(screenPoint.x - point.x) <= 0.5 && abs(screenPoint.y - point.y) <= 0.5,
+                  app: app, "Files background coordinate does not match its verified geometry")
+        try check(label.frame == target && files.frame == collectionFrame
+                  && files.exists && files.isEnabled && files.isHittable
+                  && zip(excluded, excludedFrames).allSatisfy({ $0.0.frame == $0.1 })
+                  && field.value as? String == recoveryFolder
+                  && app.alerts.count == 0 && app.menus.count == 0 && app.popovers.count == 0
+                  && hasRecoveryLocalRootIdentity(localTitle, picker: picker, navigation: navigation, app: app),
+                  app: app, "Files background or owned name changed before the one tap")
+        // One background tap, not a semantic activation of the passive label.
+        // Only the unchanged native folder/open/backup/restore checks accept it.
+        coordinate.tap()
+    }
+
+    private func hasRecoveryLocalRootIdentity(
+        _ title: String, picker: XCUIElementQuery, navigation: XCUIElementQuery, app: XCUIApplication
+    ) -> Bool {
+        // During inline editing a visible navigation title need not be tappable.
+        // It identifies the context; the actual collection gesture requires a hit point.
+        guard picker.count == 1, navigation.count == 1, picker.element.exists,
+              navigation.element.exists else { return false }
+        let roots = picker.element.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + title)
+        guard roots.count == 1, roots.element.exists else { return false }
+        let localNavigation = roots.element.navigationBars.matching(identifier:
+            "FullDocumentManagerViewControllerNavigationBar")
+        guard localNavigation.count == 1, localNavigation.element.exists,
+              localNavigation.element.frame == navigation.element.frame else { return false }
+        let titles = localNavigation.element.staticTexts.matching(NSPredicate(format: "label == %@", title))
+        guard titles.count == 1, titles.element.exists else { return false }
+        let frames = [app.frame, picker.element.frame, roots.element.frame,
+                      localNavigation.element.frame, titles.element.frame]
+        guard frames.allSatisfy({ frame in
+            frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+                && frame.width > 0 && frame.height > 0
+        }) else { return false }
+        return frames[0].contains(frames[1]) && frames[1].contains(frames[2])
+            && frames[2].contains(frames[3]) && frames[3].contains(frames[4])
+    }
 
     private func presentRecoverySave(_ app: XCUIApplication) async throws {
         let export = app.buttons["Export full backup"]
@@ -460,6 +611,35 @@ final class BatchImportUITests: XCTestCase {
         done.tap()
         // The host now compares the active catalog and original bytes against
         // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private func reachRecoveryLocalRoot(_ localTitle: String, navigation: XCUIElementQuery,
+                                        location: XCUIElementQuery, browse: XCUIElementQuery,
+                                        app: XCUIApplication) async throws {
+        let atRoot = { self.isRecoveryFolder(localTitle, navigation: navigation.element) }
+        let locationReady = { location.count == 1 && location.element.isEnabled && location.element.isHittable }
+        let browseReady = { browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        if !atRoot() {
+            // The picker can reach its remembered local root while appearing.
+            // Reconsider that verified destination during the same bounded wait.
+            try await wait("Files preparation has no supported local route", app: app) {
+                atRoot() || locationReady() || browseReady()
+            }
+            if !atRoot() && !locationReady() {
+                try check(browseReady(), app: app, "Files preparation Browse action changed")
+                if !atRoot() { browse.element.tap() }
+            }
+            if !atRoot() {
+                try await wait("Files preparation local location is unavailable", app: app) {
+                    atRoot() || locationReady()
+                }
+                if !atRoot() {
+                    try check(locationReady(), app: app, "Files preparation local location changed")
+                    if !atRoot() { location.element.tap() }
+                }
+            }
+        }
+        try await wait("Files preparation did not reach the local root", app: app) { atRoot() }
     }
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
@@ -834,12 +1014,13 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,
-                      condition: @MainActor () -> Bool) async throws {
+                      onTimeout: (@MainActor () -> Void)? = nil, condition: @MainActor () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         repeat {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
         } while ContinuousClock.now < deadline
+        onTimeout?() // Preserve the primary boundary outcome before diagnostic RPCs/teardown.
         capture(app, message, springboard: springboard)
         throw BatchTestFailure(message: message)
     }

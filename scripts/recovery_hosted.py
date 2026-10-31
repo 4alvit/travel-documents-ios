@@ -256,11 +256,15 @@ class HostedRecovery(core.Recovery):
                                          'returncode':3,'stderr_sha256':hashlib.sha256(actual).hexdigest()}
         return True
 
+    def source_context(self, commit, raw_commit):
+        return source_event(self.job,self.event,commit)
+
     def capture_source(self):
         require(not self.command('git-clean',['/usr/bin/git','status','--porcelain'],20).strip(),'Checkout is not clean')
         head=self.command('git-head',['/usr/bin/git','rev-parse','HEAD'],20).strip()
-        commit=parse_commit(self.command('git-commit',['/usr/bin/git','cat-file','commit',head],20),head)
-        context=source_event(self.job,self.event,commit)
+        raw_commit=self.command('git-commit',['/usr/bin/git','cat-file','commit',head],20)
+        commit=parse_commit(raw_commit,head)
+        context=self.source_context(commit,raw_commit)
         if 'pr_head' in context:
             signed=parse_commit(self.command('git-pr-head',['/usr/bin/git','cat-file','commit',context['pr_head']],20),context['pr_head'])
             require(signed['signature_present'],'PR head lacks required signature record')

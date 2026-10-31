@@ -406,3 +406,32 @@ as the xcresult writer. The scan remains limited to five seconds and to both
 the primary and child original work deadlines; neither stop reserve may be
 borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
+
+### Guarded Files background diagnostic
+
+The one-shot `diagnostic/files-background-20261031` hypothesis ends inline folder naming through one collection-background
+coordinate tap. Earlier keyboard Done and semantic Return attempts left the editor
+open. The later footer candidates stopped before a gesture because a passive
+navigation title or count label was not hit-testable. Those failures do not establish
+whether a background tap commits the native name.
+
+The exact unique `1 item` footer in the local provider's `File View` identifies the
+visible region. The collection itself must exist, be enabled and be hit-testable.
+The exact owned inline editor and sole `Folder` cell, finite contained frames,
+eight-point exclusion margin and maximum 64 exclusion elements remain required.
+Alerts, menus and popovers reject the interaction. The derived coordinate must
+resolve to the verified point, with a 16-point square inside the footer, collection
+and app; geometry, exclusion frames and context are checked again before dispatch.
+The passive label is not activated and no fallback action is attempted.
+
+Apple documents normalized coordinates as offsets from an element's frame and
+coordinate `tap()` as a tap at that point. These APIs do not promise Files rename
+behavior or an atomic hit test across layout changes. This is therefore a bounded
+observed-layout hypothesis, not native acceptance or a general background-tap helper.
+
+The original 15-second editor-disappearance/created-folder condition, exact folder
+opening, host empty-folder proof, backup, restore and cleanup remain mandatory.
+The alert variant retains one button tap. The global navigation helper, app code and
+timing budgets are unchanged. The reviewed branch/parent/tree and first-push binding permit only its single
+automatic attempt; they do not permit rerunning a historical branch or bypassing
+canonical required CI.
