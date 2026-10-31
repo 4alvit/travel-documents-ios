@@ -406,3 +406,28 @@ as the xcresult writer. The scan remains limited to five seconds and to both
 the primary and child original work deadlines; neither stop reserve may be
 borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
+
+### Guarded Files footer diagnostic
+
+The one-shot `diagnostic/files-footer-20261031` branch tests a single focus-loss
+interaction after an exact owned folder name is entered. Prior keyboard Done
+and semantic Return attempts returned from XCTest but left the inline editor
+open. The new hypothesis taps only the existing `1 item` static label inside
+`DOCItemCollectionViewFooterViewIdentifier`, scoped to the local provider's
+`File View`. It requires exactly one `Folder` cell and the exact inline editor.
+The complete target frame, with an eight-point exclusion margin, must not
+intersect any file, name field, button, navigation bar or keyboard. Ambiguous,
+missing, nonfinite or moved targets fail before the one tap.
+
+This is an observed-layout diagnostic, not documented Apple Files commit
+behavior. Apple documents `tap()` as sending a tap to a computed hittable point;
+its `typeText(_:)` documentation does not promise that a newline commits a
+Files name. The diagnostic does not tap Save, another file or a second
+confirmation action. The alert variant retains its original single button tap.
+
+The original 15-second editor-disappearance/created-folder condition, exact
+folder opening, host empty-folder proof, full backup, restore and cleanup gates
+remain required. A dispatched tap is not native acceptance. The source remains
+bound to one newly created branch, reviewed parent/tree, signed message and
+run attempt 1. Do not merge the diagnostic branch as a substitute for canonical
+required CI. No production app behavior or timing budget changes.

@@ -1,0 +1,280 @@
+"""Run the actual guarded one-tap confirmation helper without a simulator.
+
+Recorded geometry is synthetic replay of the failed native layout. Dispatch and
+rejection checks do not establish that native Files commits on focus loss.
+"""
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / 'UITests/BatchImportUITests.swift'
+
+FIXTURE = r'''import Foundation
+import CoreGraphics
+
+final class World { var actions: [String] = [] }
+class XCUIElement {
+    enum Kind { case other, collection, cell, textView, textField, searchField, button, staticText, keyboard, alert, navigation }
+    let world: World; let name: String; let kind: Kind
+    var exists = true, isEnabled = true, isHittable = true
+    var identifier: String, label: String, value: Any?
+    private var storedFrame: CGRect
+    var shiftAfterFirstFrameRead = false
+    private var frameReads = 0
+    var frame: CGRect {
+        get {
+            frameReads += 1
+            return shiftAfterFirstFrameRead && frameReads > 1 ? storedFrame.offsetBy(dx: 1, dy: 0) : storedFrame
+        }
+        set { storedFrame = newValue }
+    }
+    var children: [XCUIElement] = []
+    init(_ w: World, _ name: String, _ kind: Kind = .other, _ frame: CGRect = .zero,
+         identifier: String = "", label: String = "", value: String = "") {
+        world = w; self.name = name; self.kind = kind; self.storedFrame = frame
+        self.identifier = identifier; self.label = label; self.value = value
+    }
+    func descendants() -> [XCUIElement] { children.flatMap { [$0] + $0.descendants() } }
+    func query(_ kind: Kind) -> XCUIElementQuery { XCUIElementQuery(descendants().filter { $0.kind == kind }) }
+    var otherElements: XCUIElementQuery { query(.other) }
+    var collectionViews: XCUIElementQuery { query(.collection) }
+    var cells: XCUIElementQuery { query(.cell) }
+    var textViews: XCUIElementQuery { query(.textView) }
+    var textFields: XCUIElementQuery { query(.textField) }
+    var searchFields: XCUIElementQuery { query(.searchField) }
+    var buttons: XCUIElementQuery { query(.button) }
+    var staticTexts: XCUIElementQuery { query(.staticText) }
+    var keyboards: XCUIElementQuery { query(.keyboard) }
+    var alerts: XCUIElementQuery { query(.alert) }
+    func tap() { world.actions.append(name + ":tap") }
+}
+final class XCUIApplication: XCUIElement {
+    init(_ w: World) { super.init(w, "app", .other, CGRect(x:0,y:0,width:402,height:874)) }
+}
+final class XCUIElementQuery {
+    var elements: [XCUIElement]
+    var count: Int { elements.count }
+    var element: XCUIElement { precondition(elements.count == 1); return elements[0] }
+    var allElementsBoundByIndex: [XCUIElement] { elements }
+    init(_ elements: [XCUIElement]) { self.elements = elements }
+    func matching(identifier: String) -> XCUIElementQuery {
+        XCUIElementQuery(elements.filter { $0.identifier == identifier })
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        XCUIElementQuery(elements.filter { predicate.evaluate(with: ["label": $0.label]) })
+    }
+}
+struct FixtureFailure: Error {}
+final class Harness {
+    func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
+        if !condition { throw FixtureFailure() }
+    }
+    func isRecoveryFolder(_ title: String, navigation: XCUIElement) -> Bool { navigation.label == title }
+    // ACTUAL_HELPER
+    func run(field: XCUIElement, inline: Bool, names: XCUIElementQuery,
+             alerts: XCUIElementQuery, create: XCUIElementQuery,
+             picker: XCUIElementQuery, navigation: XCUIElementQuery, app: XCUIApplication) throws {
+        try confirmRecoveryFolderName(field, recoveryFolder: "TripDocket-Recovery-owned", inlineNaming: inline,
+            inlineNames: names, alertNames: alerts, create: create, picker: picker,
+            navigation: navigation, localTitle: "On My iPhone", app: app)
+    }
+}
+@main struct Main {
+    static func main() {
+        let scenario = CommandLine.arguments[1], w = World(), harness = Harness()
+        let app = XCUIApplication(w)
+        let picker = XCUIElement(w,"picker",.other,CGRect(x:0,y:72,width:402,height:802))
+        let root = XCUIElement(w,"root",.other,picker.frame,identifier:"DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: On My iPhone")
+        let nav = XCUIElement(w,"nav",.navigation,CGRect(x:0,y:72,width:402,height:108),label:"On My iPhone")
+        let files = XCUIElement(w,"files",.collection,picker.frame,identifier:"File View")
+        let cell = XCUIElement(w,"cell",.cell,CGRect(x:10,y:190,width:122,height:189),identifier:"Folder")
+        let field = XCUIElement(w,"field",.textView,CGRect(x:0,y:283,width:169,height:63),identifier:"DOC.inlineRenameField",value:"TripDocket-Recovery-owned")
+        let footer = XCUIElement(w,"footer",.other,CGRect(x:0,y:434,width:402,height:38),identifier:"DOCItemCollectionViewFooterViewIdentifier")
+        let label = XCUIElement(w,"count",.staticText,CGRect(x:179.3,y:434,width:43.7,height:18),label:"1 item")
+        let save = XCUIElement(w,"save",.button,CGRect(x:347.7,y:78,width:46.3,height:44),label:"Save")
+        let export = XCUIElement(w,"export",.textField,CGRect(x:66.3,y:484,width:319.7,height:42),value:"Documents")
+        let keyboard = XCUIElement(w,"keyboard",.keyboard,CGRect(x:0,y:538,width:402,height:336))
+        let done = XCUIElement(w,"done",.button,CGRect(x:301.7,y:752,width:100.3,height:46),identifier:"Done",label:"done")
+        let names=XCUIElementQuery([field]), alerts=XCUIElementQuery([]), create=XCUIElementQuery([done])
+        let pickerQuery=XCUIElementQuery([picker]), navigation=XCUIElementQuery([nav])
+        app.children=[picker,keyboard];picker.children=[root,export];root.children=[nav,files];nav.children=[save]
+        files.children=[cell,footer];cell.children=[field];footer.children=[label];keyboard.children=[done]
+        var inline=true, shouldFail=true, expected:[String]=[]
+        switch scenario {
+        case "inline": shouldFail=false; expected=["count:tap"]
+        case "alert": inline=false; names.elements=[]; alerts.elements=[field];shouldFail=false;expected=["done:tap"]
+        case "changed-name": field.value="foreign"
+        case "missing-field": field.exists=false
+        case "disabled-field": field.isEnabled=false
+        case "hidden-field": field.isHittable=false
+        case "wrong-identifier": field.identifier="export-filename"
+        case "ambiguous-inline": names.elements.append(field)
+        case "missing-inline": names.elements=[]
+        case "simultaneous-alert": alerts.elements=[field]
+        case "missing-confirmation": create.elements=[]
+        case "ambiguous-confirmation": create.elements.append(done)
+        case "disabled-confirmation": done.isEnabled=false
+        case "hidden-confirmation": done.isHittable=false
+        case "ambiguous-alert": inline=false;names.elements=[];alerts.elements=[field,field]
+        case "wrong-location": nav.label="iCloud Drive"
+        case "ambiguous-navigation": navigation.elements.append(nav)
+        case "missing-picker": pickerQuery.elements=[]
+        case "unknown-alert": app.children.append(XCUIElement(w,"alert",.alert))
+        case "wrong-provider": root.identifier="Cloud provider"
+        case "ambiguous-provider": picker.children.append(root)
+        case "ambiguous-collection": root.children.append(files)
+        case "second-file": files.children.append(XCUIElement(w,"foreign",.cell,CGRect(x:150,y:190,width:122,height:189),identifier:"foreign, Folder"))
+        case "wrong-cell": cell.identifier="foreign, Folder"
+        case "different-cell-editor": cell.children=[XCUIElement(w,"replacement",.textView,field.frame,identifier:"DOC.inlineRenameField",value:"foreign")]
+        case "missing-footer": footer.identifier="unknown"
+        case "ambiguous-footer": files.children.append(footer)
+        case "wrong-count-label": label.label="2 items"
+        case "second-footer-label": footer.children.append(XCUIElement(w,"second",.staticText))
+        case "hidden-footer-label": label.isHittable=false
+        case "missing-footer-label": label.exists=false
+        case "interactive-footer": footer.children.append(XCUIElement(w,"unexpected",.button))
+        case "label-outside-footer": label.frame.origin.x = -1
+        case "label-outside-collection": files.frame=CGRect(x:0,y:0,width:100,height:100)
+        case "label-outside-app": app.frame=CGRect(x:0,y:0,width:100,height:100)
+        case "late-footer-move": label.shiftAfterFirstFrameRead=true
+        case "zero-label": label.frame.size.width=0
+        case "nonfinite-label": label.frame.origin.x = .nan
+        case "nonfinite-exclusion": save.frame.origin.y = .nan
+        case "save-overlap": save.frame=label.frame
+        case "save-near-margin": save.frame=CGRect(x:label.frame.maxX+7,y:434,width:20,height:20)
+        case "file-overlap": cell.frame=label.frame
+        case "editor-overlap": field.frame=label.frame
+        case "keyboard-overlap": keyboard.frame=label.frame
+        case "export-overlap": export.frame=label.frame
+        case "navigation-overlap": nav.frame=label.frame
+        case "inventory-overflow": picker.children += (0..<65).map { XCUIElement(w,"extra\($0)",.button) }
+        default: fatalError("Unknown synthetic scenario")
+        }
+        var failed=false
+        do { try harness.run(field:field,inline:inline,names:names,alerts:alerts,create:create,picker:pickerQuery,navigation:navigation,app:app) }
+        catch { failed=true }
+        guard failed == shouldFail, w.actions == expected else { print("FAIL " + scenario); exit(1) }
+        print("PASS " + scenario)
+    }
+}
+'''
+
+class ConfirmationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func confirmRecoveryFolderName(')
+        end = source.index('    private func presentRecoverySave(', start)
+        root = Path(cls.directory.name)
+        path = root / 'Confirmation.swift'
+        path.write_text(FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = root / 'confirmation-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                       capture_output=True, text=True, timeout=45)
+        if result.returncode: raise RuntimeError(result.stderr)
+
+    def run_case(self, name):
+        result = subprocess.run([str(self.binary), name], capture_output=True, text=True,
+                                check=True, timeout=5)
+        self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_call_keeps_exact_name_and_existing_postcondition(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryCreateOwnedFilesDestination')
+        end = source.index('    private func confirmRecoveryFolderName(', start)
+        body = source[start:end]
+        typed = body.index('field.typeText(recoveryFolder)')
+        verified = body.index('try check(field.value as? String == recoveryFolder', typed)
+        before = body.index('observeCommit("before_done")', verified)
+        dispatch = body.index('try confirmRecoveryFolderName(', before)
+        after = body.index('observeCommit("after_done")', dispatch)
+        postcondition = body.index('inlineNames.count == 0 &&', after)
+        self.assertLess(typed, verified)
+        self.assertLess(verified, before)
+        self.assertLess(before, dispatch)
+        self.assertLess(dispatch, after)
+        self.assertLess(after, postcondition)
+        for operation in ('.tap()', '.press(', '.typeText(', '.typeKey('):
+            self.assertNotIn(operation, body[verified:dispatch])
+        self.assertEqual(body.count('try confirmRecoveryFolderName('), 1)
+        self.assertIn('self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)', body[postcondition:])
+        self.assertIn('(directory.count == 1 && directory.element.isHittable)', body[postcondition:])
+        self.assertIn('let deadline = ContinuousClock.now.advanced(by: .seconds(15))', source)
+        self.assertIn('python3 -B scripts/test-files-confirmation.py', (ROOT / '.github/workflows/ci.yml').read_text())
+        helper = source[end:source.index('    private func presentRecoverySave(',end)]
+        self.assertEqual(helper.count('.tap()'), 2)  # mutually exclusive alert and inline paths
+        self.assertNotIn('.typeKey(',helper)
+        self.assertNotIn('.typeText(',helper)
+        self.assertNotIn('coordinate(',helper)
+
+    def test_inline(self): self.run_case('inline')
+    def test_alert(self): self.run_case('alert')
+    def test_changed_name(self): self.run_case('changed-name')
+    def test_missing_field(self): self.run_case('missing-field')
+    def test_disabled_field(self): self.run_case('disabled-field')
+    def test_hidden_field(self): self.run_case('hidden-field')
+    def test_wrong_identifier(self): self.run_case('wrong-identifier')
+    def test_ambiguous_inline(self): self.run_case('ambiguous-inline')
+    def test_missing_inline(self): self.run_case('missing-inline')
+    def test_simultaneous_alert(self): self.run_case('simultaneous-alert')
+    def test_missing_confirmation(self): self.run_case('missing-confirmation')
+    def test_ambiguous_confirmation(self): self.run_case('ambiguous-confirmation')
+    def test_disabled_confirmation(self): self.run_case('disabled-confirmation')
+    def test_hidden_confirmation(self): self.run_case('hidden-confirmation')
+    def test_ambiguous_alert(self): self.run_case('ambiguous-alert')
+    def test_wrong_location(self): self.run_case('wrong-location')
+    def test_ambiguous_navigation(self): self.run_case('ambiguous-navigation')
+    def test_missing_picker(self): self.run_case('missing-picker')
+    def test_unknown_alert(self): self.run_case('unknown-alert')
+    def test_wrong_provider(self): self.run_case('wrong-provider')
+    def test_ambiguous_provider(self): self.run_case('ambiguous-provider')
+    def test_ambiguous_collection(self): self.run_case('ambiguous-collection')
+    def test_second_file(self): self.run_case('second-file')
+    def test_wrong_cell(self): self.run_case('wrong-cell')
+    def test_different_cell_editor(self): self.run_case('different-cell-editor')
+    def test_missing_footer(self): self.run_case('missing-footer')
+    def test_ambiguous_footer(self): self.run_case('ambiguous-footer')
+    def test_wrong_count_label(self): self.run_case('wrong-count-label')
+    def test_second_footer_label(self): self.run_case('second-footer-label')
+    def test_hidden_footer_label(self): self.run_case('hidden-footer-label')
+    def test_missing_footer_label(self): self.run_case('missing-footer-label')
+    def test_interactive_footer(self): self.run_case('interactive-footer')
+    def test_label_outside_footer(self): self.run_case('label-outside-footer')
+    def test_label_outside_collection(self): self.run_case('label-outside-collection')
+    def test_label_outside_app(self): self.run_case('label-outside-app')
+    def test_late_footer_move(self): self.run_case('late-footer-move')
+    def test_zero_label(self): self.run_case('zero-label')
+    def test_nonfinite_label(self): self.run_case('nonfinite-label')
+    def test_nonfinite_exclusion(self): self.run_case('nonfinite-exclusion')
+    def test_save_overlap(self): self.run_case('save-overlap')
+    def test_save_near_margin(self): self.run_case('save-near-margin')
+    def test_file_overlap(self): self.run_case('file-overlap')
+    def test_editor_overlap(self): self.run_case('editor-overlap')
+    def test_keyboard_overlap(self): self.run_case('keyboard-overlap')
+    def test_export_overlap(self): self.run_case('export-overlap')
+    def test_navigation_overlap(self): self.run_case('navigation-overlap')
+    def test_inventory_overflow(self): self.run_case('inventory-overflow')
+
+
+class SDKSourceTests(unittest.TestCase):
+    def test_complete_file_typechecks_without_fixture_scope(self):
+        sdk = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path'],
+                             capture_output=True, text=True, check=True, timeout=15).stdout.strip()
+        platform = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-platform-path'],
+                                  capture_output=True, text=True, check=True, timeout=15).stdout.strip()
+        frameworks = str(Path(platform) / 'Developer/Library/Frameworks')
+        result = subprocess.run(
+            ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
+             '-target', 'arm64-apple-ios17.0-simulator', '-sdk', sdk,
+             '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
+             '-I', str(Path(platform) / 'Developer/usr/lib'), str(SOURCE)],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
