@@ -161,6 +161,13 @@ final class BatchImportUITests: XCTestCase {
     // and library snapshot boundary. No StoreKit transaction is created.
     func testRecoveryCreateOwnedFilesDestination() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        let observationID = String(recoveryFolder.suffix(36))
+        func observeCommit(_ stage: String) {
+            guard ProcessInfo.processInfo.environment["TRIPDOCKET_FILES_COMMIT_OBSERVATION"] == "1" else { return }
+            print("TD_FILES_COMMIT_V1|\(observationID)|\(stage)|\(Date().timeIntervalSince1970)")
+        }
+        observeCommit("start")
+        defer { observeCommit("end") }
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -255,11 +262,16 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Native folder creation has no unique confirmation", app: app) {
             create.count == 1 && create.element.isEnabled && create.element.isHittable
         }
+        observeCommit(inlineNaming ? "editor_inline" : "editor_alert")
+        observeCommit("before_done")
         create.element.tap()
-        try await wait("Created folder or its exact title did not appear", app: app) {
+        observeCommit("after_done")
+        try await wait("Created folder or its exact title did not appear", app: app,
+                       onTimeout: { observeCommit("postcondition_failed") }) {
             inlineNames.count == 0 && (self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
                 || (directory.count == 1 && directory.element.isHittable))
         }
+        observeCommit("postcondition_passed")
         if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
         try await wait("Native Files did not open the created owned folder", app: app) {
             self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
@@ -834,12 +846,13 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,
-                      condition: @MainActor () -> Bool) async throws {
+                      onTimeout: (@MainActor () -> Void)? = nil, condition: @MainActor () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         repeat {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
         } while ContinuousClock.now < deadline
+        onTimeout?() // Preserve the primary boundary outcome before diagnostic RPCs/teardown.
         capture(app, message, springboard: springboard)
         throw BatchTestFailure(message: message)
     }
