@@ -161,6 +161,13 @@ final class BatchImportUITests: XCTestCase {
     // and library snapshot boundary. No StoreKit transaction is created.
     func testRecoveryCreateOwnedFilesDestination() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        let observationID = String(recoveryFolder.suffix(36))
+        func observeCommit(_ stage: String) {
+            guard ProcessInfo.processInfo.environment["TRIPDOCKET_FILES_COMMIT_OBSERVATION"] == "1" else { return }
+            print("TD_FILES_COMMIT_V1|\(observationID)|\(stage)|\(Date().timeIntervalSince1970)")
+        }
+        observeCommit("start")
+        defer { observeCommit("end") }
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -183,23 +190,8 @@ final class BatchImportUITests: XCTestCase {
         let location = app.cells.matching(NSPredicate(
             format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
         ))
-        if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-            if !(location.count == 1 && location.element.isHittable) {
-                try await wait("Files preparation has no unique Browse action", app: app) {
-                    browse.count == 1 && browse.element.isEnabled && browse.element.isHittable
-                }
-                browse.element.tap()
-            }
-            if !isRecoveryFolder(localTitle, navigation: navigation.element) {
-                try await wait("Files preparation local location is unavailable", app: app) {
-                    location.count == 1 && location.element.isEnabled && location.element.isHittable
-                }
-                location.element.tap()
-            }
-        }
-        try await wait("Files preparation did not reach the local root", app: app) {
-            self.isRecoveryFolder(localTitle, navigation: navigation.element)
-        }
+        try await reachRecoveryLocalRoot(localTitle, navigation: navigation,
+                                         location: location, browse: browse, app: app)
         let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
         try check(directory.count == 0, app: app, "Owned folder already exists before UI creation")
         let more = app.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "More", "More Actions"))
@@ -255,11 +247,16 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Native folder creation has no unique confirmation", app: app) {
             create.count == 1 && create.element.isEnabled && create.element.isHittable
         }
+        observeCommit(inlineNaming ? "editor_inline" : "editor_alert")
+        observeCommit("before_done")
         create.element.tap()
-        try await wait("Created folder or its exact title did not appear", app: app) {
+        observeCommit("after_done")
+        try await wait("Created folder or its exact title did not appear", app: app,
+                       onTimeout: { observeCommit("postcondition_failed") }) {
             inlineNames.count == 0 && (self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
                 || (directory.count == 1 && directory.element.isHittable))
         }
+        observeCommit("postcondition_passed")
         if !isRecoveryFolder(recoveryFolder, navigation: navigation.element) { directory.element.tap() }
         try await wait("Native Files did not open the created owned folder", app: app) {
             self.isRecoveryFolder(recoveryFolder, navigation: navigation.element)
@@ -460,6 +457,35 @@ final class BatchImportUITests: XCTestCase {
         done.tap()
         // The host now compares the active catalog and original bytes against
         // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private func reachRecoveryLocalRoot(_ localTitle: String, navigation: XCUIElementQuery,
+                                        location: XCUIElementQuery, browse: XCUIElementQuery,
+                                        app: XCUIApplication) async throws {
+        let atRoot = { self.isRecoveryFolder(localTitle, navigation: navigation.element) }
+        let locationReady = { location.count == 1 && location.element.isEnabled && location.element.isHittable }
+        let browseReady = { browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        if !atRoot() {
+            // The picker can reach its remembered local root while appearing.
+            // Reconsider that verified destination during the same bounded wait.
+            try await wait("Files preparation has no supported local route", app: app) {
+                atRoot() || locationReady() || browseReady()
+            }
+            if !atRoot() && !locationReady() {
+                try check(browseReady(), app: app, "Files preparation Browse action changed")
+                if !atRoot() { browse.element.tap() }
+            }
+            if !atRoot() {
+                try await wait("Files preparation local location is unavailable", app: app) {
+                    atRoot() || locationReady()
+                }
+                if !atRoot() {
+                    try check(locationReady(), app: app, "Files preparation local location changed")
+                    if !atRoot() { location.element.tap() }
+                }
+            }
+        }
+        try await wait("Files preparation did not reach the local root", app: app) { atRoot() }
     }
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
@@ -834,12 +860,13 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,
-                      condition: @MainActor () -> Bool) async throws {
+                      onTimeout: (@MainActor () -> Void)? = nil, condition: @MainActor () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         repeat {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
         } while ContinuousClock.now < deadline
+        onTimeout?() // Preserve the primary boundary outcome before diagnostic RPCs/teardown.
         capture(app, message, springboard: springboard)
         throw BatchTestFailure(message: message)
     }
