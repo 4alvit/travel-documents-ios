@@ -496,6 +496,19 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func attach(_ app: XCUIApplication, name: String) {
+        // debugDescription truncates accessibility values. Read only the two
+        // known diagnostic elements and retain their strictly bounded schema
+        // before a screenshot request can interrupt the remaining capture.
+        let content = guidanceDiagnosticValue(
+            app.collectionViews.matching(identifier: "privacySupport.content")
+        )
+        let cancel = guidanceDiagnosticValue(
+            app.buttons.matching(identifier: "privacySupport.external.cancel")
+        )
+        let diagnostics = XCTAttachment(string: "version=1\ncontent=\(content)\ncancel=\(cancel)")
+        diagnostics.name = "\(name) — guidance diagnostics"
+        diagnostics.lifetime = .keepAlways
+        add(diagnostics)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
@@ -504,6 +517,20 @@ final class PrivacySupportUITests: XCTestCase {
         hierarchy.name = "\(name) — accessibility hierarchy"
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
+    }
+
+    private func guidanceDiagnosticValue(_ query: XCUIElementQuery) -> String {
+        guard query.count == 1,
+              let value = query.element(boundBy: 0).value as? String,
+              value.utf8.count <= 512 else { return "unavailable" }
+        let link = "(?:none|supportIssue|privacyPreview|supportPreview|developer)"
+        let selectionAfterCancel = "(?:notObserved|none|supportIssue|privacyPreview|supportPreview|developer)"
+        let pattern = #"\Aguidance-diagnostic presentations=[0-9]{1,10} lastPresented="# + link
+            + #" cancellations=[0-9]{1,10} lastCancelled="# + link
+            + " selectionAfterCancel=" + selectionAfterCancel + " selection=" + link
+            + #" dismissals=[0-9]{1,10} scene=(?:active|inactive|background|unknown)\z"#
+        guard value.range(of: pattern, options: .regularExpression) != nil else { return "unavailable" }
+        return value
     }
 
     private struct LayoutFailure: LocalizedError {

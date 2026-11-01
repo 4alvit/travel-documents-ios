@@ -24,6 +24,9 @@ CLEANUP_SECONDS = 180
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
+SCHEMA_VERSION = "0.4.0"
+DEVELOPER_DIR = "/Applications/Xcode_26.2.app/Contents/Developer"
+XCODE_VERSION = "Xcode 26.2\nBuild version 17C52"
 
 
 def require(value, message):
@@ -160,6 +163,65 @@ def bounded_read(root, relative, maximum, check):
         for fd in reversed(opened): os.close(fd)
 
 
+def validate_schemas(summary, tests):
+    """Check only the schema contract consumed by the unchanged drivers."""
+    def model(document, name):
+        require(isinstance(document, dict) and isinstance(document.get("schemas"), dict),
+                "Invalid xcresult schema document")
+        result = document["schemas"].get(name)
+        require(isinstance(result, dict) and result.get("type") == "object"
+                and isinstance(result.get("properties"), dict), "Missing schema model: " + name)
+        return result
+
+    def field(document, name, key, *, kind=None, reference=None, required=False, item=None):
+        schema = model(document, name)
+        value = schema["properties"].get(key)
+        require(isinstance(value, dict), "Missing schema field: " + name + "." + key)
+        if required:
+            require(isinstance(schema.get("required"), list) and key in schema["required"],
+                    "Schema does not require: " + name + "." + key)
+        if kind is not None:
+            require(value.get("type") == kind, "Unexpected schema type: " + key)
+        if reference is not None:
+            require(value.get("$ref") == "#/schemas/" + reference, "Unexpected schema reference: " + key)
+        if item is not None:
+            require(value.get("items", {}).get("$ref") == "#/schemas/" + item,
+                    "Unexpected schema array items: " + key)
+
+    for key in ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures"):
+        field(summary, "Summary", key, kind="integer", required=True)
+    field(summary, "Summary", "result", reference="TestResult", required=True)
+    for key in ("runtimeWarnings", "testFailures"):
+        field(summary, "Summary", key, kind="array", required=True)
+    # Apple's schema declares this as an object reference; the actual response
+    # is an array. validate_driver separately enforces the actual one-item array.
+    field(summary, "Summary", "devicesAndConfigurations",
+          reference="DeviceAndConfigurationSummary", required=True)
+    field(summary, "DeviceAndConfigurationSummary", "device", reference="Device", required=True)
+    for document in (summary, tests):
+        field(document, "Device", "deviceId", kind="string", required=True)
+        field(document, "Device", "platform", kind="string")
+        result = document["schemas"].get("TestResult", {})
+        require(result.get("type") == "string" and "Passed" in result.get("enum", []),
+                "Schema cannot represent passed tests")
+    field(tests, "Tests", "devices", kind="array", item="Device", required=True)
+    field(tests, "Tests", "testNodes", kind="array", item="TestNode", required=True)
+    field(tests, "TestNode", "nodeType", reference="TestNodeType", required=True)
+    for key in ("nodeIdentifier",):
+        field(tests, "TestNode", key, kind="string")
+    field(tests, "TestNode", "result", reference="TestResult")
+    field(tests, "TestNode", "children", kind="array", item="TestNode")
+    node_type = tests["schemas"].get("TestNodeType", {})
+    require(node_type.get("type") == "string" and "Test Case" in node_type.get("enum", []),
+            "Schema cannot identify test cases")
+    return {"version": SCHEMA_VERSION, "validated": True}
+
+
+def schema_document(raw):
+    require(0 < len(raw) <= MIB, "Schema exceeds byte limit")
+    return json.loads(raw)
+
+
 def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
     require(summary.get("status") == "passed" and not summary.get("error")
             and summary.get("xcodebuild_returncode") == 0, "Driver did not pass")
@@ -265,6 +327,19 @@ class Qualification:
         (self.out / (label + ".json")).write_text(json.dumps(value, indent=2) + "\n")
         return value
 
+    def preflight_schemas(self):
+        schemas, hashes = {}, {}
+        for kind in ("summary", "tests"):
+            raw = self.command("xcresult-schema-" + kind,
+                               ["xcrun", "xcresulttool", "get", "test-results", kind,
+                                "--schema", "--schema-version", SCHEMA_VERSION]).encode()
+            schemas[kind] = schema_document(raw)
+            (self.out / ("xcresult-schema-" + kind + ".json")).write_bytes(raw)
+            hashes[kind] = hashlib.sha256(raw).hexdigest()
+        self.report["xcresult_schema"] = {**validate_schemas(schemas["summary"], schemas["tests"]),
+                                          "sha256": hashes}
+        self.save()
+
     def prepare(self):
         self.before = self.source("source-before")
         self.report["source"] = {"commit": self.before["head"], "tree": self.before["tree"]}
@@ -273,7 +348,11 @@ class Qualification:
                            ("sdk", ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"]),
                            ("architecture", ["uname", "-m"])):
             toolchain[name] = self.command(name, argv).strip()
+        toolchain["developer_environment"] = os.environ.get("DEVELOPER_DIR")
         self.report["toolchain"] = toolchain
+        require(toolchain["developer_environment"] == DEVELOPER_DIR and toolchain["xcode"] == XCODE_VERSION,
+                "Qualification requires the pinned Xcode 26.2 build 17C52")
+        self.preflight_schemas()
         self.command("generate-project", ["xcodegen", "generate"], 120)
         original = self.commands.limit
         self.commands.limit = min(original, time.monotonic() + 300)
@@ -547,8 +626,17 @@ class Qualification:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=MODES)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--mode", choices=MODES)
+    selection.add_argument("--validate-schemas", nargs=2, metavar=("SUMMARY", "TESTS"))
     args = parser.parse_args()
+    if args.validate_schemas:
+        documents = []
+        for name in args.validate_schemas:
+            path = Path(name).absolute()
+            documents.append(schema_document(bounded_read(path.parent, path.name, MIB, lambda: None)))
+        validate_schemas(*documents)
+        return 0
     run = Qualification(HERE.parent, args.mode, os.environ)
     def interrupt(_signal, _frame):
         run.interrupted = True

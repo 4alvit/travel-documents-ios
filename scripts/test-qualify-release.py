@@ -352,6 +352,97 @@ class Guards(unittest.TestCase):
                 with self.assertRaises(RuntimeError):run.batch_snapshot(driver)
             self.assertNotIn("batch_snapshot",run.report)
 
+    def schemas(self):
+        def obj(properties, required=None):
+            return {"type": "object", "properties": properties,
+                    "required": list(properties) if required is None else required}
+        def ref(name): return {"$ref": "#/schemas/" + name}
+        def array(name): return {"type": "array", "items": ref(name)}
+        common = {"Device": obj({"deviceId": {"type": "string"}, "platform": {"type": "string"}}, ["deviceId"]),
+                  "TestResult": {"type": "string", "enum": ["Passed", "Failed"]}}
+        properties = {key: {"type": "integer"} for key in
+                      ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")}
+        properties.update(result=ref("TestResult"), runtimeWarnings=array("Issue"), testFailures=array("TestFailure"),
+                          devicesAndConfigurations=ref("DeviceAndConfigurationSummary"))
+        summary = {"schemas": {**copy.deepcopy(common), "Summary": obj(properties),
+                    "DeviceAndConfigurationSummary": obj({"device": ref("Device")})}}
+        tests = {"schemas": {**copy.deepcopy(common), "Tests": obj({"devices": array("Device"), "testNodes": array("TestNode")}),
+                 "TestNode": obj({"nodeIdentifier": {"type": "string"}, "nodeType": ref("TestNodeType"),
+                                  "result": ref("TestResult"), "children": array("TestNode")}, ["nodeType"]),
+                 "TestNodeType": {"type": "string", "enum": ["Test Case", "Test Suite"]}}}
+        return summary, tests
+
+    def test_schema_contract_accepts_optional_generic_node_fields(self):
+        self.assertEqual(q.validate_schemas(*self.schemas()), {"version": "0.4.0", "validated": True})
+
+    def test_schema_requires_all_summary_counts_and_warning_evidence(self):
+        for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures",
+                    "runtimeWarnings", "testFailures", "devicesAndConfigurations"):
+            for change in ("missing", "optional", "type"):
+                summary, tests = self.schemas(); root = summary["schemas"]["Summary"]
+                if change == "missing": root["properties"].pop(key)
+                elif change == "optional": root["required"].remove(key)
+                else: root["properties"][key] = {"type": "null"}
+                with self.subTest(key=key, change=change), self.assertRaises(RuntimeError):
+                    q.validate_schemas(summary, tests)
+
+    def test_schema_requires_exact_tree_and_device_contract(self):
+        for kind, model, field in [(0, "Device", "deviceId"), (0, "Device", "platform"),
+                                   (0, "DeviceAndConfigurationSummary", "device"),
+                                   (1, "Tests", "devices"), (1, "Tests", "testNodes"),
+                                   (1, "TestNode", "nodeIdentifier"), (1, "TestNode", "nodeType"),
+                                   (1, "TestNode", "result"), (1, "TestNode", "children")]:
+            schemas = self.schemas(); schemas[kind]["schemas"][model]["properties"].pop(field)
+            with self.subTest(model=model, field=field), self.assertRaises(RuntimeError): q.validate_schemas(*schemas)
+        for model in ("TestNodeType", "TestResult"):
+            schemas = self.schemas(); schemas[1]["schemas"][model]["enum"] = ["unknown"]
+            with self.assertRaises(RuntimeError): q.validate_schemas(*schemas)
+
+    def test_schema_input_is_bounded_json(self):
+        for raw in (b"", b"x" * (q.MIB + 1), b"not JSON"):
+            with self.assertRaises((RuntimeError, ValueError)): q.schema_document(raw)
+        for malformed in ({}, [], {"schemas": {}}):
+            with self.assertRaises(RuntimeError): q.validate_schemas(malformed, self.schemas()[1])
+
+    def test_preflight_captures_exact_raw_schemas_before_any_device_action(self):
+        run = self.run_object(); calls = []; schemas = self.schemas()
+        outputs = {kind: json.dumps(schemas[n]) + "\n" for n, kind in enumerate(("summary", "tests"))}
+        def command(label, argv, seconds=30):
+            calls.append(argv); return outputs[argv[4]]
+        run.command = command; run.preflight_schemas()
+        for kind in ("summary", "tests"):
+            self.assertIn(["xcrun", "xcresulttool", "get", "test-results", kind, "--schema", "--schema-version", "0.4.0"], calls)
+            raw = (run.out / ("xcresult-schema-" + kind + ".json")).read_bytes()
+            self.assertEqual(raw, outputs[kind].encode())
+            self.assertEqual(run.report["xcresult_schema"]["sha256"][kind], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(len(calls), 2); self.assertIsNone(run.owned)
+
+    def test_unsupported_schema_stops_prepare_before_project_or_device_mutation(self):
+        run = self.run_object(); run.source = lambda label: {"head": HEAD, "tree": "b" * 40}; calls = []
+        schemas = self.schemas(); schemas[0]["schemas"]["Summary"]["properties"].pop("runtimeWarnings")
+        outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2", "architecture": "arm64",
+                   "xcresult-schema-summary": json.dumps(schemas[0]), "xcresult-schema-tests": json.dumps(schemas[1])}
+        def command(label, argv, seconds=30):
+            calls.append(argv); return outputs[label]
+        run.command = command
+        with patch.dict(q.os.environ, {"DEVELOPER_DIR": q.DEVELOPER_DIR}):
+            with self.assertRaises(RuntimeError): run.prepare()
+        self.assertFalse(any("simctl" in argv or "xcodegen" in argv for argv in calls))
+        self.assertIsNone(run.owned); self.assertIsNone(run.baseline)
+
+    def test_schema_cli_uses_only_files_and_rejects_mixed_execution_mode(self):
+        paths = []
+        for n, schema in enumerate(self.schemas()):
+            path = self.root / (str(n) + ".json"); path.write_text(json.dumps(schema)); paths.append(str(path))
+        with patch.object(q, "Qualification", side_effect=AssertionError("Native run not allowed")):
+            with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", *paths]):
+                self.assertEqual(q.main(), 0)
+            with patch.object(q.sys, "argv", ["qualify-release.py", "--mode", "batch", "--validate-schemas", *paths]):
+                with self.assertRaises(SystemExit): q.main()
+        link = self.root / "link"; link.symlink_to(paths[0])
+        with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", str(link), paths[1]]):
+            with self.assertRaises(RuntimeError): q.main()
+
     def test_workflow_is_explicit_read_only_and_uses_original_drivers(self):
         workflow=(Path(__file__).parent.parent/".github/workflows/release-qualification.yml").read_text()
         self.assertIn("workflow_dispatch:",workflow);self.assertIn("contents: read",workflow)
@@ -360,6 +451,11 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",workflow)
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
+        self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
+        ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
+        self.assertIn('--validate-schemas', ci)
+        self.assertIn('--schema --schema-version 0.4.0', ci)
+        self.assertNotIn('export DEVELOPER_DIR=', ci)
 
 
 if __name__ == "__main__":
