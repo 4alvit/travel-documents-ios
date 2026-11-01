@@ -483,8 +483,9 @@ class Driver:
         require(data.get("__xctestrun_metadata__", {}).get("FormatVersion") == 2, "Unsupported generated xctestrun format")
         configs = [item for item in data.get("TestConfigurations", []) if item.get("IsEnabled", True)]
         require(len(configs) == 1, "Expected one active test configuration")
-        targets = [item for item in configs[0].get("TestTargets", []) if item.get("BlueprintName") == "TripfolioUITests"]
-        require(len(targets) == 1 and targets[0].get("IsUITestBundle") is True, "Expected TripfolioUITests target")
+        targets = configs[0].get("TestTargets", [])
+        require(len(targets) == 1 and targets[0].get("BlueprintName") == "TripfolioUITests"
+                and targets[0].get("IsUITestBundle") is True, "Expected only TripfolioUITests target")
         target = targets[0]
 
         def resolve(value, host=None):
@@ -515,8 +516,10 @@ class Driver:
 
     def build_once(self):
         self.command(["xcodegen", "generate"], "xcodegen", timeout=120)
-        self.command(["xcodebuild", "build-for-testing", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio",
+        self.command(["xcodebuild", "build-for-testing", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio-iPad",
+                      "-testPlan", "Tripfolio-iPad",
                       "-configuration", "Debug", "-derivedDataPath", self.derived,
+                      "-only-testing:TripfolioUITests/PrivacySupportUITests/" + self.case[1],
                       *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=360, stream=True)
         self.discover_products()
         self.built = self.product_snapshot("products-after-build")

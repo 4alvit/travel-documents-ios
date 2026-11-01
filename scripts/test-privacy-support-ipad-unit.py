@@ -203,6 +203,27 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'differs from selected locale'):driver.run_case(*ipad.CASES[1])
         self.assertEqual(driver.report['cases'],[]);self.assertEqual(world.processes,[])
 
+    def test_one_build_selects_only_the_exact_locale_case_and_keeps_its_cap(self):
+        for locale in ('en-US','ru-RU'):
+            with self.subTest(locale=locale):
+                driver,world=self.driver(locale=locale)
+                driver.owned='synthetic-owned-device'
+                with patch.object(driver,'command') as command,patch.object(driver,'discover_products') as discover, \
+                     patch.object(driver,'product_snapshot',return_value={'synthetic':'manifest'}) as snapshot:
+                    driver.build_once()
+                self.assertEqual(command.call_count,2)
+                command.assert_any_call(['xcodegen','generate'],'xcodegen',timeout=120)
+                args,kwargs=command.call_args
+                self.assertEqual(args[0][:2],['xcodebuild','build-for-testing'])
+                self.assertEqual(args[0][args[0].index('-scheme')+1],'Tripfolio-iPad')
+                self.assertEqual(args[0][args[0].index('-testPlan')+1],'Tripfolio-iPad')
+                self.assertEqual([a for a in args[0] if str(a).startswith('-only-testing:')],
+                    ['-only-testing:TripfolioUITests/PrivacySupportUITests/'+driver.case[1]])
+                self.assertFalse(any(str(a).startswith('-skip-testing:') for a in args[0]))
+                self.assertEqual(kwargs,{'timeout':360,'stream':True})
+                discover.assert_called_once_with();snapshot.assert_called_once_with('products-after-build')
+                self.assertEqual(world.processes,[])
+
     def post_failure_case(self, locale='en-US', **process_plan):
         driver,world=self.driver(locale=locale,**process_plan);case=driver.case;locale,method,size,_=case
         driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app','xctestrun':self.root/'synthetic.xctestrun'}
@@ -384,7 +405,31 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.products['runner'],runner)
         self.assertEqual(driver.report['product_bundle_identifiers'],
                          {'aut':ipad.BUNDLE_ID,'runner':ipad.RUNNER_BUNDLE_ID})
+        data['TestConfigurations'][0]['TestTargets'].append({'BlueprintName':'TripfolioTests'})
+        (products/'Synthetic.xctestrun').write_bytes(ipad.plistlib.dumps(data))
+        with self.assertRaisesRegex(RuntimeError,'Expected only TripfolioUITests target'):driver.discover_products()
         self.assertEqual(world.processes,[])
+
+    def test_ipad_plan_preserves_options_and_default_scheme_keeps_all_test_targets(self):
+        import xml.etree.ElementTree as xml
+        default=json.loads((HERE.parent/'Tripfolio.xctestplan').read_text())
+        selected=json.loads((HERE.parent/'Tripfolio-iPad.xctestplan').read_text())
+        self.assertEqual(selected['defaultOptions'],default['defaultOptions'])
+        self.assertEqual(selected['configurations'],default['configurations'])
+        self.assertEqual(selected['testTargets'],[target for target in default['testTargets']
+            if target['target']['name']=='TripfolioUITests'])
+        self.assertEqual(len(selected['testTargets']),1)
+        schemes=HERE.parent/'Tripfolio.xcodeproj/xcshareddata/xcschemes'
+        for name,targets,plan in [('Tripfolio',{'TripfolioTests','TripfolioUITests'},'Tripfolio.xctestplan'),
+                                  ('Tripfolio-iPad',{'TripfolioUITests'},'Tripfolio-iPad.xctestplan')]:
+            scheme=xml.parse(schemes/(name+'.xcscheme')).getroot()
+            actual={node.attrib['BlueprintName'] for node in scheme.findall('TestAction/Testables/TestableReference/BuildableReference')}
+            self.assertEqual(actual,targets)
+            defaults=[node.attrib['reference'] for node in scheme.findall('TestAction/TestPlans/TestPlanReference')
+                      if node.attrib.get('default')=='YES']
+            self.assertEqual(defaults,['container:'+plan])
+            self.assertEqual([node.attrib['reference'] for node in scheme.findall('TestAction/TestPlans/TestPlanReference')],
+                             ['container:'+plan])
 
     def test_runner_readback_checks_a_fresh_container_before_and_after(self):
         driver,world,fresh=self.installed_fixture(product='runner')
