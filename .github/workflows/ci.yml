@@ -32,8 +32,8 @@ jobs:
           TRIPDOCKET_QUALIFY_DEVELOPER_DIR=/Applications/Xcode_26.2.app/Contents/Developer
           DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcodebuild -version > build/ci-toolchain/qualification-xcode.txt
           test "$(cat build/ci-toolchain/qualification-xcode.txt)" = "$(printf 'Xcode 26.2\nBuild version 17C52')"
-          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results summary --schema --schema-version 0.4.0 > build/ci-toolchain/qualification-summary-schema.json
-          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results tests --schema --schema-version 0.4.0 > build/ci-toolchain/qualification-tests-schema.json
+          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results summary --schema > build/ci-toolchain/qualification-summary-schema.json
+          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results tests --schema > build/ci-toolchain/qualification-tests-schema.json
           python3 -B scripts/qualify-release.py --validate-schemas build/ci-toolchain/qualification-summary-schema.json build/ci-toolchain/qualification-tests-schema.json
       - name: Qualification toolchain evidence
         if: always()

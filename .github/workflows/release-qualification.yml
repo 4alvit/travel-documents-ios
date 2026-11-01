@@ -16,7 +16,7 @@ jobs:
   qualify:
     runs-on: macos-15
     timeout-minutes: 55
-    # Original drivers require xcresult schema 0.4.0; default 16.4 lacks it.
+    # Pin the toolchain whose default xcresult schema is validated before use.
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:

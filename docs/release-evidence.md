@@ -60,8 +60,10 @@ show the guidance page with the confirmation closed. Its owned device was
 removed and the full final inventory matched the baseline. This focused local
 Debug run does not replace final-candidate hosted or Release qualification.
 
-Release qualification now checks its pinned Xcode 26.2 toolchain and xcresult
-0.4.0 schema before native work. The same read-only preflight runs in ordinary
+Release qualification checks its pinned Xcode 26.2 toolchain and default
+xcresult schema before native work. Hosted preflight established that this
+Xcode rejects an explicit 0.4.0 request; both result readers now use its default
+format while retaining their strict result validation. The same read-only preflight runs in ordinary
 CI, with retained schema evidence. Its 31 offline guard tests pass; native
 qualification must still pass before RC promotion.
 

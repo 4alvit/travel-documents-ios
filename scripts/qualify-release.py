@@ -24,7 +24,6 @@ CLEANUP_SECONDS = 180
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
-SCHEMA_VERSION = "0.4.0"
 DEVELOPER_DIR = "/Applications/Xcode_26.2.app/Contents/Developer"
 XCODE_VERSION = "Xcode 26.2\nBuild version 17C52"
 
@@ -164,7 +163,7 @@ def bounded_read(root, relative, maximum, check):
 
 
 def validate_schemas(summary, tests):
-    """Check only the schema contract consumed by the unchanged drivers."""
+    """Check the schema contract consumed by both result validators."""
     def model(document, name):
         require(isinstance(document, dict) and isinstance(document.get("schemas"), dict),
                 "Invalid xcresult schema document")
@@ -214,7 +213,7 @@ def validate_schemas(summary, tests):
     node_type = tests["schemas"].get("TestNodeType", {})
     require(node_type.get("type") == "string" and "Test Case" in node_type.get("enum", []),
             "Schema cannot identify test cases")
-    return {"version": SCHEMA_VERSION, "validated": True}
+    return {"selection": "pinned-toolchain-default", "validated": True}
 
 
 def schema_document(raw):
@@ -332,7 +331,7 @@ class Qualification:
         for kind in ("summary", "tests"):
             raw = self.command("xcresult-schema-" + kind,
                                ["xcrun", "xcresulttool", "get", "test-results", kind,
-                                "--schema", "--schema-version", SCHEMA_VERSION]).encode()
+                                "--schema"]).encode()
             schemas[kind] = schema_document(raw)
             (self.out / ("xcresult-schema-" + kind + ".json")).write_bytes(raw)
             hashes[kind] = hashlib.sha256(raw).hexdigest()
