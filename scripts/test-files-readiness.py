@@ -269,6 +269,15 @@ import Foundation
 struct State {
     var navigationCount = 1
     var pickerCount = 1
+    var recentsCount = 0
+    var recentsIdentifier = "DOC.browsingRoot Source: com.apple.DocumentManager.RecentDocuments, Title: Recents"
+    var recentsTitle = false
+    var tabBarCount = 1
+    var tabBarIdentifier = "DOC.browsingModeTabBar"
+    var browseCount = 1
+    var browseLabel = "Browse"
+    var browseEnabled = true
+    var browseHittable = true
     var destination = false
     var directory = false
     var location = false
@@ -278,6 +287,7 @@ final class World {
     var frames: [State]
     var index = 0
     var taps: [String] = []
+    var browseFrames = [State(location: true)]
     init(_ frames: [State]) { self.frames = frames }
     var current: State { frames[index] }
     func advance() { index = min(index + 1, frames.count - 1) }
@@ -287,14 +297,17 @@ final class World {
         case "picker": return current.pickerCount
         case "directory": return current.directory ? 1 : 0
         case "location": return current.location ? 1 : 0
-        case "browse": return current.browse ? 1 : 0
+        case "browse": return current.browse ? current.browseCount : 0
+        case "recents": return current.recentsCount
+        case "tabbar": return current.tabBarCount
+        case "absent": return 0
         default: return 1
         }
     }
     func tap(_ kind: String) {
         taps.append(kind)
         switch kind {
-        case "browse": frames = [State(location: true)]
+        case "browse": frames = browseFrames
         case "location": frames = [State(directory: true)]
         case "directory": frames = [State(destination: true)]
         default: fatalError("Unexpected tap")
@@ -306,7 +319,7 @@ final class XCUIApplication {
     let world: World
     init(_ world: World) { self.world = world }
     var navigationBars: XCUIElementQuery { XCUIElementQuery(world, "navigation") }
-    var otherElements: XCUIElementQuery { XCUIElementQuery(world, "picker") }
+    var otherElements: XCUIElementQuery { XCUIElementQuery(world, "other") }
     var cells: XCUIElementQuery { XCUIElementQuery(world, "location") }
     var tabBars: XCUIElementQuery { XCUIElementQuery(world, "tabbar") }
 }
@@ -315,7 +328,8 @@ final class XCUIElement {
     let kind: String
     init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
     var exists: Bool { world.count(kind) > 0 }
-    var isHittable: Bool { exists }
+    var isEnabled: Bool { exists && (kind != "browse" || world.current.browseEnabled) }
+    var isHittable: Bool { exists && (kind != "browse" || world.current.browseHittable) }
     var firstMatch: XCUIElement { self }
     var cells: XCUIElementQuery { XCUIElementQuery(world, "directory") }
     var buttons: XCUIElementQuery { XCUIElementQuery(world, "browse") }
@@ -327,15 +341,29 @@ final class XCUIElementQuery {
     var count: Int { element.world.count(element.kind) }
     var firstMatch: XCUIElement { element }
     subscript(_ identifier: String) -> XCUIElement { element }
-    func matching(identifier: String) -> XCUIElementQuery { self }
-    func matching(_ predicate: NSPredicate) -> XCUIElementQuery { self }
+    func matching(identifier: String) -> XCUIElementQuery {
+        if element.kind == "other" {
+            if identifier == "Browse View (Picker)" { return XCUIElementQuery(element.world, "picker") }
+            return XCUIElementQuery(element.world, identifier == element.world.current.recentsIdentifier ? "recents" : "absent")
+        }
+        if element.kind == "tabbar" && identifier != element.world.current.tabBarIdentifier {
+            return XCUIElementQuery(element.world, "absent")
+        }
+        return self
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        if element.kind == "browse" && !predicate.evaluate(with: ["label": element.world.current.browseLabel]) {
+            return XCUIElementQuery(element.world, "absent")
+        }
+        return self
+    }
 }
 struct FixtureFailure: Error {}
 final class Harness {
     let world: World
     init(_ world: World) { self.world = world }
     func isRecoveryFolder(_ title: String, navigation: XCUIElement) -> Bool {
-        world.current.destination
+        title == "Recents" ? world.current.recentsTitle : world.current.destination
     }
     func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
         if !condition { throw FixtureFailure() }
@@ -356,6 +384,49 @@ final class Harness {
         switch name {
         case "already-current": world = World([State(destination: true)])
         case "delayed-current": world = World([State(), State(destination: true)])
+        case "recents-route":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            expected = ["browse", "location", "directory"]
+        case "wrapped-recents":
+            world = World([State(recentsCount: 1, recentsTitle: true, browse: true)])
+            expected = ["browse", "location", "directory"]
+        case "recents-direct-local-root":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            world.browseFrames = [State(directory: true)]
+            expected = ["browse", "directory"]
+        case "recents-remembered-destination":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            world.browseFrames = [State(destination: true)]
+            expected = ["browse"]
+        case "recents-delayed-local-root":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            world.browseFrames = [State(browse: true), State(directory: true, browse: true)]
+            expected = ["browse", "directory"]
+        case "recents-delayed-destination":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            world.browseFrames = [State(browse: true), State(destination: true, browse: true)]
+            expected = ["browse"]
+        case "delayed-recents":
+            world = World([State(pickerCount: 0), State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browse: true)])
+            expected = ["browse", "location", "directory"]
+        case "ambiguous-recents":
+            world = World([State(pickerCount: 0, recentsCount: 2, recentsTitle: true, browse: true)]); mustFail = true
+        case "wrong-recents-source":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsIdentifier: "Other source", recentsTitle: true, browse: true)]); mustFail = true
+        case "wrong-recents-heading":
+            world = World([State(pickerCount: 0, recentsCount: 1, browse: true)]); mustFail = true
+        case "ambiguous-native-tabs":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, tabBarCount: 2, browse: true)]); mustFail = true
+        case "wrong-native-tabs":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, tabBarIdentifier: "Other tabs", browse: true)]); mustFail = true
+        case "wrong-browse-label":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browseLabel: "Other action", browse: true)]); mustFail = true
+        case "ambiguous-browse":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browseCount: 2, browse: true)]); mustFail = true
+        case "disabled-browse":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browseEnabled: false, browse: true)]); mustFail = true
+        case "unhittable-browse":
+            world = World([State(pickerCount: 0, recentsCount: 1, recentsTitle: true, browseHittable: false, browse: true)]); mustFail = true
         case "normal-route": world = World([State(browse: true)]); expected = ["browse", "location", "directory"]
         case "ambiguous-navigation": world = World([State(navigationCount: 2, destination: true)]); mustFail = true
         case "ambiguous-picker": world = World([State(pickerCount: 2, destination: true)]); mustFail = true
@@ -387,7 +458,13 @@ class OpenFolderTests(unittest.TestCase):
 
     def test_remembered_destinations_routing_and_ambiguity(self):
         for name in ['already-current', 'delayed-current', 'normal-route',
-                     'ambiguous-navigation', 'ambiguous-picker', 'wrong-folder']:
+                     'ambiguous-navigation', 'ambiguous-picker', 'wrong-folder',
+                     'recents-route', 'wrapped-recents', 'recents-direct-local-root',
+                     'recents-remembered-destination', 'recents-delayed-local-root',
+                     'recents-delayed-destination', 'delayed-recents', 'ambiguous-recents',
+                     'wrong-recents-source', 'wrong-recents-heading', 'ambiguous-native-tabs',
+                     'wrong-native-tabs', 'wrong-browse-label', 'ambiguous-browse',
+                     'disabled-browse', 'unhittable-browse']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
