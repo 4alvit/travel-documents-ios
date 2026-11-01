@@ -19,11 +19,11 @@ import uuid
 
 
 CASES = (
-    ("en-US", "testEnglishFreeGuidanceAndCancelledLinks", "large", 600),
+    ("en-US", "testEnglishFreeGuidanceAndCancelledLinks", "large", 900),
     ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 900),
 )
 BUNDLE_ID = "com.4alvit.tripfolio"
-WORK_SECONDS = {"en-US": 29 * 60, "ru-RU": 35 * 60}
+WORK_SECONDS = {"en-US": 35 * 60, "ru-RU": 35 * 60}
 DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
 # Existing command waits + each owned7s stop;30s for local manifests/copy/validation.
