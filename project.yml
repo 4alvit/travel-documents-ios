@@ -47,6 +47,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.4alvit.tripfolio.tests
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSPrincipalClass: "$(PRODUCT_MODULE_NAME).StoreKitTestBootstrap"
   TripfolioUITests:
     type: bundle.ui-testing
     platform: iOS

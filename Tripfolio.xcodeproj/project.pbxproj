@@ -27,6 +27,7 @@
 		6B448F6875C8AE15A7C01DE4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 384FE0AF3626C67FAE4CF227 /* Assets.xcassets */; };
 		78FC6405B33356E23DC9E5D5 /* OCRService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FCCD75AE6D6BD43CF2F8DC /* OCRService.swift */; };
 		8050B3D385669628F45C49AA /* NotificationSystemTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED552FC9222C76F18259166B /* NotificationSystemTests.swift */; };
+		80C3AD93718097A848CDFDD2 /* StoreKitTestBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = F62943451D26AF86E66254E8 /* StoreKitTestBootstrap.swift */; };
 		91A666938FB9B5E54BBF1F16 /* TripfolioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F33A90F3670447D8F829317 /* TripfolioUITests.swift */; };
 		9A6F2B5B1EF7BB010E91805A /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4FDE5DC335FD36E39876094E /* InfoPlist.strings */; };
 		9B1F13BF23E7090C01DEF6C9 /* AccessibilityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC62D30F07B726A2387D2A9 /* AccessibilityUITests.swift */; };
@@ -101,6 +102,7 @@
 		EBAC632122597CC83390DCD4 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		ED552FC9222C76F18259166B /* NotificationSystemTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationSystemTests.swift; sourceTree = "<group>"; };
 		F0A1847620A377EF3B2F8F53 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		F62943451D26AF86E66254E8 /* StoreKitTestBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreKitTestBootstrap.swift; sourceTree = "<group>"; };
 		F6673A125F8248E14E04A5AE /* TripfolioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripfolioApp.swift; sourceTree = "<group>"; };
 		FD32738BAB88B56BE4A8CA69 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -205,6 +207,7 @@
 				A0D492D84779BF6546C00BE4 /* PlatformTests.swift */,
 				5BF68F8B85578AD0D71925B4 /* PrivacySupportTests.swift */,
 				B2CEF21072B50D393CA4454A /* ReminderLifecycleTests.swift */,
+				F62943451D26AF86E66254E8 /* StoreKitTestBootstrap.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -384,6 +387,7 @@
 				1599BB43FC0C03770E6A0F20 /* PlatformTests.swift in Sources */,
 				2DD927556CD1720D9B31764B /* PrivacySupportTests.swift in Sources */,
 				1A2E0D395AE52667726BD9B1 /* ReminderLifecycleTests.swift in Sources */,
+				80C3AD93718097A848CDFDD2 /* StoreKitTestBootstrap.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -443,6 +447,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = "$(PRODUCT_MODULE_NAME).StoreKitTestBootstrap";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -639,6 +644,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = "$(PRODUCT_MODULE_NAME).StoreKitTestBootstrap";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
