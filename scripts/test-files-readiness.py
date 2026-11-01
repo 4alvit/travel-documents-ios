@@ -554,12 +554,15 @@ class PresentationWaitTests(unittest.TestCase):
 
     def test_extended_budget_is_scoped_to_share_action(self):
         source = SOURCE.read_text()
+        start = source.index('    private func waitForStableShareAction(')
+        end = source.index('    func testRecoveryExportFullBackupThroughFiles(', start)
+        source = source[start:end]
         call = 'wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40))'
         self.assertEqual(source.count('timeout: .seconds(40)'), 1)
         self.assertIn(call, source)
         self.assertIn('if actions.count == 1, header.count == 1', source)
         self.assertIn('if action.isEnabled, action.isHittable', source)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', source)
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', SOURCE.read_text())
 
 
 class SDKSourceTests(unittest.TestCase):
@@ -733,6 +736,138 @@ class ShareReadinessTests(unittest.TestCase):
         self.assertEqual(body.count('saveToFiles.element.tap()'), 1)
         self.assertLess(body.index('try await waitForStableShareAction(saveToFiles, app: app)'),
                         body.index('saveToFiles.element.tap()'))
+
+PREVIEW_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+
+final class XCUIElement {
+    enum ElementType { case other, staticText }
+    let elementType: ElementType
+    let identifier: String
+    let label: String
+    var frame: CGRect
+    var isHittable: Bool
+    var children: [XCUIElement]
+    init(_ identifier: String = "", label: String = "", type: ElementType = .other,
+         frame: CGRect = CGRect(x: 0, y: 100, width: 400, height: 600),
+         hittable: Bool = true, children: [XCUIElement] = []) {
+        self.identifier = identifier; self.label = label; self.elementType = type
+        self.frame = frame; self.isHittable = hittable; self.children = children
+    }
+    var flattened: [XCUIElement] { children.flatMap { [$0] + $0.flattened } }
+    func descendants(matching type: ElementType) -> XCUIElementQuery {
+        XCUIElementQuery(flattened.filter { $0.elementType == type })
+    }
+}
+final class XCUIElementQuery {
+    let elements: [XCUIElement]
+    init(_ elements: [XCUIElement]) { self.elements = elements }
+    var count: Int { elements.count }
+    var element: XCUIElement { precondition(elements.count == 1); return elements[0] }
+    func matching(identifier: String) -> XCUIElementQuery {
+        XCUIElementQuery(elements.filter { $0.identifier == identifier })
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        XCUIElementQuery(elements.filter { predicate.evaluate(with: ["label": $0.label]) })
+    }
+}
+final class XCUIApplication {
+    let nodes: [XCUIElement]
+    init(_ nodes: [XCUIElement]) { self.nodes = nodes }
+    var frame: CGRect { CGRect(x: 0, y: 0, width: 402, height: 874) }
+    var otherElements: XCUIElementQuery {
+        XCUIElementQuery(nodes.flatMap { [$0] + $0.flattened }.filter { $0.elementType == .other })
+    }
+}
+final class PreviewHarness {
+    // ACTUAL_HELPER
+    func evaluate(_ app: XCUIApplication) -> Bool { isRenderedSyntheticOriginal(app) }
+}
+func marker(_ text: String) -> XCUIElement {
+    XCUIElement(label: text, type: .staticText, frame: CGRect(x: 30, y: 200, width: 280, height: 30))
+}
+func pdf(_ children: [XCUIElement]) -> XCUIElement {
+    XCUIElement("QLPDFViewControllerViewAccessibilityIdentifier", children: children)
+}
+func preview(_ children: [XCUIElement]) -> XCUIElement {
+    XCUIElement("QLPreviewControllerView", children: children)
+}
+func decode(_ object: [String: Any]) -> XCUIElement {
+    let f = object["frame"] as? [Double] ?? [0, 100, 400, 600]
+    return XCUIElement(object["identifier"] as? String ?? "", label: object["label"] as? String ?? "",
+        type: object["type"] as? String == "staticText" ? .staticText : .other,
+        frame: CGRect(x: f[0], y: f[1], width: f[2], height: f[3]),
+        hittable: object["hittable"] as? Bool ?? true,
+        children: (object["children"] as? [[String: Any]] ?? []).map(decode))
+}
+let warning = marker("SYNTHETIC DEMO — NOT VALID FOR TRAVEL")
+let booking = marker("Coast weekend\nSample reservation ABC-000\nAlex Example")
+let name = CommandLine.arguments[1]
+var expected = false
+let app: XCUIApplication
+switch name {
+case "rendered": app = XCUIApplication([preview([pdf([warning, booking])])]); expected = true
+case "combined-lines": app = XCUIApplication([preview([pdf([marker(warning.label + "\n" + booking.label)])])]); expected = true
+case "blank": app = XCUIApplication([preview([])])
+case "pdf-shell": app = XCUIApplication([preview([pdf([])])])
+case "direct-content": app = XCUIApplication([preview([warning, booking])]); expected = true
+case "outside-preview": app = XCUIApplication([preview([]), pdf([warning, booking])])
+case "only-warning": app = XCUIApplication([preview([pdf([warning])])])
+case "only-booking": app = XCUIApplication([preview([pdf([booking])])])
+case "duplicate-marker": app = XCUIApplication([preview([pdf([warning, warning, booking])])])
+case "separate-wrappers": app = XCUIApplication([preview([pdf([warning]), pdf([booking])])]); expected = true
+case "duplicate-preview": app = XCUIApplication([preview([pdf([warning, booking])]), preview([])])
+case "hidden": warning.isHittable = false; app = XCUIApplication([preview([pdf([warning, booking])])])
+case "offscreen": warning.frame.origin.y = 950; app = XCUIApplication([preview([pdf([warning, booking])])])
+case "empty-geometry": warning.frame.size.height = 0; app = XCUIApplication([preview([pdf([warning, booking])])])
+case "file":
+    let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
+    let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    app = XCUIApplication((object["nodes"] as! [[String: Any]]).map(decode))
+    expected = object["expected"] as! Bool
+ default: fatalError("Unknown fixture")
+}
+precondition(PreviewHarness().evaluate(app) == expected)
+print("PASS " + name)
+'''
+
+
+class PreviewReadinessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func isRenderedSyntheticOriginal(')
+        end = source.index('    private func reachRecoveryLocalRoot(', start)
+        root = Path(cls.directory.name)
+        path = root / 'PreviewReadiness.swift'
+        path.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = root / 'preview-readiness-tests'
+        result = subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_rendered_pdf_content_and_rejected_shells(self):
+        for name in ['rendered', 'combined-lines', 'blank', 'pdf-shell', 'direct-content',
+                     'outside-preview', 'only-warning', 'only-booking', 'duplicate-marker',
+                     'separate-wrappers', 'duplicate-preview', 'hidden', 'offscreen', 'empty-geometry']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_recovery_requires_rendered_content_before_capture(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
+        end = source.index('    private func isRenderedSyntheticOriginal(', start)
+        body = source[start:end]
+        self.assertIn('wait("Restored original PDF content did not render", app: app, timeout: .seconds(40))', body)
+        self.assertLess(body.index('self.isRenderedSyntheticOriginal(app)'),
+                        body.index('capture(app, "Recovery restored original'))
+        self.assertNotIn('Task.sleep(for: .seconds(5))', body)
 
 
 if __name__ == '__main__':
