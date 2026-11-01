@@ -181,18 +181,31 @@ final class PrivacySupportUITests: XCTestCase {
         }
         // A caller may share the selected List within one continuous page or
         // confirmation. Geometry remains live after every scroll.
-        try await scrollTo(text, in: app, navigationTitle: title,
-                           description: name, preferWholeFrame: true, scrollContainer: container,
-                           readingPrefix: true)
+        let accepted = try await scrollTo(text, in: app, navigationTitle: title,
+                                          description: name, preferWholeFrame: true,
+                                          scrollContainer: container, readingPrefix: true)
         try require(!text.label.isEmpty, app: app, "Empty accessible text: " + name)
-        let size = text.frame.size
+        let size = accepted.targetFrame.size
         var covered: CGFloat = 0
         var previous: CGRect?
         for slice in 0..<20 {
-            let containerFrame = container.frame
-            let viewport = visibleViewport(in: app, navigationTitle: title)
-                .intersection(containerFrame).insetBy(dx: 1, dy: 1)
-            let frame = text.frame
+            let containerFrame: CGRect
+            let viewport: CGRect
+            let frame: CGRect
+            // No gesture separates acceptance from the first slice. Reuse its
+            // geometry only while a fresh text frame confirms it has not moved.
+            // Every later slice, or a changed first frame, gets fresh bounds.
+            let firstFrame = slice == 0 ? text.frame : nil
+            if let firstFrame, firstFrame == accepted.targetFrame {
+                containerFrame = accepted.containerFrame
+                viewport = accepted.visibleBounds.insetBy(dx: 1, dy: 1)
+                frame = firstFrame
+            } else {
+                containerFrame = container.frame
+                viewport = visibleViewport(in: app, navigationTitle: title)
+                    .intersection(containerFrame).insetBy(dx: 1, dy: 1)
+                frame = text.frame
+            }
             try require(text.exists && abs(frame.width - size.width) <= 1 && abs(frame.height - size.height) <= 1,
                         app: app, "Text geometry changed during reading: " + name)
             try require(frame.minX >= viewport.minX - 2 && frame.maxX <= viewport.maxX + 2,
@@ -328,11 +341,18 @@ final class PrivacySupportUITests: XCTestCase {
         try require(false, app: app, failure)
     }
 
+    private struct ScrollObservation {
+        let targetFrame: CGRect
+        let containerFrame: CGRect
+        let visibleBounds: CGRect
+    }
+
+    @discardableResult
     private func scrollTo(
         _ target: XCUIElement, in app: XCUIApplication, navigationTitle: String,
         description: String, preferWholeFrame: Bool, searchDown: Bool = true,
         scrollContainer: XCUIElement? = nil, readingPrefix: Bool = false
-    ) async throws {
+    ) async throws -> ScrollObservation {
         guard let container = scrollContainer
             ?? activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
             attach(app, name: "No active scroll container — \(description)")
@@ -353,7 +373,10 @@ final class PrivacySupportUITests: XCTestCase {
                 && frame.minY <= visibleBounds.minY + 48
             if exists && target.isHittable && visiblePortion(
                 of: frame, in: visibleBounds, preferWholeFrame: preferWholeFrame
-            ) && (!tallReadingText || prefixAligned) { return }
+            ) && (!tallReadingText || prefixAligned) {
+                return ScrollObservation(targetFrame: frame, containerFrame: containerFrame,
+                                         visibleBounds: visibleBounds)
+            }
             guard attempt < 10 else { break }
             // Keep both endpoints inside the visible List/Form. Full swipes
             // overshot partly visible rows and oscillated across the viewport.
