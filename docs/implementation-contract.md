@@ -68,6 +68,13 @@ Free limits enforced by AppModel before additions: 1 trip, 2 travelers, 8 docs;
 restoring/viewing/deleting/exporting remains available. `canAddTrip`,
 `canAddTraveler`, `canAddDocument` booleans; `purchases: PurchaseManager`.
 
+AppModel serializes mutations with `isBusy` and loads its initial library before
+checking addition limits. After the repository returns successfully, the model
+mirrors the committed result without a second fallible disk read. Draft disposal,
+preview cleanup and reminder cancellation must still complete if protected files
+become unavailable immediately after publication. Editing forms stay disabled
+while their save is in progress.
+
 App shell initializes AppModel and supplies it using `.environment(model)`.
 UI entry `RootView()` reads `@Environment(AppModel.self)`.
 Use async Task actions and display `errorMessage` alerts. Authored interface,

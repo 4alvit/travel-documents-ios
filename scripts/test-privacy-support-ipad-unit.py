@@ -239,7 +239,12 @@ class DriverTests(unittest.TestCase):
         self.assertIn('path: build/PrivacySupport-iPad/${{ matrix.locale }}/',lane)
         self.assertIn('timeout-minutes: 35',lane);self.assertIn('timeout-minutes: 29',lane)
         gate=workflow.split('  gate:',1)[1]
-        self.assertIn('if: always()',gate);self.assertIn('needs: [validate, privacy_ipad, recovery]',gate)
+        self.assertIn('if: always()',gate)
+        self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
+        self.assertIn('CORE_PURCHASE_RESULT: ${{ needs.validate.result }}',gate)
+        self.assertIn('UI_GUIDANCE_RESULT: ${{ needs.ui_guidance.result }}',gate)
+        self.assertIn('test "$CORE_PURCHASE_RESULT" = success',gate)
+        self.assertIn('test "$UI_GUIDANCE_RESULT" = success',gate)
         self.assertIn('IPAD_RESULT: ${{ needs.privacy_ipad.result }}',gate)
         self.assertIn('test "$IPAD_RESULT" = success',gate)
         self.assertIn('exec python3 scripts/test-privacy-support-ipad.py "$@"',(HERE/'test-privacy-support-ipad.sh').read_text())

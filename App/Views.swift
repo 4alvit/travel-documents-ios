@@ -217,6 +217,7 @@ private struct NewTripView: View {
                 }
                 InlineErrorRow()
             }
+            .disabled(model.isBusy)
             .navigationTitle(trip == nil ? L10n.ui("trip.new", defaultValue: "New trip") : L10n.ui("trip.edit", defaultValue: "Edit trip")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(L10n.ui("common.cancel", defaultValue: "Cancel")) { dismiss() }.disabled(model.isBusy) }
@@ -790,6 +791,7 @@ private struct EditTravelerView: View {
                 }
                 InlineErrorRow()
             }
+            .disabled(model.isBusy)
             .navigationTitle(L10n.ui("person.edit", defaultValue: "Edit person")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(L10n.ui("common.cancel", defaultValue: "Cancel")) { dismiss() }.disabled(model.isBusy) }
@@ -837,6 +839,7 @@ private struct EditDocumentView: View {
                 }
                 InlineErrorRow()
             }
+            .disabled(model.isBusy)
             .navigationTitle(L10n.ui("document.edit", defaultValue: "Edit document")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
