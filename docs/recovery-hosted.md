@@ -370,6 +370,15 @@ original 120 seconds within the same 1,500-second executor limit. No additional
 worker, Simulator, test attempt or runtime fallback is introduced.
 
 Each iPad guidance locale now runs in a separate fresh driver and owned device.
+Its single `build-for-testing` command uses the dedicated `Tripfolio-iPad`
+scheme and UI-only plan, selecting the same exact locale test method as
+`test-without-building` and retaining the 360-second build cap. A prior unscoped
+build exhausted that cap while compiling the unused hosted AppTests target.
+The iPad plan retains the default plan's configuration and options, but the
+scheme and plan include only the UI-test target and its app dependencies. The
+core/purchase job continues to build and run all hosted AppTests through the
+unchanged default plan. Generated iPad metadata must contain exactly the UI-test
+target; a full-scheme result is rejected rather than silently accepted.
 The fixed EN/RU CI matrix has `max-parallel: 1` and `fail-fast: false`: a failed
 English lane cannot prevent Russian from running, and the existing CI gate
 requires the aggregate matrix result to be `success`. Each artifact includes its

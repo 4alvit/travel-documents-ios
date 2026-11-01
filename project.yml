@@ -79,3 +79,17 @@ schemes:
         - TripfolioUITests
     archive:
       config: Release
+  Tripfolio-iPad:
+    build:
+      targets:
+        Tripfolio: all
+    run:
+      config: Debug
+      storeKitConfiguration: App/Tripfolio.storekit
+    test:
+      config: Debug
+      testPlans:
+        - path: Tripfolio-iPad.xctestplan
+          defaultPlan: true
+      targets:
+        - TripfolioUITests
