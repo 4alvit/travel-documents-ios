@@ -42,8 +42,23 @@ captures the selected suite once. This Xcode rejects an explicit schema version
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
 hash as proof that tests passed. An unknown document or toolchain fails before
-native work. Ordinary CI performs the same read-only preflight; its application
-builds keep their existing default toolchain.
+native work. Ordinary CI performs the same read-only preflight. Its core and
+guidance jobs also pin Xcode 26.2 (17C52), including the Release preview build,
+and explicitly require a unique available runtime matching that Xcode's
+Simulator SDK, with a compatible iPhone and host architecture. A supplied
+device UUID must satisfy the same checks; there is no fallback to another
+runtime. Captured inventories and the selection record accompany test evidence.
+Core and guidance test artifacts contain their result bundle plus
+`ci-toolchain/simulator-selection.*/`; consumers must select the `.xcresult`
+bundle explicitly instead of assuming every archive entry belongs to it.
+The recovery compatibility job retains its separately pinned profile.
+
+This makes the build/test environment reproducible; it does not establish that
+the previous compiler/runtime pairing caused a blank Files sheet or was
+unsupported. Changing the core toolchain changes the Release producer and
+requires fresh full CI, exact-source artifact checks and release qualification.
+Earlier compiler results are not acceptance of the new binary. Local
+`test-simulator.sh` behavior is unchanged unless `--require-sdk-match` is passed.
 
 Successful hosted capture has status `captured_pending_review`, never `passed`.
 It requires successful native execution, exact case counts and device identity,
