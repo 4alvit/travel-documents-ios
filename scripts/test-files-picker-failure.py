@@ -513,10 +513,12 @@ class Controls(unittest.TestCase):
             self.assertIn('    timeout-minutes: 35\n',body)
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
-            self.assertIn('run: bash scripts/test-simulator.sh --cohort '+cohort,original)
+            self.assertIn('run: bash scripts/test-simulator.sh --require-sdk-match --cohort '+cohort+'\n',original)
             self.assertNotIn('continue-on-error',original)
             self.assertIn("if: ${{ failure() && steps.integration.outcome == 'failure' }}",body)
-            self.assertIn('path: build/*.xcresult',body)
+            evidence=body.split('      - name: Test evidence\n')[1].split('      - name:')[0]
+            paths=[line.strip() for line in evidence.split('          path: |\n',1)[1].split('          if-no-files-found:',1)[0].splitlines()]
+            self.assertEqual(paths,['build/*.xcresult','build/ci-toolchain/simulator-selection.*/'])
             public=body.split('name: TripDocket-files-picker-failure-'+cohort+'-')[1].split('if-no-files-found')[0]
             self.assertNotIn('scratch',public);self.assertNotIn('*',public)
             paths=[line.strip() for line in public.splitlines() if '/public/' in line]
