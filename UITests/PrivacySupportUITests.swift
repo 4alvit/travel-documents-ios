@@ -34,7 +34,7 @@ final class PrivacySupportUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment = [:]
         app.launchArguments = [
-            "--ui-testing-unlocked", "--ui-testing-reset",
+            "--ui-testing-unlocked", "--ui-testing-reset", "--ui-testing-guidance-diagnostics",
             "-AppleLanguages", russian ? "(ru-RU)" : "(en-US)",
             "-AppleLocale", russian ? "ru_RU" : "en_US",
             "-UIPreferredContentSizeCategoryName", maximumType
@@ -119,8 +119,10 @@ final class PrivacySupportUITests: XCTestCase {
             try require(visibleViewport(in: app, navigationTitle: copy.externalTitle)
                 .intersection(activeScrollContainer(in: app, navigationTitle: copy.externalTitle)?.frame ?? .zero)
                 .insetBy(dx: -1, dy: -1).contains(open.frame), app: app, "Open action is clipped")
-            let cancel = app.buttons["privacySupport.external.cancel"].firstMatch
-            try require(cancel.exists && cancel.isHittable && cancel.label == copy.cancel,
+            let cancelCandidates = sheet.buttons.matching(identifier: "privacySupport.external.cancel").allElementsBoundByIndex
+            try require(cancelCandidates.count == 1, app: app, "Cancel is missing or ambiguous in the current confirmation toolbar for " + kind)
+            let cancel = cancelCandidates[0]
+            try require(cancel.exists && cancel.isEnabled && cancel.isHittable && cancel.label == copy.cancel,
                         app: app, "Localized Cancel is unavailable for " + kind)
             try require(sheet.frame.insetBy(dx: -1, dy: -1).contains(cancel.frame),
                         app: app, "Cancel is clipped outside the confirmation toolbar")

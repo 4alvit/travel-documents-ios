@@ -464,6 +464,20 @@ not permit this restart. This responds to an actual entry-stat ENOENT in
 scan allowance, native attempt count or test assertion, and does not establish
 that another run will pass.
 
+The same complete-scan restart applies to a confirmed missing known regular
+file or directory in the top-level result bundle's `Staging` directory. During
+an active owned test command, a confirmed missing known regular file below
+`DerivedData/Build/Products` may also request this restart. Xcode rebuilds those
+products between recovery phases: main run `41346633231` removed a test bundle's
+`TravelCore_TravelCore.bundle/Info.plist` during the export build, and the former
+strict absence rule stopped the build before XCTest began. The product case
+does not permit missing directories, symlinks, unknown kinds or nested result
+bundles. Products and result bundles share one restart, the original deadline
+and cumulative encounter budget; a second disappearance still fails. The
+replacement sample must traverse the entire output and charge all current
+bytes. Immutable product manifests, permission errors, identity checks and
+native phase/test counts remain unchanged.
+
 A biometric bridge checkpoint retains the parent's active owned
 `selected-tests` writer identity when the bridge is explicitly linked to that
 parent and its shared biometric report/clock. The child itself is not treated

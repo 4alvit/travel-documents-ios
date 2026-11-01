@@ -63,7 +63,7 @@ trap 'rm -f -- "$TRIPFOLIO_STRINGS_FILE"' EXIT
 # Keep the scanner outside an if condition: a tool/read failure must fail the
 # verification rather than look like a successful absence-of-debug-flags check.
 strings "$TRIPFOLIO_BINARY" > "$TRIPFOLIO_STRINGS_FILE"
-if grep -E -- '--ui-testing-unlocked|--ui-testing-reset|--demo' "$TRIPFOLIO_STRINGS_FILE" >/dev/null; then
+if grep -E -- '--ui-testing-|--demo' "$TRIPFOLIO_STRINGS_FILE" >/dev/null; then
   echo 'ERROR: development launch flags were found in the Release binary.' >&2
   exit 1
 else
