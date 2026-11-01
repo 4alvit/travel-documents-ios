@@ -2323,6 +2323,88 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('resource_scan_failure',r.report)
         self.assertEqual(r.ops.processes,[])
 
+    def test_boot_scan_15_requires_active_exact_owned_wait_and_keeps_restart_disabled(self):
+        r=self.runner();r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':112.}
+        r.report['commands'].append(row);observed=[]
+        def scan(*args,**kwargs):
+            observed.append((args[3],kwargs['allow_xcresult_restart'],kwargs['allow_products_restart']))
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()  # Admission has no active owned process.
+            r.active[123]=SimpleNamespace(pid=123);r.monitor()
+            r.active[123]=SimpleNamespace(pid=456);r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);row['finish']=0.;r.monitor();del row['finish']
+            row['argv']=argv[:-2]+['unowned','-b'];r.monitor();row['argv']=argv
+            row['id']='boot';r.monitor();row['id']='boot-ready'
+            r.owned=None;r.monitor();r.owned=argv[3]
+            row['work_deadline']=7.;r.monitor();row['work_deadline']=112.
+            r.limit=4.;r.monitor();r.limit=1380.
+            probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[dict(row)]},
+                                  active={123:SimpleNamespace(pid=123)},owned=r.owned)
+            r.monitor(command_owner=probe)
+        self.assertEqual(observed,[(end,False,False) for end in [5.,15.,5.,5.,5.,5.,5.,7.,4.,5.]])
+        self.assertEqual((r.limit,r.final,hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']),
+                         (1380.,1500.,5,15))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_boot_scan_completes_full_uncached_traversal_after_six_second_span(self):
+        r=self.runner(Ops({'delay':6.}));r.owned='10000000-0000-0000-0000-000000000001'
+        payload=b'complete synthetic source';(r.out/'synthetic.bin').write_bytes(payload)
+        real=hosted.core.os.scandir;delayed=False
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if r.active and not delayed:delayed=True;r.ops.t+=6.
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertTrue(delayed);self.assertNotIn('resource_scan_failure',r.report)
+        self.assertGreaterEqual(r.report['resources'][-1]['logical'],len(payload))
+        self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
+        row=r.report['commands'][0]
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['returncode']),(112.,120.,0))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
+        real=hosted.core.os.scandir;delays=[]
+        def scan(fd):
+            value=real(fd)
+            if r.active:delays.append(r.ops.t);r.ops.t+=15.25
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(len(delays),1);self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual(failed['deadline_elapsed']-failed['started_elapsed'],15)
+        self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLess(r.ops.t,120.);self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_boot_scan_15_is_clipped_to_original_work_deadline_and_stop_reserve(self):
+        r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
+        r.ops.on_spawn=lambda argv:setattr(r.ops,'t',110.)
+        real=hosted.core.os.scandir;delayed=False
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if r.active and not delayed:delayed=True;r.ops.t+=2.25
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),
+                         (110.,112.,112.25))
+        self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(112.,120.))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLess(r.ops.t,120.);self.assertFalse(r.active)
+
     def test_phase_scan_cooperative_overshoot_keeps_failed_totals_and_never_renews(self):
         r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;calls=0
