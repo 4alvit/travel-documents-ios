@@ -420,13 +420,32 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Restored original preview did not open", app: app) {
             app.navigationBars["Original document"].exists && app.otherElements["QLPreviewControllerView"].exists
         }
-        try await Task.sleep(for: .seconds(5))
+        try await wait("Restored original PDF content did not render", app: app, timeout: .seconds(40)) {
+            self.isRenderedSyntheticOriginal(app)
+        }
         capture(app, "Recovery restored original — inspect synthetic PDF pixels")
         let done = app.navigationBars["Original document"].buttons["Done"]
         try check(done.isHittable, app: app, "Restored original Done is not reachable")
         done.tap()
         // The host now compares the active catalog and original bytes against
         // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private func isRenderedSyntheticOriginal(_ app: XCUIApplication) -> Bool {
+        let previews = app.otherElements.matching(identifier: "QLPreviewControllerView")
+        guard previews.count == 1 else { return false }
+        let preview = previews.element
+        // A Quick Look shell can appear before its remote PDF renderer. These
+        // strings belong to the synthetic original, not the surrounding app UI.
+        return ["SYNTHETIC DEMO — NOT VALID FOR TRAVEL", "Sample reservation ABC-000"].allSatisfy { text in
+            let matches = preview.descendants(matching: .staticText)
+                .matching(NSPredicate(format: "label CONTAINS %@", text))
+            guard matches.count == 1 else { return false }
+            let marker = matches.element
+            let frame = marker.frame
+            return marker.isHittable && !frame.isEmpty && !frame.isInfinite && !frame.isNull
+                && preview.frame.contains(frame) && app.frame.contains(frame)
+        }
     }
 
     private func reachRecoveryLocalRoot(_ localTitle: String, navigation: XCUIElementQuery,
