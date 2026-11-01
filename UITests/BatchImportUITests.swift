@@ -3,6 +3,7 @@ import StoreKit
 import StoreKitTest
 import XCTest
 import UIKit
+import Vision
 
 /// Functional coverage at standard text size. Batch import seeds named synthetic
 /// PDFs into real Files and obtains Pro through local StoreKit. Paired recovery
@@ -429,9 +430,15 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Restored original preview did not open", app: app) {
             app.navigationBars["Original document"].exists && app.otherElements["QLPreviewControllerView"].exists
         }
-        try await wait("Restored original PDF content did not render", app: app, timeout: .seconds(40)) {
-            self.isRenderedSyntheticOriginal(app)
-        }
+        let rendered = try await waitForRenderedSyntheticOriginal(app)
+        let renderedScreenshot = XCTAttachment(screenshot: rendered.screenshot)
+        renderedScreenshot.name = "Recovery restored original — accepted preview pixels"
+        renderedScreenshot.lifetime = .keepAlways
+        add(renderedScreenshot)
+        let recognizedText = XCTAttachment(string: rendered.lines.joined(separator: "\n"))
+        recognizedText.name = "Recovery restored original — recognized preview text"
+        recognizedText.lifetime = .keepAlways
+        add(recognizedText)
         capture(app, "Recovery restored original — inspect synthetic PDF pixels")
         let done = app.navigationBars["Original document"].buttons["Done"]
         try check(done.isHittable, app: app, "Restored original Done is not reachable")
@@ -440,21 +447,78 @@ final class BatchImportUITests: XCTestCase {
         // its pre-reset snapshot. UI counts and a preview container are not it.
     }
 
-    private func isRenderedSyntheticOriginal(_ app: XCUIApplication) -> Bool {
-        let previews = app.otherElements.matching(identifier: "QLPreviewControllerView")
-        guard previews.count == 1 else { return false }
-        let preview = previews.element
-        // A Quick Look shell can appear before its remote PDF renderer. These
-        // strings belong to the synthetic original, not the surrounding app UI.
-        return ["SYNTHETIC DEMO — NOT VALID FOR TRAVEL", "Sample reservation ABC-000"].allSatisfy { text in
-            let matches = preview.descendants(matching: .staticText)
-                .matching(NSPredicate(format: "label CONTAINS %@", text))
-            guard matches.count == 1 else { return false }
-            let marker = matches.element
-            let frame = marker.frame
-            return marker.isHittable && !frame.isEmpty && !frame.isInfinite && !frame.isNull
-                && preview.frame.contains(frame) && app.frame.contains(frame)
+    private struct RenderedOriginalEvidence {
+        let screenshot: XCUIScreenshot
+        let lines: [String]
+    }
+
+    private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication) async throws -> RenderedOriginalEvidence {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
+        var lastObservation = "No preview observation completed"
+        while ContinuousClock.now < deadline {
+            if let rendered = renderedSyntheticOriginal(app, before: deadline, observe: { message in
+                var bytes = Array(message.utf8.prefix(2048))
+                while !bytes.isEmpty, String(bytes: bytes, encoding: .utf8) == nil { bytes.removeLast() }
+                lastObservation = String(decoding: bytes, as: UTF8.self)
+            }) { return rendered }
+            if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
         }
+        let error = failure("Restored original PDF content did not render", app: app)
+        let observation = XCTAttachment(string: lastObservation)
+        observation.name = "Recovery original preview — last observation"
+        observation.lifetime = .keepAlways
+        add(observation)
+        throw error
+    }
+
+    private func renderedSyntheticOriginal(_ app: XCUIApplication,
+                                           before deadline: ContinuousClock.Instant,
+                                           observe: (String) -> Void = { _ in }) -> RenderedOriginalEvidence? {
+        func read<T>(_ value: @autoclosure () -> T) -> T? {
+            guard ContinuousClock.now < deadline else { return nil }
+            return value()
+        }
+        observe("No unique visible preview within the observation deadline")
+        guard ContinuousClock.now < deadline else { return nil }
+        let previews = app.otherElements.matching(identifier: "QLPreviewControllerView")
+        guard read(previews.count) == 1 else { return nil }
+        let preview = previews.element
+        guard read(preview.exists) == true, read(preview.isHittable) == true,
+              let frame = read(preview.frame),
+              [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              !frame.isEmpty, !frame.isNull, !frame.isInfinite,
+              let appFrame = read(app.frame), appFrame.contains(frame) else { return nil }
+        // Some Quick Look versions render the PDF without exposing its text to
+        // accessibility. Read only fresh pixels from the visible preview itself.
+        guard let screenshot = read(preview.screenshot()) else { return nil }
+        observe("Preview screenshot unavailable or capture exceeded the observation deadline")
+        guard let image = screenshot.image.cgImage, ContinuousClock.now < deadline else { return nil }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        request.revision = VNRecognizeTextRequestRevision3
+        do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([request]) }
+        catch {
+            let failure = error as NSError
+            observe("Vision error: domain=\(failure.domain), code=\(failure.code)")
+            return nil
+        }
+        // A synchronous Vision call can overrun; late success is not accepted.
+        observe("Vision completed after the observation deadline")
+        guard ContinuousClock.now < deadline else { return nil }
+        func normalized(_ text: String) -> String {
+            let dashes = "‐‑‒–—−"
+            let plain = String(text.map { dashes.contains($0) ? "-" : $0 })
+            return plain.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            .flatMap { $0.components(separatedBy: .newlines) }.map(normalized)
+        observe("Recognized preview lines:\n" + lines.joined(separator: "\n"))
+        let markers = ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL", "Sample reservation ABC-000"]
+        guard markers.allSatisfy({ marker in lines.filter { $0 == marker }.count == 1 }),
+              ContinuousClock.now < deadline else { return nil }
+        return RenderedOriginalEvidence(screenshot: screenshot, lines: lines)
     }
 
     private func reachRecoveryLocalRoot(_ localTitle: String, navigation: XCUIElementQuery,

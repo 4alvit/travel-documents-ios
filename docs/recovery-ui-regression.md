@@ -234,10 +234,22 @@ that captured surface and prepare a separate bounded source revision.
 Before the one Save-to-Files action, its unique enabled, hittable control and
 the native share header must retain valid, stable frames for three consecutive
 observations within the original 40-second wait. This checks presentation
-readiness without adding a tap retry. Before capturing the restored original,
+readiness without adding a tap retry. Before accepting the restored original,
 the test waits up to 40 seconds for both the synthetic warning and reservation
-body to be visible within the Quick Look preview. Independent pixel review
-remains required even when those accessibility checks pass.
+body to be recognized in an actual screenshot of the unique visible Quick Look
+preview. Apple's on-device Vision recognizer reads only this synthetic fixture;
+no document is sent to an external service. The accepted screenshot is retained.
+The absolute deadline also applies after recognition returns. Independent pixel
+review remains required even when text recognition passes.
+On failure, a final observation of at most 2 KiB distinguishes recognized text,
+missing image data, a late result and a Vision error domain/code. It requires
+no additional screenshot or UI query.
+
+This uses rendered pixels because iOS 18.5 Quick Look can display the complete
+PDF while exposing no PDF text through accessibility. A hosted run demonstrated
+that mismatch after successful import, replacement and application validation.
+The earlier blank screenshot still fails the pixel check; a preview container
+or valid source PDF alone cannot satisfy it.
 If file selection times out, the existing screenshot and accessibility tree are
 followed by a small state attachment. It samples the app, exact destination,
 file, replacement action and Open action without another tap. New reads stop

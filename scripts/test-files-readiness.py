@@ -741,95 +741,206 @@ PREVIEW_FIXTURE = r'''
 import Foundation
 import CoreGraphics
 
-final class XCUIElement {
-    enum ElementType { case other, staticText }
-    let elementType: ElementType
-    let identifier: String
-    let label: String
-    var frame: CGRect
-    var isHittable: Bool
-    var children: [XCUIElement]
-    init(_ identifier: String = "", label: String = "", type: ElementType = .other,
-         frame: CGRect = CGRect(x: 0, y: 100, width: 400, height: 600),
-         hittable: Bool = true, children: [XCUIElement] = []) {
-        self.identifier = identifier; self.label = label; self.elementType = type
-        self.frame = frame; self.isHittable = hittable; self.children = children
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
     }
-    var flattened: [XCUIElement] { children.flatMap { [$0] + $0.flattened } }
-    func descendants(matching type: ElementType) -> XCUIElementQuery {
-        XCUIElementQuery(flattened.filter { $0.elementType == type })
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static func sleep(for value: Duration) async throws { ContinuousClock.elapsed += value }
+}
+struct FakeImage {
+    var lines: [String]
+    var fails = false
+    var ocrTime: Duration = .zero
+    var captureTime: Duration = .zero
+    var hasPixels = true
+}
+struct FakeUIImage { let cgImage: FakeImage? }
+struct XCUIScreenshot {
+    let token: Int
+    let image: FakeUIImage
+}
+@MainActor final class World {
+    var images: [FakeImage]
+    var captures = 0
+    var requests = 0
+    var queryReads = 0
+    var reads: [String] = []
+    var costs: [String: Duration] = [:]
+    func read(_ name: String) { reads.append(name); ContinuousClock.elapsed += costs[name] ?? .zero }
+    init(_ images: [FakeImage]) { self.images = images }
+}
+@MainActor final class XCUIElement {
+    let identifier: String
+    let world: World
+    var present = true
+    var hittable = true
+    var bounds = CGRect(x: 0, y: 100, width: 402, height: 600)
+    var exists: Bool { world.read("exists"); return present }
+    var isHittable: Bool { world.read("hittable"); return hittable }
+    var frame: CGRect { world.read("frame"); return bounds }
+    init(_ identifier: String, _ world: World) { self.identifier = identifier; self.world = world }
+    func screenshot() -> XCUIScreenshot {
+        world.read("screenshot")
+        let image = world.images[min(world.captures, world.images.count - 1)]
+        world.captures += 1
+        ContinuousClock.elapsed += image.captureTime
+        return XCUIScreenshot(token: world.captures, image: FakeUIImage(cgImage: image.hasPixels ? image : nil))
     }
 }
-final class XCUIElementQuery {
+@MainActor final class XCUIElementQuery {
     let elements: [XCUIElement]
-    init(_ elements: [XCUIElement]) { self.elements = elements }
-    var count: Int { elements.count }
+    let world: World
+    init(_ elements: [XCUIElement], _ world: World) { self.elements = elements; self.world = world }
+    var count: Int { world.read("count"); return elements.count }
     var element: XCUIElement { precondition(elements.count == 1); return elements[0] }
     func matching(identifier: String) -> XCUIElementQuery {
-        XCUIElementQuery(elements.filter { $0.identifier == identifier })
-    }
-    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
-        XCUIElementQuery(elements.filter { predicate.evaluate(with: ["label": $0.label]) })
+        XCUIElementQuery(elements.filter { $0.identifier == identifier }, world)
     }
 }
-final class XCUIApplication {
+@MainActor final class XCUIApplication {
     let nodes: [XCUIElement]
-    init(_ nodes: [XCUIElement]) { self.nodes = nodes }
-    var frame: CGRect { CGRect(x: 0, y: 0, width: 402, height: 874) }
-    var otherElements: XCUIElementQuery {
-        XCUIElementQuery(nodes.flatMap { [$0] + $0.flattened }.filter { $0.elementType == .other })
+    let world: World
+    init(_ nodes: [XCUIElement], _ world: World) { self.nodes = nodes; self.world = world }
+    var frame: CGRect { world.read("app.frame"); return CGRect(x: 0, y: 0, width: 402, height: 874) }
+    var otherElements: XCUIElementQuery { world.queryReads += 1; return XCUIElementQuery(nodes, world) }
+}
+struct FakeCandidate { let string: String }
+struct FakeObservation {
+    let string: String
+    func topCandidates(_ count: Int) -> [FakeCandidate] {
+        precondition(count == 1); return [FakeCandidate(string: string)]
     }
 }
-final class PreviewHarness {
+let VNRecognizeTextRequestRevision3 = 3
+final class VNRecognizeTextRequest {
+    enum Level { case fast, accurate }
+    var recognitionLevel: Level = .fast
+    var recognitionLanguages: [String] = []
+    var usesLanguageCorrection = true
+    var revision = 0
+    var results: [FakeObservation]?
+}
+struct FixtureFailure: Error {}
+@MainActor struct VNImageRequestHandler {
+    static var world: World!
+    let image: FakeImage
+    init(cgImage: FakeImage, options: [String: String]) { precondition(options.isEmpty); image = cgImage }
+    func perform(_ requests: [VNRecognizeTextRequest]) throws {
+        precondition(requests.count == 1)
+        let request = requests[0]
+        precondition(request.recognitionLevel == .accurate && request.recognitionLanguages == ["en-US"])
+        precondition(!request.usesLanguageCorrection && request.revision == 3)
+        Self.world.requests += 1
+        ContinuousClock.elapsed += image.ocrTime
+        if image.fails { throw FixtureFailure() }
+        request.results = image.lines.map { FakeObservation(string: $0) }
+    }
+}
+final class XCTAttachment {
+    enum Lifetime { case deleteOnSuccess, keepAlways }
+    let text: String
+    var name = ""
+    var lifetime: Lifetime = .deleteOnSuccess
+    init(string: String) { text = string }
+}
+@MainActor final class PreviewHarness {
+    var failures = 0
+    var attachments: [XCTAttachment] = []
+    func add(_ attachment: XCTAttachment) { precondition(failures == 1); attachments.append(attachment) }
+    func failure(_ message: String, app: XCUIApplication) -> FixtureFailure {
+        precondition(message == "Restored original PDF content did not render")
+        failures += 1
+        return FixtureFailure()
+    }
     // ACTUAL_HELPER
-    func evaluate(_ app: XCUIApplication) -> Bool { isRenderedSyntheticOriginal(app) }
+    func run(_ name: String) async throws {
+        let warning = "SYNTHETIC DEMO — NOT VALID FOR TRAVEL"
+        let booking = "Sample reservation ABC-000"
+        let positive = FakeImage(lines: [warning, "Coast weekend", booking, "Alex Example"])
+        let world = World([positive])
+        VNImageRequestHandler.world = world
+        let node = XCUIElement("QLPreviewControllerView", world)
+        var nodes = [node]
+        var expected = false
+        var expectedCaptures = 1
+        switch name {
+        case "rendered": expected = true
+        case "normalized":
+            world.images = [FakeImage(lines: [" SYNTHETIC  DEMO – NOT VALID FOR TRAVEL ", "Sample\treservation ABC-000"])]; expected = true
+        case "blank": world.images = [FakeImage(lines: [])]
+        case "wrong-scope":
+            world.images = [FakeImage(lines: [])]
+            nodes.append(XCUIElement("outside-preview-readable-pdf", World([positive])))
+        case "only-warning": world.images = [FakeImage(lines: [warning])]
+        case "wrong-digits": world.images = [FakeImage(lines: [warning, "Sample reservation ABC-OOO"])]
+        case "wrong-case": world.images = [FakeImage(lines: [warning.lowercased(), booking])]
+        case "duplicate": world.images = [FakeImage(lines: [warning, warning, booking])]
+        case "ocr-error": world.images[0].fails = true
+        case "error-until-deadline": world.images[0].fails = true; world.images[0].ocrTime = .seconds(20); expectedCaptures = 2
+        case "bounded-lines": world.images = [FakeImage(lines: [String(repeating: "я", count: 4000)], ocrTime: .milliseconds(39900))]
+        case "slow-count", "slow-exists", "slow-hittable", "slow-frame", "slow-app.frame":
+            world.costs[String(name.dropFirst(5))] = .seconds(41); expectedCaptures = 0
+        case "missing-pixels": world.images[0].hasPixels = false
+        case "duplicate-preview": nodes.append(XCUIElement("QLPreviewControllerView", world)); expectedCaptures = 0
+        case "missing-preview": nodes = []; expectedCaptures = 0
+        case "hidden": node.hittable = false; expectedCaptures = 0
+        case "absent": node.present = false; expectedCaptures = 0
+        case "offscreen": node.bounds.origin.y = 900; expectedCaptures = 0
+        case "zero-area": node.bounds.size.height = 0; expectedCaptures = 0
+        case "nonfinite": node.bounds.origin.x = .nan; expectedCaptures = 0
+        case "capture-overrun": world.images[0].captureTime = .seconds(41)
+        case "ocr-overrun", "ocr-at-deadline":
+            world.images[0].ocrTime = .seconds(name == "ocr-overrun" ? 41 : 40)
+        case "already-expired": expectedCaptures = 0
+        case "blank-then-rendered":
+            world.images = [FakeImage(lines: []), positive]; expected = true; expectedCaptures = 2
+        default: fatalError("Unknown fixture")
+        }
+        let app = XCUIApplication(nodes, world)
+        if ["blank-then-rendered", "ocr-overrun", "ocr-at-deadline", "capture-overrun", "error-until-deadline", "bounded-lines"].contains(name) {
+            var acceptedToken: Int?
+            do { acceptedToken = try await waitForRenderedSyntheticOriginal(app).screenshot.token }
+            catch { precondition(!expected) }
+            precondition((acceptedToken != nil) == expected)
+            if expected { precondition(acceptedToken == 2 && failures == 0) }
+            else {
+                precondition(failures == 1 && attachments.count == 1)
+                let text = attachments[0].text
+                precondition(text.utf8.count <= 2048 && attachments[0].lifetime == .keepAlways)
+                if name == "error-until-deadline" { precondition(text.contains("Vision error: domain=") && text.contains("code=")) }
+                if name == "ocr-overrun" || name == "ocr-at-deadline" { precondition(text == "Vision completed after the observation deadline") }
+                if name == "bounded-lines" { precondition(text.utf8.count >= 2044 && text.hasPrefix("Recognized preview lines:") && !text.contains("�")) }
+            }
+        } else {
+            let deadline = ContinuousClock.now.advanced(by: name == "already-expired" ? .zero : .seconds(40))
+            let result = renderedSyntheticOriginal(app, before: deadline)
+            precondition((result != nil) == expected)
+            if expected { precondition(result?.screenshot.token == 1) }
+        }
+        precondition(world.captures == expectedCaptures)
+        if name.hasPrefix("slow-") {
+            let order = ["count", "exists", "hittable", "frame", "app.frame"]
+            let index = order.firstIndex(of: String(name.dropFirst(5)))!
+            precondition(world.reads == Array(order[...index]) && world.requests == 0)
+        }
+        if expected { precondition(attachments.isEmpty) }
+        if ["capture-overrun", "missing-pixels", "already-expired"].contains(name) {
+            precondition(world.requests == 0)
+        }
+        if name == "already-expired" { precondition(world.queryReads == 0) }
+        if ["ocr-overrun", "ocr-at-deadline"].contains(name) { precondition(world.requests == 1 && world.queryReads == 1) }
+        print("PASS " + name)
+    }
 }
-func marker(_ text: String) -> XCUIElement {
-    XCUIElement(label: text, type: .staticText, frame: CGRect(x: 30, y: 200, width: 280, height: 30))
+@main struct Main {
+    @MainActor static func main() async throws { try await PreviewHarness().run(CommandLine.arguments[1]) }
 }
-func pdf(_ children: [XCUIElement]) -> XCUIElement {
-    XCUIElement("QLPDFViewControllerViewAccessibilityIdentifier", children: children)
-}
-func preview(_ children: [XCUIElement]) -> XCUIElement {
-    XCUIElement("QLPreviewControllerView", children: children)
-}
-func decode(_ object: [String: Any]) -> XCUIElement {
-    let f = object["frame"] as? [Double] ?? [0, 100, 400, 600]
-    return XCUIElement(object["identifier"] as? String ?? "", label: object["label"] as? String ?? "",
-        type: object["type"] as? String == "staticText" ? .staticText : .other,
-        frame: CGRect(x: f[0], y: f[1], width: f[2], height: f[3]),
-        hittable: object["hittable"] as? Bool ?? true,
-        children: (object["children"] as? [[String: Any]] ?? []).map(decode))
-}
-let warning = marker("SYNTHETIC DEMO — NOT VALID FOR TRAVEL")
-let booking = marker("Coast weekend\nSample reservation ABC-000\nAlex Example")
-let name = CommandLine.arguments[1]
-var expected = false
-let app: XCUIApplication
-switch name {
-case "rendered": app = XCUIApplication([preview([pdf([warning, booking])])]); expected = true
-case "combined-lines": app = XCUIApplication([preview([pdf([marker(warning.label + "\n" + booking.label)])])]); expected = true
-case "blank": app = XCUIApplication([preview([])])
-case "pdf-shell": app = XCUIApplication([preview([pdf([])])])
-case "direct-content": app = XCUIApplication([preview([warning, booking])]); expected = true
-case "outside-preview": app = XCUIApplication([preview([]), pdf([warning, booking])])
-case "only-warning": app = XCUIApplication([preview([pdf([warning])])])
-case "only-booking": app = XCUIApplication([preview([pdf([booking])])])
-case "duplicate-marker": app = XCUIApplication([preview([pdf([warning, warning, booking])])])
-case "separate-wrappers": app = XCUIApplication([preview([pdf([warning]), pdf([booking])])]); expected = true
-case "duplicate-preview": app = XCUIApplication([preview([pdf([warning, booking])]), preview([])])
-case "hidden": warning.isHittable = false; app = XCUIApplication([preview([pdf([warning, booking])])])
-case "offscreen": warning.frame.origin.y = 950; app = XCUIApplication([preview([pdf([warning, booking])])])
-case "empty-geometry": warning.frame.size.height = 0; app = XCUIApplication([preview([pdf([warning, booking])])])
-case "file":
-    let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
-    let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    app = XCUIApplication((object["nodes"] as! [[String: Any]]).map(decode))
-    expected = object["expected"] as! Bool
- default: fatalError("Unknown fixture")
-}
-precondition(PreviewHarness().evaluate(app) == expected)
-print("PASS " + name)
 '''
 
 
@@ -839,33 +950,37 @@ class PreviewReadinessTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.directory.cleanup)
         source = SOURCE.read_text()
-        start = source.index('    private func isRenderedSyntheticOriginal(')
+        start = source.index('    private struct RenderedOriginalEvidence {')
         end = source.index('    private func reachRecoveryLocalRoot(', start)
         root = Path(cls.directory.name)
         path = root / 'PreviewReadiness.swift'
         path.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = root / 'preview-readiness-tests'
-        result = subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
                                 capture_output=True, text=True, timeout=30)
         if result.returncode:
             raise AssertionError(result.stderr)
 
-    def test_rendered_pdf_content_and_rejected_shells(self):
-        for name in ['rendered', 'combined-lines', 'blank', 'pdf-shell', 'direct-content',
-                     'outside-preview', 'only-warning', 'only-booking', 'duplicate-marker',
-                     'separate-wrappers', 'duplicate-preview', 'hidden', 'offscreen', 'empty-geometry']:
+    def test_rendered_preview_pixels_and_bounded_observations(self):
+        for name in ['rendered', 'normalized', 'blank', 'wrong-scope', 'only-warning',
+                     'wrong-digits', 'wrong-case', 'duplicate', 'ocr-error', 'missing-pixels',
+                     'duplicate-preview', 'missing-preview', 'hidden', 'absent', 'offscreen',
+                     'zero-area', 'nonfinite', 'capture-overrun', 'ocr-overrun', 'ocr-at-deadline',
+                     'already-expired', 'blank-then-rendered', 'error-until-deadline', 'bounded-lines',
+                     'slow-count', 'slow-exists', 'slow-hittable', 'slow-frame', 'slow-app.frame']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
-    def test_recovery_requires_rendered_content_before_capture(self):
+    def test_recovery_attaches_the_screenshot_that_satisfied_ocr(self):
         source = SOURCE.read_text()
         start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
-        end = source.index('    private func isRenderedSyntheticOriginal(', start)
+        end = source.index('    private struct RenderedOriginalEvidence {', start)
         body = source[start:end]
-        self.assertIn('wait("Restored original PDF content did not render", app: app, timeout: .seconds(40))', body)
-        self.assertLess(body.index('self.isRenderedSyntheticOriginal(app)'),
+        self.assertIn('let rendered = try await waitForRenderedSyntheticOriginal(app)', body)
+        self.assertIn('XCTAttachment(screenshot: rendered.screenshot)', body)
+        self.assertLess(body.index('add(renderedScreenshot)'),
                         body.index('capture(app, "Recovery restored original'))
         self.assertNotIn('Task.sleep(for: .seconds(5))', body)
 
