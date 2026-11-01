@@ -411,10 +411,16 @@ class Recovery:
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
-        # Native prepare/export/restore builds share the existing15s scan
-        # allowance. Non-native preparation/capability/evidence stay at5s.
+        # Native prepare/export/restore builds and an actively owned boot wait
+        # share the existing15s scan allowance. Boot admission, other discovery,
+        # capability and evidence stay at5s; no command/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
-        allowance = CAPS['phase_scan_seconds'] if phase_scan else CAPS['scan_seconds']
+        boot_process = (self.active.get(pending.get('pgid'))
+                        if owner is self and unfinished and pending.get('id') == 'boot-ready' else None)
+        boot_scan = (boot_process is not None and boot_process.pid == pending.get('pgid')
+                     and self.owned is not None
+                     and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
+        allowance = CAPS['phase_scan_seconds'] if phase_scan or boot_scan else CAPS['scan_seconds']
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
             deadline = min(deadline, owner.t0+pending['work_deadline'])
