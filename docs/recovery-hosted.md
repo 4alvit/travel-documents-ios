@@ -202,6 +202,16 @@ seven-second process-stop reserve and mandatory post-test validation. Admission
 is checked before preparation and again immediately before spawn. A terminal
 test-process poll at or after its wait deadline fails, even with exit code 0.
 Both locales use 40-minute workflow steps and 46-minute jobs.
+
+Guidance tab transitions retain a five-second observation deadline and one tap.
+A failed English run showed a fully rendered Settings screen: the selected-tab
+snapshot was followed by a second remote navigation-bar query that exhausted
+the deadline. The transition now requires the selected tab and exactly one
+matching, nonempty, in-bounds navigation bar in the same immutable snapshot.
+The existing bounded traversal and strict deadline checks remain; a late
+snapshot, ambiguous title or missing navigation bar still fails. Fixture tests
+execute the actual Swift helper and reject those states without another remote
+query or another tap.
 The step limits include each locale's work and 180-second cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
