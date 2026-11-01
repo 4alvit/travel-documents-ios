@@ -52,6 +52,19 @@ an attachment, assertion or timeout. These observations are not substitutes for
 successful native tests, and do not claim a root cause for the historical
 Files inline-editor or screenshot-service failures in issues #3 and #4.
 
+The guidance test now attaches the complete bounded diagnostic values separately:
+XCTest's hierarchy description truncates them. A local English iPad execution
+passed its existing assertions in 178.215 seconds and recorded all four Cancel
+actions, cleared selections and completed dismissals. The post-cancel images
+show the guidance page with the confirmation closed. Its owned device was
+removed and the full final inventory matched the baseline. This focused local
+Debug run does not replace final-candidate hosted or Release qualification.
+
+Release qualification now checks its pinned Xcode 26.2 toolchain and xcresult
+0.4.0 schema before native work. The same read-only preflight runs in ordinary
+CI, with retained schema evidence. Its 31 offline guard tests pass; native
+qualification must still pass before RC promotion.
+
 ## Accepted executable baseline and ordinary Release launch — 25 October 2026
 
 The accepted executable baseline is `674cbb6`. [CI 40169628635](https://github.com/4alvit/travel-documents-ios/actions/runs/40169628635)

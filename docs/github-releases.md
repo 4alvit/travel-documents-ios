@@ -36,6 +36,14 @@ old tag or relabel an old binary as fixed.
 
 ## Prepare without publishing
 
+The explicit `Release qualification` workflow pins Xcode 26.2 (17C52). Its
+unchanged batch and biometric drivers read xcresult schema 0.4.0, which the
+ordinary CI default Xcode 16.4 does not expose. Before creating a project or
+Simulator, qualification verifies the exact toolchain and both required schema
+contracts. Ordinary CI also performs this read-only preflight and retains its
+schema evidence; its application builds keep their existing default toolchain.
+A missing toolchain or incompatible schema fails the gate before native testing.
+
 `scripts/prepare-release.py` uses Python's standard library, local Git objects,
 and authenticated `gh` **GET** requests to github.com. Actions artifact downloads
 use `Accept: application/vnd.github+json`; release asset downloads use
