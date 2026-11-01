@@ -17,7 +17,8 @@ The merge commit `3b223e483879df48fd9c12000ba532700e83eba1` has the same source 
 `931c603dd8d128153cbd110a9e01220ec4c1f035`.
 
 The subsequent [main CI 41346633231](https://github.com/4alvit/travel-documents-ios/actions/runs/41346633231)
-failed recovery and English iPad guidance. These newer failures block promotion;
+failed recovery, English iPad guidance and the phone Files import layout case.
+These newer failures block promotion;
 the prior successful run does not replace them. Recovery's resource traversal
 encountered a disappearing regular file inside an actively rebuilt test product
 and stopped the export command before XCTest. The English guidance case retained
@@ -25,6 +26,22 @@ its website confirmation after one Cancel tap. Its screenshots and event record
 do not distinguish an undelivered action from failed presentation dismissal.
 Neither result establishes an application data-loss defect or a private Apple
 framework cause. Fixes and diagnostic additions require fresh exact-source CI.
+
+The phone failure was an early 30-second navigation wait inside a helper with
+an existing 40-second total readiness budget. The retained video shows a blank
+Files sheet through that early cutoff, followed by the real navigation and
+Cancel before the total budget expired. The helper now observes both required
+elements within one monotonic 40-second deadline, rejecting observations that
+finish after it. It retains the unique enabled/hittable typed Cancel, one tap,
+navigation dismissal and return-to-presenter checks.
+
+The two affected Import/Restore layout cases then passed locally on one fresh
+iOS 27.0 (24A434) Simulator using Xcode 27.1 (27A9275), SDK 27.1. Files was not
+prewarmed. Readiness took 5.385 and 5.057 seconds respectively; the complete
+XCTest result contains two passes, no failures/skips and no runtime warnings.
+Source hashes were unchanged, the owned device was removed, and the full final
+device inventory matched its baseline. This is Debug fixture-based layout
+validation of the follow-up change, not release or authentication acceptance.
 
 The recovery monitor now permits one complete rescan after a confirmed missing
 regular build-product leaf while its owned writer is active; all time, byte and
