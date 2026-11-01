@@ -66,6 +66,13 @@ test products; its transactions never count as sales.
 Run `bash scripts/test-simulator.sh` with an installed runtime to execute app,
 StoreKit and UI tests serially. `TRIPFOLIO_SIMULATOR_ID` can select a specific
 device. The result bundle is written under `build/`.
+Pass `--require-sdk-match` before any `--cohort` option to require an available
+iPhone in the selected Xcode's exact Simulator SDK runtime; a supplied device
+UUID is checked against the same requirements. Ordinary local use keeps its
+existing selection behavior. The core and guidance CI jobs enable this check
+and pin Xcode 26.2 (17C52), including the Release preview build. Their captured
+inventories and selected device are retained with the test artifacts. The
+separate recovery compatibility job keeps its own pinned toolchain/profile.
 
 Check the [current CI](https://github.com/4alvit/travel-documents-ios/actions/workflows/ci.yml)
 for the exact revision you intend to build. Historical successful runs and their

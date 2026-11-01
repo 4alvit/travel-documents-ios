@@ -16,6 +16,8 @@ jobs:
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15
     timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,6 +28,7 @@ jobs:
           set -euo pipefail
           mkdir -p build/ci-toolchain
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 26.2\nBuild version 17C52'
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
           # Recognize exact producer documentation; runtime acceptance is separate.
@@ -44,6 +47,9 @@ jobs:
           path: build/ci-toolchain/qualification-*
           if-no-files-found: warn
           retention-days: 7
+      - name: Simulator selector regression checks
+        timeout-minutes: 2
+        run: python3 -B scripts/test-select-simulator.py
       - name: Verify
         run: |
           set -euo pipefail
@@ -55,7 +61,7 @@ jobs:
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh --cohort core-purchase
+        run: bash scripts/test-simulator.sh --require-sdk-match --cohort core-purchase
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -81,7 +87,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/*.xcresult
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
           if-no-files-found: warn
           retention-days: 7
       - name: Simulator artifact
@@ -98,6 +106,8 @@ jobs:
     name: Accessibility, localization and guidance UI
     runs-on: macos-15
     timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,11 +117,12 @@ jobs:
           set -euo pipefail
           mkdir -p build/ci-toolchain
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 26.2\nBuild version 17C52'
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh --cohort ui-guidance
+        run: bash scripts/test-simulator.sh --require-sdk-match --cohort ui-guidance
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -137,7 +148,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-tests-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/*.xcresult
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
