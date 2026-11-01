@@ -621,7 +621,31 @@ final class BatchImportUITests: XCTestCase {
         }
         let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
         let picker = pickers.element
-        try await wait("The real Files picker root is missing", app: app) { pickers.count == 1 && picker.exists }
+        let recents = app.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.DocumentManager.RecentDocuments, Title: Recents")
+        let tabs = app.tabBars.matching(identifier: "DOC.browsingModeTabBar")
+        let browseActions = tabs.element.buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let browse = browseActions.element
+        let browseReady = {
+            tabs.count == 1 && browseActions.count == 1 && browse.isEnabled && browse.isHittable
+        }
+        let browserReady = { navigations.count == 1 && pickers.count == 1 && picker.exists }
+        let recentsReady = {
+            navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
+                && self.isRecoveryFolder("Recents", navigation: navigation) && browseReady()
+        }
+        // A fresh importer can open Recents without the browser root used by
+        // Save to Files. Leave only that positively identified
+        // native screen before requiring the local-folder browser.
+        try await wait("Files did not show its browser or supported Recents screen", app: app) {
+            browserReady() || recentsReady()
+        }
+        let openedFromRecents = !browserReady()
+        if openedFromRecents {
+            try check(recentsReady(), app: app, "Native Files Recents route changed")
+            browse.tap()
+        }
+        try await wait("The real Files picker root is missing", app: app) { browserReady() }
         let atDestination = {
             navigations.count == 1 && pickers.count == 1 && picker.exists
                 && self.isRecoveryFolder(folder, navigation: navigation)
@@ -629,7 +653,6 @@ final class BatchImportUITests: XCTestCase {
         let directory = picker.cells.matching(identifier: folder + ", Folder").firstMatch
         // The captured native tab bar is a sibling of Browse View (Picker),
         // not its descendant. Its controls can appear after the root/navigation.
-        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons["Browse"].firstMatch
         let location = app.cells.matching(NSPredicate(
             format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
         )).firstMatch
@@ -637,7 +660,7 @@ final class BatchImportUITests: XCTestCase {
             navigation.exists && picker.exists
                 && (atDestination() || (directory.exists && directory.isHittable)
                     || (location.exists && location.isHittable)
-                    || (browse.exists && browse.isHittable))
+                    || (!openedFromRecents && browseReady()))
         }
         // Files remembers its last directory across presentations. The exact
         // reachable heading is sufficient; do not look for a child with the
@@ -645,7 +668,7 @@ final class BatchImportUITests: XCTestCase {
         if atDestination() { return picker }
         if !(directory.exists && directory.isHittable) {
             if !(location.exists && location.isHittable) {
-                try check(browse.exists && browse.isHittable, app: app, "Native Files Browse is unavailable")
+                try check(!openedFromRecents && browseReady(), app: app, "Native Files Browse is unavailable")
                 browse.tap()
             }
             // Browse can restore On My iPhone directly instead of showing
