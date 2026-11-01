@@ -129,9 +129,15 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        locale: [en-US, ru-RU]
+        include:
+          - locale: en-US
+            step_minutes: 29
+            job_minutes: 35
+          - locale: ru-RU
+            step_minutes: 34
+            job_minutes: 40
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.job_minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -143,7 +149,7 @@ jobs:
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
-        timeout-minutes: 29
+        timeout-minutes: ${{ matrix.step_minutes }}
         run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
       - name: iPad test evidence
         if: always()
