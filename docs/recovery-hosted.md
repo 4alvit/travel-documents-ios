@@ -89,15 +89,30 @@ published artifacts. It does not replace the UI flows with direct service calls.
 
 The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
 reserved for owned cleanup, including a final 10-second receipt reserve. Each
-Xcode phase has at most 600 seconds including process stop; each test has 300.
-The initial runtime discovery has a 120-second command cap: 112 seconds for
-work and the existing 8-second stop reserve. A returned inventory at or after
-its original command work deadline is rejected before parsing or selection.
-This is a finite scheduling-policy change from 60 seconds; the earlier hosted
-query timed out with no output at its 52-second work bound. That evidence does
-not establish the cause or that 120 seconds would suffice. There is no retry,
-warmup query, runtime fallback or download. The separate capability preparation
-stage remains limited to 60 seconds.
+Xcode phase has at most 600 seconds including process stop; the preparation
+test has 120 seconds and export/restore each have 300.
+Recovery discovery uses one fixed 300-second window after source/toolchain
+preflight. It covers the first runtime query, profile parsing/selection, the
+existing capability check, runtime recheck, baseline device inventory, one
+create, created-device inventory and exact owned-root verification. Every
+discovery command shares this deadline and retains its 8-second stop reserve;
+the initial query therefore has at most 292 seconds of work, with later calls
+receiving only the remaining time. A late response, parse, selection or owned
+root check cannot admit boot or UI work. The window ends before the pre-boot
+Files absence proof. Failure restores the original work limit before the
+unchanged owned-device cleanup path; the discovery window never renews.
+
+In run 41328552226 the initial runtime query returned no bytes before the old
+112-second work deadline, so no device or UI phase was started. Its process was
+stopped and reaped. Earlier identical queries completed in 7.7–63.4 seconds.
+These observations justify a bounded startup policy, but do not prove the OS
+cause or that 300 seconds will always suffice. There is no retry, warmup query,
+runtime fallback or download. The capability stage keeps its own 60-second cap
+inside the shared discovery window. The original 1,380-second work deadline is
+unchanged: fully consuming discovery leaves at most 1,080 seconds minus
+preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
+not a guarantee that all can run for their maximum duration in one attempt;
+later commands remain clipped to available work time and cleanup is reserved.
 
 Files preparation first runs the real provider initialization UI case, which
 reaches the exact local root, proves the run-UUID name absent and stops the
