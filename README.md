@@ -77,6 +77,8 @@ unsigned Simulator build with exact source, CI and validation receipts. Beta,
 release candidate and final promotion retain the same verified payload bytes.
 Those channels do not qualify physical-device behavior, live purchases,
 TestFlight or App Store distribution.
+Hosted qualification captures require an independent result-bundle and visual
+review before their operator receipts can authorize a release promotion.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.

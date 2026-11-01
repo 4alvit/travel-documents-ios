@@ -200,7 +200,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(m.InvalidRelease): m.validate_payload(self.f.files, self.f.commit, self.f.tree, self.f.run, "0.2.0")
 
     def test_receipts_must_match_source_artifact_tests_and_cleanup(self):
-        for key, value in [("release_artifact_sha256", "a" * 64), ("source", {"commit": "a" * 40, "tree": self.f.tree}), ("cleanup_verified", False), ("runtime_warnings", ["warning"]), ("status", "failed"), ("tests", [])]:
+        for key, value in [("release_artifact_sha256", "a" * 64), ("source", {"commit": "a" * 40, "tree": self.f.tree}), ("cleanup_verified", False), ("runtime_warnings", ["warning"]), ("status", "failed"), ("status", "captured_pending_review"), ("tests", [])]:
             receipt = self.f.receipt("privacy-biometric"); receipt[key] = value
             with self.subTest(key=key), self.assertRaises(m.InvalidRelease): m.validate_receipt(m.encode_json(receipt), "privacy-biometric", self.f.commit, self.f.tree, m.digest(self.f.app))
         receipt = self.f.receipt("privacy-biometric"); receipt["tests"][0]["result"] = "skipped"
