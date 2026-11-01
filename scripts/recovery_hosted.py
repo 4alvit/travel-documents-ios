@@ -187,6 +187,18 @@ class HostedRecovery(core.Recovery):
         self.save()  # Persist the actual run/attempt before any process acquisition.
 
     def sim(self,label,*args,cap=30):
+        discovery=getattr(self,'_discovery_deadline',None)
+        if discovery is not None and not self.cleaning and label in (
+                'profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'):
+            # All startup commands spend the same window; a later query or
+            # create never receives a fresh 300 seconds. command() reserves
+            # its original eight seconds for stopping inside self.limit.
+            require(self.limit<=discovery,'Discovery deadline was extended')
+            result=super().sim(label,*args,cap=300)
+            row=self.report['commands'][-1]
+            require(self.ops.now()<self.t0+row['work_deadline'],
+                    'Discovery command work deadline reached')
+            return result
         # Only the initial owned Files preparation gets a larger command cap.
         action={'files-launch':'launch','files-terminate':'terminate'}.get(label)
         if action:
@@ -296,6 +308,7 @@ class HostedRecovery(core.Recovery):
                     and bool(path.stat().st_mode&0o111)==expected['executable'],'Checkout changed after snapshot')
 
     def discover_profile(self):
+        require('discovery_budget' not in self.report,'Discovery already started')
         selected=self.command('selected-xcode',['/usr/bin/xcode-select','-p'],20).strip()
         developer=Path(selected).resolve(strict=True)
         toolchain_paths(developer)
@@ -307,15 +320,24 @@ class HostedRecovery(core.Recovery):
         sdk=self.command('sdk-version',['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version'],20).strip()
         sdk_path=Path(self.command('sdk-path',['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-path'],20).strip()).resolve(strict=True)
         toolchain_paths(developer,sdk_path)
-        # Publish only bounded toolchain facts in the existing receipt allowlist.
-        # The first runtime query gets 112s work + 8s stop inside the same global
-        # budget. This is a finite scheduling policy, not a proven OS fix.
+        # Toolchain preflight precedes one shared startup window, ending only
+        # after the created device's exact ownership/root has been established.
+        require(not hasattr(self,'_discovery_deadline'),'Discovery already started')
+        started=self.ops.now()
+        self._discovery_original_limit=self.limit
+        self._discovery_deadline=min(self.limit,started+300)
+        self.limit=self._discovery_deadline
+        self.report['discovery_budget']={'started_elapsed':started-self.t0,
+            'deadline_elapsed':self.limit-self.t0,'requested_seconds':300,
+            'original_work_deadline_elapsed':self._discovery_original_limit-self.t0,
+            'stop_reserve_seconds':8,'status':'active'}
+        # This remains a finite scheduling policy, not a proven OS fix.
         discovery={'xcode_version':version,'developer_dir':str(developer),
                    'sdk_version':sdk if len(sdk)<=32 and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}',sdk) else 'INVALID_FORMAT',
-                   'sdk_path':str(sdk_path),'runtime_inventory_cap_seconds':120,
+                   'sdk_path':str(sdk_path),'runtime_inventory_cap_seconds':300,
                    'runtime_inventory_status':'pending'}
         self.report['profile_discovery']=discovery
-        raw_inventory=self.sim('profile-runtimes','list','runtimes','--json',cap=120)
+        raw_inventory=self.sim('profile-runtimes','list','runtimes','--json')
         inventory_command=self.report['commands'][-1]
         require(self.ops.now() < self.t0+inventory_command['work_deadline'],
                 'Initial runtime inventory work deadline reached')
@@ -323,7 +345,9 @@ class HostedRecovery(core.Recovery):
                          runtime_inventory_utf8_bytes=len(raw_inventory.encode()),
                          runtime_inventory_sha256=hashlib.sha256(raw_inventory.encode()).hexdigest())
         inventory=json.loads(raw_inventory)
+        self.checkpoint()
         runtime=select_runtime(sdk,inventory,self.profile)
+        self.checkpoint()
         self.plan['runtime']=runtime['identifier'];self.intent['runtime']=runtime['identifier']
         paths=[Path(self.host['python']),Path('/usr/bin/git'),Path('/usr/bin/xcrun'),Path('/bin/ps'),
                developer/'usr/bin/xcodebuild',developer/'usr/bin/simctl']
@@ -370,9 +394,34 @@ class HostedRecovery(core.Recovery):
     def setup(self):
         require(shutil.disk_usage(self.out).free>=core.CAPS['admission_free_bytes'],'Hosted admission space below 16GiB')
         self.capture_source()
-        self.discover_profile()
-        self.check_capability()
-        super().setup()
+        try:
+            self.discover_profile()
+            self.check_capability()
+            super().setup()
+        finally:
+            if hasattr(self,'_discovery_original_limit'):
+                self.report['discovery_budget'].update(status='failed',finished_elapsed=self.ops.now()-self.t0)
+                self.limit=self._discovery_original_limit
+                del self._discovery_original_limit
+                del self._discovery_deadline
+
+    def owned_root(self):
+        discovering=hasattr(self,'_discovery_original_limit') and not self.cleaning
+        if discovering:self.checkpoint()
+        root=super().owned_root()
+        if discovering:self.checkpoint()
+        return root
+
+    def prepare_files_ui_baseline(self):
+        # Recovery.setup calls this only after its exact created-device
+        # inventory, claimed UUID comparison and owned-root identity checks.
+        if hasattr(self,'_discovery_original_limit'):
+            self.checkpoint()
+            self.report['discovery_budget'].update(status='completed',finished_elapsed=self.ops.now()-self.t0)
+            self.limit=self._discovery_original_limit
+            del self._discovery_original_limit
+            del self._discovery_deadline
+        return super().prepare_files_ui_baseline()
 
     def setup_files(self):
         first=len(self.report['commands'])

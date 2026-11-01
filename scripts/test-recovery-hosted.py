@@ -751,25 +751,28 @@ class BoundaryTests(unittest.TestCase):
         with patch.object(hosted,'toolchain_paths'),patch.object(hosted.core,'file_digest',return_value='a'*64):
             runner.discover_profile()
 
-    def test_first_runtime_query_allows_70_seconds_inside_120_cap(self):
-        r=self.discovery_runner(delay=70)
+    def test_first_runtime_query_allows_150_seconds_inside_shared_300_budget(self):
+        r=self.discovery_runner(delay=150)
         self.discover(r)
         rows=r.report['commands']
-        self.assertEqual([x['requested_cap_seconds'] for x in rows],[20,20,20,20,120])
+        self.assertEqual([x['requested_cap_seconds'] for x in rows],[20,20,20,20,300])
         self.assertEqual(rows[-1]['argv'],['/usr/bin/xcrun','simctl','list','runtimes','--json'])
         self.assertEqual(len(r.ops.processes),5)
-        self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+        self.assertEqual((r.t0,r.limit,r.final),(0,300,1500))
         self.assertEqual(PROFILE['prep_seconds'],60)
         self.assertEqual(r.report['profile_discovery']['sdk_version'],'18.5')
         self.assertEqual(r.report['profile_discovery']['runtime_inventory_status'],'returned')
         self.assertTrue((r.out/'resolved-profile.json').is_file())
-        self.assertEqual(r.report['profile_discovery']['runtime_inventory_cap_seconds'],120)
-        self.assertAlmostEqual(rows[-1]['work_deadline']-rows[-1]['start'],112,places=6)
-        self.assertGreaterEqual(rows[-1]['finish']-rows[-1]['start'],70)
-        self.assertLess(rows[-1]['finish']-rows[-1]['start'],112)
-        # The separate pre-create inventory and every other sim call keep 30s.
+        self.assertEqual(r.report['profile_discovery']['runtime_inventory_cap_seconds'],300)
+        self.assertAlmostEqual(rows[-1]['work_deadline']-rows[-1]['start'],292,places=6)
+        self.assertGreaterEqual(rows[-1]['finish']-rows[-1]['start'],150)
+        self.assertLess(rows[-1]['finish']-rows[-1]['start'],292)
+        # The pre-create inventory shares the original deadline; unrelated calls keep 30s.
         with patch.object(r,'command',return_value='{}') as call:
             r.sim('runtime-inventory','list','runtimes','--json')
+        self.assertEqual(call.call_args.args[-1],300)
+        with patch.object(r,'command',return_value='{}') as call:
+            r.sim('unrelated','list','devices','--json')
         self.assertEqual(call.call_args.args[-1],30)
 
     def test_runtime_query_still_times_out_once_and_preserves_pending_facts(self):
@@ -777,7 +780,7 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):self.discover(r)
         row=r.report['commands'][-1]
         self.assertEqual(row['error'],"RuntimeError('Command timeout')")
-        self.assertAlmostEqual(row['finish']-row['start'],112,places=6)
+        self.assertAlmostEqual(row['finish']-row['start'],292,places=6)
         self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         self.assertFalse(r.active)
         self.assertEqual(len(r.ops.processes),5)
@@ -788,19 +791,19 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('host_capability',saved)
 
     def test_runtime_command_uses_remaining_global_budget_and_reserves_stop(self):
-        r=self.runner(Ops({'delay':float('inf')}));r.ops.t=1370
-        with self.assertRaises(RuntimeError):r.sim('profile-runtimes','list','runtimes','--json',cap=120)
+        r=self.discovery_runner(delay=float('inf'));r.ops.t=1370
+        with self.assertRaises(RuntimeError):self.discover(r)
         row=r.report['commands'][-1]
         self.assertEqual((row['work_deadline'],row['command_deadline']),(1372,1380))
         self.assertLessEqual(row['finish'],1380)
         self.assertEqual((r.limit,r.final),(1380,1500))
         r.ops.t=1372
         with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
-            r.sim('profile-runtimes','list','runtimes','--json',cap=120)
-        self.assertEqual(len(r.ops.processes),1)
+            r.sim('runtime-inventory','list','runtimes','--json')
+        self.assertEqual(len(r.ops.processes),5)
 
     def test_first_runtime_response_at_or_after_work_deadline_is_not_accepted(self):
-        for delay in (112.,112.01):
+        for delay in (292.,292.01):
             with self.subTest(delay=delay):
                 old=self.root;self.root=old/str(delay);self.root.mkdir()
                 r=self.discovery_runner(delay=delay)
@@ -810,19 +813,19 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual(r.report['profile_discovery']['runtime_inventory_status'],'pending')
                 self.assertEqual(len(r.ops.processes),5)
                 self.assertFalse(r.active)
-                self.assertLessEqual(r.report['commands'][-1]['finish'],120.)
+                self.assertLessEqual(r.report['commands'][-1]['finish'],300.)
                 self.root=old
 
     def test_initial_runtime_timeout_keeps_TERM_KILL_inside_original_stop_reserve(self):
         r=self.discovery_runner(delay=float('inf'),ignore_term=True)
         with self.assertRaises(RuntimeError):self.discover(r)
         row=r.report['commands'][-1]
-        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(120,112,120))
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(300,292,300))
         self.assertEqual(row['stop']['signals'],[15,9])
         self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
-        self.assertGreaterEqual(row['finish'],117)
-        self.assertLess(row['finish'],120)
-        self.assertEqual((r.limit,r.final,PROFILE['prep_seconds']),(1380,1500,60))
+        self.assertGreaterEqual(row['finish'],297)
+        self.assertLess(row['finish'],300)
+        self.assertEqual((r.limit,r.final,PROFILE['prep_seconds']),(300,1500,60))
         self.assertNotIn('resolved_profile',r.report);self.assertEqual(len(r.ops.processes),5)
 
     def test_runtime_output_cap_invalid_json_and_wrong_sdk_have_no_fallback(self):
@@ -839,6 +842,136 @@ class BoundaryTests(unittest.TestCase):
                 self.assertFalse(r.create_attempted)
                 self.assertNotIn('resolved_profile',r.report)
                 self.root=old
+
+    def queue_owned_discovery(self,r,delays=(0,0,0,0)):
+        owned='10000000-0000-0000-0000-000000000001'
+        runtime=self.runtime()['identifier']
+        baseline=json.dumps({'devices':{runtime:[]}})
+        created=json.dumps({'devices':{runtime:[{'udid':owned,'name':r.intent['name'],
+            'deviceTypeIdentifier':r.intent['type']}]}})
+        outputs=[json.dumps({'runtimes':[self.runtime()]}),baseline,owned,created]
+        r.ops.plans.extend({'delay':delay,'output':[('stdout',text.encode())]}
+                           for delay,text in zip(delays,outputs))
+        return owned,baseline,created
+
+    @contextlib.contextmanager
+    def synthetic_discovery_boundaries(self,r):
+        # Keep the real hosted/core orchestration, commands, ownership matching,
+        # budgets and stop behavior; replace only external filesystem/capability.
+        with patch.object(r,'capture_source'),patch.object(r,'source'), \
+             patch.object(r,'check_capability'),patch.object(hosted,'toolchain_paths'), \
+             patch.object(hosted.core,'file_digest',return_value='a'*64), \
+             patch.object(hosted.core.Recovery,'owned_root',return_value=self.root), \
+             patch.object(hosted.core.Recovery,'prepare_files_ui_baseline'):
+            yield
+
+    def test_discovery_commands_share_one_deadline_then_restore_original_work_limit(self):
+        r=self.discovery_runner(delay=150)
+        owned,_,_=self.queue_owned_discovery(r,(35,35,30,20))
+        with self.synthetic_discovery_boundaries(r):r.setup()
+        rows=r.report['commands'];discovery=rows[4:9]
+        self.assertEqual([x['id'] for x in discovery],
+            ['profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'])
+        self.assertTrue(all(x['requested_cap_seconds']==300 and x['command_deadline']==300
+                            and x['work_deadline']==292 for x in discovery))
+        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,120])
+        self.assertEqual(r.report['discovery_budget']['status'],'completed')
+        self.assertGreaterEqual(r.report['discovery_budget']['finished_elapsed'],270)
+        self.assertLess(r.report['discovery_budget']['finished_elapsed'],292)
+        self.assertEqual((r.owned,r.limit,r.final),(owned,1380,1500))
+        self.assertEqual(r.report['attempts'],{'create':1})
+        self.assertFalse(hasattr(r,'_discovery_deadline'))
+
+    def test_discovery_window_cannot_restart_after_success(self):
+        r=self.discovery_runner();self.queue_owned_discovery(r)
+        with self.synthetic_discovery_boundaries(r):r.setup()
+        count=len(r.ops.processes)
+        with self.assertRaisesRegex(RuntimeError,'Discovery already started'):self.discover(r)
+        self.assertEqual(len(r.ops.processes),count)
+        self.assertEqual(r.report['discovery_budget']['requested_seconds'],300)
+        self.assertEqual(r.report['attempts'],{'create':1})
+
+    def test_late_runtime_parse_or_selection_does_not_admit_selected_profile(self):
+        for stage in ('parse','selection'):
+            with self.subTest(stage=stage):
+                old=self.root;self.root=old/stage;self.root.mkdir()
+                r=self.discovery_runner();original_loads=json.loads;original_select=hosted.select_runtime
+                def parse(raw,*args,**kwargs):
+                    value=original_loads(raw,*args,**kwargs)
+                    if stage=='parse' and isinstance(value,dict) and 'runtimes' in value:r.ops.t=300
+                    return value
+                def select(*args):
+                    value=original_select(*args)
+                    if stage=='selection':r.ops.t=300
+                    return value
+                with patch.object(hosted.json,'loads',side_effect=parse), \
+                     patch.object(hosted,'select_runtime',side_effect=select):
+                    with self.assertRaisesRegex(RuntimeError,'deadline'):self.discover(r)
+                self.assertEqual(r.plan['runtime'],'UNSELECTED')
+                self.assertNotIn('resolved_profile',r.report)
+                self.assertEqual(len(r.ops.processes),5)
+                self.root=old
+
+    def test_late_created_inventory_parse_preserves_owned_cleanup_but_never_boots(self):
+        r=self.discovery_runner();owned,baseline,created=self.queue_owned_discovery(r)
+        original=json.loads
+        def parse(raw,*args,**kwargs):
+            value=original(raw,*args,**kwargs)
+            if raw==created and not r.cleaning:r.ops.t=300
+            return value
+        with self.synthetic_discovery_boundaries(r),patch.object(hosted.json,'loads',side_effect=parse):
+            with self.assertRaisesRegex(RuntimeError,'deadline'):r.setup()
+            self.assertEqual(r.owned,owned)
+            self.assertEqual((r.limit,r.final),(1380,1500))
+            self.assertEqual(r.report['discovery_budget']['status'],'failed')
+            self.assertNotIn('boot',[x['id'] for x in r.report['commands']])
+            r.ops.plans.extend([{}, {}, {'output':[('stdout',baseline.encode())]}])
+            r.cleanup()
+        self.assertTrue(r.report['cleanup_verified'])
+        self.assertEqual([x['id'] for x in r.report['commands'][-3:]],['shutdown','delete','final-inventory'])
+        self.assertTrue(all(x['requested_cap_seconds']<=30 for x in r.report['commands'][-3:]))
+        self.assertFalse(r.active or r.unknown_spawn)
+
+    def test_expired_post_create_confirmation_recovers_once_inside_cleanup_budget(self):
+        r=self.discovery_runner();owned,baseline,created=self.queue_owned_discovery(r,(0,0,0,float('inf')))
+        with self.synthetic_discovery_boundaries(r):
+            with self.assertRaises(RuntimeError):r.setup()
+            self.assertTrue(r.create_attempted);self.assertIsNone(r.owned)
+            self.assertEqual((r.limit,r.final),(1380,1500))
+            r.ops.plans.extend([{'output':[('stdout',created.encode())]}, {}, {},
+                                {'output':[('stdout',baseline.encode())]}])
+            r.cleanup()
+        self.assertEqual(r.owned,owned);self.assertTrue(r.report['cleanup_verified'])
+        self.assertEqual([x['id'] for x in r.report['commands'][-4:]],
+                         ['recover-created','shutdown','delete','final-inventory'])
+        self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands'][-4:]],[20,30,30,20])
+        self.assertEqual(r.report['attempts'],{'create':1,'shutdown':1,'delete':1})
+        self.assertFalse(r.active or r.unknown_spawn)
+
+    def test_nested_capability_restores_discovery_limit_instead_of_global_work_limit(self):
+        r=self.discovery_runner(delay=250);self.discover(r)
+        r.ops.plans.extend([{'delay':float('inf')}])
+        with self.assertRaises(RuntimeError):r.check_capability()
+        self.assertEqual((r.limit,r.final),(300,1500))
+        self.assertLessEqual(r.ops.t,300)
+        self.assertFalse(r.active or r.unknown_spawn)
+        self.assertNotIn('host_capability',r.report)
+        self.assertEqual(r.report['discovery_budget']['deadline_elapsed'],300)
+
+    def test_nested_capability_stop_is_clipped_to_remaining_discovery_budget(self):
+        r=self.discovery_runner(delay=280);self.discover(r)
+        r.ops.plans.extend([{}, {'delay':float('inf'),'ignore_term':True}])
+        # This fixture exercises orchestration only, never certifies actual
+        # process capability. The nested child shares the parent's clock/stop.
+        with patch.object(hosted,'capability_result',return_value={'approved':False,'actual_execution':False}):
+            r.check_capability()
+        child=json.loads((r.out/'Capability/receipt.json').read_text())
+        row=child['commands'][-1]
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(292,300))
+        self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertEqual(r.limit,300)
+        self.assertGreaterEqual(r.ops.t,297);self.assertLess(r.ops.t,300)
+        self.assertFalse(r.active or r.unknown_spawn)
 
     def test_real_signal_boundary_distinguishes_return_ESRCH_and_EPERM(self):
         ops=hosted.core.base.RealOps({},self.root);p=SimpleNamespace(pid=321)
