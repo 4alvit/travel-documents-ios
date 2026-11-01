@@ -168,7 +168,8 @@ class ReadinessTests(unittest.TestCase):
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
         self.assertEqual(source.count('try await reachRecoveryLocalRoot(localTitle,'), 1)
-        self.assertIn('let deadline = ContinuousClock.now.advanced(by: .seconds(15))', source)
+        self.assertIn('timeout: Duration = .seconds(15)', source)
+        self.assertIn('let deadline = ContinuousClock.now.advanced(by: timeout)', source)
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('python3 -B scripts/test-files-readiness.py', workflow)
@@ -391,6 +392,96 @@ class OpenFolderTests(unittest.TestCase):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
+WAIT_FIXTURE = r'''
+import Foundation
+
+final class XCUIApplication {}
+struct BatchTestFailure: Error { let message: String }
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by duration: Duration) -> Instant { Instant(time: time + duration) }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.time < rhs.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static var sleeps = 0
+    static func sleep(for duration: Duration) async throws {
+        sleeps += 1
+        ContinuousClock.elapsed += duration
+    }
+}
+@MainActor final class Harness {
+    var captures = 0
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?) {
+        captures += 1
+    }
+    // ACTUAL_HELPER
+    func run(_ name: String) async throws {
+        let readyAt: Duration
+        var mustFail = false
+        var usesDefault = false
+        switch name {
+        case "ready": readyAt = .zero
+        case "cold-remote": readyAt = .seconds(22)
+        case "never-ready": readyAt = .seconds(41); mustFail = true
+        case "ordinary-default": readyAt = .seconds(16); mustFail = true; usesDefault = true
+        default: fatalError("Unknown fixture")
+        }
+        let condition = { ContinuousClock.elapsed >= readyAt }
+        var failed = false
+        do {
+            if usesDefault { try await wait("not ready", app: XCUIApplication(), condition: condition) }
+            else { try await wait("not ready", app: XCUIApplication(), timeout: .seconds(40), condition: condition) }
+        } catch { failed = true }
+        guard failed == mustFail, captures == (mustFail ? 1 : 0),
+              ContinuousClock.elapsed <= (usesDefault ? .seconds(15) : .seconds(40)) else {
+            print("FAIL " + name); exit(1)
+        }
+        if name == "ready" && Task.sleeps != 0 { exit(1) }
+        print("PASS " + name)
+    }
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        try await Harness().run(CommandLine.arguments[1])
+    }
+}
+'''
+
+
+class PresentationWaitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func wait(')
+        end = source.index('    private func check(', start)
+        path = Path(cls.directory.name) / 'PresentationWait.swift'
+        path.write_text(WAIT_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = Path(cls.directory.name) / 'presentation-wait-tests'
+        subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=30)
+
+    def test_remote_readiness_has_one_bounded_wait_and_failure_capture(self):
+        for name in ['ready', 'cold-remote', 'never-ready', 'ordinary-default']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_extended_budget_is_scoped_to_share_action(self):
+        source = SOURCE.read_text()
+        call = 'wait("Share sheet has no visible Save to Files action", app: app, timeout: .seconds(40))'
+        self.assertEqual(source.count('timeout: .seconds(40)'), 1)
+        self.assertIn(call, source)
+        self.assertIn('saveToFiles.count == 1 && saveToFiles.element.isEnabled && saveToFiles.element.isHittable', source)
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', source)
 
 
 class SDKSourceTests(unittest.TestCase):

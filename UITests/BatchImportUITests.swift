@@ -218,8 +218,11 @@ final class BatchImportUITests: XCTestCase {
             NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
             NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
         ))
-        try await wait("Share sheet has no visible Save to Files action", app: app) {
-            saveToFiles.count == 1 && saveToFiles.element.isHittable
+        // The first share on a fresh simulator starts a remote service. Its
+        // container can be present while it has no actions yet; allow that one
+        // presentation to initialize without repeating Export or a share tap.
+        try await wait("Share sheet has no visible Save to Files action", app: app, timeout: .seconds(40)) {
+            saveToFiles.count == 1 && saveToFiles.element.isEnabled && saveToFiles.element.isHittable
         }
         saveToFiles.element.tap()
     }
@@ -807,8 +810,9 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,
+                      timeout: Duration = .seconds(15),
                       condition: @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         repeat {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
