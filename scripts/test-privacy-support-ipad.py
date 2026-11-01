@@ -20,10 +20,10 @@ import uuid
 
 CASES = (
     ("en-US", "testEnglishFreeGuidanceAndCancelledLinks", "large", 600),
-    ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 570),
+    ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 900),
 )
 BUNDLE_ID = "com.4alvit.tripfolio"
-WORK_SECONDS = 24 * 60
+WORK_SECONDS = {"en-US": 24 * 60, "ru-RU": 30 * 60}
 CLEANUP_SECONDS = 3 * 60
 # Existing command waits + each owned7s stop;30s for local manifests/copy/validation.
 CASE_PREP_SECONDS = (60 + 7) + (60 + 7) + (30 + 7) + (30 + 7)
@@ -159,7 +159,7 @@ class Driver:
         self.derived = self.root / ("build/PrivacySupport-iPad-DerivedData-" + locale)
         require(not self.derived.exists(), "DerivedData must be fresh; no build reuse")
         self.start = time.monotonic()
-        self.work_deadline = self.start + WORK_SECONDS
+        self.work_deadline = self.start + WORK_SECONDS[locale]
         self.final_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = False
         self.active = {}
@@ -175,7 +175,7 @@ class Driver:
         self.products = None
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
-                       "work_seconds": WORK_SECONDS, "cleanup_reserve_seconds": CLEANUP_SECONDS,
+                       "work_seconds": WORK_SECONDS[locale], "cleanup_reserve_seconds": CLEANUP_SECONDS,
                        "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
         self.save()
@@ -333,6 +333,9 @@ class Driver:
                                 print(chunk.decode("utf-8", "replace"), end="", flush=True)
                     require(time.monotonic() < deadline, label + " exceeded its finite timeout")
                     time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+                if required_after:
+                    # A terminal poll at the deadline is not a timely test result.
+                    require(time.monotonic() < deadline, label + " exceeded its finite timeout")
                 if stream:
                     for channel in (reader, error_reader):
                         chunk = channel.read(1024 * 1024)

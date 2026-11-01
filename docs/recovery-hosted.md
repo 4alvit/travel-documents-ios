@@ -148,8 +148,9 @@ timed out before any device or test was reached. This is a finite scheduling
 policy, not a claim about the native service or a guarantee of success. It
 rejects completion or JSON parsing at or after the effective wait deadline
 before issuing the next command or selecting a device. There is no retry.
-Its other defaults remain 30 seconds, with 1,440 seconds
-of work and 180 seconds reserved for cleanup. Each command leaves up to 7 seconds
+Its other defaults remain 30 seconds. Each fresh English driver has 1,440 seconds
+of work; Russian has 1,800 seconds. Both reserve 180 seconds for cleanup.
+Each command leaves up to 7 seconds
 inside its phase budget for existing TERM/KILL handling. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
@@ -157,8 +158,8 @@ visible alongside secondary stop or receipt-write errors. These are cooperative
 deadline checks between operations; they do not preempt a blocked OS syscall.
 The effective initial wait is min(120, remaining work minus seven seconds);
 the stop reserve is additional to that wait but stays inside the work budget.
-Each extra second spent discovering runtimes reduces time available for later
-build, EN and RU work; their configured caps and the cleanup deadline do not grow.
+Each extra second spent discovering runtimes reduces time available for that
+locale's build and test; its configured caps and cleanup deadline do not grow.
 
 The first EN iPad XCTest command has a 600-second wait allowance instead of
 450, to allow more time for initial test-runner startup. A recorded run finished
@@ -166,18 +167,23 @@ bootstrapping about 374 seconds after that command began and reached about
 60 seconds of testcase progress before the old wait expired. This supports a
 finite scheduling-policy proposal, not a guarantee that 600 seconds succeeds
 or an explanation of the startup delay. No warmup, retry or runtime selection
-change is added. RU keeps its existing 570-second wait allowance. Both exact
-test methods, UI assertions, content-size settings and XCTest default180/max480
+change is added. A later fresh Russian run took 239 seconds from process spawn
+to XCTest start and was interrupted by its 570-second host wait while still
+making UI progress at 331 seconds. No completed test result or usable screenshot
+bundle survived that interruption. Russian therefore has a 900-second host wait:
+the observed 239-second startup, the unchanged 480-second XCTest ceiling and
+up to 181 seconds of result-finishing headroom. This is a finite allowance, not
+a guarantee about future startup time or a passing result. Both exact test
+methods, UI assertions, content-size settings and XCTest default 180/max 480
 execution allowances remain unchanged.
 
-These waits still fit inside the shared 1,440-second work deadline, with the
-existing seven seconds reserved for each stop and 180 seconds for final cleanup.
-They are upper bounds, not separately reserved time. At the recorded EN start
-about 358 seconds into work, using all600 seconds would leave at most482 seconds
-before evidence processing and RU preparation; the next wait has at most475
-seconds after its stop reserve, and less if intervening work consumes time.
-The unchanged global clamp may therefore shorten RU below570 seconds. Increasing
-both cases is unsupported by this evidence because RU was not reached. A command
+Each test must fit inside its locale's absolute work deadline, including its
+seven-second process-stop reserve and mandatory post-test validation. Admission
+is checked before preparation and again immediately before spawn. A terminal
+test-process poll at or after its wait deadline fails, even with exit code 0.
+The Russian workflow step/job limits are 34/40 minutes; English stays 29/35.
+The step limits include each locale's work and 180-second cleanup budgets; the
+job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
 can pass; partial testcase progress is not acceptance.
 
@@ -341,31 +347,32 @@ locale, source SHA, run ID and attempt; the receipt records the exact locale,
 method, one-case count, source manifests, built/installed bytes and owned UUID.
 No case is inferred from the other locale's result.
 
-This corrects an observed allocation defect: English took590 seconds including
-bootstrap; Russian was then admitted with only357 seconds of work even though
-its requested command allowance was570 seconds. Its timeout was subsequently
-masked by an installed-AUT lookup that could not fit. Every fresh locale keeps
-the original1,440-second work budget and180-second cleanup reserve. EN600/RU570
-command waits and XCTest's480-second maximum remain unchanged. Before case
-preparation, the driver requires the full command budgets and each7-second stop
-reserve, plus30 seconds for local manifests/copy/validation:986 seconds for EN
-or956 for RU. Immediately before test spawn it again requires the full test wait,
-its7-second stop reserve and171 seconds for post-test validation (installed
-lookup60, result summary30, result tests30, three7-second stops and30 seconds of
-local evidence work). These are admissions within the original absolute work
+This corrects an observed allocation defect: English took 590 seconds including
+bootstrap; Russian was then admitted with only 357 seconds of work even though
+its requested command allowance was 570 seconds. Its timeout was subsequently
+masked by an installed-AUT lookup that could not fit. Fresh drivers now use
+EN 1,440/RU 1,800-second work budgets and the same 180-second cleanup reserve.
+Command waits are EN 600/RU 900; XCTest's 480-second maximum is unchanged. Before
+case preparation, the driver requires the full command budgets and each 7-second
+stop reserve, plus 30 seconds for local manifests/copy/validation: 986 seconds
+for EN or 1,286 for RU. Immediately before test spawn it again requires the full
+test wait, its 7-second stop reserve and 171 seconds for post-test validation
+(installed lookup 60, result summary 30, result tests 30, three 7-second stops
+and 30 seconds of local evidence work). These are admissions within each locale's absolute work
 limit, not renewed deadlines or guarantees against cooperative syscall stalls.
 Insufficient budget fails before starting the case/test. Post-test evidence is
 still mandatory; its errors are retained separately and cannot replace the
 original test timeout, nonzero exit or process cleanup error.
 
-Fresh installed-AUT lookups remain60 seconds and still verify the exact owned
+Fresh installed-AUT lookups remain 60 seconds and still verify the exact owned
 UUID, bundle path/identifier and complete built-versus-installed bytes. All other
 command caps, UI assertions, result checks and no-retry behavior are unchanged.
-The separate guidance cohort and two iPad locale builds give five macOS jobs
-with 35-minute limits: at most 175 aggregate job-minutes. The workflow permits
+The separate guidance cohort and two iPad locale builds give five macOS jobs:
+four with 35-minute limits and Russian iPad with 40, at most 180 aggregate
+job-minutes. The workflow permits
 up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
 locale, subject to account runner capacity. There are six jobs including the
-Ubuntu gate. The bounded observer retains its original120-minute admission
+Ubuntu gate. The bounded observer retains its original 120-minute admission
 window and records both locale jobs separately; it must not declare a complete
 cohort when one locale is missing, skipped or failed. This is a scheduling-policy
 change requiring new runtime evidence, not acceptance of either failed old run.

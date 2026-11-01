@@ -111,9 +111,10 @@ class DriverTests(unittest.TestCase):
         stored = json.loads((driver.out/'run-summary.json').read_text())
         self.assertEqual(stored['commands'][-1], row)
 
-    def attempted_case(self, index, **plan):
+    def attempted_case(self, index, start_at=0, preparation_seconds=0, **plan):
         case = ipad.CASES[index]; locale, method, size, _ = case
         driver, world = self.driver(locale=locale, **plan)
+        world.t = start_at
         driver.owned = 'synthetic-owned-device'
         driver.products = {'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
         (driver.out/'originals'/(locale+'.xcresult')).mkdir(parents=True)
@@ -121,6 +122,8 @@ class DriverTests(unittest.TestCase):
         def command(argv, label, **kwargs):
             if label == locale+'-test':
                 return actual(argv, label, **kwargs)
+            if label == locale+'-install':
+                world.t += preparation_seconds
             return 0, size if label == locale+'-read-size' else ''
         with patch.object(driver,'command',side_effect=command), \
              patch.object(driver,'product_snapshot'), \
@@ -156,45 +159,52 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(driver.report['expected_case_count'],1)
                 self.assertEqual(driver.out,self.root.resolve()/'build/PrivacySupport-iPad'/locale)
                 self.assertEqual(driver.derived,self.root.resolve()/('build/PrivacySupport-iPad-DerivedData-'+locale))
-                self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+                work = 1440 if locale == 'en-US' else 1800
+                self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+180))
+                self.assertEqual(driver.report['work_seconds'],work)
+                self.assertEqual(driver.report['cleanup_reserve_seconds'],180)
                 self.assertEqual(world.processes,[])
 
     def test_observed_RU_remaining357_is_not_admitted_or_spawned(self):
-        driver,world=self.driver(locale='ru-RU');world.t=1076.561
+        driver,world=self.driver(locale='ru-RU');world.t=driver.work_deadline-357
         with patch.object(driver,'product_snapshot') as snapshot:
             with self.assertRaisesRegex(RuntimeError,'lacks full case/post-validation budget'):
                 driver.run_case(*driver.case)
         snapshot.assert_not_called();self.assertEqual(world.processes,[])
         self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],956)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1286)
         with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
 
     def test_full_case_admission_rejects_exact_boundary(self):
-        driver,world=self.driver()
-        required=ipad.CASE_PREP_SECONDS+driver.case[3]+7+ipad.CASE_POST_SECONDS
-        self.assertEqual(required,986);world.t=1440-required
-        with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
-        self.assertEqual(world.processes,[]);self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
+        for locale,expected in [('en-US',986),('ru-RU',1286)]:
+            with self.subTest(locale=locale):
+                driver,world=self.driver(locale=locale)
+                required=ipad.CASE_PREP_SECONDS+driver.case[3]+7+ipad.CASE_POST_SECONDS
+                self.assertEqual(required,expected);world.t=driver.work_deadline-required
+                with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
+                self.assertEqual(world.processes,[]);self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
 
     def test_actual_test_command_rechecks_full_wait_stop_and_post_budget_before_spawn(self):
-        driver,world=self.driver(delay=1)
-        world.t=1440-570-7-ipad.CASE_POST_SECONDS
-        with self.assertRaisesRegex(RuntimeError,'no test spawned'):
-            driver.command(['synthetic'],'ru-RU-test',timeout=570,required_after=ipad.CASE_POST_SECONDS)
-        self.assertEqual(world.processes,[])
-        world.t-=1
-        driver.command(['synthetic'],'ru-RU-test',timeout=570,required_after=ipad.CASE_POST_SECONDS)
-        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],world.processes[0].started+570)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
+        for locale,allowance,work in [('en-US',600,1440),('ru-RU',900,1800)]:
+            with self.subTest(locale=locale):
+                driver,world=self.driver(locale=locale,delay=1)
+                world.t=work-allowance-7-ipad.CASE_POST_SECONDS
+                with self.assertRaisesRegex(RuntimeError,'no test spawned'):
+                    driver.command(['synthetic'],locale+'-test',timeout=allowance,required_after=ipad.CASE_POST_SECONDS)
+                self.assertEqual(world.processes,[])
+                world.t-=1
+                driver.command(['synthetic'],locale+'-test',timeout=allowance,required_after=ipad.CASE_POST_SECONDS)
+                self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+                self.assertEqual(self.row(driver)['wait_deadline_monotonic'],world.processes[0].started+allowance)
+                self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+180))
 
     def test_case_does_not_accept_a_different_locale_or_case(self):
         driver,world=self.driver()
         with self.assertRaisesRegex(RuntimeError,'differs from selected locale'):driver.run_case(*ipad.CASES[1])
         self.assertEqual(driver.report['cases'],[]);self.assertEqual(world.processes,[])
 
-    def post_failure_case(self, **process_plan):
-        driver,world=self.driver(**process_plan);case=driver.case;locale,method,size,_=case
+    def post_failure_case(self, locale='en-US', **process_plan):
+        driver,world=self.driver(locale=locale,**process_plan);case=driver.case;locale,method,size,_=case
         driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
         actual=driver.command
         def command(argv,label,**kwargs):
@@ -232,12 +242,18 @@ class DriverTests(unittest.TestCase):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 1',lane)
-        self.assertIn('locale: [en-US, ru-RU]',lane)
+        for locale,step,job in [('en-US',29,35),('ru-RU',34,40)]:
+            self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
+            work=ipad.WORK_SECONDS[locale]
+            self.assertGreater(step*60,work+ipad.CLEANUP_SECONDS)
+            self.assertGreater(job,step+3)
+        self.assertEqual(lane.count('- locale:'),2)
         self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
         self.assertIn("run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'",lane)
         self.assertIn('name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',lane)
         self.assertIn('path: build/PrivacySupport-iPad/${{ matrix.locale }}/',lane)
-        self.assertIn('timeout-minutes: 35',lane);self.assertIn('timeout-minutes: 29',lane)
+        self.assertIn('timeout-minutes: ${{ matrix.job_minutes }}',lane)
+        self.assertIn('timeout-minutes: ${{ matrix.step_minutes }}',lane)
         gate=workflow.split('  gate:',1)[1]
         self.assertIn('if: always()',gate)
         self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
@@ -362,28 +378,73 @@ class DriverTests(unittest.TestCase):
         self.assertEqual([name for name,_ in world.calls if name.startswith('signal')],['signal_15','signal_9'])
         self.assertEqual(len(driver.report['cases']),1);self.assert_finished(driver)
 
-    def test_RU_wait_remains_570_and_does_not_inherit_EN_allowance(self):
+    def test_RU_wait_stops_at_900_with_one_attempt_and_same_content_size(self):
         driver,world,failure,validated=self.attempted_case(1,delay=float('inf'))
         self.assertIn('ru-RU-test exceeded its finite timeout',str(failure))
-        self.assertFalse(validated);self.assertEqual(world.t,570)
-        self.assertEqual(self.row(driver)['timeout_seconds'],570)
+        self.assertFalse(validated);self.assertEqual(world.t,900)
+        self.assertEqual(self.row(driver)['timeout_seconds'],900)
         self.assertEqual(driver.report['cases'][0]['system_content_size_expected'],
                          'accessibility-extra-extra-extra-large')
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1800,1980))
         self.assert_finished(driver)
 
-    def test_long_first_wait_leaves_RU_clipped_by_original_global_deadline(self):
-        driver,world=self.driver(delay=599);world.t=358
-        driver.command(['synthetic'],'en-US-test',timeout=ipad.CASES[0][3])
-        after_EN=world.t;self.assertGreaterEqual(after_EN,957);self.assertLess(after_EN,958)
-        world.plan['delay']=float('inf')
+    def test_RU_recorded_cold_start_plus_full_XCTest_ceiling_reaches_result_validation(self):
+        # Run41321475035: case admission at366.775s, test process at402.804s,
+        # then239.082s before XCTest began. Leave the full480s XCTest ceiling
+        # and90s for result finalization, not merely the interrupted331s UI slice.
+        elapsed=239.082+480+90
+        self.assertGreater(elapsed,570)
+        driver,world,failure,validated=self.attempted_case(
+            1,start_at=366.775,preparation_seconds=36.029,delay=elapsed)
+        self.assertEqual(str(failure),'Synthetic result validation withheld')
+        self.assertTrue(validated)
+        self.assertAlmostEqual(world.processes[0].started,402.804)
+        self.assertGreaterEqual(world.t,402.804+elapsed)
+        self.assertLess(world.t,402.804+900)
+        self.assertGreater(driver.work_deadline-world.t,ipad.CASE_POST_SECONDS)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1286)
+        args=self.row(driver)['argv']
+        self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
+        self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')
+        self.assertEqual(args[args.index('-parallel-testing-enabled')+1],'NO')
+        with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
+        self.assertEqual(len(world.processes),1)
+
+    def test_test_success_at_exact_deadline_is_rejected_before_validation(self):
+        for index,locale,allowance in [(0,'en-US',600),(1,'ru-RU',900)]:
+            with self.subTest(locale=locale):
+                driver,world,failure,validated=self.attempted_case(index,delay=allowance)
+                self.assertIn(locale+'-test exceeded its finite timeout',str(failure))
+                self.assertEqual(world.t,allowance);self.assertFalse(validated)
+                self.assertEqual(self.row(driver)['returncode'],0)
+                self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+
+    def test_RU_long_success_still_requires_post_test_evidence(self):
+        driver,error=self.post_failure_case(locale='ru-RU',delay=239.082+480+90)
+        self.assertEqual(error,'Synthetic installed-after budget exhausted')
+        self.assertEqual(driver.report['cases'][0]['status'],'started')
+        self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'],0)
+
+    def test_RU_ordinary_command_is_clipped_by_its_absolute_work_deadline(self):
+        driver,world=self.driver(locale='ru-RU',delay=float('inf'));world.t=1700
         with self.assertRaisesRegex(RuntimeError,'finite timeout'):
-            driver.command(['synthetic'],'ru-RU-test',timeout=ipad.CASES[1][3])
-        self.assertEqual(self.row(driver)['timeout_seconds'],570)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],1433)
-        self.assertEqual(world.t,1433);self.assertLess(world.t-after_EN,570)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(1440,1620))
-        self.assertEqual(len(world.processes),2);self.assertFalse(driver.active)
+            driver.command(['synthetic'],'bounded-tail',timeout=900)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],1793)
+        self.assertEqual(world.t,1793)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1800,1980))
+        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
         self.assert_finished(driver)
+
+    def test_RU_cleanup_retains_180_seconds_and_does_not_renew_work(self):
+        driver,world=self.driver(locale='ru-RU');world.t=1800
+        with self.assertRaisesRegex(RuntimeError,'Work deadline expired'):driver.checkpoint()
+        driver.cleanup()
+        self.assertTrue(driver.report['cleanup']['verified'])
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(1800,1980))
+        world.t=1979.999;driver.checkpoint()
+        world.t=1980
+        with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
+        self.assertEqual(world.processes,[])
 
     def test_runtime_120_allows_70_seconds_and_other_default_stays_30(self):
         driver, world = self.driver(delay=70, output=b'{"runtimes": []}')
@@ -437,7 +498,8 @@ class DriverTests(unittest.TestCase):
                 driver.prepare()
         self.assertIsNone(driver.owned); self.assertIsNone(driver.intent)
         self.assertEqual(driver.report['cases'], [])
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (1440, 1620))
+        work=1440 if driver.case[0]=='en-US' else 1800
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (work, work+180))
         self.assert_finished(driver)
         return failure.exception, reached, choose.called
 
@@ -507,24 +569,19 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(driver.active); self.assertLess(world.t, 120)
 
     def test_initial_runtime_longer_wait_reduces_later_case_budget(self):
-        driver, world = self.driver(delay=119, output=b'{"runtimes": []}')
+        driver, world = self.driver(locale='ru-RU',delay=119, output=b'{"runtimes": []}')
         failure, reached, selected = self.initial_runtime(driver)
         self.assertIn('No explicitly compatible', str(failure)); self.assertTrue(selected)
         self.assertEqual(reached, ['runtimes', 'device-types'])
         self.assertGreaterEqual(world.t, 119); self.assertLess(world.t, 120)
         # Fixed synthetic intervening work; no native preparation is claimed.
         world.t += 400
-        world.plan['delay'] = 599
-        driver.command(['synthetic'], 'en-US-test', timeout=ipad.CASES[0][3])
-        after_EN = world.t
-        world.plan['delay'] = float('inf')
-        with self.assertRaisesRegex(RuntimeError, 'finite timeout'):
-            driver.command(['synthetic'], 'ru-RU-test', timeout=ipad.CASES[1][3])
-        self.assertEqual([case[3] for case in ipad.CASES], [600, 570])
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 1433)
-        self.assertLess(world.t - after_EN, 316)
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (1440, 1620))
-        self.assertEqual(len(world.processes), 3); self.assertFalse(driver.active)
+        with self.assertRaisesRegex(RuntimeError, 'no case started'):
+            driver.run_case(*driver.case)
+        self.assertEqual([case[3] for case in ipad.CASES], [600, 900])
+        self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (1800, 1980))
+        self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
         self.assert_finished(driver)
 
     def test_timeout_and_probe_EPERM_keep_primary_and_allow_owned_cleanup(self):
