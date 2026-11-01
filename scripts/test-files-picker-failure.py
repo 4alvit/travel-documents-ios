@@ -510,6 +510,7 @@ class Controls(unittest.TestCase):
               for job,following in [('validate','ui_guidance'),('ui_guidance','privacy_ipad')]}
         for job,cohort in [('validate','core-purchase'),('ui_guidance','ui-guidance')]:
             body=jobs[job]
+            self.assertIn('    timeout-minutes: 35\n',body)
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
             self.assertIn('run: bash scripts/test-simulator.sh --cohort '+cohort,original)
@@ -522,12 +523,8 @@ class Controls(unittest.TestCase):
             prefix='build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/'
             self.assertEqual(paths,[prefix+name for name in
                 ['failure.png','failure-ax.txt','evidence.json','payment-failure.png','payment-failure-ax.txt']])
-        # Four definitions expand to five macOS jobs: the two locales remain
-        # serial within the iPad matrix; both Main cohorts are independent.
-        self.assertEqual(workflow.count('timeout-minutes: 35'),4)
-        ipad=workflow.split('  privacy_ipad:\n',1)[1].split('  recovery:\n',1)[0]
-        self.assertIn('max-parallel: 1',ipad);self.assertIn('fail-fast: false',ipad)
-        self.assertIn('locale: [en-US, ru-RU]',ipad)
+        # The dedicated iPad-driver suite verifies its matrix and per-locale
+        # budgets. This collector protects the two integration cohorts above.
 
 
 if __name__ == '__main__':
