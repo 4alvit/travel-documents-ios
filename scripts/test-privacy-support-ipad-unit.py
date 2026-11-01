@@ -116,7 +116,7 @@ class DriverTests(unittest.TestCase):
         driver, world = self.driver(locale=locale, **plan)
         world.t = start_at
         driver.owned = 'synthetic-owned-device'
-        driver.products = {'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
+        driver.products = {'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app','xctestrun':self.root/'synthetic.xctestrun'}
         (driver.out/'originals'/(locale+'.xcresult')).mkdir(parents=True)
         actual = driver.command
         def command(argv, label, **kwargs):
@@ -172,11 +172,11 @@ class DriverTests(unittest.TestCase):
                 driver.run_case(*driver.case)
         snapshot.assert_not_called();self.assertEqual(world.processes,[])
         self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1286)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
         with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
 
     def test_full_case_admission_rejects_exact_boundary(self):
-        for locale,expected in [('en-US',1286),('ru-RU',1286)]:
+        for locale,expected in [('en-US',1487),('ru-RU',1487)]:
             with self.subTest(locale=locale):
                 driver,world=self.driver(locale=locale)
                 required=ipad.CASE_PREP_SECONDS+driver.case[3]+7+ipad.CASE_POST_SECONDS
@@ -205,12 +205,12 @@ class DriverTests(unittest.TestCase):
 
     def post_failure_case(self, locale='en-US', **process_plan):
         driver,world=self.driver(locale=locale,**process_plan);case=driver.case;locale,method,size,_=case
-        driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','xctestrun':self.root/'synthetic.xctestrun'}
+        driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app','xctestrun':self.root/'synthetic.xctestrun'}
         actual=driver.command
         def command(argv,label,**kwargs):
             if label==locale+'-test':return actual(argv,label,**kwargs)
             return 0,size if label==locale+'-read-size' else ''
-        def installed(label,required=False):
+        def installed(label,required=False,product="aut"):
             if label.endswith('/installed-after'):raise RuntimeError('Synthetic installed-after budget exhausted')
             return {'available':True}
         with patch.object(driver,'command',side_effect=command), patch.object(driver,'product_snapshot'), \
@@ -265,17 +265,19 @@ class DriverTests(unittest.TestCase):
         self.assertIn('test "$IPAD_RESULT" = success',gate)
         self.assertIn('exec python3 scripts/test-privacy-support-ipad.py "$@"',(HERE/'test-privacy-support-ipad.sh').read_text())
 
-    def installed_fixture(self, **plan):
+    def installed_fixture(self, product="aut", **plan):
         driver,world=self.driver(**plan)
         driver.owned='synthetic-owned-device'
         (driver.out/'commands').mkdir()
-        built=self.root/'built/Tripfolio.app';fresh=self.root/'installed/Tripfolio.app'
+        name='Tripfolio.app' if product=='aut' else 'TripfolioUITests-Runner.app'
+        identifier=ipad.BUNDLE_ID if product=='aut' else ipad.RUNNER_BUNDLE_ID
+        built=self.root/'built'/name;fresh=self.root/'installed'/name
         for app in (built,fresh):
             app.mkdir(parents=True)
-            (app/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':ipad.BUNDLE_ID}))
+            (app/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':identifier}))
             (app/'Tripfolio').write_bytes(b'synthetic identical application bytes')
-        driver.products={'aut':built}
-        driver.built={'aut':ipad.tree_manifest(built,driver.checkpoint)}
+        driver.products={product:built}
+        driver.built={product:ipad.tree_manifest(built,driver.checkpoint)}
         world.plan['output']=(str(fresh)+'\n').encode()
         return driver,world,fresh
 
@@ -359,6 +361,149 @@ class DriverTests(unittest.TestCase):
         self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
         self.assertEqual(world.t,2093);self.assert_finished(driver)
 
+    def test_generated_runner_requires_the_exact_built_bundle_identifier(self):
+        driver,world=self.driver()
+        products=driver.derived/'Build/Products';products.mkdir(parents=True)
+        aut=products/'Tripfolio.app';aut.mkdir()
+        runner=products/'TripfolioUITests-Runner.app';runner.mkdir()
+        bundle=runner/'PlugIns/TripfolioUITests.xctest';bundle.mkdir(parents=True)
+        (aut/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':ipad.BUNDLE_ID}))
+        info=runner/'Info.plist'
+        data={'__xctestrun_metadata__':{'FormatVersion':2},'TestConfigurations':[{'TestTargets':[{
+            'BlueprintName':'TripfolioUITests','IsUITestBundle':True,
+            'UITargetAppPath':'__TESTROOT__/Tripfolio.app',
+            'TestHostPath':'__TESTROOT__/TripfolioUITests-Runner.app',
+            'TestBundlePath':'__TESTHOST__/PlugIns/TripfolioUITests.xctest'}]}]}
+        (products/'Synthetic.xctestrun').write_bytes(ipad.plistlib.dumps(data))
+        with self.assertRaises(FileNotFoundError):driver.discover_products()
+        for identifier in [ipad.BUNDLE_ID,'wrong.runner']:
+            info.write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':identifier}))
+            with self.assertRaisesRegex(RuntimeError,'Wrong runner bundle identifier'):driver.discover_products()
+        info.write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':ipad.RUNNER_BUNDLE_ID}))
+        driver.discover_products()
+        self.assertEqual(driver.products['runner'],runner)
+        self.assertEqual(driver.report['product_bundle_identifiers'],
+                         {'aut':ipad.BUNDLE_ID,'runner':ipad.RUNNER_BUNDLE_ID})
+        self.assertEqual(world.processes,[])
+
+    def test_runner_readback_checks_a_fresh_container_before_and_after(self):
+        driver,world,fresh=self.installed_fixture(product='runner')
+        first=driver.installed('en-US/runner-installed-before',required=True,product='runner')
+        replacement=fresh.parent.parent/'replacement'/fresh.name
+        ipad.shutil.copytree(fresh,replacement)
+        world.plan['output']=(str(replacement)+'\n').encode()
+        after=driver.installed('en-US/runner-installed-after',required=True,product='runner')
+        self.assertNotEqual(first['path'],after['path'])
+        self.assertTrue(first['matches_built_bytes'] and after['matches_built_bytes'])
+        self.assertEqual(after['bundle_id'],ipad.RUNNER_BUNDLE_ID)
+        self.assertEqual(len(world.processes),2)
+        for row in driver.report['commands']:
+            self.assertEqual(row['argv'][4],ipad.RUNNER_BUNDLE_ID)
+            self.assertEqual(row['timeout_seconds'],60)
+
+    def test_runner_readback_rejects_missing_wrong_identity_and_changed_bytes(self):
+        original=self.root
+        for kind,expected in [('missing','Installed runner unavailable'),
+                              ('identity','wrong runner bundle identifier'),
+                              ('bytes','Installed runner bytes differ')]:
+            with self.subTest(kind=kind):
+                self.root=original/kind;self.root.mkdir()
+                driver,world,fresh=self.installed_fixture(product='runner')
+                if kind=='missing':world.plan['exit']=2
+                elif kind=='identity':
+                    (fresh/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':ipad.BUNDLE_ID}))
+                else:(fresh/'Tripfolio').write_bytes(b'changed synthetic runner')
+                with self.assertRaisesRegex(RuntimeError,expected):
+                    driver.installed('ru-RU/runner-installed-before',required=True,product='runner')
+                self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        self.root=original
+
+    def test_one_runner_install_and_both_fresh_readbacks_precede_acceptance(self):
+        driver,world=self.driver();locale,method,size,_=driver.case
+        driver.owned='synthetic-owned-device'
+        driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app',
+                         'xctestrun':self.root/'synthetic.xctestrun'}
+        (driver.out/'originals'/(locale+'.xcresult')).mkdir(parents=True)
+        events=[]
+        def command(argv,label,**kwargs):
+            events.append((label,argv,kwargs))
+            return 0,size if label==locale+'-read-size' else ''
+        def installed(label,**kwargs):
+            events.append((label,kwargs));return {'available':True}
+        with patch.object(driver,'command',side_effect=command),patch.object(driver,'installed',side_effect=installed), \
+             patch.object(driver,'product_snapshot'),patch.object(driver,'parse_case',return_value={'synthetic':'validated'}):
+            driver.run_case(*driver.case)
+        labels=[event[0] for event in events]
+        self.assertEqual(labels,[locale+'-install',locale+'-runner-install',locale+'/installed-before',
+            locale+'/runner-installed-before',locale+'-set-size',locale+'-read-size',locale+'-test',
+            locale+'/installed-after',locale+'/runner-installed-after'])
+        self.assertEqual(events[1][1],['xcrun','simctl','install',driver.owned,driver.products['runner']])
+        self.assertEqual(events[1][2]['timeout'],60)
+        self.assertEqual(events[3][1],{'required':True,'product':'runner'})
+        self.assertEqual(events[-1][1],{'required':True,'product':'runner'})
+        case=driver.report['cases'][0]
+        self.assertTrue(case['runner_installed_before'] and case['runner_installed_after'])
+        self.assertEqual(case['status'],'passed');self.assertEqual(world.processes,[])
+
+    def test_nonzero_single_runner_install_prevents_native_test(self):
+        driver,world=self.driver(exit=4);locale,_,_,_=driver.case
+        driver.owned='synthetic-owned-device'
+        driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app'}
+        actual=driver.command;labels=[]
+        def command(argv,label,**kwargs):
+            labels.append(label)
+            if label==locale+'-runner-install':return actual(argv,label,**kwargs)
+            return 0,''
+        with patch.object(driver,'command',side_effect=command),patch.object(driver,'product_snapshot'), \
+             patch.object(driver,'installed') as installed,patch.object(driver,'parse_case') as parse:
+            with self.assertRaisesRegex(RuntimeError,'runner-install failed'):driver.run_case(*driver.case)
+        self.assertEqual(labels,[locale+'-install',locale+'-runner-install'])
+        installed.assert_not_called();parse.assert_not_called()
+        self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
+        with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
+
+    def test_missing_runner_after_successful_install_never_launches_test(self):
+        driver,world,_=self.installed_fixture(product='runner',exit=2)
+        locale,_,size,_=driver.case
+        driver.products['aut']=self.root/'Synthetic.app'
+        actual=driver.command;labels=[]
+        def command(argv,label,**kwargs):
+            labels.append(label)
+            if label.endswith('-lookup'):return actual(argv,label,**kwargs)
+            return 0,size
+        actual_installed=driver.installed
+        def installed(label,**kwargs):
+            if kwargs.get('product')=='runner':return actual_installed(label,**kwargs)
+            return {'available':True}
+        with patch.object(driver,'command',side_effect=command),patch.object(driver,'product_snapshot'), \
+             patch.object(driver,'installed',side_effect=installed),patch.object(driver,'parse_case') as parse:
+            with self.assertRaisesRegex(RuntimeError,'Installed runner unavailable'):driver.run_case(*driver.case)
+        self.assertEqual(labels,[locale+'-install',locale+'-runner-install',locale+'/runner-installed-before-lookup'])
+        self.assertEqual(len(world.processes),1);parse.assert_not_called()
+        self.assertNotIn('xcodebuild_exit_code',driver.report['cases'][0])
+
+    def test_runner_after_failure_prevents_success_but_preserves_native_failure(self):
+        original=self.root
+        for code in [0,65]:
+            with self.subTest(code=code):
+                self.root=original/str(code);self.root.mkdir()
+                driver,world=self.driver();locale,_,size,_=driver.case
+                driver.owned='synthetic-owned-device'
+                driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app',
+                                 'xctestrun':self.root/'synthetic.xctestrun'}
+                def command(argv,label,**kwargs):
+                    return (code,'') if label==locale+'-test' else (0,size)
+                def installed(label,**kwargs):
+                    if label.endswith('/runner-installed-after'):raise RuntimeError('runner readback failed')
+                    return {'available':True}
+                with patch.object(driver,'command',side_effect=command),patch.object(driver,'product_snapshot'), \
+                     patch.object(driver,'installed',side_effect=installed),patch.object(driver,'parse_case') as parse:
+                    with self.assertRaisesRegex(RuntimeError,'runner readback failed' if code==0 else 'xcodebuild failed'):
+                        driver.run_case(*driver.case)
+                parse.assert_not_called();self.assertEqual(driver.report['cases'][0]['status'],'started')
+                self.assertEqual(driver.report['cases'][0]['post_validation_errors'][0]['stage'],'runner-installed-after')
+        self.root=original
+
     def test_first_EN_allows_500_seconds_but_still_requires_result_validation(self):
         driver,world,failure,validated=self.attempted_case(0,delay=500)
         self.assertEqual(str(failure),'Synthetic result validation withheld')
@@ -392,7 +537,7 @@ class DriverTests(unittest.TestCase):
         self.assertGreaterEqual(world.t,338.541+elapsed)
         self.assertLess(world.t,338.541+900)
         self.assertGreater(driver.work_deadline-world.t,ipad.CASE_POST_SECONDS)
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1286)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
         args=self.row(driver)['argv']
         self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
         self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')
@@ -425,7 +570,7 @@ class DriverTests(unittest.TestCase):
         self.assertGreaterEqual(world.t,402.804+elapsed)
         self.assertLess(world.t,402.804+900)
         self.assertGreater(driver.work_deadline-world.t,ipad.CASE_POST_SECONDS)
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1286)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
         args=self.row(driver)['argv']
         self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
         self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')

@@ -374,19 +374,32 @@ masked by an installed-AUT lookup that could not fit. Fresh drivers now use
 2,100-second work budgets and the same 180-second cleanup reserve.
 Both command waits are 900 seconds; XCTest's 480-second maximum is unchanged. Before
 case preparation, the driver requires the full command budgets and each 7-second
-stop reserve, plus 30 seconds for local manifests/copy/validation: 1,286 seconds
+stop reserve, plus 30 seconds for local manifests/copy/validation: 1,487 seconds
 for either locale. Immediately before test spawn it again requires the full
-test wait, its 7-second stop reserve and 171 seconds for post-test validation
-(installed lookup 60, result summary 30, result tests 30, three 7-second stops
+test wait, its 7-second stop reserve and 238 seconds for post-test validation
+(two installed lookups of 60 seconds, result summary 30, result tests 30, four 7-second stops
 and 30 seconds of local evidence work). These are admissions within each locale's absolute work
 limit, not renewed deadlines or guarantees against cooperative syscall stalls.
 Insufficient budget fails before starting the case/test. Post-test evidence is
 still mandatory; its errors are retained separately and cannot replace the
 original test timeout, nonzero exit or process cleanup error.
 
-Fresh installed-AUT lookups remain 60 seconds and still verify the exact owned
-UUID, bundle path/identifier and complete built-versus-installed bytes. All other
-command caps, UI assertions, result checks and no-retry behavior are unchanged.
+A later Russian attempt exited 65 before any test case started: FrontBoard
+reported `com.4alvit.tripfolio.uitests.xctrunner` as unknown. The AUT had been
+installed and its bytes verified, but there was no independent installed-runner
+receipt. This proves a runner launch failure, not a particular OS compatibility
+defect or whether runner bytes were absent versus unregistered.
+
+Each locale now explicitly installs the built AUT and built UI-test runner once
+before test launch. The generated runner's Info.plist must contain the exact
+expected identifier. Fresh 60-second container lookups before and after the test
+verify both identifiers, bundle paths and complete built-versus-installed bytes;
+they do not reuse a path that xcodebuild may replace. The added runner install
+and lookups are included in the case and post-test admissions above. Installation
+or readback failure cannot become test success. The original generated xctestrun,
+900-second host wait, native assertions, exact result checks and no-retry behavior
+are unchanged. This explicit setup requires new hosted evidence; it does not
+retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
 three with 35-minute limits and two iPad jobs with 46-minute limits,
 at most 197 aggregate job-minutes. The workflow permits
