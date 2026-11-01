@@ -1,8 +1,9 @@
 # Full-backup recovery UI regression
 
-Status: the three-phase deterministic fixture policy is a source candidate. It has not
-yet passed a native run or independent pixel review. The current hosted driver
-is `python3 -B scripts/recovery_hosted.py --run` in the Recovery CI job; it binds
+The three-phase deterministic fixture exercises real export and restore. Passing
+XCTest and byte comparison alone is insufficient: independent review must also
+confirm readable PDF content in the final preview. The hosted driver is
+`python3 -B scripts/recovery_hosted.py --run` in the Recovery CI job; it binds
 the actual checkout, runner profile and attempt before any simulator action.
 This document does not authorize a local invocation or claim release acceptance.
 
@@ -219,12 +220,29 @@ are not a confinement boundary against a hostile process with host access.
 Real provider initialization and fixture shutdown, Save-to-Files, exact folder navigation,
 Settings counts and single-file selection require current runtime confirmation. Before Save,
 file selection or an optional Open, recovery requires the exact owned folder
-name as a visible static text in the Files navigation bar. Save is scoped to
-that same bar. Tapping the folder row alone does not authorize either action. The shared Files folder navigation comes from the
+name as either a static text or the exact `<folder>, Actions Menu` button in
+the Files navigation bar. Exactly one matching heading must be hittable. Save
+is scoped to that same bar. Tapping the folder row alone does not authorize
+either action. A picker initially showing Recents may use its unique native
+Browse tab once, then must satisfy the same exact destination checks. The
+shared Files folder navigation comes from the
 existing batch test. Unknown surfaces fail with screenshot and AX evidence;
 there are no guessed taps, broad alert dismissals or automatic retries. If an
 offscreen Save action or a different exporter hierarchy is encountered, review
 that captured surface and prepare a separate bounded source revision.
+
+Before the one Save-to-Files action, its unique enabled, hittable control and
+the native share header must retain valid, stable frames for three consecutive
+observations within the original 40-second wait. This checks presentation
+readiness without adding a tap retry. Before capturing the restored original,
+the test waits up to 40 seconds for both the synthetic warning and reservation
+body to be visible within the Quick Look preview. Independent pixel review
+remains required even when those accessibility checks pass.
+If file selection times out, the existing screenshot and accessibility tree are
+followed by a small state attachment. It samples the app, exact destination,
+file, replacement action and Open action without another tap. New reads stop
+after eight seconds; an in-flight synchronous XCTest query cannot be preempted.
+The original phase and command deadlines still apply.
 
 The offline utility compares the entire catalog object (including identities,
 relationships, dates and optional fields), every selected fixture original,
