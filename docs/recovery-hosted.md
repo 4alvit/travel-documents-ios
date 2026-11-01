@@ -297,8 +297,9 @@ without a completed manifest is diagnostic material only.
 ## CI integration
 
 One push to the open PR branch triggers the existing `pull_request` workflow:
-`validate` (including ordinary integration/StoreKit), `privacy_ipad`, new
-`recovery`, then `CI gate`. Gate now requires all three jobs to succeed; no
+`validate` (including ordinary integration/StoreKit), `ui_guidance`,
+`privacy_ipad` and `recovery`, then `CI gate`. Gate requires all four job
+results, including both locales in the iPad matrix, to succeed; no
 existing gate, test command or StoreKit rule is relaxed. The workflow also keeps
 its existing main-push, dispatch and merge-group triggers.
 
@@ -360,9 +361,10 @@ original test timeout, nonzero exit or process cleanup error.
 Fresh installed-AUT lookups remain60 seconds and still verify the exact owned
 UUID, bundle path/identifier and complete built-versus-installed bytes. All other
 command caps, UI assertions, result checks and no-retry behavior are unchanged.
-The two independent builds increase the declared macOS job ceiling from105 to
-140 minutes (four35-minute jobs), while peak macOS concurrency remains three:
-Main, Recovery and at most one iPad locale. There are five jobs including the
+The separate guidance cohort and two iPad locale builds give five macOS jobs
+with 35-minute limits: at most 175 aggregate job-minutes. The workflow permits
+up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
+locale, subject to account runner capacity. There are six jobs including the
 Ubuntu gate. The bounded observer retains its original120-minute admission
 window and records both locale jobs separately; it must not declare a complete
 cohort when one locale is missing, skipped or failed. This is a scheduling-policy

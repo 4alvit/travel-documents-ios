@@ -359,13 +359,22 @@ final class BatchImportUITests: XCTestCase {
         capture(app, "Recovery restore — actual exported file in owned Files folder")
         try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
                   "Files left the confirmed owned folder before selection")
+        let selectionStarted = ContinuousClock.now
         files.element(boundBy: 0).tap()
         let replace = app.buttons["Replace library from backup"]
         // A single-file importer normally completes on selection. Some native
         // versions require Open; only accept that control within this picker.
         let open = picker.buttons.matching(NSPredicate(format: "label == %@", "Open")).firstMatch
-        try await wait("File selection neither completed nor exposed Open", app: app) {
-            replace.isHittable || (picker.exists && open.isHittable && open.isEnabled)
+        do {
+            try await wait("File selection neither completed nor exposed Open", app: app) {
+                replace.isHittable || (picker.exists && open.isHittable && open.isEnabled)
+            }
+        } catch let error as BatchTestFailure {
+            // The unchanged wait already captured the failing screen and tree.
+            captureRecoverySelectionFailure(app: app, picker: picker, navigation: fileNavigation,
+                                            folder: recoveryFolder, files: files, replace: replace,
+                                            open: open, started: selectionStarted)
+            throw error
         }
         if !replace.isHittable {
             try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
@@ -912,6 +921,64 @@ final class BatchImportUITests: XCTestCase {
     private func failure(_ message: String, app: XCUIApplication) -> BatchTestFailure {
         capture(app, message)
         return BatchTestFailure(message: message)
+    }
+
+    private func captureRecoverySelectionFailure(app: XCUIApplication, picker: XCUIElement,
+                                                  navigation: XCUIElement, folder: String,
+                                                  files: XCUIElementQuery, replace: XCUIElement,
+                                                  open: XCUIElement, started: ContinuousClock.Instant) {
+        let diagnosticStarted = ContinuousClock.now
+        let deadline = diagnosticStarted.advanced(by: .seconds(8))
+        var lines = ["elapsedSinceTap=\(started.duration(to: diagnosticStarted))"]
+        // Schedule no further reads after this budget. An in-flight synchronous
+        // XCTest query retains its own timeout; there is no polling or retry.
+        @discardableResult
+        func read<T>(_ name: String, _ value: @autoclosure () -> T) -> T? {
+            guard ContinuousClock.now < deadline else {
+                lines.append("\(name)=not sampled (diagnostic budget exhausted)")
+                return nil
+            }
+            let result = value()
+            lines.append("\(name)=\(result)")
+            return result
+        }
+        func element(_ name: String, _ target: XCUIElement, includeSelection: Bool = false) {
+            guard read("\(name).exists", target.exists) == true else { return }
+            read("\(name).enabled", target.isEnabled)
+            read("\(name).hittable", target.isHittable)
+            if includeSelection {
+                read("\(name).selected", target.isSelected)
+                read("\(name).frame", target.frame)
+            }
+        }
+        read("app.state.rawValue", app.state.rawValue)
+        read("picker.exists", picker.exists)
+        let navigationExists = read("navigation.exists", navigation.exists)
+        var exactDestination: Bool?
+        if navigationExists == false {
+            exactDestination = false
+        } else if navigationExists == true {
+            let titles = navigation.descendants(matching: .any).matching(NSPredicate(
+                format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND label == %@)",
+                NSNumber(value: XCUIElement.ElementType.staticText.rawValue), folder,
+                NSNumber(value: XCUIElement.ElementType.button.rawValue), folder + ", Actions Menu"
+            ))
+            if let count = read("destinationTitles.count", titles.count) {
+                exactDestination = count == 1
+                    ? read("destinationTitle.hittable", titles.element(boundBy: 0).isHittable) : false
+            }
+        }
+        lines.append("exactDestination=\(exactDestination.map(String.init) ?? "not sampled (diagnostic budget exhausted)")")
+        if read("files.count", files.count) == 1 {
+            element("file", files.element(boundBy: 0), includeSelection: true)
+        }
+        element("replace", replace)
+        element("open", open)
+        lines.append("diagnosticElapsed=\(diagnosticStarted.duration(to: .now))")
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
+        attachment.name = "Recovery file selection — failure state"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func capture(_ app: XCUIApplication, _ name: String, springboard: XCUIApplication? = nil) {

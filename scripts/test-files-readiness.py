@@ -870,5 +870,179 @@ class PreviewReadinessTests(unittest.TestCase):
         self.assertNotIn('Task.sleep(for: .seconds(5))', body)
 
 
+SELECTION_DIAGNOSTIC_FIXTURE = r'''
+import Foundation
+
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by duration: Duration) -> Instant { Instant(time: time + duration) }
+        func duration(to other: Instant) -> Duration { other.time - time }
+        @MainActor static var now: Instant { ContinuousClock.now }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.time < rhs.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor final class World {
+    var reads: [String] = []
+    var cost: Duration = .zero
+    var costs: [String: Duration] = [:]
+    var titleCount = 1
+    func record(_ key: String) { reads.append(key); ContinuousClock.elapsed += costs[key] ?? cost }
+}
+@MainActor final class XCUIElement {
+    enum ElementType: Int { case any = 0, button = 9, staticText = 48 }
+    let world: World
+    let name: String
+    let present: Bool
+    init(_ world: World, _ name: String, present: Bool = true) {
+        self.world = world; self.name = name; self.present = present
+    }
+    var exists: Bool { world.record(name + ".exists"); return present }
+    var isEnabled: Bool { precondition(present); world.record(name + ".enabled"); return true }
+    var isHittable: Bool { precondition(present); world.record(name + ".hittable"); return name == "destinationTitle" }
+    var isSelected: Bool { precondition(present); world.record(name + ".selected"); return true }
+    var frame: String { precondition(present); world.record(name + ".frame"); return "fixture-frame" }
+    func descendants(matching type: ElementType) -> XCUIElementQuery {
+        precondition(name == "navigation" && type == .any)
+        return XCUIElementQuery(XCUIElement(world, "destinationTitle"), count: world.titleCount,
+                               name: "destinationTitles")
+    }
+}
+@MainActor final class XCUIElementQuery {
+    let file: XCUIElement
+    let matches: Int
+    let name: String
+    init(_ file: XCUIElement, count: Int, name: String = "files") {
+        self.file = file; self.matches = count; self.name = name
+    }
+    var count: Int { file.world.record(name + ".count"); return matches }
+    func element(boundBy index: Int) -> XCUIElement {
+        precondition(matches == 1 && index == 0)
+        file.world.reads.append(file.name + ".resolve")
+        return file
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        precondition(name == "destinationTitles")
+        for (type, label, expected) in [(48, "fixture", true), (9, "fixture, Actions Menu", true),
+                                       (9, "fixture", false), (48, "fixture, Actions Menu", false),
+                                       (9, "fixture-other, Actions Menu", false)] {
+            precondition(predicate.evaluate(with: ["elementType": type, "label": label]) == expected)
+        }
+        return self
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State: Int { case runningForeground = 4 }
+    let world: World
+    init(_ world: World) { self.world = world }
+    var state: State { world.record("app.state"); return .runningForeground }
+}
+final class XCTAttachment {
+    enum Lifetime { case deleteOnSuccess, keepAlways }
+    let string: String
+    var name = ""
+    var lifetime: Lifetime = .deleteOnSuccess
+    init(string: String) { self.string = string }
+}
+@MainActor final class Harness {
+    var attachments: [XCTAttachment] = []
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
+    // ACTUAL_HELPER
+    func run(_ name: String) {
+        let world = World()
+        let file = XCUIElement(world, "file", present: name != "file-disappeared")
+        let count = name == "ambiguous" ? 2 : name == "missing" ? 0 : 1
+        let controlsPresent = name != "missing"
+        if name == "budget" { world.cost = .seconds(9) }
+        if name == "budget-navigation" { world.costs["navigation.exists"] = .seconds(9) }
+        if name == "budget-title-count" { world.costs["destinationTitles.count"] = .seconds(9) }
+        if name == "budget-title-hittable" { world.costs["destinationTitle.hittable"] = .seconds(9) }
+        if name == "ambiguous-title" { world.titleCount = 2 }
+        captureRecoverySelectionFailure(app: XCUIApplication(world),
+            picker: XCUIElement(world, "picker"),
+            navigation: XCUIElement(world, "navigation", present: name != "missing-navigation"),
+            folder: "fixture", files: XCUIElementQuery(file, count: count),
+            replace: XCUIElement(world, "replace", present: controlsPresent),
+            open: XCUIElement(world, "open", present: controlsPresent), started: ContinuousClock.now)
+        precondition(attachments.count == 1)
+        let result = attachments[0]
+        precondition(result.name == "Recovery file selection — failure state" && result.lifetime == .keepAlways)
+        precondition(result.string.contains("elapsedSinceTap=") && result.string.contains("diagnosticElapsed="))
+        switch name {
+        case "complete":
+            for field in ["app.state.rawValue=4", "picker.exists=true", "navigation.exists=true",
+                          "exactDestination=true", "files.count=1", "file.enabled=true",
+                          "file.hittable=false", "file.selected=true", "file.frame=fixture-frame",
+                          "replace.enabled=true", "replace.hittable=false", "open.enabled=true", "open.hittable=false"] {
+                precondition(result.string.contains(field), field)
+            }
+        case "missing", "ambiguous":
+            precondition(!world.reads.contains("file.resolve"))
+            if name == "missing" {
+                precondition(result.string.contains("replace.exists=false") && result.string.contains("open.exists=false"))
+                precondition(!world.reads.contains("replace.enabled") && !world.reads.contains("open.enabled"))
+            }
+        case "file-disappeared":
+            precondition(result.string.contains("file.exists=false"))
+            precondition(!world.reads.contains("file.enabled") && !world.reads.contains("file.frame"))
+        case "budget", "budget-navigation", "budget-title-count", "budget-title-hittable":
+            var expected = ["app.state"]
+            if name != "budget" { expected += ["picker.exists", "navigation.exists"] }
+            if ["budget-title-count", "budget-title-hittable"].contains(name) {
+                expected += ["destinationTitles.count"]
+            }
+            if name == "budget-title-hittable" {
+                expected += ["destinationTitle.resolve", "destinationTitle.hittable"]
+            }
+            precondition(world.reads == expected)
+            precondition(result.string.contains("not sampled (diagnostic budget exhausted)"))
+            if name != "budget-title-hittable" {
+                precondition(result.string.contains("exactDestination=not sampled"))
+            }
+        case "missing-navigation", "ambiguous-title":
+            precondition(result.string.contains("exactDestination=false"))
+            precondition(!world.reads.contains("destinationTitle.resolve"))
+            if name == "missing-navigation" { precondition(!world.reads.contains("destinationTitles.count")) }
+        default: fatalError("Unknown fixture")
+        }
+        precondition(Set(world.reads).count == world.reads.count, "Diagnostic must not poll or retry")
+        print("PASS " + name)
+    }
+}
+@main struct Main {
+    @MainActor static func main() { Harness().run(CommandLine.arguments[1]) }
+}
+'''
+
+
+class SelectionDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func captureRecoverySelectionFailure(')
+        end = source.index('    private func capture(', start)
+        root = Path(cls.directory.name)
+        path = root / 'SelectionDiagnostic.swift'
+        path.write_text(SELECTION_DIAGNOSTIC_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = root / 'selection-diagnostic-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_failure_state_handles_disappearing_ambiguous_and_slow_controls(self):
+        for name in ['complete', 'missing', 'ambiguous', 'file-disappeared', 'budget',
+                     'budget-navigation', 'budget-title-count', 'budget-title-hittable',
+                     'missing-navigation', 'ambiguous-title']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
