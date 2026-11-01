@@ -1,0 +1,403 @@
+{
+  "validated_at_local": "2026-10-24T20:34:37.387365-07:00",
+  "source_head": "0e669da95eb4d241d2141c1456a94d4f9d91ae25",
+  "status": "PASS_TEXT_LIMITS_WITH_EXPLICIT_OWNER_DEPENDENCIES",
+  "checks": [
+    {
+      "file": "listing-en-US.json",
+      "field": "name",
+      "unicode_code_points": 28,
+      "utf16_code_units": 28,
+      "utf8_bytes": 28,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "min": 2,
+        "max": 30,
+        "unit": "characters",
+        "source": "app_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-en-US.json",
+      "field": "subtitle",
+      "unicode_code_points": 27,
+      "utf16_code_units": 27,
+      "utf8_bytes": 27,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 30,
+        "unit": "characters",
+        "source": "app_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-en-US.json",
+      "field": "promotional_text",
+      "unicode_code_points": 150,
+      "utf16_code_units": 150,
+      "utf8_bytes": 150,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 170,
+        "unit": "characters",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-en-US.json",
+      "field": "keywords",
+      "unicode_code_points": 64,
+      "utf16_code_units": 64,
+      "utf8_bytes": 64,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 100,
+        "unit": "utf8_bytes",
+        "per_keyword_min_characters": 3,
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-en-US.json",
+      "field": "description",
+      "unicode_code_points": 2815,
+      "utf16_code_units": 2815,
+      "utf8_bytes": 2815,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "characters",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "app-review-notes-en-US.txt",
+      "field": "app_review_notes",
+      "unicode_code_points": 2896,
+      "utf16_code_units": 2896,
+      "utf8_bytes": 2896,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "utf8_bytes",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-review-notes-en-US.txt",
+      "field": "iap_review_notes",
+      "unicode_code_points": 1196,
+      "utf16_code_units": 1196,
+      "utf8_bytes": 1196,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-ru.json",
+      "field": "name",
+      "unicode_code_points": 29,
+      "utf16_code_units": 29,
+      "utf8_bytes": 45,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "min": 2,
+        "max": 30,
+        "unit": "characters",
+        "source": "app_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-ru.json",
+      "field": "subtitle",
+      "unicode_code_points": 28,
+      "utf16_code_units": 28,
+      "utf8_bytes": 53,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 30,
+        "unit": "characters",
+        "source": "app_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-ru.json",
+      "field": "promotional_text",
+      "unicode_code_points": 160,
+      "utf16_code_units": 160,
+      "utf8_bytes": 297,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 170,
+        "unit": "characters",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-ru.json",
+      "field": "keywords",
+      "unicode_code_points": 43,
+      "utf16_code_units": 43,
+      "utf8_bytes": 81,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 100,
+        "unit": "utf8_bytes",
+        "per_keyword_min_characters": 3,
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "listing-ru.json",
+      "field": "description",
+      "unicode_code_points": 3039,
+      "utf16_code_units": 3039,
+      "utf8_bytes": 5485,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "characters",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "app-review-notes-ru.txt",
+      "field": "app_review_notes",
+      "unicode_code_points": 1818,
+      "utf16_code_units": 1818,
+      "utf8_bytes": 3188,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "utf8_bytes",
+        "source": "platform_version_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-review-notes-ru.txt",
+      "field": "iap_review_notes",
+      "unicode_code_points": 1209,
+      "utf16_code_units": 1209,
+      "utf8_bytes": 2114,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 4000,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-localizations.json",
+      "field": "en-US.iap_name",
+      "unicode_code_points": 14,
+      "utf16_code_units": 14,
+      "utf8_bytes": 14,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "min": 2,
+        "max": 30,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-localizations.json",
+      "field": "en-US.iap_description",
+      "unicode_code_points": 43,
+      "utf16_code_units": 43,
+      "utf8_bytes": 43,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 45,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-localizations.json",
+      "field": "ru.iap_name",
+      "unicode_code_points": 14,
+      "utf16_code_units": 14,
+      "utf8_bytes": 14,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "min": 2,
+        "max": 30,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    },
+    {
+      "file": "iap-localizations.json",
+      "field": "ru.iap_description",
+      "unicode_code_points": 45,
+      "utf16_code_units": 45,
+      "utf8_bytes": 83,
+      "NFC": true,
+      "simple_character_counts_agree": true,
+      "limit": {
+        "max": 45,
+        "unit": "characters",
+        "source": "iap_information"
+      },
+      "pass": true,
+      "contains_owner_placeholder": false
+    }
+  ],
+  "notes": [
+    "Russian description exceeds 4000 UTF-8 bytes but is below the documented 4000-character description limit. This is allowed; do not confuse description with App Review Notes.",
+    "Russian keywords and App Review Notes pass the stricter applicable UTF-8-byte limits.",
+    "Privacy/support drafts intentionally contain owner placeholders and are not publishable until owner-inputs are resolved.",
+    "No App Store account, app/runtime, test, repository or remote-publication mutation was performed."
+  ],
+  "prohibited_claim_review": {
+    "dollar_price_in_consumer_listings": false,
+    "says_unlimited_storage": false,
+    "offers_sync_or_family_sharing": false,
+    "markets_readiness_as_paid_only": false,
+    "claims_actual_delivery_or_document_legal_validity": false,
+    "claims_actual_release_or_real_sales": false
+  },
+  "known_placeholders": {
+    "support-ru.md": [
+      "[LEGAL_OPERATOR_NAME]",
+      "[PUBLIC_SUPPORT_CONTACT]"
+    ],
+    "privacy-en-US.md": [
+      "[LEGAL_OPERATOR_NAME]",
+      "[POLICY_EFFECTIVE_DATE]",
+      "[PUBLIC_PRIVACY_CONTACT]",
+      "[SUPPORT_DATA_RETENTION_AND_DELETION]"
+    ],
+    "support-en-US.md": [
+      "[LEGAL_OPERATOR_NAME]",
+      "[PUBLIC_SUPPORT_CONTACT]"
+    ],
+    "privacy-ru.md": [
+      "[LEGAL_OPERATOR_NAME]",
+      "[POLICY_EFFECTIVE_DATE]",
+      "[PUBLIC_PRIVACY_CONTACT]",
+      "[SUPPORT_DATA_RETENTION_AND_DELETION]"
+    ]
+  },
+  "implementation_evidence": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "fca57db8bfb9f8bd753c0b9eb81cabe83d01800bf0e49b9fd364e6bf06a15420"
+    },
+    {
+      "path": "docs/app-store-metadata.md",
+      "sha256": "2d894a299dd4c20c099421ff4568f7229a3f5d0b63c6c8bb172c24764f7d0b13"
+    },
+    {
+      "path": "docs/privacy.md",
+      "sha256": "039cadf54ec5cdd3c0bfa17edff8051e86906638361592f32f53920dca1b37f2"
+    },
+    {
+      "path": "docs/support.md",
+      "sha256": "5d2771187383bd71d003ce57beef118f5475716a4e0442400f100fcef347587f"
+    },
+    {
+      "path": "docs/data-and-recovery.md",
+      "sha256": "3a0db78125740d6df85cc0d2ad6f2d6451c6b63b37d93e3417555da0a6f41da0"
+    },
+    {
+      "path": "docs/implementation-contract.md",
+      "sha256": "e4c434497a17682fc7055a0b324830c02e8ca1ac49162a46ecf096c6c2b5b098"
+    },
+    {
+      "path": "App/AppModel.swift",
+      "sha256": "3d66b7cf6b5852e776136964890583f8f7c58d354b1bc5d84e7fdc4457669a47"
+    },
+    {
+      "path": "App/PurchaseManager.swift",
+      "sha256": "231de8c0e2976fc262ff91367229f6a6beeaad83e1b03dca6e4904477125ce6c"
+    },
+    {
+      "path": "App/PrivacyLock.swift",
+      "sha256": "ed599dd3b4c2ce15ff0ceeef67ba6f3ec4dc48e2983e04cab1280cb497a3a438"
+    },
+    {
+      "path": "App/ReminderService.swift",
+      "sha256": "9768ded0d29c56f0449f9a2467867315d0a8cbf2a796b9c690094574d4702ccc"
+    },
+    {
+      "path": "App/Views.swift",
+      "sha256": "b07104e40a6ff46d3b6f9b42b64261c963680528a12e83360994a4849ec12434"
+    },
+    {
+      "path": "App/Tripfolio.storekit",
+      "sha256": "27601af664a23a52352b3b9eb64f97085789d468ec6221159260819452b2c312"
+    },
+    {
+      "path": "App/PrivacyInfo.xcprivacy",
+      "sha256": "80786716c3d3883870940efc2559177240bc5ce812f5ea63801f0a12d9159c91"
+    },
+    {
+      "path": "Sources/TravelCore/DocumentRepository.swift",
+      "sha256": "5026e8756f6b8a3f5fbbaa3bd217ff0022d586df497a8a48375ee0d6a57b1ef6"
+    },
+    {
+      "path": "Package.swift",
+      "sha256": "fcf6c9c76029b1f27f588129afc676d3924c5d0673d23c70a7de4aeb8c481374"
+    },
+    {
+      "path": "project.yml",
+      "sha256": "c66b6f33c113b11daf0b0edb26cab1e116dddecf243b57ef31c597f1c6f5ce55"
+    }
+  ]
+}

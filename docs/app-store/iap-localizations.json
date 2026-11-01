@@ -1,0 +1,25 @@
+{
+  "product_id": "com.4alvit.tripfolio.pro",
+  "type": "NON_CONSUMABLE",
+  "reference_name": "TripDocket Pro Lifetime",
+  "reference_name_note": "Existing internal tracking name; customer copy does not promise perpetual service or all future features.",
+  "target_price": {
+    "currency": "USD",
+    "amount": "24.99",
+    "status": "Authorized target and existing LOCAL Xcode configuration; not a verified live App Store price. Do not paste into localized customer copy."
+  },
+  "family_sharable": false,
+  "family_sharable_status": "Matches current local configuration; preserve this offer when configuring the live product.",
+  "localizations": [
+    {
+      "locale": "en-US",
+      "name": "TripDocket Pro",
+      "description": "More files, batch import, expiry reminders."
+    },
+    {
+      "locale": "ru",
+      "name": "TripDocket Pro",
+      "description": "Больше файлов, пакетный импорт и напоминания."
+    }
+  ]
+}

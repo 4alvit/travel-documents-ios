@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "Сканируйте документы и сохраняйте их в локальную библиотеку для поездок.";
+"NSFaceIDUsageDescription" = "Разблокируйте доступ к личным документам для поездок.";
+"TripDocket document backup" = "Резервная копия документов TripDocket";
+"CFBundleDisplayName" = "TripDocket";

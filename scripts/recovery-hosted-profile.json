@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "repository": "4alvit/travel-documents-ios",
+  "runner_label": "macos-15",
+  "runner_environment": "github-hosted",
+  "runner_arch": "ARM64",
+  "machine": "arm64",
+  "image_os_prefix": "macos15",
+  "python_minimum": [
+    3,
+    11
+  ],
+  "xcode_minimum_major": 16,
+  "xcode_selection": "already-selected only; record and freeze canonical developer directory",
+  "runtime_selection": "exact full numeric iphonesimulator SDK version; one available runtime; no fallback/download",
+  "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro",
+  "case_attempts": {
+    "prepare": 1,
+    "export": 1,
+    "restore": 1
+  },
+  "total_seconds": 1500,
+  "cleanup_seconds": 120,
+  "prep_seconds": 60,
+  "minimum_admission_free_GiB": 16,
+  "minimum_work_free_GiB": 8,
+  "maximum_output_GiB": 8,
+  "maximum_xcresult_GiB": 2,
+  "project": "checked-in Tripfolio.xcodeproj; no generation or installation in recovery job"
+}

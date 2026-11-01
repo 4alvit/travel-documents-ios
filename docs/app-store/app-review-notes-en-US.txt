@@ -1,0 +1,17 @@
+TripDocket is a local travel-document organizer. No TripDocket login or demo account is required. Apple may request its own purchase authentication. Please use a device with a passcode: the release app uses device-owner authentication (Face ID, Touch ID or passcode) and stays locked if it cannot authenticate. There is no release authentication bypass. Camera scanning needs supported hardware; Files import is also available.
+
+1. Unlock, create a trip, and add a person on People.
+2. In the trip, choose Add document. Import a fictional PDF/JPEG/PNG or scan a fictional paper document; review its title, type, person and optional expiry date, then save.
+3. Choose Check all originals and open the saved file. Viewing and original-file verification work offline after import. This does not validate travel requirements.
+4. Export a trip packet or use Settings > Export full backup. An explicit warning precedes sharing. Copies are unencrypted and cannot be recalled.
+5. Settings > Restore from backup accepts a .tripbackup file. After confirmation it replaces the whole library, not merges it. Cancel preserves the library; invalid backup content is rejected before replacement.
+
+Free permits 1 trip, 2 people and 8 documents. Original checks, viewing, editing, deletion, basic export and recovery do not require Pro, including after entitlement loss. Pro adds more entries, reviewed batch import of up to 10 files, and explicitly enabled local expiry reminders. Limits for all tiers: 16,777,216 bytes per original; 67,108,864 bytes of originals per library; 100,663,296 bytes per incoming backup (16/64/96 MiB; UI labels MB).
+
+Open the Pro card in Settings or reach an addition limit. Product com.4alvit.tripfolio.pro is a non-consumable, one-time purchase with no subscription. The app shows StoreKit's localized price. Restore purchases is in Settings and on the Pro screen. Pending/cancelled transactions do not grant Pro; only verified active entitlements do. Restoring purchases does not restore files. Family Sharing is not part of this offer.
+
+In a trip's actions, Import multiple files opens the Pro batch workflow. Review and explicitly confirm every item before saving the batch. Preparation or save failure does not add a partial batch.
+
+Reminders request notification permission only after an explicit action. Text is generic. They use the confirmed expiry date: 9 AM in the scheduling time zone, 30 days before expiry, or the next 9 AM before the expiry day when inside that window. Later time-zone changes do not move the reminder. Document edits clear its old reminder; replacement restore clears existing schedules. They can be set again.
+
+The interface follows English/Russian iOS language preferences with English fallback. The shipped build and associated live product must be reviewed together; the repository's Xcode StoreKit catalog is only a local testing configuration.

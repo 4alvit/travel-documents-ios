@@ -1,0 +1,39 @@
+{
+  "identifier" : "45E0FAC9-8F4E-4328-BB9F-A6C6249C9AB0",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "24.99",
+      "familyShareable" : false,
+      "internalID" : "A8246A9D-17BA-4B18-B035-D93710519A39",
+      "localizations" : [
+        {
+          "description" : "More trips, travelers, and documents, with optional expiry reminders. One purchase; no subscription.",
+          "displayName" : "TripDocket Pro",
+          "locale" : "en_US"
+        },
+        {
+          "description" : "Больше поездок, путешественников и документов, а также напоминания об истечении срока. Одна покупка, без подписки.",
+          "displayName" : "TripDocket Pro",
+          "locale" : "ru_RU"
+        }
+      ],
+      "productID" : "com.4alvit.tripfolio.pro",
+      "referenceName" : "TripDocket Pro Lifetime",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_askToBuyEnabled" : false,
+    "_billingGracePeriodEnabled" : false,
+    "_billingIssuesEnabled" : false,
+    "_disableDialogs" : false,
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_renewalBillingIssuesEnabled" : false,
+    "_storefront" : "USA",
+    "_storeKitErrors" : []
+  },
+  "subscriptionGroups" : [],
+  "version" : { "major" : 3, "minor" : 0 }
+}

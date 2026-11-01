@@ -1,0 +1,26 @@
+// Core presentation strings. Keys are not persisted model values.
+"documentKind.passport" = "Паспорт";
+"documentKind.insurance" = "Страховка";
+"documentKind.ticket" = "Билет";
+"documentKind.booking" = "Бронирование";
+"documentKind.other" = "Другое";
+"repositoryError.invalidImportCount" = "Выберите от 1 до 10 документов для одного импорта.";
+"repositoryError.invalidName" = "Введите непустое имя длиной не более 200 символов и используйте простое имя файла.";
+"repositoryError.unsupportedFileType" = "Поддерживаются только оригиналы в форматах PDF, JPEG и PNG.";
+"repositoryError.invalidFile" = "Не удаётся безопасно открыть этот файл. Используйте PDF без блокировки или целое изображение JPEG/PNG размером не более 32 мегапикселей.";
+"repositoryError.documentTooLarge" = "Размер каждого оригинала не должен превышать 16 МиБ.";
+"repositoryError.libraryTooLarge" = "Библиотека превышает ограничение по объёму или количеству элементов. Перед удалением документов экспортируйте резервную копию.";
+"repositoryError.archiveTooLarge" = "Размер резервной копии превышает допустимые 96 МиБ.";
+"repositoryError.invalidArchive" = "Резервная копия неполная или недействительна. Текущая библиотека не заменена.";
+"repositoryError.invalidCatalog" = "Не удаётся безопасно прочитать сохранённую библиотеку. Сохраните резервную копию и попробуйте восстановить библиотеку из неё.";
+"repositoryError.unsupportedSchema" = "В этой библиотеке используется неподдерживаемая версия формата.";
+"repositoryError.missingReference" = "Поездка или путешественник, на которых ссылается документ, не существуют.";
+"repositoryError.duplicateIdentifier" = "Библиотека содержит повторяющиеся идентификаторы или имена сохранённых файлов.";
+"repositoryError.documentNotFound" = "Этого документа больше нет в библиотеке.";
+"repositoryError.tripNotFound" = "Этой поездки больше нет в библиотеке.";
+"repositoryError.travelerNotFound" = "Этого путешественника больше нет в библиотеке.";
+"repositoryError.originalMissing" = "Полный оригинал отсутствует. Восстановите его из резервной копии.";
+"repositoryError.originalModified" = "Полный оригинал изменён или повреждён. Восстановите его из резервной копии.";
+"repositoryError.unreadableOriginal" = "Не удаётся прочитать полный оригинал. Разблокируйте устройство и повторите попытку.";
+"repositoryError.storageUnavailable" = "Локальное хранилище недоступно. Разблокируйте устройство и повторите попытку.";
+"repositoryError.saveFailed" = "Не удалось сохранить изменение. Проверьте свободное место и повторите попытку. Предыдущая библиотека сохранена.";

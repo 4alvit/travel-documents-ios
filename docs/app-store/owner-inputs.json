@@ -1,0 +1,96 @@
+{
+  "prepared_local_date": "2026-10-24",
+  "status": "Text drafts and bundled EN/RU guidance are integrated. Final owner-dependent policy/contact details and App Store submission configuration remain pending.",
+  "confirmed_defaults_do_not_reask": {
+    "primary_locale": "en-US",
+    "additional_locale": "ru",
+    "primary_category": "Travel",
+    "release_method": "Manual",
+    "base_app_model": "Free with one optional non-consumable Pro purchase",
+    "target_pro_price": {
+      "amount": "24.99",
+      "currency": "USD",
+      "scope": "Authorized target; currently present in local Xcode configuration only. Must be configured and verified in App Store Connect."
+    },
+    "bundle_id": "com.4alvit.tripfolio",
+    "product_id": "com.4alvit.tripfolio.pro",
+    "iap_type": "NON_CONSUMABLE",
+    "family_sharing_offer": false,
+    "product_name": "TripDocket",
+    "version_in_source": "0.1.0",
+    "build_in_source": "1"
+  },
+  "owner_facts_not_invented": [
+    {
+      "id": "legal_operator",
+      "needed": "Legal person/entity operating the app and owning the relevant rights; copyright owner and year rights were obtained. Do not infer from Git authors, GitHub handles or the current calendar year.",
+      "used_by": [
+        "privacy pages",
+        "support pages",
+        "copyright field"
+      ],
+      "placeholder": "[LEGAL_OPERATOR_NAME]"
+    },
+    {
+      "id": "public_support_contact",
+      "needed": "An actual contact route approved for public display (for example a support email; address/phone where applicable). An existing public GitHub issue tracker alone is not asserted to satisfy the ASC contact requirement.",
+      "used_by": [
+        "support pages",
+        "Support URL"
+      ],
+      "placeholder": "[PUBLIC_SUPPORT_CONTACT]"
+    },
+    {
+      "id": "public_privacy_contact",
+      "needed": "A real published private-correspondence route for privacy/security questions; may match the support address only if the owner chooses.",
+      "used_by": [
+        "privacy pages"
+      ],
+      "placeholder": "[PUBLIC_PRIVACY_CONTACT]"
+    },
+    {
+      "id": "support_data_policy",
+      "needed": "Actual retention/deletion handling for voluntarily sent support correspondence. No retention period or legal basis has been invented.",
+      "used_by": [
+        "privacy pages"
+      ],
+      "placeholder": "[SUPPORT_DATA_RETENTION_AND_DELETION]"
+    },
+    {
+      "id": "policy_effective_date",
+      "needed": "Effective date when the final pages are published. Draft preparation date is 24 October 2026 in America/Los_Angeles, not an asserted effective date.",
+      "placeholder": "[POLICY_EFFECTIVE_DATE]"
+    },
+    {
+      "id": "review_contact",
+      "needed": "App Review contact full name, email and international-format phone. This is private review metadata, not automatically the public support contact.",
+      "used_by": [
+        "App Review contact form"
+      ]
+    },
+    {
+      "id": "distribution_and_legal",
+      "needed": "Actual sale territories and accurate account/legal declarations, including applicable trader/contact details. No territories, trader status, legal entity or agreement acceptance is assumed."
+    }
+  ],
+  "root_integration_tasks_not_owner_questions": [
+    "Keep the reviewed listing, IAP and review-note drafts integrated; preserve technical identifiers.",
+    "Publish final privacy/support pages after replacing owner-dependent placeholders, then verify public HTTPS URLs and all links. Prefer stable pages; verify commit-pinned source URLs after the integration push if those are used for review evidence.",
+    "The in-app privacy/support entry is implemented and uses confirmed preview URLs pinned to commit 1391b307. After final owner-approved pages are published, update and verify the final destinations without silently changing the historical preview evidence.",
+    "Verify final app-name availability in App Store Connect and finish any needed name clearance. A prior bounded search is not reservation or clearance.",
+    "Configure the matching non-consumable at the authorized target price, with the EN/RU localizations and family sharing off; verify actual price/availability and attach the first IAP to the app version submission.",
+    "Use a real purchase-screen review screenshot and accurate synthetic-data App Store screenshots. Do not claim local Xcode screenshots establish live pricing or purchases.",
+    "Select Travel, primary en-US, Russian localization and Manual release as already authorized. Do not publish the release merely because metadata saves.",
+    "Reconcile App Privacy declarations with the final signed build and actual support/hosting services. Empty NSPrivacyCollectedDataTypes and absence of an analytics SDK are evidence, not a substitute for the final questionnaire.",
+    "Remove the draft banners and all bracket placeholders from privacy/support before publishing; listing/IAP/review-note payloads contain no owner placeholders.",
+    "Keep the default Apple license agreement unless another agreement is supplied and authorized; no custom legal terms are drafted here.",
+    "Keep device, signing, live IAP and App Review checks separate from accepted source CI. No live-release readiness follows from these text drafts."
+  ],
+  "not_requested_or_not_fabricated": [
+    "No owner email, phone, legal address or entity invented.",
+    "No ratings/age classification invented.",
+    "No unsupported lifetime service, encryption, zero-knowledge, safety certification or unlimited-storage claim.",
+    "No income, sales, adoption, conversion or willingness-to-pay claim.",
+    "No new questions about price, primary language, Travel category or Manual release."
+  ]
+}
