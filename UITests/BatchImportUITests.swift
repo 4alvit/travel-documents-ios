@@ -221,10 +221,52 @@ final class BatchImportUITests: XCTestCase {
         // The first share on a fresh simulator starts a remote service. Its
         // container can be present while it has no actions yet; allow that one
         // presentation to initialize without repeating Export or a share tap.
-        try await wait("Share sheet has no visible Save to Files action", app: app, timeout: .seconds(40)) {
-            saveToFiles.count == 1 && saveToFiles.element.isEnabled && saveToFiles.element.isHittable
-        }
+        try await waitForStableShareAction(saveToFiles, app: app)
         saveToFiles.element.tap()
+    }
+
+    private func waitForStableShareAction(_ actions: XCUIElementQuery, app: XCUIApplication) async throws {
+        let header = app.navigationBars.matching(identifier: "UIActivityContentView")
+        var previousFrames: [CGRect]?
+        var previousIdentity: String?
+        var stableObservations = 0
+        // Remote share actions become hittable before the presentation finishes.
+        // Require the same action and native header geometry on successive polls;
+        // any unavailable, invalid, or changing state restarts convergence.
+        try await wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40)) {
+            var frames: [CGRect]?
+            var identity: String?
+            if actions.count == 1, header.count == 1 {
+                let action = actions.element
+                if action.isEnabled, action.isHittable {
+                    let bounds = app.frame
+                    let candidate = [action.frame, header.element.frame]
+                    if candidate.allSatisfy({ frame in
+                        frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite
+                            && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
+                    }) {
+                        frames = candidate
+                        identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                    }
+                }
+            }
+            if let frames, let identity {
+                let unchanged = previousFrames.map { old in
+                    zip(old, frames).allSatisfy { a, b in
+                        abs(a.minX - b.minX) <= 0.5 && abs(a.minY - b.minY) <= 0.5
+                            && abs(a.width - b.width) <= 0.5 && abs(a.height - b.height) <= 0.5
+                    }
+                } ?? false
+                stableObservations = unchanged && identity == previousIdentity ? stableObservations + 1 : 1
+                previousFrames = frames
+                previousIdentity = identity
+                return stableObservations >= 3
+            }
+            previousFrames = nil
+            previousIdentity = nil
+            stableObservations = 0
+            return false
+        }
     }
 
     func testRecoveryExportFullBackupThroughFiles() async throws {

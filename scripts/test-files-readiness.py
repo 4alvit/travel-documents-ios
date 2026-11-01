@@ -554,10 +554,11 @@ class PresentationWaitTests(unittest.TestCase):
 
     def test_extended_budget_is_scoped_to_share_action(self):
         source = SOURCE.read_text()
-        call = 'wait("Share sheet has no visible Save to Files action", app: app, timeout: .seconds(40))'
+        call = 'wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40))'
         self.assertEqual(source.count('timeout: .seconds(40)'), 1)
         self.assertIn(call, source)
-        self.assertIn('saveToFiles.count == 1 && saveToFiles.element.isEnabled && saveToFiles.element.isHittable', source)
+        self.assertIn('if actions.count == 1, header.count == 1', source)
+        self.assertIn('if action.isEnabled, action.isHittable', source)
         self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', source)
 
 
@@ -575,6 +576,163 @@ class SDKSourceTests(unittest.TestCase):
              '-I', str(Path(platform) / 'Developer/usr/lib'), str(SOURCE)],
             capture_output=True, text=True, timeout=45)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+SHARE_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+
+struct ShareFrame {
+    var actions = 1
+    var headers = 1
+    var enabled = true
+    var hittable = true
+    var bounds = CGRect(x: 0, y: 0, width: 402, height: 874)
+    var action = CGRect(x: 114, y: 295, width: 82, height: 134)
+    var header = CGRect(x: 0, y: 78, width: 402, height: 95)
+    var identifier = "actionGroupCell"
+    var label = "Save to Files"
+    var type = 75
+}
+final class ShareWorld {
+    var frames: [ShareFrame]
+    var index = 0
+    var polls = 0
+    var taps = 0
+    init(_ frames: [ShareFrame]) { self.frames = frames }
+    var current: ShareFrame { frames[min(index, frames.count - 1)] }
+}
+final class XCUIElement {
+    struct ElementType { let rawValue: Int }
+    let world: ShareWorld
+    let header: Bool
+    init(_ world: ShareWorld, header: Bool) { self.world = world; self.header = header }
+    var isEnabled: Bool { world.current.enabled }
+    var isHittable: Bool { world.current.hittable }
+    var frame: CGRect { header ? world.current.header : world.current.action }
+    var identifier: String { world.current.identifier }
+    var label: String { world.current.label }
+    var elementType: ElementType { ElementType(rawValue: world.current.type) }
+    func tap() { world.taps += 1 }
+}
+final class XCUIElementQuery {
+    let world: ShareWorld
+    let header: Bool
+    init(_ world: ShareWorld, header: Bool = false) { self.world = world; self.header = header }
+    var count: Int { header ? world.current.headers : world.current.actions }
+    var element: XCUIElement { XCUIElement(world, header: header) }
+    func matching(identifier: String) -> XCUIElementQuery {
+        precondition(header && identifier == "UIActivityContentView")
+        return self
+    }
+}
+final class XCUIApplication {
+    let world: ShareWorld
+    init(_ world: ShareWorld) { self.world = world }
+    var navigationBars: XCUIElementQuery { XCUIElementQuery(world, header: true) }
+    var frame: CGRect { world.current.bounds }
+}
+struct ShareFailure: Error {}
+@MainActor final class ShareHarness {
+    let world: ShareWorld
+    init(_ world: ShareWorld) { self.world = world }
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration,
+              condition: @MainActor () -> Bool) async throws {
+        precondition(timeout == .seconds(40))
+        for _ in 0..<12 {
+            world.polls += 1
+            if condition() { return }
+            world.index += 1
+        }
+        throw ShareFailure()
+    }
+    // ACTUAL_HELPER
+    func run() async throws {
+        let actions = XCUIElementQuery(world)
+        try await waitForStableShareAction(actions, app: XCUIApplication(world))
+        actions.element.tap()
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let name = CommandLine.arguments[1]
+        let ready = ShareFrame()
+        var invalid = ready
+        var moved = ready
+        moved.action.origin.y += 5
+        var otherIdentity = ready
+        otherIdentity.identifier = "system-action"
+        otherIdentity.type = 9
+        var expectedPolls = 0
+        var frames: [ShareFrame]
+        switch name {
+        case "ready": frames = [ready]; expectedPolls = 3
+        case "late-ready": invalid.actions = 0; frames = [invalid, invalid, ready]; expectedPolls = 5
+        case "movement-resets": frames = [ready, ready, moved]; expectedPolls = 5
+        case "header-resets": moved = ready; moved.header.origin.y += 5; frames = [ready, ready, moved]; expectedPolls = 5
+        case "identity-resets": frames = [ready, ready, otherIdentity]; expectedPolls = 5
+        case "unavailable-resets": invalid.actions = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
+        case "disabled-resets": invalid.enabled = false; frames = [ready, ready, invalid, ready]; expectedPolls = 6
+        case "invalid-resets": invalid.action.size.width = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
+        case "moving": frames = (0..<12).map { i in var f = ready; f.action.origin.y += Double(i); return f }
+        case "absent": invalid.actions = 0; frames = [invalid]
+        case "ambiguous": invalid.actions = 2; frames = [invalid]
+        case "missing-header": invalid.headers = 0; frames = [invalid]
+        case "ambiguous-header": invalid.headers = 2; frames = [invalid]
+        case "disabled": invalid.enabled = false; frames = [invalid]
+        case "hidden": invalid.hittable = false; frames = [invalid]
+        case "zero-area": invalid.action.size.width = 0; frames = [invalid]
+        case "offscreen": invalid.action.origin.x = -10; frames = [invalid]
+        case "invalid-header": invalid.header.size.height = 0; frames = [invalid]
+        case "nonfinite": invalid.action.origin.x = .infinity; frames = [invalid]
+        default: fatalError("Unknown fixture")
+        }
+        let world = ShareWorld(frames)
+        var failed = false
+        do { try await ShareHarness(world).run() } catch { failed = true }
+        precondition(failed == (expectedPolls == 0))
+        precondition(world.taps == (expectedPolls == 0 ? 0 : 1))
+        precondition(world.polls == (expectedPolls == 0 ? 12 : expectedPolls))
+        print("PASS " + name)
+    }
+}
+'''
+
+
+class ShareReadinessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func waitForStableShareAction(')
+        end = source.index('    func testRecoveryExportFullBackupThroughFiles(', start)
+        root = Path(cls.directory.name)
+        path = root / 'ShareReadiness.swift'
+        path.write_text(SHARE_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = root / 'share-readiness-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_share_readiness_convergence_and_rejected_states(self):
+        for name in ['ready', 'late-ready', 'movement-resets', 'header-resets', 'identity-resets',
+                     'unavailable-resets', 'disabled-resets', 'invalid-resets', 'moving',
+                     'absent', 'ambiguous', 'missing-header', 'ambiguous-header', 'disabled',
+                     'hidden', 'zero-area', 'offscreen', 'invalid-header', 'nonfinite']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_shared_export_path_waits_before_its_single_tap(self):
+        source = SOURCE.read_text()
+        start = source.index('    private func presentRecoverySave(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        body = source[start:end]
+        self.assertEqual(body.count('saveToFiles.element.tap()'), 1)
+        self.assertLess(body.index('try await waitForStableShareAction(saveToFiles, app: app)'),
+                        body.index('saveToFiles.element.tap()'))
 
 
 if __name__ == '__main__':
