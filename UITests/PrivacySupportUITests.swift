@@ -58,6 +58,9 @@ final class PrivacySupportUITests: XCTestCase {
         entry.tap()
         try require(app.navigationBars[copy.title].waitForExistence(timeout: 5),
                     app: app, "Bundled guidance did not open from Free Settings")
+        var guidanceContainer = try requireActiveScrollContainer(
+            in: app, navigationTitle: copy.title, description: "Bundled guidance"
+        )
 
         let bodies = [
             "privacySupport.offline", "privacySupport.local.body", "privacySupport.access.body",
@@ -70,7 +73,8 @@ final class PrivacySupportUITests: XCTestCase {
         ]
         for id in bodies {
             let body = app.staticTexts[id].firstMatch
-            try await readWholeText(body, in: app, title: copy.title, name: id)
+            try await readWholeText(body, in: app, title: copy.title, name: id,
+                                    scrollContainer: guidanceContainer)
             if id == "privacySupport.offline" {
                 try require(body.label == copy.offline, app: app, "Offline/Free introduction is incomplete or has wrong language")
             } else if id == "privacySupport.support.warning" {
@@ -90,34 +94,49 @@ final class PrivacySupportUITests: XCTestCase {
             ("supportPreview", docs + "support-" + suffix),
             ("developer", "https://github.com/4alvit")
         ]
-        for (kind, expectedURL) in destinations {
+        for (index, linkDestination) in destinations.enumerated() {
+            let (kind, expectedURL) = linkDestination
+            if index > 0 {
+                // The previous confirmation was dismissed. Select this page's
+                // live List again rather than retaining a handle across it.
+                guidanceContainer = try requireActiveScrollContainer(
+                    in: app, navigationTitle: copy.title, description: kind + " guidance entry"
+                )
+            }
             let link = app.buttons["privacySupport.link." + kind].firstMatch
             try await scrollTo(link, in: app, navigationTitle: copy.title,
                                description: "Website confirmation entry " + kind, preferWholeFrame: true,
-                               searchDown: kind != "supportIssue")
+                               searchDown: kind != "supportIssue", scrollContainer: guidanceContainer)
             link.tap()
             let sheet = app.navigationBars[copy.externalTitle]
             try require(sheet.waitForExistence(timeout: 5), app: app, "Missing confirmation for " + kind)
+            let confirmationContainer = try requireActiveScrollContainer(
+                in: app, navigationTitle: copy.externalTitle, description: kind + " confirmation"
+            )
             // Use an exact label predicate rather than a very long identifier query.
             let explanation = app.staticTexts.matching(NSPredicate(format: "label == %@", copy.externalBody)).firstMatch
-            try await readWholeText(explanation, in: app, title: copy.externalTitle, name: kind + " external explanation")
+            try await readWholeText(explanation, in: app, title: copy.externalTitle,
+                                    name: kind + " external explanation", scrollContainer: confirmationContainer)
             let warning = app.staticTexts["privacySupport.external.warning"].firstMatch
             if kind == "supportIssue" {
-                try await readWholeText(warning, in: app, title: copy.externalTitle, name: "Public support warning")
+                try await readWholeText(warning, in: app, title: copy.externalTitle,
+                                        name: "Public support warning", scrollContainer: confirmationContainer)
                 try require(warning.label == copy.warning, app: app, "Incorrect warning in public-support confirmation")
             } else {
                 try require(!warning.exists, app: app, "Unexpected public-issue warning for " + kind)
             }
             let destination = app.staticTexts["privacySupport.external.destination"].firstMatch
-            try await readWholeText(destination, in: app, title: copy.externalTitle, name: kind + " exact destination")
+            try await readWholeText(destination, in: app, title: copy.externalTitle,
+                                    name: kind + " exact destination", scrollContainer: confirmationContainer)
             try require(destination.label == expectedURL, app: app, "Unexpected destination for " + kind)
             let open = app.buttons["privacySupport.external.open"].firstMatch
             try await scrollTo(open, in: app, navigationTitle: copy.externalTitle,
-                               description: "Explicit website action " + kind, preferWholeFrame: true)
+                               description: "Explicit website action " + kind, preferWholeFrame: true,
+                               scrollContainer: confirmationContainer)
             try require(open.label == copy.open && open.isEnabled,
                         app: app, "Open action has incorrect language or is disabled")
             try require(visibleViewport(in: app, navigationTitle: copy.externalTitle)
-                .intersection(activeScrollContainer(in: app, navigationTitle: copy.externalTitle)?.frame ?? .zero)
+                .intersection(confirmationContainer.frame)
                 .insetBy(dx: -1, dy: -1).contains(open.frame), app: app, "Open action is clipped")
             let cancelCandidates = sheet.buttons.matching(identifier: "privacySupport.external.cancel").allElementsBoundByIndex
             try require(cancelCandidates.count == 1, app: app, "Cancel is missing or ambiguous in the current confirmation toolbar for " + kind)
@@ -154,13 +173,14 @@ final class PrivacySupportUITests: XCTestCase {
     /// Cover every vertical point of a Text's stable frame, including paragraphs
     /// taller than one screen. A label existing in AX alone is insufficient.
     private func readWholeText(_ text: XCUIElement, in app: XCUIApplication,
-                               title: String, name: String) async throws {
-        guard let container = activeScrollContainer(in: app, navigationTitle: title) else {
+                               title: String, name: String,
+                               scrollContainer: XCUIElement? = nil) async throws {
+        guard let container = scrollContainer ?? activeScrollContainer(in: app, navigationTitle: title) else {
             attach(app, name: "No active text container — " + name)
             throw LayoutFailure(message: "No active text container for " + name)
         }
-        // This invocation cannot navigate or replace its List. Reuse its selected
-        // container while still reading live geometry after every scroll.
+        // A caller may share the selected List within one continuous page or
+        // confirmation. Geometry remains live after every scroll.
         try await scrollTo(text, in: app, navigationTitle: title,
                            description: name, preferWholeFrame: true, scrollContainer: container,
                            readingPrefix: true)
@@ -408,10 +428,20 @@ final class PrivacySupportUITests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
     }
 
+    private func requireActiveScrollContainer(
+        in app: XCUIApplication, navigationTitle: String, description: String
+    ) throws -> XCUIElement {
+        guard let container = activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
+            attach(app, name: "No active scroll container — " + description)
+            throw LayoutFailure(message: "No hittable app scrollView/collectionView for " + description)
+        }
+        return container
+    }
+
     private func activeScrollContainer(in app: XCUIApplication, navigationTitle: String) -> XCUIElement? {
-        let navigation = app.navigationBars[navigationTitle]
-        let navigationFrame = navigation.exists ? navigation.frame : app.frame
-        let viewport = visibleViewport(in: app, navigationTitle: navigationTitle)
+        let observation = viewportObservation(in: app, navigationTitle: navigationTitle)
+        let navigationFrame = observation.navigationFrame ?? app.frame
+        let viewport = observation.bounds
         let candidates = app.scrollViews.allElementsBoundByIndex + app.collectionViews.allElementsBoundByIndex
         // Apply the same geometry filters before either accessibility pass.
         let geometric: [(element: XCUIElement, frame: CGRect)] = candidates.compactMap { element in
@@ -451,17 +481,31 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func visibleViewport(in app: XCUIApplication, navigationTitle: String?) -> CGRect {
+        viewportObservation(in: app, navigationTitle: navigationTitle).bounds
+    }
+
+    private struct ViewportObservation {
+        let bounds: CGRect
+        let navigationFrame: CGRect?
+    }
+
+    private func viewportObservation(in app: XCUIApplication, navigationTitle: String?) -> ViewportObservation {
         let window = app.windows.firstMatch
         var viewport = window.exists ? window.frame : app.frame
         viewport = viewport.insetBy(dx: 2, dy: 2)
+        var navigationFrame: CGRect?
         if let navigationTitle {
             let navigation = app.navigationBars[navigationTitle]
-            if navigation.exists, navigation.isHittable {
+            if navigation.exists {
+                let isHittable = navigation.isHittable
                 let frame = navigation.frame
-                let top = max(viewport.minY, frame.maxY)
-                viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
-                                  width: min(viewport.width, frame.width),
-                                  height: max(0, viewport.maxY - top))
+                navigationFrame = frame
+                if isHittable {
+                    let top = max(viewport.minY, frame.maxY)
+                    viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
+                                      width: min(viewport.width, frame.width),
+                                      height: max(0, viewport.maxY - top))
+                }
             }
         }
         // Floating bottom tabs can overlap a List row that still reports exists.
@@ -472,7 +516,7 @@ final class PrivacySupportUITests: XCTestCase {
                 viewport.size.height = max(0, min(viewport.maxY, frame.minY) - viewport.minY)
             }
         }
-        return viewport
+        return ViewportObservation(bounds: viewport, navigationFrame: navigationFrame)
     }
 
     private func visiblePortion(
