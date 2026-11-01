@@ -94,27 +94,35 @@ def payload(manifest):
             for entry in manifest["entries"] if entry["kind"] != "directory"]
 
 
-def choose_pair(runtimes, device_types, architecture):
-    available_types = {item["identifier"]: item for item in device_types["devicetypes"]}
+def choose_pair(runtimes, device_types, architecture, sdk):
+    require(isinstance(sdk, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", sdk),
+            "Invalid Simulator SDK version")
+    require(tuple(map(int, sdk.split("."))) >= (17,), "Simulator SDK predates the app minimum")
+    matches = [runtime for runtime in runtimes["runtimes"] if runtime.get("version") == sdk
+               and runtime.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")]
+    require(len(matches) == 1, "No unique exact SDK-matched installed runtime")
+    runtime = matches[0]
+    require(runtime.get("isAvailable") is True, "SDK-matched runtime unavailable")
+    architectures = runtime.get("supportedArchitectures")
+    require(isinstance(architectures, list) and architecture in architectures,
+            "SDK-matched runtime architecture unavailable")
+    types = device_types["devicetypes"]
+    available_types = {item["identifier"]: item for item in types}
+    require(len(types) == len(available_types), "Ambiguous device type inventory")
+    supported_types = runtime.get("supportedDeviceTypes", [])
+    identifiers = [item["identifier"] for item in supported_types]
+    require(len(identifiers) == len(set(identifiers)), "Ambiguous runtime device compatibility")
     candidates = []
-    for runtime in runtimes["runtimes"]:
-        if not runtime.get("isAvailable") or ".iOS-" not in runtime.get("identifier", ""):
+    for identifier in identifiers:
+        dtype = available_types.get(identifier)
+        if not dtype or dtype.get("productFamily") != "iPad":
             continue
-        version = tuple(int(v) for v in re.findall(r"\d+", runtime["version"]))
-        if version < (17,) or architecture not in runtime.get("supportedArchitectures", []):
-            continue
-        # Use the runtime's explicit compatibility list, never a guessed name/OS pair.
-        for supported in runtime.get("supportedDeviceTypes", []):
-            identifier = supported.get("identifier")
-            dtype = available_types.get(identifier)
-            if not dtype or dtype.get("productFamily") != "iPad":
-                continue
-            name = dtype["name"]
-            key = (version, "13-inch" in name, "Pro" in name, identifier)
-            candidates.append((key, {"runtime": runtime["identifier"], "os_version": runtime["version"],
-                                     "os_build": runtime.get("buildversion"), "device_type": identifier,
-                                     "device_name": name, "architecture": architecture}))
-    require(candidates, "No explicitly compatible available iOS 17+ runtime/iPad pair for this architecture")
+        name = dtype["name"]
+        key = ("13-inch" in name, "Pro" in name, identifier)
+        candidates.append((key, {"runtime": runtime["identifier"], "os_version": runtime["version"],
+                                 "os_build": runtime.get("buildversion"), "device_type": identifier,
+                                 "device_name": name, "architecture": architecture}))
+    require(candidates, "No explicitly compatible iPad in the SDK-matched runtime")
     return max(candidates, key=lambda candidate: candidate[0])[1]
 
 
@@ -411,6 +419,11 @@ class Driver:
         for argv, label in ((["xcodebuild", "-version"], "xcode-version"),
                             (["xcrun", "xcresulttool", "version"], "xcresulttool-version")):
             self.command(argv, label)
+        sdk_raw = self.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "simulator-sdk-version")[1]
+        self.sdk_version = sdk_raw.strip()
+        require(re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", self.sdk_version), "Invalid Simulator SDK version")
+        self.report["simulator_sdk"] = {"raw": sdk_raw, "version": self.sdk_version,
+                                        "selection": "exact-sdk-matched"}
         for kind in ("summary", "tests"):
             self.command(["xcrun", "xcresulttool", "help", "get", "test-results", kind], "xcresulttool-help-" + kind)
         started = time.monotonic()
@@ -442,7 +455,7 @@ class Driver:
         self.checkpoint()
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
         self.checkpoint()
-        pair = choose_pair(runtimes, dtypes, architecture)
+        pair = choose_pair(runtimes, dtypes, architecture, self.sdk_version)
         self.checkpoint()
         inventory = self.json_command(["xcrun", "simctl", "list", "devices", "--json"], "devices-before")
         self.checkpoint()

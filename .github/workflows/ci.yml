@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   # Preserve the recovery job's bounded owned-process cleanup window.
   cancel-in-progress: false
 jobs:
@@ -154,6 +154,8 @@ jobs:
             step_minutes: 40
             job_minutes: 46
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,7 +164,9 @@ jobs:
       - name: Toolchain
         timeout-minutes: 3
         run: |
-          xcodebuild -version
+          TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)
+          printf '%s\n' "$TRIPDOCKET_IPAD_XCODE_VERSION"
+          test "$TRIPDOCKET_IPAD_XCODE_VERSION" = $'Xcode 26.2\nBuild version 17C52'
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})

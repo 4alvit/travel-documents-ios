@@ -137,6 +137,78 @@ class DriverTests(unittest.TestCase):
             '-only-testing:TripfolioUITests/PrivacySupportUITests/'+method)
         return driver,world,failure.exception,validate.called
 
+    def sdk_fixture(self):
+        types = {'devicetypes': [
+            {'identifier': 'type.ipad-m4', 'name': 'iPad Pro 13-inch M4', 'productFamily': 'iPad'},
+            {'identifier': 'type.ipad-m5', 'name': 'iPad Pro 13-inch M5', 'productFamily': 'iPad'},
+            {'identifier': 'type.phone', 'name': 'iPhone', 'productFamily': 'iPhone'}]}
+        def runtime(version, device):
+            return {'identifier': 'com.apple.CoreSimulator.SimRuntime.iOS-' + version.replace('.', '-'),
+                    'version': version, 'buildversion': 'synthetic-build-' + version, 'isAvailable': True,
+                    'supportedArchitectures': ['arm64'], 'supportedDeviceTypes': [{'identifier': device}]}
+        return {'runtimes': [runtime('18.5', 'type.ipad-m4'), runtime('26.2', 'type.ipad-m5')]}, types
+
+    def test_sdk_pair_uses_exact_sdk_and_only_its_supported_device_types(self):
+        runtimes, types = self.sdk_fixture()
+        pair = ipad.choose_pair(runtimes, types, 'arm64', '18.5')
+        self.assertEqual(pair['os_version'], '18.5')
+        self.assertEqual(pair['device_type'], 'type.ipad-m4')
+        self.assertEqual(pair['os_build'], 'synthetic-build-18.5')
+        self.assertEqual(ipad.choose_pair(runtimes, types, 'arm64', '26.2')['device_type'], 'type.ipad-m5')
+
+    def test_sdk_pair_rejects_ambiguous_match_even_if_one_is_unavailable(self):
+        runtimes, types = self.sdk_fixture()
+        duplicate = dict(runtimes['runtimes'][0]); duplicate['isAvailable'] = False
+        runtimes['runtimes'].append(duplicate)
+        with self.assertRaisesRegex(RuntimeError, 'unique exact SDK-matched'):
+            ipad.choose_pair(runtimes, types, 'arm64', '18.5')
+
+    def test_sdk_pair_requires_available_architecture_compatible_ipad(self):
+        for mutation in ('absent', 'unavailable', 'architecture', 'phone', 'unknown-type', 'duplicate-type', 'malformed-architecture'):
+            runtimes, types = self.sdk_fixture(); runtime = runtimes['runtimes'][0]
+            if mutation == 'absent': runtimes['runtimes'].pop(0)
+            elif mutation == 'unavailable': runtime['isAvailable'] = False
+            elif mutation == 'architecture': runtime['supportedArchitectures'] = ['x86_64']
+            elif mutation == 'malformed-architecture': runtime['supportedArchitectures'] = 'arm64'
+            elif mutation == 'phone': runtime['supportedDeviceTypes'] = [{'identifier': 'type.phone'}]
+            elif mutation == 'unknown-type': runtime['supportedDeviceTypes'] = [{'identifier': 'missing'}]
+            else: runtime['supportedDeviceTypes'] *= 2
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                ipad.choose_pair(runtimes, types, 'arm64', '18.5')
+        for sdk in ('', 'latest', '18.5\n', '../18.5', '16.4', None):
+            with self.subTest(sdk=sdk), self.assertRaises(RuntimeError):
+                ipad.choose_pair(*self.sdk_fixture(), 'arm64', sdk)
+
+    def test_sdk_raw_output_and_selection_are_retained_during_prepare(self):
+        driver, world, reached, error = self.complete_discovery()
+        self.assertIsNone(error)
+        self.assertEqual(driver.report['simulator_sdk'], {'raw': '26.2\n', 'version': '26.2',
+                                                        'selection': 'exact-sdk-matched'})
+        self.assertEqual(driver.report['destination']['os_version'], '26.2')
+        self.assertEqual(reached.count('create-owned-ipad'), 1)
+
+    def test_invalid_sdk_stops_before_any_simulator_discovery_or_creation(self):
+        driver, _ = self.driver(); calls = []
+        def command(argv, label, **kwargs):
+            calls.append(argv)
+            return 0, 'invalid-sdk' if label == 'simulator-sdk-version' else ''
+        with patch.object(driver, 'source_snapshot', return_value={'status': '', 'head': 'a' * 40}), \
+             patch.object(driver, 'command', side_effect=command):
+            with self.assertRaisesRegex(RuntimeError, 'Invalid Simulator SDK version'): driver.prepare()
+        self.assertFalse(any('simctl' in argv for argv in calls)); self.assertIsNone(driver.owned)
+
+    def test_ci_ipad_toolchain_is_pinned_without_changing_native_case_allowances(self):
+        workflow = (HERE.parent / '.github/workflows/ci.yml').read_text()
+        self.assertIn('group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}', workflow)
+        self.assertIn('cancel-in-progress: false', workflow)
+        ipad_job = workflow.split('  privacy_ipad:\n', 1)[1].split('  recovery:\n', 1)[0]
+        self.assertIn('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer', ipad_job)
+        self.assertIn('TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)', ipad_job)
+        self.assertIn("test \"$TRIPDOCKET_IPAD_XCODE_VERSION\" = $'Xcode 26.2\\nBuild version 17C52'", ipad_job)
+        self.assertEqual([case[3] for case in ipad.CASES], [900, 900])
+        self.assertEqual(ipad.WORK_SECONDS, {'en-US': 2100, 'ru-RU': 2100})
+        self.assertEqual(ipad.CLEANUP_SECONDS, 180)
+
     def test_selected_locale_is_required_and_invalid_locale_creates_no_output(self):
         with self.assertRaises(TypeError): ipad.Driver(self.root)
         with self.assertRaisesRegex(RuntimeError, 'Exactly one supported locale'): ipad.Driver(self.root, 'all')
@@ -673,11 +745,11 @@ class DriverTests(unittest.TestCase):
         def command(argv, label, **kwargs):
             if label == 'runtimes':
                 return actual_command(argv, label, **kwargs)
-            return 0, 'arm64' if label == 'architecture' else ''
+            return 0, '26.2\n' if label == 'simulator-sdk-version' else ('arm64' if label == 'architecture' else '')
         with patch.object(driver, 'source_snapshot', return_value={'status':'', 'head':'a'*40}), \
              patch.object(driver, 'json_command', side_effect=json_command), \
              patch.object(driver, 'command', side_effect=command):
-            with self.assertRaisesRegex(RuntimeError, 'No explicitly compatible'): driver.prepare()
+            with self.assertRaisesRegex(RuntimeError, 'No unique exact SDK-matched'): driver.prepare()
         self.assertEqual(self.row(driver)['timeout_seconds'], 300)
         self.assertGreaterEqual(world.t, 70)
         self.assertLess(world.t, 120)
@@ -702,7 +774,7 @@ class DriverTests(unittest.TestCase):
         def command(argv, label, **kwargs):
             if label == 'runtimes':
                 return actual_command(argv, label, **kwargs)
-            return 0, 'arm64' if label == 'architecture' else ''
+            return 0, '26.2\n' if label == 'simulator-sdk-version' else ('arm64' if label == 'architecture' else '')
         with patch.object(driver, 'source_snapshot', return_value={'status':'', 'head':'a'*40}), \
              patch.object(driver, 'json_command', side_effect=json_command), \
              patch.object(driver, 'command', side_effect=command), \
@@ -784,7 +856,7 @@ class DriverTests(unittest.TestCase):
     def test_initial_runtime_longer_wait_reduces_later_case_budget(self):
         driver, world = self.driver(locale='ru-RU',delay=289, output=b'{"runtimes": []}')
         failure, reached, selected = self.initial_runtime(driver)
-        self.assertIn('No explicitly compatible', str(failure)); self.assertTrue(selected)
+        self.assertIn('No unique exact SDK-matched', str(failure)); self.assertTrue(selected)
         self.assertEqual(reached, ['runtimes', 'device-types'])
         self.assertGreaterEqual(world.t, 289); self.assertLess(world.t, 290)
         # Fixed synthetic intervening work; no native preparation is claimed.
@@ -824,7 +896,7 @@ class DriverTests(unittest.TestCase):
                 world.plan.update(delay=(costs or {}).get(label,0),output=output.encode())
                 return actual_command(argv,label,**kwargs)
             if label in ['boot','bootstatus']:reached.append(label)
-            return 0,''
+            return 0, '26.2\n' if label == 'simulator-sdk-version' else ''
         def json_command(argv,label,**kwargs):
             value=actual_json(argv,label,**kwargs)
             world.t+=(after_read or {}).get(label,0)
