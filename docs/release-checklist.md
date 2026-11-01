@@ -3,12 +3,15 @@
 Record exact commit, OS, Xcode and tests in release-evidence.md. Advance a release
 channel only after its evidence exists; never relabel an unverified build stable.
 Checked historical items below retain their recorded source/scope; they are not
-whole-suite acceptance of the current PR. The accepted executable baseline
-passed at `674cbb6`; see [current evidence](release-evidence.md#accepted-executable-baseline-and-ordinary-release-launch--25-october-2026).
-Every later push requires its own ordinary CI.
+whole-suite acceptance of a later revision. See [current and historical evidence](release-evidence.md).
+Every later push requires its own ordinary CI. The separate
+[GitHub source/Simulator channels](github-releases.md) have explicit beta, RC and
+final artifact gates; they do not complete the physical-device and App Store
+requirements below.
 
-- [x] Public repository provisioned through Terraform; development preview in draft PR #1.
-- [ ] Fresh independent approval of the final PR push, with repository protection retained.
+- [x] Public repository provisioned through Terraform; development preview PR #1 merged.
+- [x] Final PR #1 head `45521e6` received fresh independent source approval and security review.
+      Later release changes require their own review and CI.
 
 - [x] Core tests: 38 passed, including atomic batches, cancellation, failed-restore
       preservation and exact originals.

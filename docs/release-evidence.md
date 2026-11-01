@@ -1,8 +1,39 @@
 # Release evidence
 
-Current stage: development preview in a public draft PR. No GitHub or App Store
-release has been verified. Live Apple distribution and physical-device gates
-remain open. Historical failures below remain attached to their original runs.
+Current stage: development preview merged into `main` through
+[PR #1](https://github.com/4alvit/travel-documents-ios/pull/1).
+[GitHub releases](https://github.com/4alvit/travel-documents-ios/releases) carry
+their own exact-source acceptance records under the
+[source/Simulator channel policy](github-releases.md). Live Apple distribution
+and physical-device gates remain open. Historical failures below remain
+attached to their original runs.
+
+## Release preparation — 1 November 2026
+
+The reviewed PR head `45521e62198e113820a54af1bb84f6bf97b51337` passed all six
+jobs in [CI 41333949690](https://github.com/4alvit/travel-documents-ios/actions/runs/41333949690).
+Independent source and security reviews found no confirmed actionable findings.
+The merge commit `3b223e483879df48fd9c12000ba532700e83eba1` has the same source tree,
+`931c603dd8d128153cbd110a9e01220ec4c1f035`.
+
+The subsequent [main CI 41346633231](https://github.com/4alvit/travel-documents-ios/actions/runs/41346633231)
+failed recovery and English iPad guidance. These newer failures block promotion;
+the prior successful run does not replace them. Recovery's resource traversal
+encountered a disappearing regular file inside an actively rebuilt test product
+and stopped the export command before XCTest. The English guidance case retained
+its website confirmation after one Cancel tap. Its screenshots and event record
+do not distinguish an undelivered action from failed presentation dismissal.
+Neither result establishes an application data-loss defect or a private Apple
+framework cause. Fixes and diagnostic additions require fresh exact-source CI.
+
+The recovery monitor now permits one complete rescan after a confirmed missing
+regular build-product leaf while its owned writer is active; all time, byte and
+entry limits still apply. Opt-in Debug Simulator guidance values distinguish
+received Cancel actions, cleared selection and completed dismissal. Localization
+attachments log the screenshot request and return boundaries, without dropping
+an attachment, assertion or timeout. These observations are not substitutes for
+successful native tests, and do not claim a root cause for the historical
+Files inline-editor or screenshot-service failures in issues #3 and #4.
 
 ## Accepted executable baseline and ordinary Release launch — 25 October 2026
 

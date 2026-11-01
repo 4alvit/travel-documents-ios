@@ -123,7 +123,7 @@ def tree_manifest(root, checkpoint=lambda: None, max_bytes=2*GIB):
 
 
 def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observation=None,
-               allow_xcresult_restart=False):
+               allow_xcresult_restart=False, allow_products_restart=False):
     """Bounded no-follow FD traversal of the owned output, including active jobs.
 
     Directory mtimes may change during a writer. Every encountered entry consumes
@@ -134,6 +134,10 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     complete fresh traversal after confirmed absence of a regular direct
     <root>.xcresult/Data/_tmp. leaf or a known regular/directory entry below the
     same top-level bundle Staging directory. No staging entry is skipped.
+    The same owned writer may replace regular Build/Products leaves while
+    rebuilding between phases. Their confirmed disappearance also requires a
+    complete fresh traversal, never the mutable-cache leaf skip above. Both
+    kinds share one restart; product directories and symlinks stay strict.
     Both passes share the original deadline and
     encounter cap; no partial accounting is accepted. Other errors fail closed.
     The disk cap uses allocated
@@ -144,8 +148,8 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
     totals = {'logical': 0, 'allocated': 0, 'entries': 0, 'xcresults': {}}
     encounters = 0
     class RestartScan(Exception):
-        def __init__(self, error, relative):
-            self.error, self.relative = error, relative
+        def __init__(self, error, relative, kind):
+            self.error, self.relative, self.kind = error, relative, kind
     observation = {} if observation is None else observation
     started = now()
     observation.update(status='running', operation_count=0, max_depth=0)
@@ -207,10 +211,13 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                     result_staging = (allow_xcresult_restart and len(prefix) >= 2
                             and bundle == prefix[0] and prefix[0].endswith('.xcresult')
                             and prefix[1] == 'Staging')
+                    product_leaf = (allow_products_restart and bundle is None
+                            and prefix[:3] == ('DerivedData', 'Build', 'Products')
+                            and not child.name.endswith('.xcresult'))
                     derived_leaf = (bundle is None and prefix and prefix[0] == 'DerivedData'
                             and relative[:3] != ('DerivedData', 'Build', 'Products')
                             and not child.name.endswith('.xcresult'))
-                    if error.errno != errno.ENOENT or not (result_temp or result_staging or derived_leaf):
+                    if error.errno != errno.ENOENT or not (result_temp or result_staging or product_leaf or derived_leaf):
                         raise
                     check()
                     # Count every missing encounter, including any discarded pass.
@@ -253,10 +260,10 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                         raise RuntimeError('Entry reappeared during absence confirmation')
                     check()
                     confirm_parent()
-                    if result_temp or result_staging:
-                        # Never skip an xcresult entry or return this partial sample.
+                    if result_temp or result_staging or product_leaf:
+                        # Never skip a result/product entry or return this partial sample.
                         # All open traversal descriptors unwind before a fresh pass.
-                        raise RestartScan(error, relative)
+                        raise RestartScan(error, relative, 'products' if product_leaf else 'xcresult')
                     totals['confirmed_absent_derived_entries'] = totals.get('confirmed_absent_derived_entries', 0) + 1
                     observation['confirmed_absent_derived_entries'] = totals['confirmed_absent_derived_entries']
                     observation['last_confirmed_absent_path'] = '/'.join(relative)[:256]
@@ -316,7 +323,9 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                         'Output root replaced before complete rescan')
                 check()
                 observation['discarded_scan'] = {
-                    'reason': 'Confirmed absent xcresult Data temporary leaf or Staging entry',
+                    'reason': ('Confirmed absent regular Build/Products leaf' if restart.kind == 'products'
+                               else 'Confirmed absent xcresult Data temporary leaf or Staging entry'),
+                    'kind': restart.kind,
                     'path': '/'.join(restart.relative)[:256],
                     'error': repr(restart.error)[:512],
                     'partial_counts_are_not_valid_accounting': True,
@@ -327,7 +336,8 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
                 continue
             if attempt:
                 totals.update(complete_scan_attempts=attempt+1, scan_encounters=encounters,
-                              xcresult_rescan_path=observation['discarded_scan']['path'])
+                              **{observation['discarded_scan']['kind'] + '_rescan_path':
+                                 observation['discarded_scan']['path']})
             observation['status'] = 'completed'
             return totals
     except BaseException as error:
@@ -440,7 +450,8 @@ class Recovery:
             observation['stage'] = 'traversal'
             row = live_sizes(self.out, self.output_id, self.ops.now, deadline, self.timecheck,
                              observation=observation['traversal'],
-                             allow_xcresult_restart=restart_allowed)
+                             allow_xcresult_restart=restart_allowed,
+                             allow_products_restart=restart_allowed)
             check()
             observation['stage'] = 'free_space_after'
             free = shutil.disk_usage(self.out).free
