@@ -87,6 +87,9 @@ Debug builds with real sensitive documents. Release builds omit these flags.
 
 The hosted iPad guidance job runs the existing English normal-size and Russian
 maximum Dynamic Type cases with `bash scripts/test-privacy-support-ipad.sh`.
+CI pins Xcode 26.2 (17C52); the driver requires an available Simulator runtime
+matching the selected Xcode's iOS Simulator SDK. A missing or ambiguous match
+fails before device creation. Local use requires the same SDK/runtime match.
 It creates a dedicated compatible iPad, builds once, sets and reads back the
 system text size before each separate test, then deletes only that simulator
 and checks that its UUID is absent. Both CI jobs must succeed. Evidence under

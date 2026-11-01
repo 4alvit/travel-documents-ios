@@ -67,6 +67,23 @@ format while retaining their strict result validation. The same read-only prefli
 CI, with retained schema evidence. Its 31 offline guard tests pass; native
 qualification must still pass before RC promotion.
 
+Subsequent hosted guidance runs exposed additional failures. The `334d993`
+English iPad run completed all four Cancel transitions but exceeded its
+six-minute XCTest allowance; its finalized result is failed. The `8b3e5ec`
+English iPad run failed earlier: a correctly targeted Settings entry tap did
+not open guidance, with no delayed transition in the retained video. Neither
+result is accepted, and the evidence does not establish a private framework
+root cause.
+
+The next iPad candidate pins Xcode 26.2 (17C52) and selects only an available
+runtime matching its Simulator SDK. This keeps iPadOS 26.2 coverage while
+changing the compiler, linked SDK and XCTest framework from the previous
+Xcode 16.4 runs. It is a controlled environment change requiring fresh native
+and visual validation; it does not prove the older pairing was unsupported.
+All case assertions and time allowances remain in place. CI concurrency is
+scoped by commit so a new candidate can start while older owned cleanup
+finishes, without cancelling active work.
+
 ## Accepted executable baseline and ordinary Release launch — 25 October 2026
 
 The accepted executable baseline is `674cbb6`. [CI 40169628635](https://github.com/4alvit/travel-documents-ios/actions/runs/40169628635)
