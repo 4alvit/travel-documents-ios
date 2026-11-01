@@ -282,12 +282,12 @@ class BoundaryTests(unittest.TestCase):
     def test_ci_artifacts_bind_run_attempt_without_broadening_recovery_uploads(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         names=[line.strip() for line in workflow.splitlines() if 'name: TripDocket-' in line]
-        self.assertEqual(len(names),7)
-        self.assertEqual(len(set(names)),7)
+        self.assertEqual(len(names),8)
+        self.assertEqual(len(set(names)),8)
         self.assertEqual({name.split('${{')[0].strip() for name in names},
                          {'name: TripDocket-tests-core-purchase-', 'name: TripDocket-tests-ui-guidance-',
                           'name: TripDocket-simulator-', 'name: TripDocket-privacy-ipad-',
-                          'name: TripDocket-recovery-',
+                          'name: TripDocket-recovery-', 'name: TripDocket-qualification-toolchain-',
                           'name: TripDocket-files-picker-failure-core-purchase-',
                           'name: TripDocket-files-picker-failure-ui-guidance-'})
         self.assertTrue(all('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in name for name in names))

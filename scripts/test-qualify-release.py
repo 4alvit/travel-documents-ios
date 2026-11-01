@@ -373,7 +373,7 @@ class Guards(unittest.TestCase):
         return summary, tests
 
     def test_schema_contract_accepts_optional_generic_node_fields(self):
-        self.assertEqual(q.validate_schemas(*self.schemas()), {"version": "0.4.0", "validated": True})
+        self.assertEqual(q.validate_schemas(*self.schemas()), {"selection": "pinned-toolchain-default", "validated": True})
 
     def test_schema_requires_all_summary_counts_and_warning_evidence(self):
         for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures",
@@ -411,7 +411,7 @@ class Guards(unittest.TestCase):
             calls.append(argv); return outputs[argv[4]]
         run.command = command; run.preflight_schemas()
         for kind in ("summary", "tests"):
-            self.assertIn(["xcrun", "xcresulttool", "get", "test-results", kind, "--schema", "--schema-version", "0.4.0"], calls)
+            self.assertIn(["xcrun", "xcresulttool", "get", "test-results", kind, "--schema"], calls)
             raw = (run.out / ("xcresult-schema-" + kind + ".json")).read_bytes()
             self.assertEqual(raw, outputs[kind].encode())
             self.assertEqual(run.report["xcresult_schema"]["sha256"][kind], hashlib.sha256(raw).hexdigest())
@@ -454,7 +454,9 @@ class Guards(unittest.TestCase):
         self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)
-        self.assertIn('--schema --schema-version 0.4.0', ci)
+        self.assertIn('summary --schema >', ci)
+        self.assertIn('tests --schema >', ci)
+        self.assertNotIn('--schema-version', ci)
         self.assertNotIn('export DEVELOPER_DIR=', ci)
 
 
