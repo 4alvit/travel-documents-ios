@@ -218,7 +218,7 @@ final class PrivacySupportUITests: XCTestCase {
     ) async throws {
         let clock = ContinuousClock()
         func observation(until deadline: ContinuousClock.Instant)
-            throws -> (element: XCUIElement, selected: Bool)? {
+            throws -> (element: XCUIElement, selected: Bool, navigationVisible: Bool)? {
             // One AX snapshot supplies all hierarchy/geometry facts. Repeated
             // exists/count calls previously spent the five-second readiness
             // budget before the unique visible iPad action could be tapped.
@@ -228,11 +228,16 @@ final class PrivacySupportUITests: XCTestCase {
             var visited = 0
             var matches = 0
             var leaves: [(node: XCUIElementSnapshot, parent: XCUIElementSnapshot?)] = []
+            var navigationFrames: [CGRect] = []
             func visit(_ node: XCUIElementSnapshot, parent: XCUIElementSnapshot?, depth: Int) -> Bool? {
                 guard clock.now < deadline, depth <= 40, visited < 1_000 else {
                     return nil
                 }
                 visited += 1
+                if node.elementType == .navigationBar,
+                   node.identifier == navigationTitle || node.label == navigationTitle {
+                    navigationFrames.append(node.frame)
+                }
                 let matching = node.elementType == .button && node.label == title
                 if matching { matches += 1 }
                 var descendantMatches = false
@@ -263,9 +268,12 @@ final class PrivacySupportUITests: XCTestCase {
                 return nil
             }
             guard clock.now < deadline else { return nil }
+            let navigationVisible = navigationFrames.count == 1 && navigationFrames.allSatisfy {
+                !$0.isNull && !$0.isInfinite && $0.width > 0 && $0.height > 0 && root.frame.contains($0)
+            }
             // .element preserves the query's unique-match requirement; no
             // index, firstMatch or coordinate substitutes for the actual action.
-            return (action.element, leaf.node.isSelected)
+            return (action.element, leaf.node.isSelected, navigationVisible)
         }
         let readinessDeadline = clock.now.advanced(by: .seconds(5))
         var target: XCUIElement?
@@ -288,7 +296,7 @@ final class PrivacySupportUITests: XCTestCase {
         let transitionDeadline = clock.now.advanced(by: .seconds(5))
         while clock.now < transitionDeadline {
             if let current = try observation(until: transitionDeadline), current.selected,
-               clock.now < transitionDeadline && app.navigationBars[navigationTitle].exists,
+               current.navigationVisible,
                clock.now < transitionDeadline {
                 return
             }

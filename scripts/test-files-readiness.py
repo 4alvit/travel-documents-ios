@@ -572,13 +572,15 @@ class SDKSourceTests(unittest.TestCase):
         platform = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-platform-path'],
                                   capture_output=True, text=True, check=True, timeout=15).stdout.strip()
         frameworks = str(Path(platform) / 'Developer/Library/Frameworks')
-        result = subprocess.run(
-            ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
-             '-target', 'arm64-apple-ios17.0-simulator', '-sdk', sdk,
-             '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
-             '-I', str(Path(platform) / 'Developer/usr/lib'), str(SOURCE)],
-            capture_output=True, text=True, timeout=45)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for source in (SOURCE, ROOT / 'UITests/PrivacySupportUITests.swift'):
+            with self.subTest(source=source.name):
+                result = subprocess.run(
+                    ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
+                     '-target', 'arm64-apple-ios17.0-simulator', '-sdk', sdk,
+                     '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
+                     '-I', str(Path(platform) / 'Developer/usr/lib'), str(source)],
+                    capture_output=True, text=True, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 SHARE_FIXTURE = r'''
 import Foundation
@@ -1153,6 +1155,173 @@ class SelectionDiagnosticTests(unittest.TestCase):
         for name in ['complete', 'missing', 'ambiguous', 'file-disappeared', 'budget',
                      'budget-navigation', 'budget-title-count', 'budget-title-hittable',
                      'missing-navigation', 'ambiguous-title']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
+TAB_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+
+@MainActor struct ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by duration: Duration) -> Instant { Instant(time: time + duration) }
+        func duration(to other: Instant) -> Duration { other.time - time }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.time < rhs.time }
+    }
+    static var elapsed: Duration = .zero
+    var now: Instant { Instant(time: Self.elapsed) }
+}
+@MainActor enum Task {
+    static func sleep(for duration: Duration) async throws { ContinuousClock.elapsed += duration }
+}
+enum ElementType { case other, button, navigationBar }
+@MainActor final class XCUIElementSnapshot {
+    var elementType: ElementType
+    var label: String
+    var identifier: String
+    var frame: CGRect
+    var isEnabled = true
+    var isSelected = false
+    var storedChildren: [XCUIElementSnapshot] = []
+    var traversalCost: Duration = .zero
+    var children: [XCUIElementSnapshot] {
+        ContinuousClock.elapsed += traversalCost
+        return storedChildren
+    }
+    init(_ type: ElementType, _ label: String = "", _ identifier: String = "", _ frame: CGRect) {
+        elementType = type; self.label = label; self.identifier = identifier; self.frame = frame
+    }
+}
+@MainActor final class World {
+    let name: String
+    var taps = 0
+    var snapshots = 0
+    var navigationQueries = 0
+    var failures = 0
+    var tappedAt: Duration = .zero
+    init(_ name: String) { self.name = name }
+    func snapshot() -> XCUIElementSnapshot {
+        snapshots += 1
+        ContinuousClock.elapsed += taps == 0 ? .milliseconds(500) :
+            (name == "late-snapshot" ? .seconds(5) : .milliseconds(500))
+        let bounds = CGRect(x: 0, y: 0, width: 1032, height: 1376)
+        let root = XCUIElementSnapshot(.other, "", "", bounds)
+        let frame = CGRect(x: 545, y: 41, width: 97, height: 32.5)
+        let leaf = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+        leaf.isSelected = taps > 0 && name != "unselected"
+        if name == "single-button" { root.storedChildren = [leaf] }
+        else {
+            let parent = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+            parent.storedChildren = [leaf]; root.storedChildren = [parent]
+        }
+        if name == "ambiguous-tab" { root.storedChildren.append(XCUIElementSnapshot(.button, "Settings", "gearshape", frame)) }
+        if taps > 0 {
+            let nav = XCUIElementSnapshot(.navigationBar, "", name == "wrong-navigation" ? "Trips" : "Settings",
+                                         CGRect(x: 0, y: 32, width: 1032, height: 116))
+            if name == "label-navigation" { nav.identifier = ""; nav.label = "Settings" }
+            if name == "offscreen-navigation" { nav.frame.origin.x = -20 }
+            if name == "empty-navigation" { nav.frame.size.height = 0 }
+            if name == "infinite-navigation" { nav.frame.origin.y = .infinity }
+            if name != "missing-navigation" { root.storedChildren.append(nav) }
+            if name == "ambiguous-navigation" { root.storedChildren.append(nav) }
+            if name == "late-traversal" { root.traversalCost = .seconds(5) }
+            if name == "too-deep" {
+                var child = root
+                for _ in 0..<42 {
+                    let next = XCUIElementSnapshot(.other, "", "", .zero)
+                    child.storedChildren.append(next); child = next
+                }
+            }
+            if name == "too-many-nodes" {
+                root.storedChildren += (0..<1000).map { _ in XCUIElementSnapshot(.other, "", "", .zero) }
+            }
+        }
+        return root
+    }
+}
+@MainActor final class XCUIElement {
+    let world: World
+    init(_ world: World) { self.world = world }
+    var isEnabled: Bool { true }
+    var isHittable: Bool { world.name != "unhittable-tab" }
+    // The old second remote navbar query consumed 8.2s after a ready snapshot.
+    // Keep it available so this fixture fails if that query is reintroduced.
+    var exists: Bool {
+        world.navigationQueries += 1
+        ContinuousClock.elapsed += .milliseconds(8200)
+        return true
+    }
+    func tap() { world.taps += 1; world.tappedAt = ContinuousClock.elapsed }
+}
+@MainActor final class XCUIElementQuery {
+    let world: World
+    init(_ world: World) { self.world = world }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery { self }
+    func children(matching type: ElementType) -> XCUIElementQuery { self }
+    var element: XCUIElement { XCUIElement(world) }
+    subscript(_ identifier: String) -> XCUIElement { XCUIElement(world) }
+}
+@MainActor final class XCUIApplication {
+    let world: World
+    init(_ world: World) { self.world = world }
+    func snapshot() throws -> XCUIElementSnapshot { world.snapshot() }
+    var buttons: XCUIElementQuery { XCUIElementQuery(world) }
+    var navigationBars: XCUIElementQuery { XCUIElementQuery(world) }
+}
+struct FixtureFailure: Error {}
+@MainActor final class Harness {
+    func require(_ value: Bool, app: XCUIApplication, _ message: String) throws {
+        if !value { app.world.failures += 1; throw FixtureFailure() }
+    }
+    // ACTUAL_HELPER
+    func run(_ app: XCUIApplication) async throws {
+        try await selectTab("Settings", navigationTitle: "Settings", failure: "Settings did not open", in: app)
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
+        let success = ["ready", "single-button", "label-navigation"].contains(name)
+        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab"].contains(name)
+        var failed = false
+        do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
+        precondition(failed != success)
+        precondition(world.taps == (beforeTapFailure ? 0 : 1))
+        precondition(world.navigationQueries == 0)
+        precondition(world.failures == (success ? 0 : 1))
+        if success { precondition(world.snapshots == 2 && ContinuousClock.elapsed < .seconds(5)) }
+        if name == "late-snapshot" || name == "late-traversal" { precondition(world.snapshots == 2) }
+        print("PASS " + name)
+    }
+}
+'''
+
+
+class TabNavigationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
+        start = source.index('    private func selectTab(')
+        end = source.index('    private func scrollTo(', start)
+        path = Path(cls.directory.name) / 'TabNavigation.swift'
+        path.write_text(TAB_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        cls.binary = Path(cls.directory.name) / 'tab-navigation-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_one_snapshot_proves_selected_tab_and_unique_visible_navigation(self):
+        for name in ['ready', 'single-button', 'label-navigation', 'unselected', 'missing-navigation',
+                     'wrong-navigation', 'ambiguous-navigation', 'offscreen-navigation', 'empty-navigation',
+                     'infinite-navigation', 'late-snapshot', 'late-traversal', 'too-deep', 'too-many-nodes',
+                     'ambiguous-tab', 'unhittable-tab']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
