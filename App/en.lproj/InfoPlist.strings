@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "Scan a document directly into your local travel library.";
+"NSFaceIDUsageDescription" = "Unlock access to your private travel documents.";
+"TripDocket document backup" = "TripDocket document backup";
+"CFBundleDisplayName" = "TripDocket";

@@ -1,0 +1,721 @@
+{
+  "release_gate": "blocked",
+  "reason": "Published CI baseline ddd9240 has four completed StoreKit purchase failures; cold-device routing, signed device validation and live App Store release remain unverified. See release-evidence.md and current draft PR1 checks for later commits.",
+  "runs": [
+    {
+      "name": "existing-iphone-full",
+      "source_commit": "17025401b1958266ba5e5eb4273a80d83dbd2a27",
+      "scope": "existing previously configured simulator",
+      "result_bundle": "build/Tests-20261021T023126Z.xcresult",
+      "result": "Passed",
+      "passed": 27,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:31:43.520000+00:00",
+      "finish_utc": "2026-10-21T02:36:03.619000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "brand_at_run": "Tripfolio"
+    },
+    {
+      "name": "fresh-iphone-storekit",
+      "source_commit": "934f09a",
+      "scope": "fresh simulator; preflight blocked before app purchase or sync",
+      "result_bundle": "build/ColdStoreKit.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:39:59.874000+00:00",
+      "finish_utc": "2026-10-21T02:41:25.308000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "25E7B822-8574-4B3E-B955-6E91B8D09E9B",
+          "deviceName": "Tripfolio-Cold-StoreKit",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "brand_at_run": "Tripfolio"
+    },
+    {
+      "name": "fresh-ipad-first",
+      "source_commit": "25ac66c6e8d2253e09a69bb30d4fb9b748bdea9c",
+      "scope": "fresh simulator; payment preflight and obsolete navigation selector failed",
+      "result_bundle": "build/iPadUI.xcresult",
+      "result": "Failed",
+      "passed": 2,
+      "failed": 2,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:36:26.407000+00:00",
+      "finish_utc": "2026-10-21T02:39:33.377000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "A967A695-67C1-4D6F-BE3A-9B376048861F",
+          "deviceName": "Tripfolio-iPad-QA",
+          "modelName": "iPad Pro 11-inch (M5)",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "brand_at_run": "Tripfolio"
+    },
+    {
+      "name": "ipad-nonpayment-corrected",
+      "source_commit": "42bf9fcebda6516a0fee003fc6fecf0fa0465d63",
+      "scope": "only three nonpayment UI cases",
+      "result_bundle": "build/iPadUIVerified.xcresult",
+      "result": "Passed",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:41:50.128000+00:00",
+      "finish_utc": "2026-10-21T02:44:11.733000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "A967A695-67C1-4D6F-BE3A-9B376048861F",
+          "deviceName": "Tripfolio-iPad-QA",
+          "modelName": "iPad Pro 11-inch (M5)",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "brand_at_run": "Tripfolio"
+    },
+    {
+      "name": "iphone-nonpayment-corrected",
+      "source_commit": "a14974554de95606a504caec8a691203d9ba2c1f",
+      "scope": "only three nonpayment UI cases",
+      "result_bundle": "build/iPhoneUIVerified.xcresult",
+      "result": "Passed",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:44:24.463000+00:00",
+      "finish_utc": "2026-10-21T02:46:13.664000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "brand_at_run": "Tripfolio"
+    },
+    {
+      "name": "tripdocket-iphone-branding-nonpayment",
+      "brand_at_run": "TripDocket",
+      "source_commit": "f3b56885a1bd7ae721764389a2a7490778d5a31b",
+      "scope": "Only three nonpayment UI cases: creation/free quota, Lock now, original readiness and explicit export warning/dismissal. No purchase attempt or new StoreKit acceptance.",
+      "result_bundle": "build/TripDocketBrandUI.xcresult",
+      "result": "Passed",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T02:51:23.739000+00:00",
+      "finish_utc": "2026-10-21T02:53:11.945000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ]
+    },
+    {
+      "name": "batch-model-and-warning-phone",
+      "source_commit": "fa21d26750a7e536446afd875aa28da7966253a2",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "20 AppModel,14 batch model,2 focused maximum-type cases; no authentication/purchase proof",
+      "result_bundle": "build/Batch-Model-Warning-Phone.xcresult",
+      "result": "Passed",
+      "passed": 36,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:08:04.860000+00:00",
+      "finish_utc": "2026-10-21T15:10:42.314000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ]
+    },
+    {
+      "name": "complete-export-warning-phone",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Full warning-body coverage and complete Export action visibility; no actual export",
+      "result_bundle": "build/Final-Export-Warning-Phone.xcresult",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:15:35.887000+00:00",
+      "finish_utc": "2026-10-21T15:17:16.453000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ]
+    },
+    {
+      "name": "complete-export-warning-ipad",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Full warning-body coverage and complete Export action visibility; no actual export",
+      "result_bundle": "build/Final-Export-Warning-iPad.xcresult",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:16:17.361000+00:00",
+      "finish_utc": "2026-10-21T15:17:49.475000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "A967A695-67C1-4D6F-BE3A-9B376048861F",
+          "deviceName": "Tripfolio-iPad-QA",
+          "modelName": "iPad Pro 11-inch (M5)",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-b",
+      "source_commit": "fa21d26750a7e536446afd875aa28da7966253a2",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-8b56d1f6-680b-45e7-a818-1bae5e3ab99d/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:18:26.472000+00:00",
+      "finish_utc": "2026-10-21T15:20:03.339000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"The local Files location is unavailable\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-c",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-ecdbc5ee-f492-42c6-ba0e-e1d1108c00c3/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:20:57.514000+00:00",
+      "finish_utc": "2026-10-21T15:22:53.472000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"Metadata choice is not reachable: Ticket\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-d",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-ec63fc6c-9380-4d44-acea-b2ff176aa5da/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:23:49.370000+00:00",
+      "finish_utc": "2026-10-21T15:25:15.375000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"The document title was not edited exactly\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-e",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-7de136ad-359b-44cd-b84f-45e20e2e2d70/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:26:20.743000+00:00",
+      "finish_utc": "2026-10-21T15:28:08.953000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"Person choice did not return to review\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-f",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-10142978-30ca-4f99-b984-1fbda7c2b03c/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:28:36.864000+00:00",
+      "finish_utc": "2026-10-21T15:30:26.949000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"Explicit expiry opt-in did not reveal its date control\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-g",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-1c06f688-f878-45d3-bca7-ec71e3214569/Tests.xcresult",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:31:14.333000+00:00",
+      "finish_utc": "2026-10-21T15:33:49.090000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "failures": [
+        "failed: caught error: \"BatchTestFailure(message: \"Explicit expiry opt-in did not reveal its date control\")\""
+      ]
+    },
+    {
+      "name": "strict-real-files-batch-h",
+      "source_commit": "a01542df63f6d0601cbafcce8dd82f45705c0189",
+      "source_state": "working candidate; see source qualification in release-evidence.md",
+      "brand_at_run": "TripDocket",
+      "scope": "Actual Files and local Xcode purchase. Failed attempts are retained; only H completes the whole scenario.",
+      "result_bundle": "build/BatchSimulator-1275fb8d-d06f-4ab8-be19-5b07ace862b5/Tests.xcresult",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "start_utc": "2026-10-21T15:34:33.896000+00:00",
+      "finish_utc": "2026-10-21T15:37:53.314000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "source_inventory_sha256": "c47d28b2d2e9838b74e657322b66e12cf4bfe17e551925205c1c9069bdc1c188",
+      "tested_source_sha256": {
+        "App/AppModel.swift": "81aab38beab9657f923a45bb3cb4844efa0b6012e7a152a22ac486c0996ce9b3",
+        "App/BatchImport.swift": "50b2e09139c1b94ef2431a9a86c16ab6248339720113aa710a89bea97b28a322",
+        "App/BatchImportView.swift": "da6eca6042222de346e6fe0e679f57bbfbbccdbb0f1dbbba991942478905989a",
+        "App/OCRService.swift": "aff5c54ba46a04e1010ccc80c8656b64d0d52e141cdab5f7e54135a8837721f2",
+        "App/PrivacyLock.swift": "e02a3ca92f08dd631234cfb0b21f05ccb495000c1b081de5dc84985bd485b503",
+        "App/PurchaseManager.swift": "2f3b06e314ea7d625ccaee85775838d1b4cbb1239cdd8a036b35eca674ca343b",
+        "App/ReminderService.swift": "1271dbbaec37abb4b01c461fdc734bf5c0f85e1d992423e6f69b2d418b55a4fb",
+        "App/Scanner.swift": "81d9191f7b77c9cecd855868231e2a97b38094f312fc8a41acf335a553d5ae3c",
+        "App/TripfolioApp.swift": "bc3497630b23987ba3f7fb481ea6b20e42d75b2c2f2b61cfb9f7daf55b4c28ce",
+        "App/Views.swift": "b5c0395aa940fb5378c9e399385ee54a7a4b807c234bea4e6c7142cd20106349",
+        "AppTests/AppModelTests.swift": "c63276cc18adeebde7698c29df8ac154f16be5c772f2b13377755bbd9ba8552f",
+        "AppTests/BatchImportTests.swift": "8f6905fcce54b850f90807437f83aed16d21dcec85565f58525c7afcebaea47e",
+        "AppTests/PlatformTests.swift": "3bf517964a0c38dd22e17c66b3a4629df6986534498f85263c25551b97c15d3d",
+        "Sources/TravelCore/DocumentImportInput.swift": "5dd2daaa9da1814cfaa94ac21622c85532e8ce003d90ded2735269d6b6747dae",
+        "Sources/TravelCore/DocumentRepository.swift": "5026e8756f6b8a3f5fbbaa3bd217ff0022d586df497a8a48375ee0d6a57b1ef6",
+        "Sources/TravelCore/Models.swift": "fe9307bd0957c7051916d1c6a06ccf4c5a378bac5ae248595e52165731d1a532",
+        "Sources/TravelCore/TravelDate.swift": "8be2776898340946c778eabf9a5db00f3de17d7a16f02a3f5e81385b46029220",
+        "Tests/TravelCoreTests/DocumentRepositoryTests.swift": "5c845469b2d5ffc91c987a3fc299668a4a8249396cbd939ee060572344ae9c07",
+        "Tests/TravelCoreTests/TravelDateTests.swift": "b4d93bb6c6f254ccfb5cb1332a7829bd90dcd2a7b74464c87df751a6ab4dae5b",
+        "Tripfolio.xcodeproj/project.pbxproj": "cd63dd5ef0c1d1dc95dd3f79cc353789f88af06bd9cc4ca24674f0db44d38cad",
+        "UITests/AccessibilityUITests.swift": "b97e1dfed7c0e1d31bf85ffc89dc016a858345f5976e93535aecf647ed36d149",
+        "UITests/BatchImportUITests.swift": "9e82bbca369268a3d32a2bf48279191b14588683657f349e647b3d95c122baf8",
+        "UITests/PrivacyTransitionUITests.swift": "d5a5ee6340fd0e0b6d0364f23092f075e47efb60da16174054538fe1e193c2df",
+        "UITests/PurchaseUITests.swift": "35b3881beb55a4f81b4b98ba74d051705d0e1a1f1d8dadd407c55ac51cd1d1fc",
+        "UITests/TripfolioUITests.swift": "28356f12b1aca2f743392d7a8aa8e024ff2fb456ffdc6f5df477e4005953a4ee",
+        "scripts/test-batch-simulator.py": "d4f9e5877d8030fdbc65a47c9aef7f75a003212b3ba133526ba61eb40a752be8"
+      }
+    },
+    {
+      "name": "cache-and-reminder-edge-cases",
+      "source_commit": "6d8cbc586cb676e15a9e2e703c7a4bc33bdc219d",
+      "source_state": "Frozen working candidate based on 87fac0f; seven changed files committed unchanged in 37f8f08 and 6d8cbc5. Later changes are documentation only.",
+      "source_hashes": {
+        "App/AppModel.swift": "563689cc071bb96698d424379225469a7fd53268fbcf11958704e9b453d3f758",
+        "App/ReminderService.swift": "140f04ae67c508b25c2d4d92cf4f3ccda90fe07410fc2aaea6e6544d50eda5de",
+        "App/Views.swift": "30b5129111bfa7f26c962323c8b721fc6f2ef34459d691358e621ef2781d8dcf",
+        "AppTests/AppModelTests.swift": "462e4b4e4f76ac5ada635ffbb479a3a9efdac2b2c368bfa69b26cb53ce2694d9",
+        "AppTests/PlatformTests.swift": "57bc75f72d8860e052d64f8caa6cbaa0b27153410d03a14d3c816cdf70eed87b",
+        "AppTests/ReminderLifecycleTests.swift": "6d45af696df16e5f96ae6e4369d2fc5eb303278b8cfdaf7ea33a0b1ec9a077a0",
+        "Tripfolio.xcodeproj/project.pbxproj": "b1a50e5ff75994edc56e08c716105561c24411152a0991056c9aece4bf0a1f29"
+      },
+      "inventory_files": 71,
+      "source_unchanged_during_run": true,
+      "result_bundle": "build/EdgeHardening-f0cfe49b-a1aa-48aa-93c5-26839db5cbdf/Tests.xcresult",
+      "command": [
+        "xcodebuild",
+        "-project",
+        "Tripfolio.xcodeproj",
+        "-scheme",
+        "Tripfolio",
+        "-configuration",
+        "Debug",
+        "-destination",
+        "platform=iOS Simulator,id=37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+        "-parallel-testing-enabled",
+        "NO",
+        "-maximum-concurrent-test-simulator-destinations",
+        "1",
+        "-collect-test-diagnostics",
+        "never",
+        "-derivedDataPath",
+        "build/EdgeDerivedData",
+        "-resultBundlePath",
+        "build/EdgeHardening-f0cfe49b-a1aa-48aa-93c5-26839db5cbdf/Tests.xcresult",
+        "-only-testing:TripfolioTests/AppModelTests",
+        "-only-testing:TripfolioTests/BatchImportTests",
+        "-only-testing:TripfolioTests/ReminderLifecycleTests",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderUsesThirtyDaysBeforeExpiryAtNine",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderWithinThirtyDaysUsesNextNineAM",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderKeepsWallClockTimeAcrossDaylightSavingChanges",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderRejectsExpiredOrTooSoonDates",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderTriggerKeepsTheBuddhistCalendarAndSchedulingZone",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderTriggerKeepsExplicitZoneAcrossTheDateLine",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderRejectsFreeUserBeforeReadingPermission",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderRechecksEntitlementBeforeAskingPermission",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderRechecksEntitlementAfterPermissionReturns",
+        "-only-testing:TripfolioTests/PlatformTests/testReminderUsesConfirmedCivilDateAndGenericNotificationContent",
+        "CODE_SIGNING_ALLOWED=NO",
+        "test"
+      ],
+      "result": "Passed",
+      "passed": 61,
+      "failed": 0,
+      "skipped": 0,
+      "suite_counts": {
+        "AppModelTests": 21,
+        "BatchImportTests": 14,
+        "ReminderLifecycleTests": 16,
+        "PlatformTests_reminders": 10
+      },
+      "start_utc": "2026-10-21T16:40:33.090000+00:00",
+      "finish_utc": "2026-10-21T16:41:07.605000+00:00",
+      "destinations": [
+        {
+          "architecture": "arm64",
+          "deviceId": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+          "deviceName": "Tripfolio-QA",
+          "modelName": "iPhone 17 Pro",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        }
+      ],
+      "limitations": "Controlled notification client, no actual OS delivery or UI/StoreKit cases. Prior UI evidence remains source-pinned."
+    },
+    {
+      "scope": "i18n_ipad_before_caption_fix",
+      "date": "2026-10-21",
+      "result": "Failed",
+      "result_bundle": "build/Localization-UI-ipad-d7879e62-2029-411e-897a-f7ab5a39532f/Tests.xcresult",
+      "passed": 2,
+      "failed": 1,
+      "skipped": 0,
+      "reason": "Russian export action was 232.5 points high inside a 202.5-point pane; bottom 46 points clipped.",
+      "resolution": "Shorter Russian action caption; superseded by the final 3/3 iPad run."
+    },
+    {
+      "scope": "i18n_ipad_intermediate_caption",
+      "date": "2026-10-21",
+      "result": "Failed",
+      "result_bundle": "build/Localization-UI-ipad-73c0f390-5fed-4184-8759-5bd62ebf8680/Tests.xcresult",
+      "passed": 2,
+      "failed": 1,
+      "skipped": 0,
+      "reason": "Intermediate export caption still wrapped: 170.5-point button in a 140.5-point pane, bottom 46 points clipped.",
+      "resolution": "Remove Russian action ellipsis to fit one line; superseded by final 3/3 iPad run."
+    },
+    {
+      "scope": "i18n_model",
+      "date": "2026-10-21",
+      "result": "Passed",
+      "result_bundle": "build/Localization-Models-44404693-4fa6-4931-af64-0d94517a44f7/Tests.xcresult",
+      "passed": 71,
+      "failed": 0,
+      "skipped": 0,
+      "device_id": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+      "source_inputs_sha256": {
+        "App/AppModel.swift": "3d66b7cf6b5852e776136964890583f8f7c58d354b1bc5d84e7fdc4457669a47",
+        "App/Assets.xcassets/AppIcon.appiconset/AppIcon.png": "3540b19658493c6fea0255e155a188be5678bc226bbcc2b1965be10ed6c9765d",
+        "App/Assets.xcassets/AppIcon.appiconset/Contents.json": "852920cb36e95beb53771138a4b8195a16fcce1cc31250632f246081cc638f9a",
+        "App/Assets.xcassets/Contents.json": "f5fb0e1f3a8142892ed092efb5955c1c2cc537003a89ad7bbdb9dade7fe8985f",
+        "App/BatchImport.swift": "ad74449000e976af88da05b8468aed0ff6149f986e730eac55238e13fea4b0af",
+        "App/BatchImportView.swift": "07c211bd6cf640434c3c0e07c2c219ef5c588aff341404a6fea3c37112f9b61e",
+        "App/Info.plist": "7718e2302284765844142da1f0b06a6675bb618b5b3597b60e57681beccd8a22",
+        "App/Localization.swift": "f6c077e134b004927a9f13340c76a8da1905b048b7236568037b521e8ef4b175",
+        "App/OCRService.swift": "f987fba1219763940741d67d0ebf2461a5ed6b57cd46b0ce3d2e937e447a5d68",
+        "App/PrivacyInfo.xcprivacy": "80786716c3d3883870940efc2559177240bc5ce812f5ea63801f0a12d9159c91",
+        "App/PrivacyLock.swift": "f74494e0306bd5f24341234722e8dc22a01def74890a64d32b51a642c973b34a",
+        "App/PurchaseManager.swift": "231de8c0e2976fc262ff91367229f6a6beeaad83e1b03dca6e4904477125ce6c",
+        "App/ReminderService.swift": "32871c7063b6cc04267ead07352b9d60f06880fdaa36e456032847c5f363b403",
+        "App/Scanner.swift": "acff14f5426e3aeb9619f0fe5b91b9f0e9ed3429eca245dd9b825a8d03dd2fb3",
+        "App/Services.xcstrings": "02cb9768130ea2f8fd7d79c6cdc2eb3edfcae6b93ff87b8b22f44a03e1f6fc72",
+        "App/Tripfolio.storekit": "27601af664a23a52352b3b9eb64f97085789d468ec6221159260819452b2c312",
+        "App/TripfolioApp.swift": "2f54a9cdd3549184afec83758537c21b36bd3d3d974a9ad0fef13a52b7ca7489",
+        "App/UI.xcstrings": "fd0915158b782c8bf0e190a08ecc151014e62d53d1dbd90eaa581d341311e860",
+        "App/Views.swift": "1b6b44ac05a7ef8764d259fb7b1f90c86e7055eeb7d839bfc239510a92155eb0",
+        "App/en.lproj/InfoPlist.strings": "53d0df6f6c8a5af78e0e17785621c64e61a81c4b7c349620568c6bc398864ca2",
+        "App/en.lproj/Localizable.strings": "2f79bec700891dee3ed3e318136eb096044d92932a599cbd6706b26ec7ea1936",
+        "App/ru.lproj/InfoPlist.strings": "97e4187163840578c14d93b0be0356da5ee11661785860219d0aa37bff83bd87",
+        "App/ru.lproj/Localizable.strings": "b47717d4eeedce0e4b743d07eaf4a241c1808b42fa2fc19b903619f3dce30702",
+        "AppTests/AppModelTests.swift": "462e4b4e4f76ac5ada635ffbb479a3a9efdac2b2c368bfa69b26cb53ce2694d9",
+        "AppTests/BatchImportTests.swift": "8f6905fcce54b850f90807437f83aed16d21dcec85565f58525c7afcebaea47e",
+        "AppTests/LocalizationTests.swift": "0462f4c2a3b0ff310b6373c41a2d0bd166dbdd50a704490bde3db79b8a4fb97e",
+        "AppTests/PlatformTests.swift": "57bc75f72d8860e052d64f8caa6cbaa0b27153410d03a14d3c816cdf70eed87b",
+        "AppTests/ReminderLifecycleTests.swift": "6d45af696df16e5f96ae6e4369d2fc5eb303278b8cfdaf7ea33a0b1ec9a077a0",
+        "Package.swift": "fcf6c9c76029b1f27f588129afc676d3924c5d0673d23c70a7de4aeb8c481374",
+        "Sources/TravelCore/CoreLocalization.swift": "7df4f68f5af16d84773da82b04105ce5d03119fd1ff1c8fdbb670a04145a97a8",
+        "Sources/TravelCore/DocumentImportInput.swift": "5dd2daaa9da1814cfaa94ac21622c85532e8ce003d90ded2735269d6b6747dae",
+        "Sources/TravelCore/DocumentRepository.swift": "5026e8756f6b8a3f5fbbaa3bd217ff0022d586df497a8a48375ee0d6a57b1ef6",
+        "Sources/TravelCore/Models.swift": "d031f9aff0535bcc66d3b0f99c363205c82ac2e7dbfa8783ba35b7a4a44ad598",
+        "Sources/TravelCore/Resources/en.lproj/Core.strings": "32a31c242a59d09600cea7189b885862dafd0d42e196cb640e6ff1b2b7436f7f",
+        "Sources/TravelCore/Resources/ru.lproj/Core.strings": "43121dbe5b596ff1430db1d6abbabd4c5438ee013d28c2ee7de29c3b7411dc23",
+        "Sources/TravelCore/TravelDate.swift": "8be2776898340946c778eabf9a5db00f3de17d7a16f02a3f5e81385b46029220",
+        "Tests/TravelCoreTests/DocumentRepositoryTests.swift": "5c845469b2d5ffc91c987a3fc299668a4a8249396cbd939ee060572344ae9c07",
+        "Tests/TravelCoreTests/LocalizationTests.swift": "49c56f01693f611a6e27ba4398f589dd6c1c85f8a48a97967bd4222de70af4d6",
+        "Tests/TravelCoreTests/TravelDateTests.swift": "b4d93bb6c6f254ccfb5cb1332a7829bd90dcd2a7b74464c87df751a6ab4dae5b",
+        "project.yml": "c66b6f33c113b11daf0b0edb26cab1e116dddecf243b57ef31c597f1c6f5ce55"
+      },
+      "limitations": "Model does not run purchases. UI ordinary launches remain locked; fixture UI bypasses auth, does not purchase, restore or export. No physical-device or VoiceOver claim."
+    },
+    {
+      "scope": "i18n_phone",
+      "date": "2026-10-21",
+      "result": "Passed",
+      "result_bundle": "build/Localization-UI-phone-8737d8ec-bd6e-46fd-9b42-33b53c33c1ee/Tests.xcresult",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "device_id": "37D49EA4-2641-446F-81DB-1907F6EEFA2D",
+      "source_inputs_sha256": {
+        "App/AppModel.swift": "3d66b7cf6b5852e776136964890583f8f7c58d354b1bc5d84e7fdc4457669a47",
+        "App/Assets.xcassets/AppIcon.appiconset/AppIcon.png": "3540b19658493c6fea0255e155a188be5678bc226bbcc2b1965be10ed6c9765d",
+        "App/Assets.xcassets/AppIcon.appiconset/Contents.json": "852920cb36e95beb53771138a4b8195a16fcce1cc31250632f246081cc638f9a",
+        "App/Assets.xcassets/Contents.json": "f5fb0e1f3a8142892ed092efb5955c1c2cc537003a89ad7bbdb9dade7fe8985f",
+        "App/BatchImport.swift": "ad74449000e976af88da05b8468aed0ff6149f986e730eac55238e13fea4b0af",
+        "App/BatchImportView.swift": "07c211bd6cf640434c3c0e07c2c219ef5c588aff341404a6fea3c37112f9b61e",
+        "App/Info.plist": "7718e2302284765844142da1f0b06a6675bb618b5b3597b60e57681beccd8a22",
+        "App/Localization.swift": "f6c077e134b004927a9f13340c76a8da1905b048b7236568037b521e8ef4b175",
+        "App/OCRService.swift": "f987fba1219763940741d67d0ebf2461a5ed6b57cd46b0ce3d2e937e447a5d68",
+        "App/PrivacyInfo.xcprivacy": "80786716c3d3883870940efc2559177240bc5ce812f5ea63801f0a12d9159c91",
+        "App/PrivacyLock.swift": "f74494e0306bd5f24341234722e8dc22a01def74890a64d32b51a642c973b34a",
+        "App/PurchaseManager.swift": "231de8c0e2976fc262ff91367229f6a6beeaad83e1b03dca6e4904477125ce6c",
+        "App/ReminderService.swift": "32871c7063b6cc04267ead07352b9d60f06880fdaa36e456032847c5f363b403",
+        "App/Scanner.swift": "acff14f5426e3aeb9619f0fe5b91b9f0e9ed3429eca245dd9b825a8d03dd2fb3",
+        "App/Services.xcstrings": "02cb9768130ea2f8fd7d79c6cdc2eb3edfcae6b93ff87b8b22f44a03e1f6fc72",
+        "App/Tripfolio.storekit": "27601af664a23a52352b3b9eb64f97085789d468ec6221159260819452b2c312",
+        "App/TripfolioApp.swift": "2f54a9cdd3549184afec83758537c21b36bd3d3d974a9ad0fef13a52b7ca7489",
+        "App/UI.xcstrings": "13cf5c92916847c8daaad6183bc29257c99ac82f4031f483e150eb3e65d96b9b",
+        "App/Views.swift": "b07104e40a6ff46d3b6f9b42b64261c963680528a12e83360994a4849ec12434",
+        "App/en.lproj/InfoPlist.strings": "53d0df6f6c8a5af78e0e17785621c64e61a81c4b7c349620568c6bc398864ca2",
+        "App/en.lproj/Localizable.strings": "2f79bec700891dee3ed3e318136eb096044d92932a599cbd6706b26ec7ea1936",
+        "App/ru.lproj/InfoPlist.strings": "97e4187163840578c14d93b0be0356da5ee11661785860219d0aa37bff83bd87",
+        "App/ru.lproj/Localizable.strings": "b47717d4eeedce0e4b743d07eaf4a241c1808b42fa2fc19b903619f3dce30702",
+        "AppTests/AppModelTests.swift": "462e4b4e4f76ac5ada635ffbb479a3a9efdac2b2c368bfa69b26cb53ce2694d9",
+        "AppTests/BatchImportTests.swift": "8f6905fcce54b850f90807437f83aed16d21dcec85565f58525c7afcebaea47e",
+        "AppTests/LocalizationTests.swift": "0462f4c2a3b0ff310b6373c41a2d0bd166dbdd50a704490bde3db79b8a4fb97e",
+        "AppTests/PlatformTests.swift": "57bc75f72d8860e052d64f8caa6cbaa0b27153410d03a14d3c816cdf70eed87b",
+        "AppTests/ReminderLifecycleTests.swift": "6d45af696df16e5f96ae6e4369d2fc5eb303278b8cfdaf7ea33a0b1ec9a077a0",
+        "Package.swift": "fcf6c9c76029b1f27f588129afc676d3924c5d0673d23c70a7de4aeb8c481374",
+        "Sources/TravelCore/CoreLocalization.swift": "7df4f68f5af16d84773da82b04105ce5d03119fd1ff1c8fdbb670a04145a97a8",
+        "Sources/TravelCore/DocumentImportInput.swift": "5dd2daaa9da1814cfaa94ac21622c85532e8ce003d90ded2735269d6b6747dae",
+        "Sources/TravelCore/DocumentRepository.swift": "5026e8756f6b8a3f5fbbaa3bd217ff0022d586df497a8a48375ee0d6a57b1ef6",
+        "Sources/TravelCore/Models.swift": "d031f9aff0535bcc66d3b0f99c363205c82ac2e7dbfa8783ba35b7a4a44ad598",
+        "Sources/TravelCore/Resources/en.lproj/Core.strings": "32a31c242a59d09600cea7189b885862dafd0d42e196cb640e6ff1b2b7436f7f",
+        "Sources/TravelCore/Resources/ru.lproj/Core.strings": "43121dbe5b596ff1430db1d6abbabd4c5438ee013d28c2ee7de29c3b7411dc23",
+        "Sources/TravelCore/TravelDate.swift": "8be2776898340946c778eabf9a5db00f3de17d7a16f02a3f5e81385b46029220",
+        "Tests/TravelCoreTests/DocumentRepositoryTests.swift": "5c845469b2d5ffc91c987a3fc299668a4a8249396cbd939ee060572344ae9c07",
+        "Tests/TravelCoreTests/LocalizationTests.swift": "49c56f01693f611a6e27ba4398f589dd6c1c85f8a48a97967bd4222de70af4d6",
+        "Tests/TravelCoreTests/TravelDateTests.swift": "b4d93bb6c6f254ccfb5cb1332a7829bd90dcd2a7b74464c87df751a6ab4dae5b",
+        "Tripfolio.xcodeproj/project.pbxproj": "8f965f11c793f17d7d719cdb99a337ec4b84134efab7a628d9fd3d707bd5d31c",
+        "UITests/AccessibilityUITests.swift": "b97e1dfed7c0e1d31bf85ffc89dc016a858345f5976e93535aecf647ed36d149",
+        "UITests/BatchImportUITests.swift": "9e82bbca369268a3d32a2bf48279191b14588683657f349e647b3d95c122baf8",
+        "UITests/LocalizationUITests.swift": "f45987c1ea29f7e57ae870b20ffe0e1d0e644c41aadf4c3319981d160d53168f",
+        "UITests/PrivacyTransitionUITests.swift": "d5a5ee6340fd0e0b6d0364f23092f075e47efb60da16174054538fe1e193c2df",
+        "UITests/PurchaseUITests.swift": "35b3881beb55a4f81b4b98ba74d051705d0e1a1f1d8dadd407c55ac51cd1d1fc",
+        "UITests/TripfolioUITests.swift": "28356f12b1aca2f743392d7a8aa8e024ff2fb456ffdc6f5df477e4005953a4ee",
+        "project.yml": "c66b6f33c113b11daf0b0edb26cab1e116dddecf243b57ef31c597f1c6f5ce55"
+      },
+      "limitations": "Model does not run purchases. UI ordinary launches remain locked; fixture UI bypasses auth, does not purchase, restore or export. No physical-device or VoiceOver claim."
+    },
+    {
+      "scope": "i18n_ipad",
+      "date": "2026-10-21",
+      "result": "Passed",
+      "result_bundle": "build/Localization-UI-ipad-fe4338b4-9262-4a3f-ba62-a7372161b6b0/Tests.xcresult",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "device_id": "A967A695-67C1-4D6F-BE3A-9B376048861F",
+      "source_inputs_sha256": {
+        "App/AppModel.swift": "3d66b7cf6b5852e776136964890583f8f7c58d354b1bc5d84e7fdc4457669a47",
+        "App/Assets.xcassets/AppIcon.appiconset/AppIcon.png": "3540b19658493c6fea0255e155a188be5678bc226bbcc2b1965be10ed6c9765d",
+        "App/Assets.xcassets/AppIcon.appiconset/Contents.json": "852920cb36e95beb53771138a4b8195a16fcce1cc31250632f246081cc638f9a",
+        "App/Assets.xcassets/Contents.json": "f5fb0e1f3a8142892ed092efb5955c1c2cc537003a89ad7bbdb9dade7fe8985f",
+        "App/BatchImport.swift": "ad74449000e976af88da05b8468aed0ff6149f986e730eac55238e13fea4b0af",
+        "App/BatchImportView.swift": "07c211bd6cf640434c3c0e07c2c219ef5c588aff341404a6fea3c37112f9b61e",
+        "App/Info.plist": "7718e2302284765844142da1f0b06a6675bb618b5b3597b60e57681beccd8a22",
+        "App/Localization.swift": "f6c077e134b004927a9f13340c76a8da1905b048b7236568037b521e8ef4b175",
+        "App/OCRService.swift": "f987fba1219763940741d67d0ebf2461a5ed6b57cd46b0ce3d2e937e447a5d68",
+        "App/PrivacyInfo.xcprivacy": "80786716c3d3883870940efc2559177240bc5ce812f5ea63801f0a12d9159c91",
+        "App/PrivacyLock.swift": "f74494e0306bd5f24341234722e8dc22a01def74890a64d32b51a642c973b34a",
+        "App/PurchaseManager.swift": "231de8c0e2976fc262ff91367229f6a6beeaad83e1b03dca6e4904477125ce6c",
+        "App/ReminderService.swift": "32871c7063b6cc04267ead07352b9d60f06880fdaa36e456032847c5f363b403",
+        "App/Scanner.swift": "acff14f5426e3aeb9619f0fe5b91b9f0e9ed3429eca245dd9b825a8d03dd2fb3",
+        "App/Services.xcstrings": "02cb9768130ea2f8fd7d79c6cdc2eb3edfcae6b93ff87b8b22f44a03e1f6fc72",
+        "App/Tripfolio.storekit": "27601af664a23a52352b3b9eb64f97085789d468ec6221159260819452b2c312",
+        "App/TripfolioApp.swift": "2f54a9cdd3549184afec83758537c21b36bd3d3d974a9ad0fef13a52b7ca7489",
+        "App/UI.xcstrings": "13cf5c92916847c8daaad6183bc29257c99ac82f4031f483e150eb3e65d96b9b",
+        "App/Views.swift": "b07104e40a6ff46d3b6f9b42b64261c963680528a12e83360994a4849ec12434",
+        "App/en.lproj/InfoPlist.strings": "53d0df6f6c8a5af78e0e17785621c64e61a81c4b7c349620568c6bc398864ca2",
+        "App/en.lproj/Localizable.strings": "2f79bec700891dee3ed3e318136eb096044d92932a599cbd6706b26ec7ea1936",
+        "App/ru.lproj/InfoPlist.strings": "97e4187163840578c14d93b0be0356da5ee11661785860219d0aa37bff83bd87",
+        "App/ru.lproj/Localizable.strings": "b47717d4eeedce0e4b743d07eaf4a241c1808b42fa2fc19b903619f3dce30702",
+        "AppTests/AppModelTests.swift": "462e4b4e4f76ac5ada635ffbb479a3a9efdac2b2c368bfa69b26cb53ce2694d9",
+        "AppTests/BatchImportTests.swift": "8f6905fcce54b850f90807437f83aed16d21dcec85565f58525c7afcebaea47e",
+        "AppTests/LocalizationTests.swift": "0462f4c2a3b0ff310b6373c41a2d0bd166dbdd50a704490bde3db79b8a4fb97e",
+        "AppTests/PlatformTests.swift": "57bc75f72d8860e052d64f8caa6cbaa0b27153410d03a14d3c816cdf70eed87b",
+        "AppTests/ReminderLifecycleTests.swift": "6d45af696df16e5f96ae6e4369d2fc5eb303278b8cfdaf7ea33a0b1ec9a077a0",
+        "Package.swift": "fcf6c9c76029b1f27f588129afc676d3924c5d0673d23c70a7de4aeb8c481374",
+        "Sources/TravelCore/CoreLocalization.swift": "7df4f68f5af16d84773da82b04105ce5d03119fd1ff1c8fdbb670a04145a97a8",
+        "Sources/TravelCore/DocumentImportInput.swift": "5dd2daaa9da1814cfaa94ac21622c85532e8ce003d90ded2735269d6b6747dae",
+        "Sources/TravelCore/DocumentRepository.swift": "5026e8756f6b8a3f5fbbaa3bd217ff0022d586df497a8a48375ee0d6a57b1ef6",
+        "Sources/TravelCore/Models.swift": "d031f9aff0535bcc66d3b0f99c363205c82ac2e7dbfa8783ba35b7a4a44ad598",
+        "Sources/TravelCore/Resources/en.lproj/Core.strings": "32a31c242a59d09600cea7189b885862dafd0d42e196cb640e6ff1b2b7436f7f",
+        "Sources/TravelCore/Resources/ru.lproj/Core.strings": "43121dbe5b596ff1430db1d6abbabd4c5438ee013d28c2ee7de29c3b7411dc23",
+        "Sources/TravelCore/TravelDate.swift": "8be2776898340946c778eabf9a5db00f3de17d7a16f02a3f5e81385b46029220",
+        "Tests/TravelCoreTests/DocumentRepositoryTests.swift": "5c845469b2d5ffc91c987a3fc299668a4a8249396cbd939ee060572344ae9c07",
+        "Tests/TravelCoreTests/LocalizationTests.swift": "49c56f01693f611a6e27ba4398f589dd6c1c85f8a48a97967bd4222de70af4d6",
+        "Tests/TravelCoreTests/TravelDateTests.swift": "b4d93bb6c6f254ccfb5cb1332a7829bd90dcd2a7b74464c87df751a6ab4dae5b",
+        "Tripfolio.xcodeproj/project.pbxproj": "8f965f11c793f17d7d719cdb99a337ec4b84134efab7a628d9fd3d707bd5d31c",
+        "UITests/AccessibilityUITests.swift": "b97e1dfed7c0e1d31bf85ffc89dc016a858345f5976e93535aecf647ed36d149",
+        "UITests/BatchImportUITests.swift": "9e82bbca369268a3d32a2bf48279191b14588683657f349e647b3d95c122baf8",
+        "UITests/LocalizationUITests.swift": "f45987c1ea29f7e57ae870b20ffe0e1d0e644c41aadf4c3319981d160d53168f",
+        "UITests/PrivacyTransitionUITests.swift": "d5a5ee6340fd0e0b6d0364f23092f075e47efb60da16174054538fe1e193c2df",
+        "UITests/PurchaseUITests.swift": "35b3881beb55a4f81b4b98ba74d051705d0e1a1f1d8dadd407c55ac51cd1d1fc",
+        "UITests/TripfolioUITests.swift": "28356f12b1aca2f743392d7a8aa8e024ff2fb456ffdc6f5df477e4005953a4ee",
+        "project.yml": "c66b6f33c113b11daf0b0edb26cab1e116dddecf243b57ef31c597f1c6f5ce55"
+      },
+      "limitations": "Model does not run purchases. UI ordinary launches remain locked; fixture UI bypasses auth, does not purchase, restore or export. No physical-device or VoiceOver claim."
+    }
+  ],
+  "consumer_brand": "TripDocket",
+  "brand_status": "Provisional; App Store Connect reservation and trademark clearance pending."
+}

@@ -1,0 +1,7 @@
+Product: com.4alvit.tripfolio.pro. Type: non-consumable, one purchase, no renewal. Display name: TripDocket Pro. Family Sharing is not included.
+
+Open the Pro card in Settings or reach a Free addition limit. Free allows 1 trip, 2 people and 8 documents. Pro enables additional entries, batch import of 1-10 PDF/JPEG/PNG files with explicit confirmation of every item, and user-enabled local expiry reminders. It does not remove storage limits: 16 MiB per original, 64 MiB of originals per library, 96 MiB per incoming backup.
+
+The displayed price comes from the localized StoreKit product. Restore purchases is available in Settings and on the Pro screen. No TripDocket login is required; Apple may ask for purchase authentication. Only verified active entitlements grant Pro. Pending, cancelled or unverified purchases do not grant access. Revocation removes paid capabilities while original verification, viewing, editing, deletion, basic export and backup recovery remain available.
+
+Restore purchases recovers the license only. Backup restore is a separate operation and replaces the local library after confirmation. Local Xcode configuration/test transactions are not live App Store sales.
