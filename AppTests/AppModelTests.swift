@@ -1,6 +1,6 @@
 import UIKit
 import XCTest
-import TravelCore
+@testable import TravelCore
 @testable import Tripfolio
 
 @MainActor
@@ -126,6 +126,213 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.library.documents.count, 1)
         XCTAssertEqual(model.library.documents.first?.title, "Confirmed ticket")
         XCTAssertEqual(model.library.documents.first?.kind, .ticket)
+    }
+
+    func testCommittedImportCannotBeRetriedWhenCatalogBecomesUnreadable() async throws {
+        for usesFile in [false, true] {
+            let root = temporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let seed = try DocumentRepository(rootURL: root)
+            let trip = try await seed.createTrip(title: "Synthetic trip", departureDate: nil)
+            let original = samplePDF()
+            let source = root.appendingPathComponent("Synthetic ticket.pdf")
+            try original.write(to: source)
+            let model = AppModel(rootURL: root, makeRepository: Self.repositoryWithUnreadablePublishedCatalog)
+            await model.refresh()
+            model.beginDocumentImport(tripID: trip.id)
+            let draft = try XCTUnwrap(model.documentImportDraft)
+            if usesFile { model.selectImportFile(source, draftID: draft.id) }
+            else { model.selectImportScan(original, draftID: draft.id) }
+            draft.title = "Confirmed synthetic ticket"
+            await model.saveDocumentImport(draftID: draft.id)
+
+            XCTAssertNil(model.errorMessage, "A committed import must not be reported as failed")
+            XCTAssertNil(model.documentImportDraft, "A committed draft must not remain retryable")
+            XCTAssertEqual(model.library.documents.count, 1)
+            XCTAssertFalse(model.isBusy)
+            let pointer = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("active.json"))) as? [String: Any])
+            let generation = try XCTUnwrap(pointer["generation"] as? String)
+            let catalog = root.appendingPathComponent(generation).appendingPathComponent("catalog.json")
+            XCTAssertThrowsError(try Data(contentsOf: catalog), "Prove the post-publication read fault was active")
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalog.path)
+
+            // A late duplicate Save callback cannot publish the original again.
+            await model.saveDocumentImport(draftID: draft.id)
+            let persisted = try await seed.load()
+            XCTAssertEqual(model.library, persisted)
+            XCTAssertEqual(persisted.documents.count, 1)
+            let saved = try XCTUnwrap(persisted.documents.first)
+            let savedBytes = try await seed.documentData(id: saved.id)
+            XCTAssertEqual(savedBytes, original)
+        }
+    }
+
+    func testCommittedMutationsFinishCleanupWhenCatalogBecomesUnreadable() async throws {
+        enum Mutation: CaseIterable {
+            case createTrip, addTraveler, updateTrip, updateTraveler, updateDocument
+            case deleteTrip, deleteTraveler, deleteDocument
+        }
+        for mutation in Mutation.allCases {
+            let root = temporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let seed = try DocumentRepository(rootURL: root)
+            let trip = try await seed.createTrip(title: "Synthetic trip", departureDate: nil)
+            let traveler = try await seed.addTraveler(name: "Synthetic traveler")
+            let original = samplePDF()
+            let document = try await seed.importDocument(data: original, originalFilename: "Synthetic.pdf",
+                tripID: trip.id, travelerID: traveler.id, title: "Synthetic document", kind: .ticket, expiryDate: nil)
+            var removedReminders = Set<String>()
+            let notifications = ReminderService.NotificationClient(
+                authorizationStatus: { .authorized }, requestAuthorization: { true }, add: { _ in },
+                remove: { removedReminders.formUnion($0) })
+            let model = AppModel(rootURL: root,
+                temporaryRootURL: root.appendingPathComponent("PresentationCache"),
+                proEntitlement: { true }, reminderNotifications: notifications,
+                makeRepository: Self.repositoryWithUnreadablePublishedCatalog)
+            await model.refresh()
+            await model.checkReadiness(tripID: trip.id)
+            let preview = await model.previewURL(documentID: document.id)
+            let previewURL = try XCTUnwrap(preview)
+            switch mutation {
+            case .createTrip: await model.createTrip(title: "Another trip", departureDate: nil)
+            case .addTraveler: await model.addTraveler(name: "Another traveler")
+            case .updateTrip: await model.updateTrip(id: trip.id, title: "Renamed trip", departureDate: nil)
+            case .updateTraveler: await model.updateTraveler(id: traveler.id, name: "Renamed traveler")
+            case .updateDocument:
+                model.beginEditingDocument(document)
+                let draft = try XCTUnwrap(model.documentEditDraft)
+                draft.title = "Renamed document"
+                await model.saveDocumentEdit()
+                XCTAssertNil(model.documentEditDraft)
+            case .deleteTrip: await model.deleteTrip(id: trip.id)
+            case .deleteTraveler: await model.deleteTraveler(id: traveler.id)
+            case .deleteDocument: await model.deleteDocument(id: document.id)
+            }
+            XCTAssertNil(model.errorMessage, "Committed mutation must succeed: \(mutation)")
+            XCTAssertFalse(model.isBusy)
+            if mutation == .deleteDocument || mutation == .deleteTrip || mutation == .updateDocument {
+                XCTAssertTrue(removedReminders.contains("tripfolio.expiry.\(document.id.uuidString)"),
+                              "Committed deletion/edit must cancel its old reminder")
+            }
+            if mutation == .deleteDocument || mutation == .deleteTrip {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: previewURL.path))
+                XCTAssertNil(model.readiness[document.id])
+            }
+            let pointer = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("active.json"))) as? [String: Any])
+            let generation = try XCTUnwrap(pointer["generation"] as? String)
+            let catalog = root.appendingPathComponent(generation).appendingPathComponent("catalog.json")
+            XCTAssertThrowsError(try Data(contentsOf: catalog), "Prove the read fault was active: \(mutation)")
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalog.path)
+            let persisted = try await seed.load()
+            XCTAssertEqual(model.library, persisted, "The displayed library must match the committed one: \(mutation)")
+            for retained in persisted.documents {
+                let savedBytes = try await seed.documentData(id: retained.id)
+                XCTAssertEqual(savedBytes, original)
+            }
+        }
+    }
+
+    func testInitialMutationLoadsExistingLibraryBeforeCheckingFreeLimits() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = samplePDF()
+        let (repository, _) = try await seedPolicyDocuments(count: 8, at: root, original: original)
+        _ = try await repository.addTraveler(name: "Second traveler")
+        let expected = try await repository.load()
+        let trip = try XCTUnwrap(expected.trips.first)
+        for operation in ["trip", "traveler", "data", "file"] {
+            let model = AppModel(rootURL: root, readExternal: { _, _ in
+                XCTFail("Initial quota must be checked before reading an import source")
+                return original
+            })
+            // No explicit refresh: the initial empty presentation must not be
+            // treated as an empty persisted library for any addition policy.
+            switch operation {
+            case "trip": await model.createTrip(title: "Over quota", departureDate: nil)
+            case "traveler": await model.addTraveler(name: "Over quota")
+            case "data":
+                let saved = await model.importData(original, filename: "extra.pdf", tripID: trip.id,
+                    travelerID: nil, title: "Over quota", kind: .ticket, expiryDate: nil)
+                XCTAssertFalse(saved)
+            default:
+                let saved = await model.importFile(url: root.appendingPathComponent("extra.pdf"), tripID: trip.id,
+                    travelerID: nil, title: "Over quota", kind: .ticket, expiryDate: nil)
+                XCTAssertFalse(saved)
+            }
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isBusy)
+            XCTAssertEqual(model.library, expected)
+            let persisted = try await repository.load()
+            XCTAssertEqual(persisted, expected)
+        }
+    }
+
+    func testInitialSuccessfulMutationPreservesExistingRecordsWithoutRefresh() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repository, before) = try await seedPolicyDocuments(count: 1, at: root, original: samplePDF())
+        let model = AppModel(rootURL: root)
+        await model.addTraveler(name: "Second traveler")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.library.trips, before.trips)
+        XCTAssertEqual(model.library.documents, before.documents)
+        XCTAssertEqual(model.library.travelers.count, 2)
+        let afterAddition = try await repository.load()
+        XCTAssertEqual(model.library, afterAddition)
+
+        let editing = AppModel(rootURL: root)
+        let document = try XCTUnwrap(before.documents.first)
+        let saved = await editing.updateDocument(id: document.id, title: "Updated title",
+            travelerID: document.travelerID, kind: document.kind, expiryDate: nil)
+        XCTAssertTrue(saved)
+        let afterEdit = try await repository.load()
+        XCTAssertEqual(editing.library, afterEdit)
+        XCTAssertEqual(editing.library.travelers.count, 2)
+        XCTAssertEqual(editing.library.documents.first?.title, "Updated title")
+    }
+
+    func testFailedInitialRefreshDoesNotMakeEmptyPresentationAMutationBaseline() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repository, expected) = try await seedPolicyDocuments(count: 1, at: root, original: samplePDF())
+        let pointer = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("active.json"))) as? [String: Any])
+        let generation = try XCTUnwrap(pointer["generation"] as? String)
+        let catalog = root.appendingPathComponent(generation).appendingPathComponent("catalog.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: catalog.path)
+        let model = AppModel(rootURL: root)
+        await model.refresh()
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.library, .empty)
+        model.errorMessage = nil
+        await model.addTraveler(name: "Cannot add while unavailable")
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.library, .empty)
+        XCTAssertFalse(model.isBusy)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalog.path)
+        let unchanged = try await repository.load()
+        XCTAssertEqual(unchanged, expected)
+        model.errorMessage = nil
+        await model.addTraveler(name: "Added after recovery")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.library.trips, expected.trips)
+        XCTAssertEqual(model.library.documents, expected.documents)
+        XCTAssertEqual(model.library.travelers.count, 2)
+        let persisted = try await repository.load()
+        XCTAssertEqual(model.library, persisted)
+    }
+
+    nonisolated private static func repositoryWithUnreadablePublishedCatalog(at libraryURL: URL) throws -> DocumentRepository {
+        try DocumentRepository(rootURL: libraryURL) { data, url in
+            try data.write(to: url, options: .atomic)
+            guard url.lastPathComponent.hasPrefix(".pending-") else { return }
+            // Publication still succeeds. A later catalog read fails, as it can
+            // when device locking makes protected files unavailable.
+            let pointer = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let generation = try XCTUnwrap(pointer["generation"] as? String)
+            let catalog = libraryURL.appendingPathComponent(generation).appendingPathComponent("catalog.json")
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: catalog.path)
+        }
     }
 
     func testLibraryReplacementInvalidatesImportEvenWithIdenticalContent() async throws {

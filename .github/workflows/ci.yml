@@ -164,6 +164,8 @@ jobs:
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py
           python3 -B scripts/test-files-readiness.py
+          python3 -B scripts/test-privacy-support-ipad-unit.py
+          python3 -B scripts/test-verify-recovery-evidence.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
         env:

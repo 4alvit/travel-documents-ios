@@ -444,21 +444,27 @@ final class AccessibilityUITests: XCTestCase {
         // action can still report hittable while Files is on top of it.
         let filesNavigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
         let sidebarNavigation = app.navigationBars["DOCSidebarView"].firstMatch
-        // A captured cold presentation took almost eight seconds to expose its
-        // navigation bar. Give that presentation its own bounded wait before
-        // measuring Cancel readiness; a one-point Other labelled Cancel is not
-        // evidence of a usable button and must not be tapped as a fallback.
-        try require(filesNavigation.waitForExistence(timeout: 15),
+        // On a cold hosted simulator, the real Files navigation and Cancel
+        // appeared in the failure capture after the old 15-second wait ended.
+        // Allow provider startup within one 40-second budget; still require
+        // the actual navigation and a typed, hittable Cancel before acting.
+        // An Other labelled Cancel is not an actionable button.
+        let started = Date()
+        let deadline = started.addingTimeInterval(40)
+        try require(filesNavigation.waitForExistence(timeout: 30),
                     app: app, "\(name) did not present its Files navigation")
         var cancel: XCUIElement?
-        let deadline = Date().addingTimeInterval(8)
         repeat {
             if filesNavigation.exists {
                 // iPhone exposes Cancel in the main navigation; the observed
                 // iPad split picker places it in the Files sidebar navigation.
-                cancel = [filesNavigation.buttons["Cancel"].firstMatch,
-                          sidebarNavigation.buttons["Cancel"].firstMatch]
-                    .first { $0.exists && $0.isHittable }
+                let candidates = [filesNavigation, sidebarNavigation]
+                    .flatMap { $0.buttons.matching(NSPredicate(format: "label == %@", "Cancel"))
+                        .allElementsBoundByIndex }
+                    .filter { $0.exists && $0.isEnabled && $0.isHittable }
+                try require(candidates.count <= 1, app: app,
+                            "\(name) exposed ambiguous actionable Cancel buttons")
+                cancel = candidates.first
             }
             if cancel != nil { break }
             try await Task.sleep(for: .milliseconds(100))
@@ -469,6 +475,7 @@ final class AccessibilityUITests: XCTestCase {
         }
         try require(filesNavigation.exists && cancel.isHittable,
                     app: app, "\(name) disappeared before its Cancel could be tapped")
+        print("FILES_PICKER_READY name=\(name) elapsed=\(Date().timeIntervalSince(started))")
         attach(app, name: "Maximum type — \(name)")
         cancel.tap()
         try require(filesNavigation.waitForNonExistence(timeout: 5),

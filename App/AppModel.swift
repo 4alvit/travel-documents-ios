@@ -51,6 +51,11 @@ final class DocumentEditDraft: Identifiable {
     }
 }
 
+/// Owns the repository's sole writer. `isBusy` serializes mutations; once the
+/// repository returns, mirror its committed result without another fallible
+/// load. Otherwise device locking can turn a successful mutation into a false
+/// failure and skip draft, cache, or reminder cleanup. Mutations load their
+/// initial baseline before checking quotas; later refreshes remain explicit.
 @MainActor @Observable
 final class AppModel {
     var library = LibrarySnapshot.empty {
@@ -72,11 +77,13 @@ final class AppModel {
     let purchases = PurchaseManager()
 
     @ObservationIgnored private var repository: DocumentRepository?
+    @ObservationIgnored private var hasLoadedLibrary = false
     @ObservationIgnored private var batchPreparationTask: Task<Void, Never>?
     @ObservationIgnored private var batchBusyOwner: UUID?
     @ObservationIgnored private let temporaryRoot: URL
     @ObservationIgnored private let proEntitlement: (@MainActor () -> Bool)?
     @ObservationIgnored private let readExternalFile: @Sendable (URL, Int) async throws -> Data
+    @ObservationIgnored private let reminderNotifications: ReminderService.NotificationClient
     private static let documentLimit = 16 * 1024 * 1024
     private static let backupLimit = 96 * 1024 * 1024
 
@@ -90,9 +97,12 @@ final class AppModel {
     init(rootURL: URL? = nil,
          temporaryRootURL: URL? = nil,
          proEntitlement: (@MainActor () -> Bool)? = nil,
-         readExternal: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
+         readExternal: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal,
+         reminderNotifications: ReminderService.NotificationClient = .system,
+         makeRepository: (URL) throws -> DocumentRepository = { try DocumentRepository(rootURL: $0) }) {
         self.proEntitlement = proEntitlement
         self.readExternalFile = readExternal
+        self.reminderNotifications = reminderNotifications
         let fm = FileManager.default
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         temporaryRoot = temporaryRootURL ?? fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -112,7 +122,7 @@ final class AppModel {
                 }
             }
             #endif
-            repository = try DocumentRepository(rootURL: libraryURL)
+            repository = try makeRepository(libraryURL)
         } catch {
             errorMessage = L10n.service("services.model.open.failed", defaultValue: "The local library could not be opened. Your existing files have not been replaced. \(error.localizedDescription)")
         }
@@ -122,29 +132,42 @@ final class AppModel {
         guard !isBusy, let repository else { return }
         isBusy = true
         defer { isBusy = false }
-        do { library = try await repository.load() }
+        do {
+            library = try await repository.load()
+            hasLoadedLibrary = true
+        }
         catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Call only while holding `isBusy`, before mutation policy or publication.
+    /// The initial empty presentation is not evidence that storage is empty.
+    private func loadInitialLibraryIfNeeded(_ repository: DocumentRepository) async throws {
+        guard !hasLoadedLibrary else { return }
+        library = try await repository.load()
+        hasLoadedLibrary = true
     }
 
     func createTrip(title: String, departureDate: Date?) async {
         guard !isBusy, let repository else { return }
-        guard canAddTrip else { errorMessage = L10n.service("services.model.free.trip", defaultValue: "Free includes one trip. Pro adds more trips; your existing documents remain available."); return }
         isBusy = true
         defer { isBusy = false }
         do {
-            _ = try await repository.createTrip(title: title, departureDate: departureDate.map { TravelDate.stored(from: $0) })
-            library = try await repository.load()
+            try await loadInitialLibraryIfNeeded(repository)
+            guard canAddTrip else { errorMessage = L10n.service("services.model.free.trip", defaultValue: "Free includes one trip. Pro adds more trips; your existing documents remain available."); return }
+            let saved = try await repository.createTrip(title: title, departureDate: departureDate.map { TravelDate.stored(from: $0) })
+            library.trips.append(saved)
         } catch { errorMessage = error.localizedDescription }
     }
 
     func addTraveler(name: String) async {
         guard !isBusy, let repository else { return }
-        guard canAddTraveler else { errorMessage = L10n.service("services.model.free.travelers", defaultValue: "Free includes two travelers. Pro adds more people."); return }
         isBusy = true
         defer { isBusy = false }
         do {
-            _ = try await repository.addTraveler(name: name)
-            library = try await repository.load()
+            try await loadInitialLibraryIfNeeded(repository)
+            guard canAddTraveler else { errorMessage = L10n.service("services.model.free.travelers", defaultValue: "Free includes two travelers. Pro adds more people."); return }
+            let saved = try await repository.addTraveler(name: name)
+            library.travelers.append(saved)
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -153,8 +176,9 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await repository.updateTrip(id: id, title: title, departureDate: departureDate.map { TravelDate.stored(from: $0) })
-            library = try await repository.load()
+            try await loadInitialLibraryIfNeeded(repository)
+            let saved = try await repository.updateTrip(id: id, title: title, departureDate: departureDate.map { TravelDate.stored(from: $0) })
+            library.trips = library.trips.map { $0.id == id ? saved : $0 }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -162,14 +186,18 @@ final class AppModel {
         guard !isBusy, let repository else { return }
         isBusy = true
         defer { isBusy = false }
-        let documents = library.documents.filter { $0.tripID == id }
         do {
+            try await loadInitialLibraryIfNeeded(repository)
+            let documents = library.documents.filter { $0.tripID == id }
             try await repository.deleteTrip(id: id)
-            library = try await repository.load()
+            var committed = library
+            committed.trips.removeAll { $0.id == id }
+            committed.documents.removeAll { $0.tripID == id }
+            library = committed
             clearTemporaryCopies()
             for document in documents {
                 readiness[document.id] = nil
-                ReminderService.cancel(documentID: document.id)
+                ReminderService.cancel(documentID: document.id, notifications: reminderNotifications)
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -179,8 +207,9 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await repository.updateTraveler(id: id, name: name)
-            library = try await repository.load()
+            try await loadInitialLibraryIfNeeded(repository)
+            let saved = try await repository.updateTraveler(id: id, name: name)
+            library.travelers = library.travelers.map { $0.id == id ? saved : $0 }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -189,8 +218,14 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
         do {
+            try await loadInitialLibraryIfNeeded(repository)
             try await repository.deleteTraveler(id: id)
-            library = try await repository.load()
+            var committed = library
+            committed.travelers.removeAll { $0.id == id }
+            for index in committed.documents.indices where committed.documents[index].travelerID == id {
+                committed.documents[index].travelerID = nil
+            }
+            library = committed
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -322,9 +357,10 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
         do {
-            try await repository.updateDocument(id: id, title: title, travelerID: travelerID, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
-            library = try await repository.load()
-            ReminderService.cancel(documentID: id)
+            try await loadInitialLibraryIfNeeded(repository)
+            let saved = try await repository.updateDocument(id: id, title: title, travelerID: travelerID, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
+            library.documents = library.documents.map { $0.id == id ? saved : $0 }
+            ReminderService.cancel(documentID: id, notifications: reminderNotifications)
             notice = L10n.service("services.model.edit.updated", defaultValue: "Details updated. Schedule the reminder again if needed.")
             return true
         } catch { errorMessage = error.localizedDescription; return false }
@@ -333,11 +369,12 @@ final class AppModel {
     @discardableResult
     func importFile(url: URL, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async -> Bool {
         guard !isBusy, let repository else { return false }
-        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available."); return false }
         isBusy = true
         defer { isBusy = false }
         do {
             try Task.checkCancellation()
+            try await loadInitialLibraryIfNeeded(repository)
+            guard canAddDocument else { errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available."); return false }
             let data = try await readExternalFile(url, Self.documentLimit)
             try Task.checkCancellation()
             // A provider read can outlive a refund. Re-evaluate the current
@@ -347,8 +384,11 @@ final class AppModel {
                 errorMessage = L10n.service("services.model.free.documentsAccess", defaultValue: "Free includes eight documents. Pro adds more; viewing, export and recovery stay available.")
                 return false
             }
-            _ = try await repository.importDocument(data: data, originalFilename: url.lastPathComponent, tripID: tripID, travelerID: travelerID, title: title, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
-            library = try await repository.load()
+            let saved = try await repository.importDocument(data: data, originalFilename: url.lastPathComponent, tripID: tripID, travelerID: travelerID, title: title, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
+            // The transaction has committed. A subsequent protected-file read
+            // can fail after the device locks; it must not leave a retryable
+            // import draft that would add the same original a second time.
+            library.documents.append(saved)
             readiness = [:]
             notice = L10n.service("services.model.import.originalCopied", defaultValue: "Original copied into the local library. Run the offline check before you travel.")
             return true
@@ -361,12 +401,13 @@ final class AppModel {
     @discardableResult
     func importData(_ data: Data, filename: String, tripID: UUID, travelerID: UUID?, title: String, kind: DocumentKind, expiryDate: Date?) async -> Bool {
         guard !isBusy, let repository else { return false }
-        guard canAddDocument else { errorMessage = L10n.service("services.model.free.documents", defaultValue: "Free includes eight documents. Pro adds more documents."); return false }
         isBusy = true
         defer { isBusy = false }
         do {
-            _ = try await repository.importDocument(data: data, originalFilename: filename, tripID: tripID, travelerID: travelerID, title: title, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
-            library = try await repository.load()
+            try await loadInitialLibraryIfNeeded(repository)
+            guard canAddDocument else { errorMessage = L10n.service("services.model.free.documents", defaultValue: "Free includes eight documents. Pro adds more documents."); return false }
+            let saved = try await repository.importDocument(data: data, originalFilename: filename, tripID: tripID, travelerID: travelerID, title: title, kind: kind, expiryDate: expiryDate.map { TravelDate.stored(from: $0) })
+            library.documents.append(saved)
             readiness = [:]
             notice = L10n.service("services.model.import.saved", defaultValue: "Document saved on this device.")
             return true
@@ -390,11 +431,12 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
         do {
+            try await loadInitialLibraryIfNeeded(repository)
             try await repository.deleteDocument(id: id)
-            library = try await repository.load()
+            library.documents.removeAll { $0.id == id }
             clearTemporaryCopies()
             readiness[id] = nil
-            ReminderService.cancel(documentID: id)
+            ReminderService.cancel(documentID: id, notifications: reminderNotifications)
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -417,12 +459,13 @@ final class AppModel {
             let data = try await readExternalFile(url, Self.backupLimit)
             try Task.checkCancellation()
             library = try await repository.restoreBackup(data)
+            hasLoadedLibrary = true
             documentImportDraft = nil
             documentEditDraft = nil
             if let draft = batchImportDraft { discardBatchImport(draftID: draft.id) }
             readiness = [:]
             clearTemporaryCopies()
-            ReminderService.cancelAll()
+            ReminderService.cancelAll(notifications: reminderNotifications)
             notice = L10n.service("services.model.restore.completed", defaultValue: "Backup restored and originals verified. Schedule reminders again on this device.")
         } catch is CancellationError {
             // Preserve the library, readiness results, and unsaved editor.

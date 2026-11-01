@@ -415,8 +415,14 @@ final class BatchImportUITests: XCTestCase {
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
         // This is a navigation-title marker, not the folder's row in its parent.
-        // Unknown native accessibility layouts must fail before a write/selection.
-        let titles = navigation.staticTexts.matching(NSPredicate(format: "label == %@", folder))
+        // Files can expose its heading as an Actions Menu button. Match the
+        // complete name and role so a back button or similarly named folder
+        // cannot authorize a write/selection in the wrong destination.
+        let titles = navigation.descendants(matching: .any).matching(NSPredicate(
+            format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND label == %@)",
+            NSNumber(value: XCUIElement.ElementType.staticText.rawValue), folder,
+            NSNumber(value: XCUIElement.ElementType.button.rawValue), folder + ", Actions Menu"
+        ))
         return navigation.exists && titles.count == 1 && titles.element(boundBy: 0).isHittable
     }
 
@@ -605,10 +611,18 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func openLocalFilesFolder(_ folder: String, app: XCUIApplication) async throws -> XCUIElement {
-        let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
-        try await wait("Files did not present its navigation", app: app) { navigation.exists }
-        let picker = app.otherElements["Browse View (Picker)"].firstMatch
-        try await wait("The real Files picker root is missing", app: app) { picker.exists }
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let navigation = navigations.element
+        try await wait("Files did not present its navigation", app: app) {
+            navigations.count == 1 && navigation.exists
+        }
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let picker = pickers.element
+        try await wait("The real Files picker root is missing", app: app) { pickers.count == 1 && picker.exists }
+        let atDestination = {
+            navigations.count == 1 && pickers.count == 1 && picker.exists
+                && self.isRecoveryFolder(folder, navigation: navigation)
+        }
         let directory = picker.cells.matching(identifier: folder + ", Folder").firstMatch
         // The captured native tab bar is a sibling of Browse View (Picker),
         // not its descendant. Its controls can appear after the root/navigation.
@@ -618,10 +632,14 @@ final class BatchImportUITests: XCTestCase {
         )).firstMatch
         try await wait("Native Files navigation did not render its local browsing controls", app: app) {
             navigation.exists && picker.exists
-                && ((directory.exists && directory.isHittable)
+                && (atDestination() || (directory.exists && directory.isHittable)
                     || (location.exists && location.isHittable)
                     || (browse.exists && browse.isHittable))
         }
+        // Files remembers its last directory across presentations. The exact
+        // reachable heading is sufficient; do not look for a child with the
+        // same name or navigate away from an already selected destination.
+        if atDestination() { return picker }
         if !(directory.exists && directory.isHittable) {
             if !(location.exists && location.isHittable) {
                 try check(browse.exists && browse.isHittable, app: app, "Native Files Browse is unavailable")
@@ -630,12 +648,16 @@ final class BatchImportUITests: XCTestCase {
             // Browse can restore On My iPhone directly instead of showing
             // the locations sidebar. Wait for either observed destination.
             try await wait("Files did not show the exact fixture folder or its local location", app: app) {
-                (directory.exists && directory.isHittable) || (location.exists && location.isHittable)
+                atDestination() || (directory.exists && directory.isHittable) || (location.exists && location.isHittable)
             }
+            if atDestination() { return picker }
             if !(directory.exists && directory.isHittable) { location.tap() }
         }
-        try await wait("The named synthetic Files folder is missing", app: app) { directory.exists && directory.isHittable }
-        directory.tap()
+        try await wait("The named synthetic Files folder is missing", app: app) {
+            atDestination() || (directory.exists && directory.isHittable)
+        }
+        if !atDestination() { directory.tap() }
+        try await wait("Files did not reach the exact synthetic folder", app: app) { atDestination() }
         return picker
     }
 
