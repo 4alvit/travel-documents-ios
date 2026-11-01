@@ -60,12 +60,22 @@ show the guidance page with the confirmation closed. Its owned device was
 removed and the full final inventory matched the baseline. This focused local
 Debug run does not replace final-candidate hosted or Release qualification.
 
-Release qualification checks its pinned Xcode 26.2 toolchain and default
-xcresult schema before native work. Hosted preflight established that this
-Xcode rejects an explicit 0.4.0 request; both result readers now use its default
-format while retaining their strict result validation. The same read-only preflight runs in ordinary
-CI, with retained schema evidence. Its 31 offline guard tests pass; native
-qualification must still pass before RC promotion.
+Hosted preflight established two Xcode 26.2 (17C52) compatibility problems:
+an explicit schema 0.4.0 request is unsupported, and the default summary-schema
+documentation is malformed. The latter was captured in
+[CI 41352317506](https://github.com/4alvit/travel-documents-ios/actions/runs/41352317506),
+artifact `13100939614`. Its schema also omits the documented warning field;
+that omission alone does not establish what an actual result contains.
+
+The revised preflight recognizes the exact producer documentation without
+loosening result JSON parsing. Hosted qualification captures native results,
+source/product identities and cleanup evidence with status
+`captured_pending_review`. It never claims release acceptance. An independent
+Xcode 27.1 reader must verify the same retained result bundle, all expected
+cases and explicit empty warning/failure arrays, followed by visual and
+original-byte review, before the separate operator receipt may pass. The
+[channel policy](github-releases.md) specifies this boundary. No pending or
+failed run is promoted by this compatibility change.
 
 Subsequent hosted guidance runs exposed additional failures. The `334d993`
 English iPad run completed all four Cancel transitions but exceeded its

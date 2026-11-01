@@ -36,15 +36,37 @@ old tag or relabel an old binary as fixed.
 
 ## Prepare without publishing
 
-The explicit `Release qualification` workflow pins Xcode 26.2 (17C52). Both
-result validators use that toolchain's default xcresult schema, rather than
-requesting version 0.4.0 which this Xcode does not support. Before creating a
-project or Simulator, qualification verifies the exact toolchain and both
-schema contracts consumed by the validators. Ordinary CI performs this
-read-only preflight and retains its schema evidence; its application builds
-keep their existing default toolchain. A missing toolchain or incompatible
-schema fails the gate before native testing. Result counts, individual cases,
-device identity and runtime-warning checks remain mandatory.
+The explicit `Release qualification` workflow pins Xcode 26.2 (17C52) and
+captures the selected suite once. This Xcode rejects an explicit schema version
+0.4.0, and its default summary-schema documentation contains invalid JSON.
+The preflight recognizes the exact captured documentation by SHA-256, retaining
+the original bytes. It does not repair result JSON or treat a documentation
+hash as proof that tests passed. An unknown document or toolchain fails before
+native work. Ordinary CI performs the same read-only preflight; its application
+builds keep their existing default toolchain.
+
+Successful hosted capture has status `captured_pending_review`, never `passed`.
+It requires successful native execution, exact case counts and device identity,
+unchanged source, matching built/installed products, the batch original-byte
+proof where applicable, a complete result-bundle manifest and verified cleanup.
+Reported runtime warnings or test failures block capture; an omitted warning field is
+recorded as unavailable, not as an empty list. Workflow success and exit code
+zero establish capture completion only. They do not authorize promotion.
+
+Before accepting a Debug execution receipt, independently read a copy of that
+same retained bundle with Xcode 27.1 (27A9275), whose result summary provides an
+explicit `runtimeWarnings` array. Verify the Actions artifact digest, exact
+run/attempt/source commit and tree, and the original bundle's complete file
+manifest before making the copy. Preserve the original unchanged and verify
+its manifest again after review. Record the reader version, commands, schema
+and output hashes. The reader must report the exact expected one or six passed
+cases, zero failures/skips/expected failures, the captured device, and explicit
+empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
+failure or any warning block acceptance. Inspect the retained screenshots and
+the mode-specific byte/cleanup evidence too. Only this complete review may
+produce the separate operator `passed` receipt described below; never rewrite
+the raw capture report into a pass. These checks cover the retained XCTest
+record, not every application or system-console message.
 
 `scripts/prepare-release.py` uses Python's standard library, local Git objects,
 and authenticated `gh` **GET** requests to github.com. Actions artifact downloads

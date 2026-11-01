@@ -103,7 +103,9 @@ class Guards(unittest.TestCase):
                    lambda s,r,t: r.update(expectedFailures=1), lambda s,r,t: r.update(passedTests=True),
                    lambda s,r,t: r.update(runtimeWarnings=[{"message":"runtime issue"}]),
                    lambda s,r,t: r.update(testFailures=[{"failureText":"unexpected issue"}]),
-                   lambda s,r,t: r.pop("runtimeWarnings"),
+                   lambda s,r,t: r.pop("testFailures"),
+                   lambda s,r,t: r.update(runtimeWarnings=None),
+                   lambda s,r,t: r.update(runtimeWarnings="[]"),
                    lambda s,r,t: t["testNodes"].append(copy.deepcopy(t["testNodes"][0])),
                    lambda s,r,t: t["testNodes"][0].update(result="Skipped"),
                    lambda s,r,t: t["devices"][0].update(deviceId=EXISTING),
@@ -186,11 +188,12 @@ class Guards(unittest.TestCase):
         (app/"payload").write_bytes(b"changed")
         self.assertNotEqual(q.tree_manifest(app,lambda:None),manifest)
 
-    def exercise_driver(self, *, skipped=False, runtime_warning=False):
+    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False):
         run=self.run_object();run.owned=OWNED
         summary,result,tree,cases=self.fixture()
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
+        if missing_warnings:result.pop("runtimeWarnings")
         source=summary["source_before"]
         child=SimpleNamespace(pid=123,returncode=0,stdout=None,stderr=None,poll=lambda:0)
         events=[]
@@ -228,24 +231,86 @@ class Guards(unittest.TestCase):
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
         self.assertEqual(events,["prepare","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
-        self.assertTrue(run.report["driver_passed"])
+        self.assertTrue(run.report["driver_capture_verified"])
 
     def test_skipped_driver_result_never_reaches_product_acceptance(self):
         run,events=self.exercise_driver(skipped=True)
-        self.assertNotIn("products",events);self.assertNotIn("driver_passed",run.report)
+        self.assertNotIn("products",events);self.assertNotIn("driver_capture_verified",run.report)
 
     def test_actual_xcresult_runtime_warning_is_retained_and_prevents_acceptance(self):
         run,events=self.exercise_driver(runtime_warning=True)
         self.assertEqual(run.report["xcresult_issues"]["runtimeWarnings"],[{"message":"Runtime issue"}])
-        self.assertNotIn("products",events);self.assertNotIn("driver_passed",run.report)
+        self.assertNotIn("products",events);self.assertNotIn("driver_capture_verified",run.report)
+
+    def test_missing_host_warning_field_is_not_reported_and_only_allows_capture(self):
+        run,events=self.exercise_driver(missing_warnings=True)
+        self.assertEqual(run.report["xcresult_issues"]["runtimeWarnings"],"not_reported")
+        self.assertFalse(run.report["xcresult_issues"]["runtimeWarnings_reported"])
+        self.assertTrue(run.report["driver_capture_verified"])
+        self.assertEqual(run.report["status"],"running")
+
+    def test_nested_runtime_warning_in_tree_fails_when_summary_does_not_report_warnings(self):
+        for mode in q.MODES:
+            data=self.fixture(mode);data[1].pop("runtimeWarnings")
+            data[2]["testNodes"][0]["children"]=[{"nodeType":"Test Case Run","children":[
+                {"nodeType":"Runtime Warning","name":"Observed runtime issue"}]}]
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError,"tree reported a runtime warning"):
+                self.validate(mode,data)
 
     def test_execute_requires_both_products_and_final_device_cleanup(self):
         run=self.run_object();run.before={"head":HEAD}
         run.prepare=lambda:None;run.source=lambda label:run.before
-        run.run_driver=lambda:run.report.update(driver_passed=True,products_verified=True)
+        run.run_driver=lambda:run.report.update(driver_capture_verified=True,products_verified=True)
         run.cleanup=lambda:None
         self.assertEqual(run.execute(),1)
         self.assertEqual(run.report["status"],"failed")
+
+    def prepared_capture(self, mode="batch"):
+        run=self.run_object(mode);run.before={"head":HEAD}
+        result=self.root/"build/OriginalDriver/Tests.xcresult"
+        (result/"Data").mkdir(parents=True);(result/"Data/result").write_bytes(b"original result bytes")
+        (result/"Info.plist").write_bytes(b"original result metadata")
+        run.report["driver_directory"]="build/OriginalDriver"
+        run.prepare=lambda:None;run.source=lambda label:run.before
+        run.run_driver=lambda:run.report.update(driver_capture_verified=True,products_verified=True,
+                                              batch_snapshot={"verified":True})
+        run.cleanup=lambda:run.report.update(cleanup_verified=True)
+        return run,result
+
+    def test_successful_capture_is_pending_review_and_binds_unchanged_original_bytes(self):
+        for mode in q.MODES:
+            with tempfile.TemporaryDirectory(dir=self.root) as directory:
+                saved=self.root;self.root=Path(directory)
+                run,result=self.prepared_capture(mode)
+                before={str(p.relative_to(result)):p.read_bytes() for p in result.rglob("*") if p.is_file()}
+                self.assertEqual(run.execute(),0)
+                self.assertEqual(run.report["status"],"captured_pending_review")
+                proof=run.report["original_xcresult"];raw=(run.out/proof["manifest"]).read_bytes()
+                self.assertEqual(hashlib.sha256(raw).hexdigest(),proof["manifest_sha256"])
+                manifest=json.loads(raw)
+                self.assertEqual(manifest["./Data/result"]["sha256"],hashlib.sha256(before["Data/result"]).hexdigest())
+                self.assertEqual(before,{str(p.relative_to(result)):p.read_bytes() for p in result.rglob("*") if p.is_file()})
+                self.root=saved
+
+    def test_result_manifest_failure_never_becomes_a_successful_capture(self):
+        run,result=self.prepared_capture();(result/"Info.plist").unlink()
+        self.assertEqual(run.execute(),1)
+        self.assertEqual(run.report["status"],"failed")
+        self.assertNotIn("original_xcresult",run.report)
+
+    def test_result_capture_refuses_incomplete_cleanup_and_oversized_bundle(self):
+        run,result=self.prepared_capture()
+        with self.assertRaises(RuntimeError):run.capture_original_result()
+        run.report["cleanup_verified"]=True
+        with (result/"Data/result").open("wb") as stream:stream.truncate(256*q.MIB+1)
+        with self.assertRaisesRegex(RuntimeError,"byte cap"):run.capture_original_result()
+        self.assertNotIn("original_xcresult",run.report)
+
+    def test_result_capture_rejects_links_instead_of_binding_external_bytes(self):
+        run,result=self.prepared_capture();run.report["cleanup_verified"]=True
+        (result/"Data/link").symlink_to(self.root/"outside")
+        with self.assertRaisesRegex(RuntimeError,"unsupported links"):run.capture_original_result()
+        self.assertNotIn("original_xcresult",run.report)
 
     def snapshot_fixture(self):
         root=Path(tempfile.mkdtemp(dir=self.root));run=q.Qualification(root,"batch",ENV);run.owned=OWNED
@@ -353,60 +418,34 @@ class Guards(unittest.TestCase):
             self.assertNotIn("batch_snapshot",run.report)
 
     def schemas(self):
-        def obj(properties, required=None):
-            return {"type": "object", "properties": properties,
-                    "required": list(properties) if required is None else required}
-        def ref(name): return {"$ref": "#/schemas/" + name}
-        def array(name): return {"type": "array", "items": ref(name)}
-        common = {"Device": obj({"deviceId": {"type": "string"}, "platform": {"type": "string"}}, ["deviceId"]),
-                  "TestResult": {"type": "string", "enum": ["Passed", "Failed"]}}
-        properties = {key: {"type": "integer"} for key in
-                      ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")}
-        properties.update(result=ref("TestResult"), runtimeWarnings=array("Issue"), testFailures=array("TestFailure"),
-                          devicesAndConfigurations=ref("DeviceAndConfigurationSummary"))
-        summary = {"schemas": {**copy.deepcopy(common), "Summary": obj(properties),
-                    "DeviceAndConfigurationSummary": obj({"device": ref("Device")})}}
-        tests = {"schemas": {**copy.deepcopy(common), "Tests": obj({"devices": array("Device"), "testNodes": array("TestNode")}),
-                 "TestNode": obj({"nodeIdentifier": {"type": "string"}, "nodeType": ref("TestNodeType"),
-                                  "result": ref("TestResult"), "children": array("TestNode")}, ["nodeType"]),
-                 "TestNodeType": {"type": "string", "enum": ["Test Case", "Test Suite"]}}}
-        return summary, tests
+        fixtures = Path(__file__).parent / "fixtures/xcresult-xcode-26.2"
+        return ((fixtures / "summary-schema.txt").read_bytes(), (fixtures / "tests-schema.json").read_bytes())
 
-    def test_schema_contract_accepts_optional_generic_node_fields(self):
-        self.assertEqual(q.validate_schemas(*self.schemas()), {"selection": "pinned-toolchain-default", "validated": True})
+    def test_exact_producer_documents_are_recognized_without_json_normalization(self):
+        summary, tests = self.schemas()
+        self.assertTrue(q.validate_schemas(summary, tests)["documentation_verified"])
+        with self.assertRaises(json.JSONDecodeError): json.loads(summary)
+        self.assertIn("Tests", json.loads(tests)["schemas"])
+        self.assertNotIn(b'"runtimeWarnings"', summary)
+        # Identity of stale documentation never substitutes for actual evidence.
+        data = self.fixture(); data[1].pop("testFailures")
+        with self.assertRaises(RuntimeError): self.validate("batch", data)
 
-    def test_schema_requires_all_summary_counts_and_warning_evidence(self):
-        for key in ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures",
-                    "runtimeWarnings", "testFailures", "devicesAndConfigurations"):
-            for change in ("missing", "optional", "type"):
-                summary, tests = self.schemas(); root = summary["schemas"]["Summary"]
-                if change == "missing": root["properties"].pop(key)
-                elif change == "optional": root["required"].remove(key)
-                else: root["properties"][key] = {"type": "null"}
-                with self.subTest(key=key, change=change), self.assertRaises(RuntimeError):
-                    q.validate_schemas(summary, tests)
+    def test_changed_producer_docs_are_rejected_even_if_valid_json(self):
+        for index in (0, 1):
+            for replacement in (b"{}", b'{"runtimeWarnings":[]}', self.schemas()[index] + b"\n",
+                                self.schemas()[index].replace(b'"deviceId"', b'"otherId"')):
+                documents = list(self.schemas()); documents[index] = replacement
+                with self.subTest(index=index), self.assertRaises(RuntimeError): q.validate_schemas(*documents)
 
-    def test_schema_requires_exact_tree_and_device_contract(self):
-        for kind, model, field in [(0, "Device", "deviceId"), (0, "Device", "platform"),
-                                   (0, "DeviceAndConfigurationSummary", "device"),
-                                   (1, "Tests", "devices"), (1, "Tests", "testNodes"),
-                                   (1, "TestNode", "nodeIdentifier"), (1, "TestNode", "nodeType"),
-                                   (1, "TestNode", "result"), (1, "TestNode", "children")]:
-            schemas = self.schemas(); schemas[kind]["schemas"][model]["properties"].pop(field)
-            with self.subTest(model=model, field=field), self.assertRaises(RuntimeError): q.validate_schemas(*schemas)
-        for model in ("TestNodeType", "TestResult"):
-            schemas = self.schemas(); schemas[1]["schemas"][model]["enum"] = ["unknown"]
-            with self.assertRaises(RuntimeError): q.validate_schemas(*schemas)
-
-    def test_schema_input_is_bounded_json(self):
-        for raw in (b"", b"x" * (q.MIB + 1), b"not JSON"):
-            with self.assertRaises((RuntimeError, ValueError)): q.schema_document(raw)
-        for malformed in ({}, [], {"schemas": {}}):
+    def test_schema_identity_rejects_wrong_types_empty_oversized_and_swapped_docs(self):
+        for malformed in ({}, [], None, "text", b"", b"x" * (q.MIB + 1)):
             with self.assertRaises(RuntimeError): q.validate_schemas(malformed, self.schemas()[1])
+        with self.assertRaises(RuntimeError): q.validate_schemas(*reversed(self.schemas()))
 
     def test_preflight_captures_exact_raw_schemas_before_any_device_action(self):
         run = self.run_object(); calls = []; schemas = self.schemas()
-        outputs = {kind: json.dumps(schemas[n]) + "\n" for n, kind in enumerate(("summary", "tests"))}
+        outputs = {kind: schemas[n].decode() for n, kind in enumerate(("summary", "tests"))}
         def command(label, argv, seconds=30):
             calls.append(argv); return outputs[argv[4]]
         run.command = command; run.preflight_schemas()
@@ -417,11 +456,11 @@ class Guards(unittest.TestCase):
             self.assertEqual(run.report["xcresult_schema"]["sha256"][kind], hashlib.sha256(raw).hexdigest())
         self.assertEqual(len(calls), 2); self.assertIsNone(run.owned)
 
-    def test_unsupported_schema_stops_prepare_before_project_or_device_mutation(self):
+    def test_unrecognized_schema_stops_prepare_before_project_or_device_mutation(self):
         run = self.run_object(); run.source = lambda label: {"head": HEAD, "tree": "b" * 40}; calls = []
-        schemas = self.schemas(); schemas[0]["schemas"]["Summary"]["properties"].pop("runtimeWarnings")
+        schemas = self.schemas()
         outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2", "architecture": "arm64",
-                   "xcresult-schema-summary": json.dumps(schemas[0]), "xcresult-schema-tests": json.dumps(schemas[1])}
+                   "xcresult-schema-summary": schemas[0].decode() + "\n", "xcresult-schema-tests": schemas[1].decode()}
         def command(label, argv, seconds=30):
             calls.append(argv); return outputs[label]
         run.command = command
@@ -433,7 +472,7 @@ class Guards(unittest.TestCase):
     def test_schema_cli_uses_only_files_and_rejects_mixed_execution_mode(self):
         paths = []
         for n, schema in enumerate(self.schemas()):
-            path = self.root / (str(n) + ".json"); path.write_text(json.dumps(schema)); paths.append(str(path))
+            path = self.root / (str(n) + ".json"); path.write_bytes(schema); paths.append(str(path))
         with patch.object(q, "Qualification", side_effect=AssertionError("Native run not allowed")):
             with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", *paths]):
                 self.assertEqual(q.main(), 0)

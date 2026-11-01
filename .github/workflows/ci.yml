@@ -28,7 +28,7 @@ jobs:
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
-          # Read-only qualification schema check; regular CI keeps its default Xcode.
+          # Recognize exact producer documentation; runtime acceptance is separate.
           TRIPDOCKET_QUALIFY_DEVELOPER_DIR=/Applications/Xcode_26.2.app/Contents/Developer
           DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcodebuild -version > build/ci-toolchain/qualification-xcode.txt
           test "$(cat build/ci-toolchain/qualification-xcode.txt)" = "$(printf 'Xcode 26.2\nBuild version 17C52')"

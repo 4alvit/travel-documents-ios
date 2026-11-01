@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit hosted batch/biometric qualification on one new owned iPhone."""
+"""Capture hosted batch/biometric evidence; independent review remains required."""
 import argparse
 import hashlib
 import importlib.util
@@ -162,63 +162,22 @@ def bounded_read(root, relative, maximum, check):
         for fd in reversed(opened): os.close(fd)
 
 
+# Exact producer documentation captured from Xcode 26.2 build 17C52.
+# The summary document is malformed/stale; its identity is not runtime evidence.
+SCHEMA_DOCUMENTS = {
+    "summary": "caebdac65d3702246017a340212ddf224723bb24db65631c47ff08bf140a5e66",
+    "tests": "e2ab685a13f16c60c44bec331e90c85973f0e3cc1fcd9669ddee541fc1ad3609",
+}
+
+
 def validate_schemas(summary, tests):
-    """Check the schema contract consumed by both result validators."""
-    def model(document, name):
-        require(isinstance(document, dict) and isinstance(document.get("schemas"), dict),
-                "Invalid xcresult schema document")
-        result = document["schemas"].get(name)
-        require(isinstance(result, dict) and result.get("type") == "object"
-                and isinstance(result.get("properties"), dict), "Missing schema model: " + name)
-        return result
-
-    def field(document, name, key, *, kind=None, reference=None, required=False, item=None):
-        schema = model(document, name)
-        value = schema["properties"].get(key)
-        require(isinstance(value, dict), "Missing schema field: " + name + "." + key)
-        if required:
-            require(isinstance(schema.get("required"), list) and key in schema["required"],
-                    "Schema does not require: " + name + "." + key)
-        if kind is not None:
-            require(value.get("type") == kind, "Unexpected schema type: " + key)
-        if reference is not None:
-            require(value.get("$ref") == "#/schemas/" + reference, "Unexpected schema reference: " + key)
-        if item is not None:
-            require(value.get("items", {}).get("$ref") == "#/schemas/" + item,
-                    "Unexpected schema array items: " + key)
-
-    for key in ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures"):
-        field(summary, "Summary", key, kind="integer", required=True)
-    field(summary, "Summary", "result", reference="TestResult", required=True)
-    for key in ("runtimeWarnings", "testFailures"):
-        field(summary, "Summary", key, kind="array", required=True)
-    # Apple's schema declares this as an object reference; the actual response
-    # is an array. validate_driver separately enforces the actual one-item array.
-    field(summary, "Summary", "devicesAndConfigurations",
-          reference="DeviceAndConfigurationSummary", required=True)
-    field(summary, "DeviceAndConfigurationSummary", "device", reference="Device", required=True)
-    for document in (summary, tests):
-        field(document, "Device", "deviceId", kind="string", required=True)
-        field(document, "Device", "platform", kind="string")
-        result = document["schemas"].get("TestResult", {})
-        require(result.get("type") == "string" and "Passed" in result.get("enum", []),
-                "Schema cannot represent passed tests")
-    field(tests, "Tests", "devices", kind="array", item="Device", required=True)
-    field(tests, "Tests", "testNodes", kind="array", item="TestNode", required=True)
-    field(tests, "TestNode", "nodeType", reference="TestNodeType", required=True)
-    for key in ("nodeIdentifier",):
-        field(tests, "TestNode", key, kind="string")
-    field(tests, "TestNode", "result", reference="TestResult")
-    field(tests, "TestNode", "children", kind="array", item="TestNode")
-    node_type = tests["schemas"].get("TestNodeType", {})
-    require(node_type.get("type") == "string" and "Test Case" in node_type.get("enum", []),
-            "Schema cannot identify test cases")
-    return {"selection": "pinned-toolchain-default", "validated": True}
-
-
-def schema_document(raw):
-    require(0 < len(raw) <= MIB, "Schema exceeds byte limit")
-    return json.loads(raw)
+    """Recognize exact pinned-toolchain docs without loosening any JSON parser."""
+    for kind, raw in (("summary", summary), ("tests", tests)):
+        require(isinstance(raw, bytes) and 0 < len(raw) <= MIB, "Invalid schema documentation bytes")
+        require(hashlib.sha256(raw).hexdigest() == SCHEMA_DOCUMENTS[kind],
+                "Unrecognized " + kind + " schema documentation for pinned Xcode")
+    return {"selection": "pinned-toolchain-default", "documentation_verified": True,
+            "runtime_evidence": "Independent pinned-reader review must provide explicit warnings, failures, counts, cases and device identity"}
 
 
 def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
@@ -229,11 +188,14 @@ def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
                 "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
     require(result.get("result") == "Passed" and all(type(result.get(k)) is int
             and result[k] == v for k, v in expected.items()), "Incomplete or skipped result")
-    require(result.get("runtimeWarnings") == [] and result.get("testFailures") == [],
-            "XCTest reported runtime warnings or failures, or omitted their evidence")
+    require(result.get("testFailures") == [], "XCTest reported failures or omitted their evidence")
+    require("runtimeWarnings" not in result or result["runtimeWarnings"] == [],
+            "XCTest reported runtime warnings or invalid warning evidence")
     pending, cases = list(tree.get("testNodes", [])), []
     while pending:
-        node = pending.pop(); pending.extend(node.get("children", []))
+        node = pending.pop()
+        require(node.get("nodeType") != "Runtime Warning", "XCTest test tree reported a runtime warning")
+        pending.extend(node.get("children", []))
         if node.get("nodeType") == "Test Case":
             require(node.get("result") == "Passed", "A selected case did not pass")
             cases.append(node.get("nodeIdentifier"))
@@ -332,7 +294,7 @@ class Qualification:
             raw = self.command("xcresult-schema-" + kind,
                                ["xcrun", "xcresulttool", "get", "test-results", kind,
                                 "--schema"]).encode()
-            schemas[kind] = schema_document(raw)
+            schemas[kind] = raw
             (self.out / ("xcresult-schema-" + kind + ".json")).write_bytes(raw)
             hashes[kind] = hashlib.sha256(raw).hexdigest()
         self.report["xcresult_schema"] = {**validate_schemas(schemas["summary"], schemas["tests"]),
@@ -485,7 +447,11 @@ class Qualification:
         if (driver.directory / "xcresult-summary.json").exists():
             try:
                 result = json.loads(bounded_read(driver.directory, "xcresult-summary.json", 16 * MIB, self.check))
-                self.report["xcresult_issues"] = {key: result.get(key) for key in ("runtimeWarnings", "testFailures")}
+                self.report["xcresult_issues"] = {
+                    "runtimeWarnings": result["runtimeWarnings"] if "runtimeWarnings" in result else "not_reported",
+                    "runtimeWarnings_reported": "runtimeWarnings" in result,
+                    "testFailures": result.get("testFailures"),
+                }
                 self.save()
             except BaseException as error:
                 failure = failure or error
@@ -497,7 +463,7 @@ class Qualification:
         validate_driver(self.mode, driver.summary, result, tree, expected, self.owned, self.job["GITHUB_SHA"])
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
-        self.report["driver_passed"] = True
+        self.report["driver_capture_verified"] = True
         self.report["selected_cases"] = expected
 
     def products(self, driver):
@@ -607,6 +573,30 @@ class Qualification:
         require(final == self.baseline, "Baseline device inventory changed")
         self.report["cleanup_verified"] = True
 
+    def capture_original_result(self):
+        require(self.report["cleanup_verified"] and not self.xcode.active and not self.xcode.unknown_spawn
+                and not self.commands.active and not self.commands.unknown_spawn,
+                "Original result capture requires complete owned cleanup")
+        result = self.root / self.report["driver_directory"] / "Tests.xcresult"
+        require(result.is_relative_to(self.root / "build") and result.resolve(strict=True) == result,
+                "Invalid original result path")
+        # Reuse the bounded product traversal (256 MiB, 10,000 entries), after
+        # every owned writer/device is gone. The original bundle is never edited.
+        manifest = tree_manifest(result, self.check)
+        require(all(entry["kind"] in ("file", "directory") for entry in manifest.values()),
+                "Original result contains unsupported links")
+        require(manifest.get("./Info.plist", {}).get("kind") == "file"
+                and manifest.get("./Data", {}).get("kind") == "directory", "Incomplete original result bundle")
+        encoded = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        self.check()
+        name = "xcresult-original-manifest.json"
+        (self.out / name).write_bytes(encoded)
+        self.check()
+        self.report["original_xcresult"] = {
+            "path": str(result.relative_to(self.root)), "manifest": name,
+            "manifest_sha256": hashlib.sha256(encoded).hexdigest(), "entries": len(manifest),
+        }
+
     def execute(self):
         try:
             self.prepare(); self.run_driver()
@@ -616,11 +606,16 @@ class Qualification:
         finally:
             try: self.cleanup()
             except BaseException as error: self.report["errors"].append("Cleanup: " + repr(error))
-            self.report["status"] = ("passed" if not self.report["errors"] and self.report.get("driver_passed")
-                                     and self.report.get("products_verified") and self.report["cleanup_verified"]
-                                     and (self.mode != "batch" or self.report.get("batch_snapshot", {}).get("verified")) else "failed")
+            capture_ready = (not self.report["errors"] and self.report.get("driver_capture_verified")
+                             and self.report.get("products_verified") and self.report["cleanup_verified"]
+                             and (self.mode != "batch" or self.report.get("batch_snapshot", {}).get("verified")))
+            if capture_ready:
+                try: self.capture_original_result()
+                except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))
+            self.report["status"] = ("captured_pending_review" if capture_ready and not self.report["errors"]
+                                     and self.report.get("original_xcresult") else "failed")
             self.save()
-        return 0 if self.report["status"] == "passed" else 1
+        return 0 if self.report["status"] == "captured_pending_review" else 1
 
 
 def main():
@@ -633,7 +628,7 @@ def main():
         documents = []
         for name in args.validate_schemas:
             path = Path(name).absolute()
-            documents.append(schema_document(bounded_read(path.parent, path.name, MIB, lambda: None)))
+            documents.append(bounded_read(path.parent, path.name, MIB, lambda: None))
         validate_schemas(*documents)
         return 0
     run = Qualification(HERE.parent, args.mode, os.environ)
