@@ -573,20 +573,69 @@ real cancellation but caught an ineffective navigation-bar dismissal; the
 existing-device full run above verifies the corrected dismissal. Failed runs
 are not relabeled as successful runs.
 
-## StoreKit limitation
+## StoreKit unit-test startup — 1 November 2026
 
-The local configuration alone has not produced reliable cold-device CLI
-behavior on this toolchain. A synthetic `.xcode` transaction is not
-by itself proof that a subsequent application API uses the same store.
-No fake entitlement or production bypass has been added.
-The handwritten StoreKit entry in the test plan has not been established as a
-supported activation mechanism; no test-plan UI switch is asserted here.
+A fresh minimal app-hosted control on Xcode 27.1 (27A9275), iOS 27.0
+(24A434), with the same product and configuration, observed its verified Xcode
+non-consumable entitlement on the first poll (25 ms). Adding only an early
+StoreKit updates observer and completing entitlement/catalog reads before
+creating SKTestSession reproduced the failure: the synthetic purchase was in
+Xcode, but the entitlement stream stayed empty for five seconds. A subsequent
+finish call reported a sandbox/no-account error. Thus the runtime can deliver
+local entitlements; early application API access can select a different store
+before the test session exists.
+
+Debug hosted unit tests now defer AppModel construction only when Xcode injects
+the exact `TripfolioTests.xctest` bundle. The test bundle initializes local
+StoreKit through its `NSPrincipalClass` before any test starts, including model
+tests that create purchase managers. This uses Apple's documented
+[pretesting global setup](https://developer.apple.com/documentation/xctest/xctestobservationcenter).
+The app retains its shared model lifecycle for ordinary launches, UI tests and
+Release; StoreKitTest is imported only by tests. Existing five-second verified
+entitlement preflights and scenario reset checks remain in force.
+
+This fixes the early entitlement initialization demonstrated by the control;
+it does not make the full local StoreKit suite pass. A selected application test
+confirmed bootstrap completion before the first test, then successful reset,
+synthetic purchase, verified entitlement, transaction finish, clear and empty
+entitlement readback. Catalog loading also completed. The subsequent
+`Product.purchase` call did not return within the unchanged 60-second test
+allowance. An earlier full-suite attempt had reached that first purchase case
+after 61 passing tests and showed an Apple Account sign-in prompt.
+
+An independent minimal UIKit host reproduced the purchase problem with no TripDocket
+code, no early StoreKit calls and only one SKTestSession. After resetting the
+session, both `disableDialogs` and `askToBuyEnabled` read back as true. The real
+catalog returned the configured product and price, but `Product.purchase`
+presented Apple Account sign-in instead of returning `.pending`. That control
+was stopped without interacting with the prompt; it is not a passing test or
+a completed XCTest result. This is evidence of a remaining local Xcode
+27.1/iOS 27 purchase-routing limitation, independently of the app's startup
+and multi-session test fixture. No credentials or AppStore.sync were used.
+Full purchase acceptance still requires the current hosted CI result; neither
+successful entitlement preflight nor the non-purchase checks substitute for it.
+
+The bootstrap change passed all 93 selected local non-Platform unit tests
+(AppLaunch, AppModel, BatchImport, Localization, NotificationSystem,
+PrivacySupport, PurchaseFeedback and ReminderLifecycle), with no failures or
+skips. The existing maximum-type import and restore Files open/cancel UI cases
+then passed 2/2 on the same fresh simulator. Their successful ordinary UI-test
+app launch confirms that the exact unit-host guard does not suppress UI-test
+startup. Source hashes remained unchanged across both runs; these results do
+not include the Platform purchase scenarios or physical-device behavior.
+
+The local Xcode 27.1 test-plan decoder/encoder silently removes the handwritten
+`defaultOptions.storeKitConfiguration` key while preserving supported options.
+That unsupported entry is removed. The scheme retains its Run-action StoreKit
+configuration; unit tests explicitly initialize their bundled configuration.
+A synthetic `.xcode` transaction alone still does not prove that subsequent
+application APIs use the same store, and no entitlement bypass is added.
 
 Apple has discussed a related CLI configuration issue and an earlier-version
 fix in [Developer Forums](https://developer.apple.com/forums/thread/826971).
-That report is context, not proof of the cause on Xcode 27. The historical
-cold-device CLI probes did not establish their local test environment. Subsequent
-accepted hosted CI passed all seven StoreKit cases. No physical-device or
+That report is context, not an explanation of the remaining local purchase behavior. The historical
+cold-device CLI probes did not establish their local test environment. Later
+accepted historical hosted CI passed all seven StoreKit cases. No physical-device or
 live-store acceptance follows from that result.
 
 ## Distribution and physical-device limits

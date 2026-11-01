@@ -76,6 +76,16 @@ become unavailable immediately after publication. Editing forms stay disabled
 while their save is in progress.
 
 App shell initializes AppModel and supplies it using `.environment(model)`.
+In Debug hosted unit tests, the exact injected `TripfolioTests.xctest` bundle
+selects an inert app shell before constructing AppModel. The test bundle's
+`NSPrincipalClass` initializes its local SKTestSession before any test creates a
+model or purchase manager. This prevents early StoreKit reads from binding the
+test host to the sandbox for entitlement preflight. It does not establish that
+every StoreKit API uses the local store: Xcode 27.1/iOS 27 still presents account
+sign-in for Product.purchase in an independent minimal host. Purchase assertions
+remain required in the supported hosted CI environment. Ordinary launches, UI
+tests, and Release use the normal app shell; StoreKitTest remains a dependency
+of the test bundle only.
 UI entry `RootView()` reads `@Environment(AppModel.self)`.
 Use async Task actions and display `errorMessage` alerts. Authored interface,
 error, privacy and permission text is localized in English and Russian. Use the

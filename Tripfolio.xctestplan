@@ -13,9 +13,6 @@
     "defaultTestExecutionTimeAllowance": 30,
     "maximumTestExecutionTimeAllowance": 60,
     "testTimeoutsEnabled": true,
-    "storeKitConfiguration": {
-      "identifier": "App/Tripfolio.storekit"
-    },
     "targetForVariableExpansion": {
       "containerPath": "container:Tripfolio.xcodeproj",
       "identifier": "B8962A135336070583A5FA4D",
