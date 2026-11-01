@@ -42,18 +42,22 @@ captures the selected suite once. This Xcode rejects an explicit schema version
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
 hash as proof that tests passed. An unknown document or toolchain fails before
-native work. Ordinary CI performs the same read-only preflight. Its core and
-guidance jobs also pin Xcode 26.2 (17C52), including the Release preview build,
-and explicitly require a unique available runtime matching that Xcode's
-Simulator SDK, with a compatible iPhone and host architecture. A supplied
-device UUID must satisfy the same checks; there is no fallback to another
-runtime. Captured inventories and the selection record accompany test evidence.
-Core and guidance test artifacts contain their result bundle plus
+native work. Ordinary CI performs the same read-only preflight using an
+explicit Xcode 26.2 environment. Core/purchase tests and the Release preview
+pin Xcode 16.4 (16F6) and retain their previously validated runtime selection;
+this compatibility lane does not claim that the runtime matches its SDK.
+Its result bundle records the actual device/runtime, and the original Release
+provenance records the producer.
+
+The phone guidance job pins Xcode 26.2 (17C52) and requires a unique available
+runtime matching that Xcode's Simulator SDK, with a compatible iPhone and host
+architecture. A supplied device UUID must satisfy the same checks; there is no
+fallback to another runtime. Its test artifact contains the result bundle plus
 `ci-toolchain/simulator-selection.*/`; consumers must select the `.xcresult`
 bundle explicitly instead of assuming every archive entry belongs to it.
 The recovery compatibility job retains its separately pinned profile.
 
-This makes the build/test environment reproducible; it does not establish that
+These records identify the build/test environments; they do not establish that
 the previous compiler/runtime pairing caused a blank Files sheet or was
 unsupported. Changing the core toolchain changes the Release producer and
 requires fresh full CI, exact-source artifact checks and release qualification.
