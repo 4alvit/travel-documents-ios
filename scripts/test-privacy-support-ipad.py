@@ -23,12 +23,15 @@ CASES = (
     ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 900),
 )
 BUNDLE_ID = "com.4alvit.tripfolio"
+RUNNER_BUNDLE_ID = BUNDLE_ID + ".uitests.xctrunner"
 WORK_SECONDS = {"en-US": 35 * 60, "ru-RU": 35 * 60}
 DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
-# Existing command waits + each owned7s stop;30s for local manifests/copy/validation.
-CASE_PREP_SECONDS = (60 + 7) + (60 + 7) + (30 + 7) + (30 + 7)
-CASE_POST_SECONDS = (60 + 7) + (30 + 7) + (30 + 7) + 30
+# Two installs, two fresh container lookups, and two content-size commands.
+# Every command includes its 7s stop reserve; post-validation also reserves
+# 30s for local manifests/copy/validation in addition to both fresh lookups.
+CASE_PREP_SECONDS = 4 * (60 + 7) + 2 * (30 + 7)
+CASE_POST_SECONDS = 2 * (60 + 7) + 2 * (30 + 7) + 30
 
 
 def selected_case(locale):
@@ -497,6 +500,10 @@ class Driver:
                          "test_bundle": resolve(target["TestBundlePath"], runner), "xctestrun": runfiles[0]}
         app_info = plistlib.loads((self.products["aut"] / "Info.plist").read_bytes())
         require(app_info.get("CFBundleIdentifier") == BUNDLE_ID, "Wrong AUT bundle identifier")
+        runner_info = plistlib.loads((runner / "Info.plist").read_bytes())
+        require(runner_info.get("CFBundleIdentifier") == RUNNER_BUNDLE_ID, "Wrong runner bundle identifier")
+        self.report["product_bundle_identifiers"] = {
+            "aut": app_info["CFBundleIdentifier"], "runner": runner_info["CFBundleIdentifier"]}
         self.report["product_paths"] = {key: str(path) for key, path in self.products.items()}
 
     def product_snapshot(self, label):
@@ -514,23 +521,26 @@ class Driver:
         self.discover_products()
         self.built = self.product_snapshot("products-after-build")
 
-    def installed(self, label, required=False):
+    def installed(self, label, required=False, product="aut"):
         # Fresh lookup every time: test-without-building may replace the container.
-        code, output = self.command(["xcrun", "simctl", "get_app_container", self.owned, BUNDLE_ID, "app"], label + "-lookup", timeout=60, check=False)
+        require(product in ("aut", "runner"), "Unsupported installed product")
+        bundle_id = BUNDLE_ID if product == "aut" else RUNNER_BUNDLE_ID
+        name = "AUT" if product == "aut" else "runner"
+        code, output = self.command(["xcrun", "simctl", "get_app_container", self.owned, bundle_id, "app"], label + "-lookup", timeout=60, check=False)
         if code:
             record = {"available": False, "lookup_exit_code": code}
             self.write(label + ".json", record)
-            require(not required, "Installed AUT unavailable: " + label)
+            require(not required, "Installed " + name + " unavailable: " + label)
             return record
         path = Path(output.strip())
-        require(path.is_absolute() and path.name == self.products["aut"].name and path.is_dir() and not path.is_symlink(), "Invalid fresh AUT container path")
+        require(path.is_absolute() and path.name == self.products[product].name and path.is_dir() and not path.is_symlink(), "Invalid fresh " + name + " container path")
         info = plistlib.loads((path / "Info.plist").read_bytes())
-        require(info.get("CFBundleIdentifier") == BUNDLE_ID, "Fresh container has wrong AUT bundle identifier")
+        require(info.get("CFBundleIdentifier") == bundle_id, "Fresh container has wrong " + name + " bundle identifier")
         manifest = tree_manifest(path, self.checkpoint)
-        record = {"available": True, "path": str(path), "manifest": manifest,
-                  "matches_built_bytes": payload(manifest) == payload(self.built["aut"])}
+        record = {"available": True, "bundle_id": bundle_id, "path": str(path), "manifest": manifest,
+                  "matches_built_bytes": payload(manifest) == payload(self.built[product])}
         self.write(label + ".json", record)
-        require(record["matches_built_bytes"], "Installed AUT bytes differ from built AUT: " + label)
+        require(record["matches_built_bytes"], "Installed " + name + " bytes differ from built " + name + ": " + label)
         return record
 
     def copy_for_reader(self, original, label):
@@ -586,7 +596,9 @@ class Driver:
         entry["status"] = "started"
         self.product_snapshot(label + "/products-before")
         self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]], label + "-install", timeout=60)
+        self.command(["xcrun", "simctl", "install", self.owned, self.products["runner"]], label + "-runner-install", timeout=60)
         entry["installed_before"] = self.installed(label + "/installed-before", required=True)["available"]
+        entry["runner_installed_before"] = self.installed(label + "/runner-installed-before", required=True, product="runner")["available"]
         self.command(["xcrun", "simctl", "ui", self.owned, "content_size", size], label + "-set-size")
         actual = self.command(["xcrun", "simctl", "ui", self.owned, "content_size"], label + "-read-size")[1].strip()
         entry["system_content_size_actual"] = actual
@@ -610,6 +622,7 @@ class Driver:
             for stage, operation in (
                     ("products-after", lambda: self.product_snapshot(label + "/products-after")),
                     ("installed-after", lambda: entry.update(installed_after=self.installed(label + "/installed-after", required=True)["available"])),
+                    ("runner-installed-after", lambda: entry.update(runner_installed_after=self.installed(label + "/runner-installed-after", required=True, product="runner")["available"])),
                     ("save", self.save)):
                 try:
                     operation()
