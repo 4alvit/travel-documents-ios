@@ -131,8 +131,8 @@ jobs:
       matrix:
         include:
           - locale: en-US
-            step_minutes: 34
-            job_minutes: 40
+            step_minutes: 40
+            job_minutes: 46
           - locale: ru-RU
             step_minutes: 40
             job_minutes: 46

@@ -158,8 +158,8 @@ remaining time. A late parse or selection cannot admit another query or device
 creation. If the deadline expires after creation, the existing cleanup still
 owns that exact device.
 
-Overall work deadlines remain fixed at driver start: 1,740 seconds for English
-and 2,100 for Russian, including discovery. Both reserve 180 seconds for cleanup.
+Overall work deadlines remain fixed at driver start: 2,100 seconds for each
+locale, including discovery. Both reserve 180 seconds for cleanup.
 The phase is also clipped to that overall work deadline. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
@@ -168,27 +168,25 @@ checks between operations, not preemption of a blocked OS syscall. Releasing the
 discovery phase before boot/build never renews the overall clock; longer discovery
 still consumes time available for the complete case admission below.
 
-The first EN iPad XCTest command has a 600-second wait allowance instead of
-450, to allow more time for initial test-runner startup. A recorded run finished
-bootstrapping about 374 seconds after that command began and reached about
-60 seconds of testcase progress before the old wait expired. This supports a
-finite scheduling-policy proposal, not a guarantee that 600 seconds succeeds
-or an explanation of the startup delay. No warmup, retry or runtime selection
-change is added. A later fresh Russian run took 239 seconds from process spawn
-to XCTest start and was interrupted by its 570-second host wait while still
-making UI progress at 331 seconds. No completed test result or usable screenshot
-bundle survived that interruption. Russian therefore has a 900-second host wait:
-the observed 239-second startup, the unchanged 480-second XCTest ceiling and
-up to 181 seconds of result-finishing headroom. This is a finite allowance, not
-a guarantee about future startup time or a passing result. Both exact test
-methods, UI assertions, content-size settings and XCTest default 180/max 480
-execution allowances remain unchanged.
+Both iPad XCTest commands have a 900-second host wait. A fresh Russian run took
+239 seconds from process spawn to XCTest start and was interrupted by its old
+570-second wait while making UI progress at 331 seconds. A later English run
+passed discovery in 10.2 seconds but took 299.814 seconds from test-process spawn
+to XCTest start. Its old 600-second wait interrupted active UI work at 300.30
+seconds. Neither interrupted run completed its result bundle or retained usable
+screenshot payloads. These are startup-budget failures, not passing UI evidence.
+
+The shared 900-second wait accommodates the observed roughly 300-second startup,
+the unchanged 480-second XCTest ceiling and up to 120 seconds of result-finishing
+headroom. This is a finite allowance, not a guarantee about future startup time
+or a passing result. Exact test methods, UI assertions, content-size settings,
+XCTest default 180/max 480 execution allowances and no-retry behavior are unchanged.
 
 Each test must fit inside its locale's absolute work deadline, including its
 seven-second process-stop reserve and mandatory post-test validation. Admission
 is checked before preparation and again immediately before spawn. A terminal
 test-process poll at or after its wait deadline fails, even with exit code 0.
-The Russian workflow step/job limits are 40/46 minutes; English uses 34/40.
+Both locales use 40-minute workflow steps and 46-minute jobs.
 The step limits include each locale's work and 180-second cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
@@ -358,11 +356,11 @@ This corrects an observed allocation defect: English took 590 seconds including
 bootstrap; Russian was then admitted with only 357 seconds of work even though
 its requested command allowance was 570 seconds. Its timeout was subsequently
 masked by an installed-AUT lookup that could not fit. Fresh drivers now use
-EN 1,740/RU 2,100-second work budgets and the same 180-second cleanup reserve.
-Command waits are EN 600/RU 900; XCTest's 480-second maximum is unchanged. Before
+2,100-second work budgets and the same 180-second cleanup reserve.
+Both command waits are 900 seconds; XCTest's 480-second maximum is unchanged. Before
 case preparation, the driver requires the full command budgets and each 7-second
-stop reserve, plus 30 seconds for local manifests/copy/validation: 986 seconds
-for EN or 1,286 for RU. Immediately before test spawn it again requires the full
+stop reserve, plus 30 seconds for local manifests/copy/validation: 1,286 seconds
+for either locale. Immediately before test spawn it again requires the full
 test wait, its 7-second stop reserve and 171 seconds for post-test validation
 (installed lookup 60, result summary 30, result tests 30, three 7-second stops
 and 30 seconds of local evidence work). These are admissions within each locale's absolute work
@@ -375,8 +373,8 @@ Fresh installed-AUT lookups remain 60 seconds and still verify the exact owned
 UUID, bundle path/identifier and complete built-versus-installed bytes. All other
 command caps, UI assertions, result checks and no-retry behavior are unchanged.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-three with 35-minute limits, English iPad with 40 and Russian iPad with 46,
-at most 191 aggregate job-minutes. The workflow permits
+three with 35-minute limits and two iPad jobs with 46-minute limits,
+at most 197 aggregate job-minutes. The workflow permits
 up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
 locale, subject to account runner capacity. There are six jobs including the
 Ubuntu gate. The bounded observer retains its original 120-minute admission
