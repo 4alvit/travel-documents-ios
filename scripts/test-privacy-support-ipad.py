@@ -23,7 +23,8 @@ CASES = (
     ("ru-RU", "testRussianMaximumTypeFreeGuidanceAndCancelledLinks", "accessibility-extra-extra-extra-large", 900),
 )
 BUNDLE_ID = "com.4alvit.tripfolio"
-WORK_SECONDS = {"en-US": 24 * 60, "ru-RU": 30 * 60}
+WORK_SECONDS = {"en-US": 29 * 60, "ru-RU": 35 * 60}
+DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
 # Existing command waits + each owned7s stop;30s for local manifests/copy/validation.
 CASE_PREP_SECONDS = (60 + 7) + (60 + 7) + (30 + 7) + (30 + 7)
@@ -162,6 +163,7 @@ class Driver:
         self.work_deadline = self.start + WORK_SECONDS[locale]
         self.final_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = False
+        self.discovery_deadline = None
         self.active = {}
         self.confirmed_absent_groups = set()
         self.owned = None
@@ -192,9 +194,16 @@ class Driver:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
+    def phase_limit(self):
+        if self.cleaning:
+            return self.final_deadline
+        return min(self.work_deadline, self.discovery_deadline) if self.discovery_deadline is not None else self.work_deadline
+
     def checkpoint(self):
-        limit = self.final_deadline if self.cleaning else self.work_deadline
-        require(time.monotonic() < limit, "Cleanup deadline expired" if self.cleaning else "Work deadline expired; cleanup reserve preserved")
+        message = "Cleanup deadline expired" if self.cleaning else (
+            "Discovery deadline expired" if self.discovery_deadline is not None else
+            "Work deadline expired; cleanup reserve preserved")
+        require(time.monotonic() < self.phase_limit(), message)
 
     def signal(self, signum, _frame):
         if self.acquiring or self.registering_process:
@@ -212,7 +221,7 @@ class Driver:
         # Only handles registered immediately after our start_new_session spawn.
         # An exited leader is not proof that its descendants have stopped writing.
         require(process.pid > 0 and self.active.get(process.pid) is process, "Refusing to stop an unowned process group")
-        limit = self.final_deadline if self.cleaning else self.work_deadline
+        limit = self.phase_limit()
         deadline = min(limit, time.monotonic() + 7)
         record = {"owned_process_group": process.pid, "started_at": self.now(), "signals": [], "group_absent": False,
                   "deadline_monotonic": deadline, "observations": {}}
@@ -295,7 +304,7 @@ class Driver:
                     raise
 
     def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0):
-        limit = self.final_deadline if self.cleaning else self.work_deadline
+        limit = self.phase_limit()
         deadline = min(limit - 7, time.monotonic() + timeout)
         prefix = f"commands/{len(self.report['commands']):03d}-{label}"
         stdout, stderr = self.out / (prefix + ".stdout"), self.out / (prefix + ".stderr")
@@ -333,8 +342,8 @@ class Driver:
                                 print(chunk.decode("utf-8", "replace"), end="", flush=True)
                     require(time.monotonic() < deadline, label + " exceeded its finite timeout")
                     time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-                if required_after:
-                    # A terminal poll at the deadline is not a timely test result.
+                if required_after or self.discovery_deadline is not None:
+                    # A terminal poll at the deadline is not a timely result.
                     require(time.monotonic() < deadline, label + " exceeded its finite timeout")
                 if stream:
                     for channel in (reader, error_reader):
@@ -369,7 +378,17 @@ class Driver:
         return item["returncode"], stdout.read_text(errors="replace")
 
     def json_command(self, argv, label, timeout=30):
-        return json.loads(self.command(argv, label, timeout=timeout)[1])
+        output = self.command(argv, label, timeout=timeout)[1]
+        if self.discovery_deadline is not None:
+            require(time.monotonic() < self.report["commands"][-1]["wait_deadline_monotonic"],
+                    "Discovery inventory parsing reached its wait deadline")
+            self.checkpoint()
+        value = json.loads(output)
+        if self.discovery_deadline is not None:
+            require(time.monotonic() < self.report["commands"][-1]["wait_deadline_monotonic"],
+                    "Discovery inventory parsing reached its wait deadline")
+            self.checkpoint()
+        return value
 
     def source_snapshot(self, label):
         def git(*args):
@@ -391,20 +410,45 @@ class Driver:
             self.command(argv, label)
         for kind in ("summary", "tests"):
             self.command(["xcrun", "xcresulttool", "help", "get", "test-results", kind], "xcresulttool-help-" + kind)
-        # Finite initial inventory scheduling allowance; all later waits keep their own caps.
-        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"], "runtimes", timeout=120)
-        # A final poll may reap exactly at the effective deadline. Do not admit
-        # that inventory (or a late parse) into later commands or device selection.
-        require(time.monotonic() < self.report["commands"][-1]["wait_deadline_monotonic"],
-                "Initial runtime inventory wait deadline reached")
+        started = time.monotonic()
+        self.discovery_deadline = min(self.work_deadline, started + DISCOVERY_SECONDS)
+        discovery = {"status": "running", "started_at": self.now(), "start_monotonic": started,
+                     "deadline_monotonic": self.discovery_deadline, "budget_seconds": DISCOVERY_SECONDS}
+        self.report["discovery"] = discovery
+        try:
+            self.discover_owned_ipad()
+            discovery["status"] = "passed"
+        except BaseException as error:
+            discovery.update(status="failed", error=repr(error))
+            raise
+        finally:
+            discovery["finished_at"] = self.now()
+            discovery["elapsed_seconds"] = time.monotonic() - started
+            self.discovery_deadline = None
+        self.save()
+        print("Owned iPad: " + json.dumps(self.report["destination"], sort_keys=True), flush=True)
+        self.command(["xcrun", "simctl", "boot", self.owned], "boot", timeout=45)
+        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=180)
+
+    def discover_owned_ipad(self):
+        """All discovery, acquisition and identity checks share one phase limit."""
+        runtimes = self.json_command(["xcrun", "simctl", "list", "runtimes", "--json"],
+                                     "runtimes", timeout=DISCOVERY_SECONDS)
+        self.checkpoint()
         dtypes = self.json_command(["xcrun", "simctl", "list", "devicetypes", "--json"], "device-types")
+        self.checkpoint()
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
+        self.checkpoint()
         pair = choose_pair(runtimes, dtypes, architecture)
+        self.checkpoint()
         inventory = self.json_command(["xcrun", "simctl", "list", "devices", "--json"], "devices-before")
+        self.checkpoint()
         self.baseline = {device["udid"].upper() for _, device in devices(inventory)}
         self.intent = {**pair, "name": "TripDocket-Privacy-" + str(uuid.uuid4())}
         require(all(device.get("name") != self.intent["name"] for _, device in devices(inventory)), "Device name collision")
+        self.checkpoint()
         self.write("ownership.json", {"intent": self.intent, "baseline_uuids": sorted(self.baseline), "owned_uuid": None})
+        self.checkpoint()
         self.acquiring = True
         try:
             result = self.command(["xcrun", "simctl", "create", self.intent["name"], pair["device_type"], pair["runtime"]], "create-owned-ipad")
@@ -418,10 +462,9 @@ class Driver:
             self.acquiring = False
         self.deliver_deferred_signal()  # Device acquisition also recorded the owned UUID.
         verify = self.json_command(["xcrun", "simctl", "list", "devices", "--json"], "devices-created")
+        self.checkpoint()
         require(recover_owned(verify, self.intent, self.baseline) == self.owned, "Created device identity could not be verified")
-        print("Owned iPad: " + json.dumps(self.report["destination"], sort_keys=True), flush=True)
-        self.command(["xcrun", "simctl", "boot", self.owned], "boot", timeout=45)
-        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=180)
+        self.checkpoint()
 
     def common_xcode(self):
         return ["-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "60",

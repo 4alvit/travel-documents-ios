@@ -131,11 +131,11 @@ jobs:
       matrix:
         include:
           - locale: en-US
-            step_minutes: 29
-            job_minutes: 35
-          - locale: ru-RU
             step_minutes: 34
             job_minutes: 40
+          - locale: ru-RU
+            step_minutes: 40
+            job_minutes: 46
     runs-on: macos-15
     timeout-minutes: ${{ matrix.job_minutes }}
     steps:
