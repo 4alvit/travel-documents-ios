@@ -142,24 +142,31 @@ and other probe errors remain failures. The existing post-KILL confirmation and
 capability acceptance rules are unchanged. This secondary cleanup correction
 cannot erase the primary scan failure or prove cleanup for an older run.
 
-The separate iPad guidance driver gives only its initial runtime query a
-120-second wait timeout, increased from 60 after a zero-output initial query
-timed out before any device or test was reached. This is a finite scheduling
-policy, not a claim about the native service or a guarantee of success. It
-rejects completion or JSON parsing at or after the effective wait deadline
-before issuing the next command or selecting a device. There is no retry.
-Its other defaults remain 30 seconds. Each fresh English driver has 1,440 seconds
-of work; Russian has 1,800 seconds. Both reserve 180 seconds for cleanup.
-Each command leaves up to 7 seconds
-inside its phase budget for existing TERM/KILL handling. Stop receipts summarize
+The iPad guidance driver uses one fixed 300-second discovery phase after its
+source/toolchain preflight. An earlier initial runtime query produced no output
+within 120 seconds, before any device or test existed. The larger phase is a
+bounded scheduling policy; the service's underlying delay and eventual success
+are not established. There is no warmup, retry or alternate runtime fallback.
+
+The shared phase covers runtime and device-type inventories, architecture and
+pair selection, baseline devices, owned-device creation and identity validation.
+Queries, JSON parsing, selection and ownership writes consume the same deadline;
+none renews it. Each command leaves seven seconds inside the phase for existing
+process-stop handling. The initial runtime request therefore waits at most 293
+seconds; later command caps stay unchanged and are clipped to the shared
+remaining time. A late parse or selection cannot admit another query or device
+creation. If the deadline expires after creation, the existing cleanup still
+owns that exact device.
+
+Overall work deadlines remain fixed at driver start: 1,740 seconds for English
+and 2,100 for Russian, including discovery. Both reserve 180 seconds for cleanup.
+The phase is also clipped to that overall work deadline. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
 visible alongside secondary stop or receipt-write errors. These are cooperative
-deadline checks between operations; they do not preempt a blocked OS syscall.
-The effective initial wait is min(120, remaining work minus seven seconds);
-the stop reserve is additional to that wait but stays inside the work budget.
-Each extra second spent discovering runtimes reduces time available for that
-locale's build and test; its configured caps and cleanup deadline do not grow.
+checks between operations, not preemption of a blocked OS syscall. Releasing the
+discovery phase before boot/build never renews the overall clock; longer discovery
+still consumes time available for the complete case admission below.
 
 The first EN iPad XCTest command has a 600-second wait allowance instead of
 450, to allow more time for initial test-runner startup. A recorded run finished
@@ -181,7 +188,7 @@ Each test must fit inside its locale's absolute work deadline, including its
 seven-second process-stop reserve and mandatory post-test validation. Admission
 is checked before preparation and again immediately before spawn. A terminal
 test-process poll at or after its wait deadline fails, even with exit code 0.
-The Russian workflow step/job limits are 34/40 minutes; English stays 29/35.
+The Russian workflow step/job limits are 40/46 minutes; English uses 34/40.
 The step limits include each locale's work and 180-second cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
@@ -351,7 +358,7 @@ This corrects an observed allocation defect: English took 590 seconds including
 bootstrap; Russian was then admitted with only 357 seconds of work even though
 its requested command allowance was 570 seconds. Its timeout was subsequently
 masked by an installed-AUT lookup that could not fit. Fresh drivers now use
-EN 1,440/RU 1,800-second work budgets and the same 180-second cleanup reserve.
+EN 1,740/RU 2,100-second work budgets and the same 180-second cleanup reserve.
 Command waits are EN 600/RU 900; XCTest's 480-second maximum is unchanged. Before
 case preparation, the driver requires the full command budgets and each 7-second
 stop reserve, plus 30 seconds for local manifests/copy/validation: 986 seconds
@@ -368,8 +375,8 @@ Fresh installed-AUT lookups remain 60 seconds and still verify the exact owned
 UUID, bundle path/identifier and complete built-versus-installed bytes. All other
 command caps, UI assertions, result checks and no-retry behavior are unchanged.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-four with 35-minute limits and Russian iPad with 40, at most 180 aggregate
-job-minutes. The workflow permits
+three with 35-minute limits, English iPad with 40 and Russian iPad with 46,
+at most 191 aggregate job-minutes. The workflow permits
 up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
 locale, subject to account runner capacity. There are six jobs including the
 Ubuntu gate. The bounded observer retains its original 120-minute admission
