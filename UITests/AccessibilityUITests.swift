@@ -164,20 +164,27 @@ final class AccessibilityUITests: XCTestCase {
         var previousFrame: CGRect?
         var usedFallback = false
         var lastDragWasFallback = false
+        // One call stays in the same navigation context. Retain only the
+        // chosen element; observe its geometry again after every gesture.
+        var selectedContainer: XCUIElement?
         for attempt in 0...10 {
             if target.exists && target.isHittable && visiblePortion(
                 of: target, in: app, navigationTitle: navigationTitle,
                 preferWholeFrame: preferWholeFrame
             ) { return }
             guard attempt < 10 else { break }
-            guard let container = activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
+            if selectedContainer == nil {
+                selectedContainer = activeScrollContainer(in: app, navigationTitle: navigationTitle)
+            }
+            guard let container = selectedContainer else {
                 attach(app, name: "No active scroll container — \(description)")
                 throw LayoutFailure(message: "No hittable app scrollView/collectionView for \(description)")
             }
             // Keep both endpoints inside the visible List/Form. Full swipes
             // overshot partly visible rows and oscillated across the viewport.
-            let viewport = visibleViewport(in: app, navigationTitle: navigationTitle)
-                .intersection(container.frame).insetBy(dx: 12, dy: 12)
+            let visibleBounds = visibleViewport(in: app, navigationTitle: navigationTitle)
+            let containerFrame = container.frame
+            let viewport = visibleBounds.intersection(containerFrame).insetBy(dx: 12, dy: 12)
             guard !viewport.isNull, viewport.width > 24, viewport.height > 80 else {
                 attach(app, name: "No safe drag viewport — \(description)")
                 throw LayoutFailure(message: "No safe scroll viewport for \(description)")
@@ -211,8 +218,8 @@ final class AccessibilityUITests: XCTestCase {
             var translation = correction > 0 ? distance : -distance
             let origin = container.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
             var start = origin.withOffset(CGVector(
-                dx: viewport.midX - container.frame.minX,
-                dy: viewport.midY - container.frame.minY
+                dx: viewport.midX - containerFrame.minX,
+                dy: viewport.midY - containerFrame.minY
             ))
             if let fallbackAnchor, unchanged, !usedFallback {
                 // The iPad wrapper can miss a pan begun on the interactive trip
@@ -284,17 +291,19 @@ final class AccessibilityUITests: XCTestCase {
         if let navigationTitle {
             let navigation = app.navigationBars[navigationTitle]
             if navigation.exists, navigation.isHittable {
-                let top = max(viewport.minY, navigation.frame.maxY)
-                viewport = CGRect(x: max(viewport.minX, navigation.frame.minX), y: top,
-                                  width: min(viewport.width, navigation.frame.width),
+                let frame = navigation.frame
+                let top = max(viewport.minY, frame.maxY)
+                viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
+                                  width: min(viewport.width, frame.width),
                                   height: max(0, viewport.maxY - top))
             }
         }
         // Floating bottom tabs can overlap a List row that still reports exists.
         // Top-mounted iPad tabs should not remove the bottom half of the viewport.
         for bar in app.tabBars.allElementsBoundByIndex where bar.exists && bar.isHittable {
-            if bar.frame.minY > viewport.midY {
-                viewport.size.height = max(0, min(viewport.maxY, bar.frame.minY) - viewport.minY)
+            let frame = bar.frame
+            if frame.minY > viewport.midY {
+                viewport.size.height = max(0, min(viewport.maxY, frame.minY) - viewport.minY)
             }
         }
         return viewport
@@ -425,9 +434,10 @@ final class AccessibilityUITests: XCTestCase {
             let correction = viewport.minY + overlap - (frame.minY + coveredThrough)
             let distance = min(160, min(viewport.height * 0.4, max(24, abs(correction))))
             let translation = correction > 0 ? distance : -distance
+            let bodyFrame = body.frame
             let start = body.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-                .withOffset(CGVector(dx: viewport.midX - body.frame.minX,
-                                     dy: viewport.midY - body.frame.minY))
+                .withOffset(CGVector(dx: viewport.midX - bodyFrame.minX,
+                                     dy: viewport.midY - bodyFrame.minY))
             let end = start.withOffset(CGVector(dx: 0, dy: translation))
             print("WARNING_DRAG attempt=\(attempt) dy=\(translation)")
             start.press(forDuration: 0.05, thenDragTo: end,
