@@ -3,6 +3,7 @@ import SwiftUI
 import Darwin
 import Observation
 import UIKit
+import UniformTypeIdentifiers
 #endif
 
 @main
@@ -186,7 +187,7 @@ private struct NativeBatchSeedView: View {
             }
             .sheet(item: $presentedReopen) { session in
                 if let request = reopen, request.pickerSession.id == session.id {
-                    BatchDocumentPicker(session: session) { result in
+                    NativeSeedCopyPicker(session: session) { result in
                         request.receive(result)
                     }
                 }
@@ -223,7 +224,7 @@ private struct NativeBatchSeedView: View {
               presentedExport == nil, reopen == nil else { return }
         let request = NativeSeedReopenSession()
         // Keep semantic ownership after UIKit clears the sheet binding.
-        // This diagnostic reuses the actual opening picker in the same AUT.
+        // This diagnostic requests native temporary copies in the same AUT.
         reopen = request
         presentedReopen = request.pickerSession
     }
@@ -308,6 +309,34 @@ private struct NativeSeedExportPicker: UIViewControllerRepresentable {
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             request.cancel()
         }
+    }
+}
+
+@MainActor
+private struct NativeSeedCopyPicker: UIViewControllerRepresentable {
+    let session: BatchDocumentPicker.Session
+    let completion: (Result<BatchPickerSelection, Error>?) -> Void
+
+    func makeCoordinator() -> BatchDocumentPicker.Coordinator {
+        BatchDocumentPicker.Coordinator(
+            session: session,
+            capture: { .copied(try BatchDocumentSelection.capture($0)) },
+            completion: completion
+        )
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf, .jpeg, .png], asCopy: true)
+        picker.allowsMultipleSelection = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ controller: UIDocumentPickerViewController,
+                                         coordinator: BatchDocumentPicker.Coordinator) {
+        BatchDocumentPicker.dismantleUIViewController(controller, coordinator: coordinator)
     }
 }
 
