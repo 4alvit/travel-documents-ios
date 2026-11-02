@@ -30,6 +30,8 @@ jobs:
         timeout-minutes: 2
         run: |
           python3 -B scripts/test-qualify-release.py
+          python3 -B scripts/test-batch-driver.py
+          python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-simulator-driver-inventory.py
       - name: Capture selected suite for review
         timeout-minutes: 44

@@ -43,13 +43,18 @@ final class PurchaseManager {
         purchaseDiagnostics.observe(.load, stage: .entitlements)
         defer { purchaseDiagnostics.observe(.load, stage: .returned) }
         #endif
-        await refreshEntitlements()
-        guard !isBusy else { return }
+        // A load arriving during another operation may refresh rights, but
+        // must not acquire the catalog later and displace a user's purchase.
+        guard !isBusy else {
+            await refreshEntitlements()
+            return
+        }
         isBusy = true
+        defer { isBusy = false }
+        await refreshEntitlements()
         #if DEBUG && targetEnvironment(simulator)
         purchaseDiagnostics.beginCatalog()
         #endif
-        defer { isBusy = false }
         do {
             #if DEBUG && targetEnvironment(simulator)
             purchaseDiagnostics.observe(.load, stage: .catalog)
