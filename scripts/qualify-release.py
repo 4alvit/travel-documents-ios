@@ -566,8 +566,26 @@ class Qualification:
         if self.owned:
             self.verify_owned(current)
             if current[self.owned]["state"] != "Shutdown":
-                self.command("shutdown", ["xcrun", "simctl", "shutdown", self.owned], 60)
-            self.command("delete", ["xcrun", "simctl", "delete", self.owned], 60)
+                try:
+                    self.command("shutdown", ["xcrun", "simctl", "shutdown", self.owned], 60)
+                except Exception as error:
+                    # A timed-out RPC does not establish the device's final state.
+                    # Retain the failure even if a fresh observation permits cleanup.
+                    self.report["errors"].append("Cleanup shutdown: " + repr(error))
+                    require(not self.xcode.active and not self.xcode.unknown_spawn
+                            and not self.commands.active and not self.commands.unknown_spawn,
+                            "Unresolved process ownership after shutdown; device cleanup withheld")
+                    self.check()
+                    current = self.inventory("after-shutdown-error")
+                    self.report["shutdown_failure_inventory"] = current
+                    if self.owned in current:
+                        self.verify_owned(current)
+                        require(current[self.owned]["state"] == "Shutdown",
+                                "Owned device is not confirmed shut down; deletion withheld")
+                    else:
+                        require(current == self.baseline, "Baseline changed after shutdown failure")
+            if self.owned in current:
+                self.command("delete", ["xcrun", "simctl", "delete", self.owned], 60)
         final = self.inventory("after-cleanup")
         self.report["final_inventory"] = final
         require(final == self.baseline, "Baseline device inventory changed")

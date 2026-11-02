@@ -136,7 +136,7 @@ class Driver:
         return snapshot
 
     def prepare(self):
-        inventory = json.loads(self.command("xcrun", "simctl", "list", "devices", "available", "--json"))
+        inventory = json.loads(self.command("xcrun", "simctl", "list", "devices", "--json"))
         matches = [(runtime, device) for runtime, devices in inventory["devices"].items() for device in devices
                    if device.get("udid", "").upper() == self.args.device]
         if len(matches) != 1:

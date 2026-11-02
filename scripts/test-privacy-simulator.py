@@ -210,7 +210,7 @@ class Driver:
         self.summary["source_before"] = self.provenance
         self.record("source_before", provenance=self.provenance)
         self.write_summary()
-        output = self.command("list_devices", ["xcrun", "simctl", "list", "devices", "available", "--json"])
+        output = self.command("list_devices", ["xcrun", "simctl", "list", "devices", "--json"])
         try:
             devices = json.loads(output)["devices"]
             matches = [(runtime, device) for runtime, items in devices.items() for device in items
