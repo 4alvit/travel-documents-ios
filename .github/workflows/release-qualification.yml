@@ -1,4 +1,5 @@
 name: Release qualification
+run-name: "Diagnostic native Save to Files: ${{ inputs.mode }}"
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +33,7 @@ jobs:
           python3 -B scripts/test-qualify-release.py
           python3 -B scripts/test-batch-driver.py
           python3 -B scripts/test-batch-import-diagnostics.py
+          python3 -B scripts/test-native-batch-seed.py
           python3 -B scripts/test-simulator-driver-inventory.py
           python3 -B scripts/test-biometric-handshake.py
       - name: Capture selected suite for review
