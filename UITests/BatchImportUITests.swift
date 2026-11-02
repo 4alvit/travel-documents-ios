@@ -1355,7 +1355,14 @@ final class BatchImportUITests: XCTestCase {
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
         try await wait("Native root Files browser or supported Recents screen is missing", app: app) {
-            browserReady() || recentsReady()
+            // Classify one observation instead of rereading a changing browser
+            // as Recents after an earlier navigation query found no match.
+            guard navigations.count == 1 else { return false }
+            let pickerCount = pickers.count
+            if pickerCount == 1 { return pickers.element.exists }
+            guard pickerCount == 0 else { return false }
+            return recents.count == 1 && recents.element.exists
+                && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
         if !browserReady() {
             try check(recentsReady(), app: app, "Native root Files Recents route changed")

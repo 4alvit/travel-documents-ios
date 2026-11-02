@@ -171,4 +171,181 @@ class NativeRootUI(unittest.TestCase):
         self.assertIn('isNativeFilesRoot(app) && matchingFiles.count == 1', select)
         self.assertIn('isNativeFilesRoot(app) && openActions.count == 1', select)
 
+READINESS_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Instant: Comparable {
+    let milliseconds: Double
+    static func < (a: Self, b: Self) -> Bool { a.milliseconds < b.milliseconds }
+    func advanced(by duration: Duration) -> Self {
+        let value = duration.components
+        return Self(milliseconds: milliseconds + Double(value.seconds) * 1000
+                    + Double(value.attoseconds) / 1e15)
+    }
+}
+@MainActor enum ContinuousClock {
+    static var now = Instant(milliseconds: 0)
+}
+@MainActor enum Task {
+    static func sleep(for duration: Duration) async throws {
+        ContinuousClock.now = ContinuousClock.now.advanced(by: duration)
+    }
+}
+struct Sample: Decodable { let value: Int; let milliseconds: Double }
+@MainActor final class Script {
+    let samples: [String: [Sample]]
+    var offsets: [String: Int] = [:]
+    var calls: [String] = []
+    var captures = 0
+    init(_ samples: [String: [Sample]]) { self.samples = samples }
+    func read(_ key: String) -> Int {
+        calls.append(key)
+        guard let values = samples[key], !values.isEmpty else { fatalError("Unexpected query: " + key) }
+        let offset = offsets[key, default: 0]
+        offsets[key] = offset + 1
+        let value = values[min(offset, values.count - 1)]
+        ContinuousClock.now = Instant(milliseconds: ContinuousClock.now.milliseconds + value.milliseconds)
+        return value.value
+    }
+}
+@MainActor final class Node {
+    let script: Script
+    let name: String
+    init(_ script: Script, _ name: String) { self.script = script; self.name = name }
+    var count: Int { script.read(name + ".count") }
+    var element: Node { self }
+    var exists: Bool { script.read(name + ".exists") == 1 }
+    var isEnabled: Bool { script.read(name + ".enabled") == 1 }
+    var isHittable: Bool { script.read(name + ".hittable") == 1 }
+}
+typealias XCUIApplication = Node
+@MainActor final class Harness {
+    let script: Script
+    init(_ script: Script) { self.script = script }
+    func isRecoveryFolder(_ title: String, navigation: Node) -> Bool {
+        precondition(title == "Recents")
+        return script.read("folder.recents") == 1
+    }
+    func capture(_ app: Node, _ message: String, springboard: Node?, batchDiagnostic: Bool) {
+        precondition(batchDiagnostic); script.captures += 1
+    }
+    // ACTUAL_WAIT
+    func run(oldBranching: Bool) async throws {
+        let app = Node(script, "app")
+        let navigations = Node(script, "navigation")
+        let pickers = Node(script, "picker")
+        let recents = Node(script, "recents")
+        let tabs = Node(script, "tabs")
+        let browse = Node(script, "browse")
+        // ACTUAL_PREDICATES
+        if oldBranching {
+            try await wait("Native root Files browser or supported Recents screen is missing", app: app) {
+                browserReady() || recentsReady()
+            }
+        } else {
+            // ACTUAL_INITIAL_WAIT
+        }
+    }
+}
+@main struct Probe {
+    @MainActor static func main() async throws {
+        let args = Array(CommandLine.arguments.dropFirst())
+        let samples = try JSONDecoder().decode([String: [Sample]].self, from: Data(args[0].utf8))
+        let script = Script(samples)
+        var accepted = false
+        do { try await Harness(script).run(oldBranching: args[1] == "old"); accepted = true }
+        catch {}
+        let result: [String: Any] = ["accepted": accepted, "milliseconds": ContinuousClock.now.milliseconds,
+                                    "calls": script.calls, "captures": script.captures]
+        print(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+'''
+
+
+class InitialNativeRootReadiness(unittest.TestCase):
+    """Run the actual initial wait and predicate with deterministic RPC latency."""
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(); cls.addClassCleanup(cls.scratch.cleanup)
+        temp = Path(cls.scratch.name); cls.binary = temp / "readiness"
+        route = helper("    private func openNativeFilesRoot", "    private func openLocalFilesFolder")
+        start = route.index('        try await wait("Native root Files browser or supported Recents screen is missing"')
+        initial_wait = route[start:route.index("        if !browserReady()", start)]
+        predicates = route[route.index("        let browseReady ="):start]
+        actual_wait = helper("    private func wait(", "    private func check(")
+        source = (READINESS_FIXTURE.replace("    // ACTUAL_WAIT", actual_wait)
+                  .replace("        // ACTUAL_PREDICATES", predicates)
+                  .replace("            // ACTUAL_INITIAL_WAIT", initial_wait))
+        swift = temp / "Readiness.swift"; swift.write_text(source)
+        subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(cls.binary)],
+                       check=True, capture_output=True, text=True, timeout=60)
+
+    def run_predicate(self, samples, old=False):
+        encoded = {key: [{"value": value, "milliseconds": cost} for value, cost in values]
+                   for key, values in samples.items()}
+        result = subprocess.run([str(self.binary), json.dumps(encoded), "old" if old else "current"],
+                                check=True, capture_output=True, text=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_late_browser_transition_is_not_misclassified_as_recents(self):
+        # C26's last nav0 then slow nav1/picker1 observations, with measured
+        # query costs. This is a deterministic counterexample, not a UI replay.
+        samples = {"navigation.count": [(0, 3996.98), (1, 12967.8)],
+                   "picker.count": [(1, 2846.04)], "picker.exists": [(1, 10)]}
+        old = self.run_predicate(samples, old=True)
+        current = self.run_predicate(samples)
+        self.assertFalse(old["accepted"])
+        self.assertEqual(old["captures"], 1)
+        self.assertTrue(current["accepted"])
+        self.assertEqual(current["captures"], 0)
+        self.assertEqual(old["calls"], ["navigation.count", "navigation.count", "picker.count"])
+        self.assertEqual(current["calls"], old["calls"] + ["picker.exists"])
+        # An in-flight synchronous query may finish after the existing 15s
+        # deadline. The unchanged wait already accepts a true result then.
+        self.assertGreater(current["milliseconds"], 15000)
+
+    def test_browser_branch_reads_each_count_once_and_requires_existence(self):
+        samples = {"navigation.count": [(1, 1)], "picker.count": [(1, 1)], "picker.exists": [(1, 1)]}
+        result = self.run_predicate(samples)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["calls"], list(samples))
+        samples["picker.exists"] = [(0, 16000)]
+        result = self.run_predicate(samples)
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["captures"], 1)
+        self.assertEqual(result["calls"], list(samples))
+
+    def test_missing_or_duplicate_navigation_cannot_read_or_accept_picker(self):
+        for count in (0, 2):
+            with self.subTest(count=count):
+                result = self.run_predicate({"navigation.count": [(count, 16000)]})
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["captures"], 1)
+                self.assertEqual(result["calls"], ["navigation.count"])
+
+    def test_duplicate_picker_cannot_fall_through_to_recents(self):
+        result = self.run_predicate({"navigation.count": [(1, 1)], "picker.count": [(2, 16000)]})
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["calls"], ["navigation.count", "picker.count"])
+
+    def test_recents_retains_all_identity_existence_and_action_requirements(self):
+        samples = {"navigation.count": [(1, 1)], "picker.count": [(0, 1)],
+                   "recents.count": [(1, 1)], "recents.exists": [(1, 1)],
+                   "folder.recents": [(1, 1)], "tabs.count": [(1, 1)],
+                   "browse.count": [(1, 1)], "browse.enabled": [(1, 1)], "browse.hittable": [(1, 1)]}
+        result = self.run_predicate(samples)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["calls"], list(samples))
+        for key in list(samples)[2:]:
+            rejected_values = (0, 2) if key.endswith(".count") else (0,)
+            for value in rejected_values:
+                with self.subTest(key=key, value=value):
+                    altered = dict(samples); altered[key] = [(value, 16000)]
+                    result = self.run_predicate(altered)
+                    self.assertFalse(result["accepted"])
+                    self.assertEqual(result["captures"], 1)
+                    self.assertEqual(result["calls"], list(samples)[:list(samples).index(key) + 1])
+
+
 if __name__ == "__main__": unittest.main(verbosity=2)
