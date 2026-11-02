@@ -188,6 +188,14 @@ The MainActor model owns one bounded, nonpersisted `BatchImportDraft` and its
 preparation task. File-picker, cancel and commit entry points carry the draft ID,
 so a late callback from an old picker cannot change a newer draft. Each item
 stores a confirmation snapshot; changing metadata removes its confirmation.
+The batch picker requests temporary copies through UIKit. A selection lease
+accepts only regular files inside the app's temporary directory and retains
+them until preparation finishes, including any outstanding read after cancel.
+Rejected and stale selections also attempt cleanup. Cleanup checks the captured
+file and parent-directory identities before unlinking a file; replaced or
+unrecognized paths are left untouched. Provider originals are not cleanup
+targets. The model still enforces
+the file-count, complete-content, size and entitlement checks before review.
 Pro gates new batch preparation and save, never old-data access or recovery.
 The batch editor, single-file import and existing-document editor are mutually exclusive. Privacy
 view teardown keeps the model draft; explicit cancel, completed save or source

@@ -611,7 +611,10 @@ extension AppModel {
         batchImportDraft = BatchImportDraft(tripID: tripID, sourceLibrary: library)
     }
 
-    func prepareBatchImport(urls: [URL], draftID: UUID) {
+    func prepareBatchImport(urls: [URL], draftID: UUID,
+                            onConsumptionFinished: @escaping @MainActor () -> Void = {}) {
+        var preparationOwnsCompletion = false
+        defer { if !preparationOwnsCompletion { onConsumptionFinished() } }
         guard let draft = batchImportDraft, draft.id == draftID,
               draft.phase == .choosing, !isBusy else { return }
         guard canUseBatchImport else { draft.errorMessage = BatchImportError.proRequired.localizedDescription; return }
@@ -630,7 +633,11 @@ extension AppModel {
         draft.phase = .preparing
         batchBusyOwner = draftID
         isBusy = true
+        preparationOwnsCompletion = true
         batchPreparationTask = Task { [weak self] in
+            // Cancellation closes the draft immediately, but an outstanding
+            // read may still use a picker-owned copy until this await returns.
+            defer { onConsumptionFinished() }
             await self?.prepareBatchFiles(urls, draftID: draftID)
         }
     }
