@@ -76,6 +76,10 @@ Xcode 16.4 (16F6), retaining the previously validated runtime selection. This
 compatibility lane does not claim an SDK-matched runtime; the test result
 records its actual device/runtime. The separate recovery compatibility job
 keeps its own pinned toolchain/profile.
+Phone guidance CI explicitly prepares the selected Simulator's local Files provider
+before its UI cases and retains the bounded preparation receipt. The unchanged
+picker assertions still require real navigation and cancellation; these checks
+cover a preinitialized provider and do not establish cold first-use behavior.
 
 Check the [current CI](https://github.com/4alvit/travel-documents-ios/actions/workflows/ci.yml)
 for the exact revision you intend to build. Historical successful runs and their
