@@ -162,11 +162,16 @@ private struct NativeBatchSeedView: View {
                 ForEach(files, id: \.lastPathComponent) { file in
                     Button(file.lastPathComponent) { beginExport(file) }
                         .accessibilityIdentifier("nativeSeed." + file.lastPathComponent)
-                        .disabled(unavailable || pending || exports[file.lastPathComponent] != nil)
+                        .disabled(reopenEnabled || unavailable || pending || exports[file.lastPathComponent] != nil)
                     if exports[file.lastPathComponent]?.phase == .verified {
                         Text("Export verified")
                             .accessibilityIdentifier("nativeSeed.saved." + file.lastPathComponent)
                     }
+                }
+                if reopenEnabled {
+                    Button("Export both synthetic PDFs") { beginExportBoth() }
+                        .accessibilityIdentifier("nativeSeed.exportBoth")
+                        .disabled(unavailable || pending || !exports.isEmpty || files.count != 2)
                 }
                 if reopenEnabled && bothExportsVerified {
                     Button("Reopen exported files") { beginReopen() }
@@ -209,13 +214,29 @@ private struct NativeBatchSeedView: View {
     }
 
     private func beginExport(_ file: URL) {
-        guard !unavailable, !pending, exports[file.lastPathComponent] == nil,
+        guard !reopenEnabled, !unavailable, !pending, exports[file.lastPathComponent] == nil,
               let encoded = NativeBatchSeedFiles.fixtures.first(where: { $0.0 == file.lastPathComponent })?.1,
               let bytes = Data(base64Encoded: encoded) else { failed = true; return }
         let request = NativeSeedExportSession(source: file, expected: bytes)
         // Semantic ownership survives UIKit's automatic sheet dismissal.
         // There is no destination deletion; this Simulator is qualifier-owned.
         exports[file.lastPathComponent] = request
+        presentedExport = request
+    }
+
+    private func beginExportBoth() {
+        let names = Set(NativeBatchSeedFiles.fixtures.map(\.0))
+        guard reopenEnabled, !unavailable, !pending, exports.isEmpty,
+              presentedExport == nil, files.count == 2,
+              Set(files.map(\.lastPathComponent)) == names else { return }
+        var expected: [String: Data] = [:]
+        for (name, encoded) in NativeBatchSeedFiles.fixtures {
+            guard let bytes = Data(base64Encoded: encoded) else { failed = true; return }
+            expected[name] = bytes
+        }
+        let request = NativeSeedExportSession(sources: files, expected: expected)
+        // Both markers share one terminal result, after both destination reads.
+        for name in names { exports[name] = request }
         presentedExport = request
     }
 
@@ -235,14 +256,19 @@ private struct NativeBatchSeedView: View {
 private final class NativeSeedExportSession: Identifiable {
     enum Phase { case waiting, verifying, verified, failed }
     let id = UUID()
-    let source: URL
-    private let expected: Data
+    let sources: [URL]
+    private let expected: [String: Data]
     private let read: @Sendable (URL, Int) async throws -> Data
     private(set) var phase: Phase = .waiting
 
-    init(source: URL, expected: Data,
+    convenience init(source: URL, expected: Data,
+                     read: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
+        self.init(sources: [source], expected: [source.lastPathComponent: expected], read: read)
+    }
+
+    init(sources: [URL], expected: [String: Data],
          read: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
-        self.source = source
+        self.sources = sources
         self.expected = expected
         self.read = read
     }
@@ -251,11 +277,20 @@ private final class NativeSeedExportSession: Identifiable {
         // The first terminal delegate event owns the result. Duplicate or
         // late events cannot start another read or overwrite a failed export.
         guard phase == .waiting else { return }
-        guard !expected.isEmpty, expected.count <= 1024, urls.count == 1,
-              let destination = urls.first, destination.isFileURL,
-              destination.host == nil || destination.host == "" || destination.host == "localhost",
-              destination.lastPathComponent == source.lastPathComponent,
-              destination.standardizedFileURL != source.standardizedFileURL else {
+        let sourceURLs = Set(sources.map(\.standardizedFileURL))
+        let names = Set(expected.keys)
+        guard (1...2).contains(sources.count), expected.count == sources.count,
+              expected.values.allSatisfy({ !$0.isEmpty && $0.count <= 1024 }),
+              sourceURLs.count == sources.count,
+              Set(sources.map(\.lastPathComponent)) == names,
+              urls.count == sources.count,
+              Set(urls.map(\.lastPathComponent)) == names,
+              Set(urls.map(\.standardizedFileURL)).count == urls.count,
+              urls.allSatisfy({ destination in
+                  destination.isFileURL
+                      && (destination.host == nil || destination.host == "" || destination.host == "localhost")
+                      && !sourceURLs.contains(destination.standardizedFileURL)
+              }) else {
             phase = .failed
             return
         }
@@ -263,14 +298,19 @@ private final class NativeSeedExportSession: Identifiable {
         let read = self.read
         let expected = self.expected
         Task { [weak self] in
-            let verified: Bool
+            var verified = true
             do {
                 // Preserve the exact returned URL, including its access grant.
                 // The production reader coordinates off-main, balances its
                 // security scope, and bounds the full byte stream to1024 bytes.
-                let bytes = try await read(destination, 1024)
-                try Task.checkCancellation()
-                verified = bytes == expected
+                for destination in urls {
+                    let bytes = try await read(destination, 1024)
+                    try Task.checkCancellation()
+                    guard bytes == expected[destination.lastPathComponent] else {
+                        verified = false
+                        break
+                    }
+                }
             } catch {
                 verified = false
             }
@@ -292,7 +332,7 @@ private struct NativeSeedExportPicker: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(request: request) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forExporting: [request.source], asCopy: true)
+        let picker = UIDocumentPickerViewController(forExporting: request.sources, asCopy: true)
         picker.delegate = context.coordinator
         return picker
     }

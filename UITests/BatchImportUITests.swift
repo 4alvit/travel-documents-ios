@@ -420,9 +420,13 @@ final class BatchImportUITests: XCTestCase {
             app.launchArguments += ["--ui-testing-native-reopen", "--ui-testing-batch-diagnostics"]
         }
         app.launch()
-        for filename in filenames {
-            let seed = app.buttons["nativeSeed." + filename]
-            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isHittable }
+        // The control changes only export grouping. Direct preparation and
+        // ordinary seeding retain their one-file export presentations.
+        let exportGroups = reopenControl ? [filenames] : filenames.map { [$0] }
+        for exportNames in exportGroups {
+            let sourceIdentifier = reopenControl ? "nativeSeed.exportBoth" : "nativeSeed." + exportNames[0]
+            let seed = app.buttons[sourceIdentifier]
+            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isEnabled && seed.isHittable }
             seed.tap()
             let picker: XCUIElement
             let navigation: XCUIElement
@@ -437,21 +441,21 @@ final class BatchImportUITests: XCTestCase {
             try await wait("Native seed destination Save is unavailable", app: app) {
                 save.exists && save.isEnabled && save.isHittable
             }
-            capture(app, "Native seed exact destination before Save — " + filename)
+            capture(app, "Native seed exact destination before Save — " + exportNames.joined(separator: ", "))
             if nativeRoot {
                 try check(isNativeFilesRoot(app)
                           && navigation.buttons.matching(NSPredicate(format: "label == %@", "Save")).count == 1,
                           app: app, "Native seed left its verified local root or unique Save action")
             }
             save.tap()
-            let verified = app.staticTexts["nativeSeed.saved." + filename]
+            let verified = exportNames.map { app.staticTexts["nativeSeed.saved." + $0] }
             let failed = app.staticTexts["nativeSeed.failure"]
             try await wait("Native seed export did not finish destination verification", app: app) {
-                failed.exists || (!navigation.exists && verified.exists)
+                failed.exists || (!navigation.exists && verified.allSatisfy { $0.exists })
             }
-            try check(!failed.exists && verified.exists, app: app,
+            try check(!failed.exists && verified.allSatisfy { $0.exists }, app: app,
                       "Native seed export destination was not verified")
-            capture(app, "Native seed returned after Save — " + filename)
+            capture(app, "Native seed returned after Save — " + exportNames.joined(separator: ", "))
         }
         if reopenControl {
             // Diagnostic only: keep this AUT process alive after both exports.

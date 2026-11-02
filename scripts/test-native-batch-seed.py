@@ -139,13 +139,17 @@ class SeedGuards(unittest.TestCase):
         view=APP[APP.index("private struct NativeBatchSeedView"):]
         self.assertIn("NativeSeedExportPicker(request: request)",view)
         self.assertIn("Button(file.lastPathComponent) { beginExport(file) }",view)
-        self.assertIn("UIDocumentPickerViewController(forExporting: [request.source], asCopy: true)",view)
+        self.assertIn("UIDocumentPickerViewController(forExporting: request.sources, asCopy: true)",view)
+        self.assertIn('if reopenEnabled {\n                    Button("Export both synthetic PDFs")',view)
+        self.assertIn('.accessibilityIdentifier("nativeSeed.exportBoth")',view)
+        self.assertIn('for name in names { exports[name] = request }',view)
+        self.assertIn('guard !reopenEnabled, !unavailable, !pending',view)
         self.assertIn('Text("Export verified")',view)
         self.assertIn('"nativeSeed.failure"',view)
         self.assertIn('"nativeSeed.saved." + file.lastPathComponent',view)
         self.assertIn("= AppModel.readExternal",view)
         self.assertIn("try await read(destination, 1024)",view)
-        self.assertIn("verified = bytes == expected",view)
+        self.assertIn("guard bytes == expected[destination.lastPathComponent]",view)
         self.assertNotIn("removeItem",view)
         self.assertNotIn("unlink",view)
         self.assertNotIn("isPro",view);self.assertNotIn("importDocument",view)
@@ -157,7 +161,9 @@ class SeedGuards(unittest.TestCase):
         self.assertIn("defer { app.terminate() }",seed)
         ordinary, control = seed.rsplit('        if reopenControl {', 1)
         control, completion = control.split('        // Host compares both exact destination bytes;', 1)
-        self.assertEqual((ordinary + completion).count(".tap()"),2)  # source, verified Save per file
+        self.assertEqual((ordinary + completion).count(".tap()"),2)  # source, verified Save per export group
+        self.assertIn('let exportGroups = reopenControl ? [filenames] : filenames.map { [$0] }',ordinary)
+        self.assertIn('reopenControl ? "nativeSeed.exportBoth" : "nativeSeed." + exportNames[0]',ordinary)
         self.assertEqual(control.count(".tap()"),1)
         self.assertIn('reopen.tap()',control)
         self.assertIn('let reopenControl = reopenValue == "1"',ordinary)
@@ -169,8 +175,8 @@ class SeedGuards(unittest.TestCase):
         self.assertNotIn('app.launch()',control)
         self.assertNotIn('app.terminate()',control)
         self.assertNotIn("saveToFiles",seed)
-        self.assertIn('let verified = app.staticTexts["nativeSeed.saved." + filename]',seed)
-        self.assertIn('try check(!failed.exists && verified.exists',seed)
+        self.assertIn('let verified = exportNames.map { app.staticTexts["nativeSeed.saved." + $0] }',seed)
+        self.assertIn('try check(!failed.exists && verified.allSatisfy { $0.exists }',seed)
         self.assertIn('let nativeRoot = try nativeRootMode("seed")',seed)
         self.assertIn("picker = try await openNativeFilesRoot(app)",seed)
         self.assertIn("isNativeFilesRoot(app)",seed)
@@ -276,17 +282,26 @@ enum AppModel {
 actor Reader {
     var calls = 0
     var url: URL?
+    var urls: [URL] = []
     var maximum = 0
+    var pending: CheckedContinuation<Data, any Error>?
     let mode: String
     init(_ mode: String) { self.mode = mode }
     func read(_ url: URL, _ maximum: Int) async throws -> Data {
-        calls += 1; self.url = url; self.maximum = maximum
+        calls += 1; self.url = url; self.maximum = maximum; urls.append(url)
+        if calls == 2 && mode.hasPrefix("array-held") {
+            return try await withCheckedThrowingContinuation { pending = $0 }
+        }
         await Task.yield()
         if mode == "read-error" { throw ProbeError.rejected }
         if mode == "cancelled-read" { throw CancellationError() }
         if mode == "wrong-bytes" { return Data("incorrect".utf8) }
+        if calls == 2 && mode == "array-wrong-second" { return Data("incorrect".utf8) }
+        if calls == 2 && mode == "array-error-second" { throw ProbeError.rejected }
         return try Data(contentsOf: url)
     }
+    func release(_ data: Data) { let saved = pending; pending = nil; saved?.resume(returning: data) }
+    var isHeld: Bool { pending != nil }
 }
 """
         main = r"""
@@ -296,16 +311,28 @@ actor Reader {
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         let source = root.appendingPathComponent("source/synthetic-ticket.pdf")
         let destination = root.appendingPathComponent("destination/synthetic-ticket.pdf")
+        let secondSource = root.appendingPathComponent("source/synthetic-insurance.pdf")
+        let secondDestination = root.appendingPathComponent("destination/synthetic-insurance.pdf")
         let bytes = Data("known complete source bytes".utf8)
+        let secondBytes = Data("different complete second source bytes".utf8)
         try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try bytes.write(to: source); try bytes.write(to: destination)
+        try secondBytes.write(to: secondSource); try secondBytes.write(to: secondDestination)
         let reader = Reader(mode)
         let expected = mode == "empty-expected" ? Data() : mode == "large-expected" ? Data(repeating: 1,count:1025) : bytes
-        let session = NativeSeedExportSession(source: source, expected: expected, read: { url, limit in
-            try await reader.read(url,limit)
-        })
-        var urls = [destination]
+        let array = mode.hasPrefix("array-")
+        let session: NativeSeedExportSession
+        if array {
+            session = NativeSeedExportSession(sources: [source,secondSource],
+                expected: [source.lastPathComponent: bytes,secondSource.lastPathComponent: secondBytes],
+                read: { try await reader.read($0,$1) })
+        } else {
+            session = NativeSeedExportSession(source: source, expected: expected, read: { url, limit in
+                try await reader.read(url,limit)
+            })
+        }
+        var urls = array ? [destination,secondDestination] : [destination]
         switch mode {
         case "empty": urls = []
         case "multiple": urls = [destination,destination]
@@ -315,19 +342,54 @@ actor Reader {
         case "source": urls = [source]
         case "source-alias": urls = [source.deletingLastPathComponent().appendingPathComponent("../source/synthetic-ticket.pdf")]
         case "cancel-before": session.cancel()
+        case "array-reverse": urls.reverse()
+        case "array-missing", "array-failed-then-valid": urls = [secondDestination]
+        case "array-duplicate": urls = [destination,destination]
+        case "array-extra": urls.append(root.appendingPathComponent("destination/extra.pdf"))
+        case "array-source": urls[1] = secondSource
+        case "array-wrong-name": urls[1] = root.appendingPathComponent("destination/other.pdf")
+        case "array-cancel-before": session.cancel()
         default: break
         }
         session.receive(urls)
         if mode == "duplicate" { session.receive([destination]); session.cancel() }
         if mode == "failure-then-valid" { session.receive([destination]) }
-        while session.phase == .verifying { await Task.yield() }
+        if mode == "array-failed-then-valid" { session.receive([destination,secondDestination]) }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        var heldWithoutSuccess = false
+        if mode.hasPrefix("array-held") {
+            while !(await reader.isHeld) {
+                guard clock.now < deadline else { throw ProbeError.rejected }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            heldWithoutSuccess = session.phase == .verifying
+            guard heldWithoutSuccess else { throw ProbeError.rejected }
+            // An accepted delegate result owns verification; later events
+            // cannot replace it or publish success before the second read.
+            session.receive([]); session.receive([destination,secondDestination]); session.cancel()
+            await reader.release(mode == "array-held-wrong" ? Data("wrong".utf8) : secondBytes)
+        }
+        while session.phase == .verifying {
+            guard clock.now < deadline else { throw ProbeError.rejected }
+            try await Task.sleep(for: .milliseconds(1))
+        }
         let first = session.phase == .verified
-        session.receive([destination]); session.cancel()
-        while session.phase == .verifying { await Task.yield() }
+        session.receive(array ? [destination,secondDestination] : [destination]); session.cancel()
+        while session.phase == .verifying {
+            guard clock.now < deadline else { throw ProbeError.rejected }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let readURLs = await reader.urls
         let result:[String:Any] = ["verified":session.phase == .verified,"stable":first == (session.phase == .verified),
             "calls":await reader.calls,"exact_url":await reader.url == destination,"maximum":await reader.maximum,
+            "exact_urls":readURLs == Array(urls.prefix(readURLs.count)),
+            "read_names":readURLs.map(\.lastPathComponent),"held_without_success":heldWithoutSuccess,
+            "pending_drained": !(await reader.isHeld),
             "source_unchanged":try Data(contentsOf:source) == bytes,
-            "destination_unchanged":try Data(contentsOf:destination) == bytes]
+            "destination_unchanged":try Data(contentsOf:destination) == bytes,
+            "second_source_unchanged":try Data(contentsOf:secondSource) == secondBytes,
+            "second_destination_unchanged":try Data(contentsOf:secondDestination) == secondBytes]
         print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)
     }
 }
@@ -344,6 +406,9 @@ actor Reader {
             self.assertTrue(value["stable"])
             self.assertTrue(value["source_unchanged"])
             self.assertTrue(value["destination_unchanged"])
+            self.assertTrue(value["second_source_unchanged"])
+            self.assertTrue(value["second_destination_unchanged"])
+            self.assertTrue(value["pending_drained"])
             return value
 
     def test_actual_export_state_requires_single_correct_external_destination_before_read(self):
@@ -364,6 +429,31 @@ actor Reader {
     def test_actual_export_state_rejects_duplicate_and_late_events(self):
         value = self.probe("duplicate")
         self.assertTrue(value["verified"]);self.assertEqual(value["calls"],1)
+
+    def test_actual_array_export_matches_names_without_destination_order_assumption(self):
+        for mode,names in [("array-success",["synthetic-ticket.pdf","synthetic-insurance.pdf"]),
+                           ("array-reverse",["synthetic-insurance.pdf","synthetic-ticket.pdf"])]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertTrue(value["verified"]);self.assertEqual(value["calls"],2)
+                self.assertEqual(value["read_names"],names);self.assertTrue(value["exact_urls"])
+                self.assertEqual(value["maximum"],1024)
+
+    def test_actual_array_export_rejects_partial_duplicate_extra_or_source_destinations(self):
+        for mode in ["array-missing","array-duplicate","array-extra","array-source",
+                     "array-wrong-name","array-cancel-before","array-failed-then-valid"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertFalse(value["verified"]);self.assertEqual(value["calls"],0)
+
+    def test_actual_array_export_waits_for_second_read_and_rejects_late_replacement(self):
+        for mode in ["array-held-success","array-held-wrong","array-wrong-second","array-error-second"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertEqual(value["verified"],mode=="array-held-success")
+                self.assertEqual(value["calls"],2);self.assertTrue(value["exact_urls"])
+                if mode.startswith("array-held"):
+                    self.assertTrue(value["held_without_success"])
 
 
 if __name__ == "__main__":
