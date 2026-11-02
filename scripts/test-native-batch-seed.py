@@ -129,6 +129,54 @@ class SeedGuards(unittest.TestCase):
                 with self.assertRaises((RuntimeError,FileNotFoundError)):run.verify_fixtures()
             else:run.verify_fixtures()
 
+    def test_actual_driver_native_folder_mode_proves_absence_without_creating_or_adopting(self):
+        for existing in (None,"directory","symlink"):
+            base=self.root/str(existing);base.mkdir()
+            run=driver.Driver.__new__(driver.Driver)
+            run.args=SimpleNamespace(device=OWNED,native_seed=True,native_folder=True)
+            run.root=base;run.directory=base/"evidence";run.directory.mkdir()
+            run.token=TOKEN;run.folder_name="TripDocket-Batch-QA-"+TOKEN
+            run.fixture_directory=None;run.fixture_identity=None;run.native_folder_destination=None
+            run.summary={};run.save=Mock();run.record=Mock();run.source_snapshot=Mock(return_value={})
+            project=base/"Tripfolio.xcodeproj";project.mkdir();(project/"project.pbxproj").write_bytes(b"fixture")
+            group=base/OWNED/"data/Containers/Shared/AppGroup"/OWNED
+            provider=group/"File Provider Storage";provider.mkdir(parents=True)
+            destination=provider/run.folder_name
+            if existing=="directory":destination.mkdir();(destination/"keep").write_bytes(b"keep")
+            elif existing=="symlink":destination.symlink_to(provider,target_is_directory=True)
+            inventory={"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-2":[
+                {"udid":OWNED,"state":"Booted","isAvailable":True,"name":"owned"}]}}
+            run.command=Mock(side_effect=[json.dumps(inventory).encode(),f"{driver.GROUP}\t{group}\n".encode()])
+            if existing:
+                with self.assertRaisesRegex(RuntimeError,"must not already exist"):run.prepare()
+                self.assertTrue(destination.exists())
+            else:
+                run.prepare()
+                self.assertFalse(destination.exists());self.assertEqual(run.native_folder_destination,destination)
+                self.assertEqual(len(list((run.directory/"fixtures").iterdir())),2)
+                self.assertEqual(run.record.call_args.args[0],"native_folder_absence_verified")
+            self.assertIsNone(run.fixture_directory);self.assertIsNone(run.fixture_identity)
+            run.remove_fixtures()
+            if existing=="directory":self.assertEqual((destination/"keep").read_bytes(),b"keep")
+            elif existing=="symlink":self.assertTrue(destination.is_symlink())
+
+    def test_native_folder_case_is_separate_opt_in_one_creation_without_save(self):
+        case=UI[UI.index("func testNativeCreateOwnedFilesFolder"):
+                UI.index("func testNativeSaveSeedsBothSyntheticOriginals")]
+        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1"',case)
+        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"]',case)
+        self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',case)
+        self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder',case)
+        self.assertIn("executionTimeAllowance = 180",case)
+        for action in ("more.element.tap()","newFolder.element.tap()","create.element.tap()"):
+            self.assertEqual(case.count(action),1)
+        self.assertIn("remainingEditors.count == 0",case)
+        self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)",case)
+        self.assertIn('app.state == .notRunning',case)
+        self.assertNotIn('buttons["Save"]',case)
+        self.assertNotIn('coordinate(',case)
+        self.assertNotIn('press(forDuration',case)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

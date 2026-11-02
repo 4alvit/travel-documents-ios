@@ -26,6 +26,9 @@ PREPARE_SECONDS = 600
 SEED_CASE = "BatchImportUITests/testNativeSaveSeedsBothSyntheticOriginals()"
 SEED_SECONDS = 300
 SEED_CASE_SECONDS = 180
+FOLDER_CASE = "BatchImportUITests/testNativeCreateOwnedFilesFolder()"
+FOLDER_SECONDS = 240
+FOLDER_CASE_SECONDS = 180
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
@@ -263,7 +266,7 @@ def validate_batch_order(raw, recorded):
 
 
 def validate_files_preparation(summary, tree, owned, selection, expected_case=PREPARE_CASE):
-    require(expected_case in (PREPARE_CASE, SEED_CASE), "Unexpected preparation case")
+    require(expected_case in (PREPARE_CASE, SEED_CASE, FOLDER_CASE), "Unexpected preparation case")
     require(isinstance(summary, dict) and isinstance(tree, dict), "Invalid Files preparation result")
     nodes = tree.get("testNodes")
     require(isinstance(nodes, list), "Missing Files preparation cases")
@@ -451,10 +454,11 @@ class Qualification:
                 "Incomplete or oversized Files preparation result")
         return manifest
 
-    def inspect_files_preparation(self, native_seed=False):
-        prefix = "native-seed" if native_seed else "files-prepare"
-        key = "native_seed" if native_seed else "files_preparation"
-        expected_case = SEED_CASE if native_seed else PREPARE_CASE
+    def inspect_files_preparation(self, native_seed=False, native_folder=False):
+        require(not (native_seed and native_folder), "Ambiguous preparation phase")
+        prefix = "native-folder" if native_folder else "native-seed" if native_seed else "files-prepare"
+        key = "native_folder" if native_folder else "native_seed" if native_seed else "files_preparation"
+        expected_case = FOLDER_CASE if native_folder else SEED_CASE if native_seed else PREPARE_CASE
         original = self.out / (prefix + ".xcresult")
         manifest = self.preparation_manifest(original)
         raw = recovery.encoded(manifest)
@@ -559,6 +563,109 @@ class Qualification:
         require(self.owned in devices and all(devices[self.owned][key] == self.intent[key]
                 for key in ("runtime", "name", "type")), "Owned device identity changed")
 
+    def native_folder_leaf(self, driver, *, absent=False):
+        """Check only the exact intended leaf below its pinned provider."""
+        owned = driver.native_folder_destination
+        require(owned is not None and driver.fixture_directory is None
+                and str(uuid.UUID(driver.token)) == driver.token
+                and owned.name == driver.folder_name == "TripDocket-Batch-QA-" + driver.token,
+                "Invalid native folder intent")
+        provider = owned.parent
+        self.container_path(str(provider.parent), "Shared", "AppGroup")
+        require(provider.name == "File Provider Storage", "Invalid native folder provider")
+        with_fd = os.open(provider, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            def provider_matches():
+                current = provider.lstat()
+                opened = os.fstat(with_fd)
+                return stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == driver.provider_identity \
+                    and (opened.st_dev, opened.st_ino) == driver.provider_identity
+            require(provider_matches(), "Native folder provider identity changed")
+            try:
+                entry = os.stat(owned.name, dir_fd=with_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                require(absent, "Native folder was not created")
+                require(provider_matches(), "Native folder provider changed during absence check")
+                return None
+            require(not absent, "Native folder intent already exists")
+            require(stat.S_ISDIR(entry.st_mode), "Native folder is not a regular directory")
+            leaf = os.open(owned.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=with_fd)
+            try:
+                opened = os.fstat(leaf)
+                identity = (entry.st_dev, entry.st_ino)
+                require((opened.st_dev, opened.st_ino) == identity, "Native folder changed while opening")
+                with os.scandir(leaf) as entries:
+                    require(next(entries, None) is None, "Native folder is not empty")
+                current = os.stat(owned.name, dir_fd=with_fd, follow_symlinks=False)
+                require(stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == identity
+                        and provider_matches(), "Native folder identity changed during verification")
+                return identity
+            finally:
+                os.close(leaf)
+        finally:
+            os.close(with_fd)
+
+    def prepare_native_folder(self, driver):
+        require(self.mode == "batch" and "native_folder" not in self.report
+                and self.report.get("files_preparation_verified") is True,
+                "Native folder requires one verified Files preparation")
+        require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
+                "Native folder requires exclusive device ownership")
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Native folder writer unresolved")
+        require(driver.remaining() > FOLDER_SECONDS + SEED_SECONDS + 600 + 8
+                and time.monotonic() + FOLDER_SECONDS + SEED_SECONDS + 600 + 120 < self.work_deadline,
+                "Insufficient native folder, seed and main driver budget")
+        self.native_folder_leaf(driver, absent=True)
+        derived = self.root / self.report["files_preparation"]["derived_data"]
+        expected = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
+                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
+        require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
+                "Invalid shared native folder build")
+        self.report["native_folder"] = {"calls": 1, "case": FOLDER_CASE, "phase_seconds": FOLDER_SECONDS,
+            "case_seconds": FOLDER_CASE_SECONDS, "token": driver.token, "absent_before": True,
+            "destination": str(driver.native_folder_destination), "provider_identity": list(driver.provider_identity),
+            "ingress": "native New Folder", "adopted": False,
+            "driver_deadline": driver.deadline - self.started, "driver_remaining_before": driver.remaining(),
+            "partial_leaf_cleanup": "unadopted leaf retained for exclusive owned Simulator teardown"}
+        self.save()
+        argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
+            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(FOLDER_CASE_SECONDS),
+            "-maximum-test-execution-time-allowance", str(FOLDER_CASE_SECONDS), "-derivedDataPath", derived,
+            "-resultBundlePath", self.out / "native-folder.xcresult",
+            "-only-testing:TripfolioUITests/" + FOLDER_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+        previous = self.commands.ops.env
+        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_UI": "1",
+            "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_TOKEN": driver.token,
+            "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
+            "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        failure = None
+        try:
+            self.command("native-folder-ui", argv, min(FOLDER_SECONDS, driver.remaining()))
+        except BaseException as error:
+            failure = error
+        finally:
+            self.commands.ops.env = previous
+            self.report["native_folder"]["driver_remaining_after"] = max(0, driver.deadline - time.monotonic())
+        try:
+            require(not self.commands.active and not self.commands.unknown_spawn
+                    and not self.xcode.active and not self.xcode.unknown_spawn, "Native folder writer unresolved")
+            self.inspect_files_preparation(native_folder=True)
+            if failure is None:
+                identity = self.native_folder_leaf(driver)
+                driver.fixture_identity = identity
+                driver.fixture_directory = driver.native_folder_destination
+                self.report["native_folder"].update(adopted=True, empty_after=True, leaf_identity=list(identity))
+        except BaseException as error:
+            self.report["native_folder_inspection_error"] = repr(error)
+            if failure is None: failure = error
+        if failure is not None: raise failure
+        self.report["native_folder_verified"] = True
+        driver.record("native_created_empty_owned_folder", path=str(driver.fixture_directory))
+        self.save()
+
     def native_seed_files(self, driver, *, empty=False):
         """Verify the exclusive destination; never create provider file bytes."""
         owned = driver.fixture_directory
@@ -597,8 +704,9 @@ class Qualification:
 
     def prepare_native_seed(self, driver):
         require(self.mode == "batch" and "native_seed" not in self.report
-                and self.report.get("files_preparation_verified") is True,
-                "Native seed requires one verified Files preparation")
+                and self.report.get("files_preparation_verified") is True
+                and self.report.get("native_folder_verified") is True,
+                "Native seed requires verified Files preparation and native folder")
         require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
                 "Native seed requires exclusive device ownership")
         require(not self.commands.active and not self.commands.unknown_spawn
@@ -705,12 +813,15 @@ class Qualification:
         require(time.monotonic() + timeout + 120 < self.work_deadline, "Insufficient full driver/postcheck budget")
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
-        args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None, native_seed=self.mode == "batch")
+        args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None,
+                               native_seed=self.mode == "batch", native_folder=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
             driver.prepare()
-            if self.mode == "batch": self.prepare_native_seed(driver)
+            if self.mode == "batch":
+                self.prepare_native_folder(driver)
+                self.prepare_native_seed(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
             require(time.monotonic() + remaining + 8 < self.work_deadline,
                     "Insufficient full test and owned-stop budget after driver preparation")
@@ -736,7 +847,10 @@ class Qualification:
             if not self.xcode.active and not self.xcode.unknown_spawn:
                 try:
                     if self.mode == "batch":
-                        driver.verify_fixtures(); driver.remove_fixtures()
+                        if driver.fixture_directory is not None:
+                            driver.verify_fixtures(); driver.remove_fixtures()
+                        else:
+                            driver.summary["fixture_cleanup"] = "Unadopted native folder intent; owned Simulator teardown only"
                         driver.summary["source_after"] = driver.source_snapshot()
                     else:
                         driver.restore(); driver.verify_provenance()
@@ -907,13 +1021,14 @@ class Qualification:
                 and not self.commands.active and not self.commands.unknown_spawn,
                 "Original result capture requires complete owned cleanup")
         if self.mode == "batch":
-            for key, prefix in (("files_preparation", "files-prepare"), ("native_seed", "native-seed")):
+            for key, prefix in (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
+                                ("native_seed", "native-seed")):
                 proof = self.report.get(key + "_original", {})
                 require(self.report.get(key + "_verified") is True
                         and proof.get("path") == prefix + ".xcresult"
                         and proof.get("manifest") == prefix + "-original-manifest.json"
                         and proof.get("unchanged_after_reader") is True,
-                        "Missing verified Files preparation or native seed")
+                        "Missing verified Files preparation, native folder or native seed")
                 raw = bounded_read(self.out, proof["manifest"], 16 * MIB, self.check)
                 require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
                         and self.preparation_manifest(self.out / proof["path"]) == json.loads(raw),

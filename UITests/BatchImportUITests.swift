@@ -201,6 +201,101 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
+    func testNativeCreateOwnedFilesFolder() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
+                          "Opt in only for the owned native-folder fixture diagnostic")
+        let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
+        let ownedFolder = "TripDocket-Batch-QA-" + token
+        guard UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder else {
+            throw BatchTestFailure(message: "Native folder creation requires its exact canonical owned token")
+        }
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--demo"]
+        app.launch()
+        try await wait("The native-folder demo did not finish loading", app: app) {
+            app.staticTexts["Coast weekend"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
+        try await presentRecoverySave(app)
+        let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
+        try await wait("Native-folder Files picker did not open", app: app) {
+            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
+        }
+        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let location = app.cells.matching(NSPredicate(
+            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
+        ))
+        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
+        let directory = picker.element.cells.matching(identifier: ownedFolder + ", Folder")
+        try check(directory.count == 0, app: app, "Owned native folder already exists before creation")
+        let more = navigation.element.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "OverflowBarButtonItem", "More"
+        ))
+        try await wait("Native-folder local root has no unique More action", app: app) {
+            self.isRecoveryFolder(localTitle, navigation: navigation.element)
+                && more.count == 1 && more.element.isEnabled && more.element.isHittable
+        }
+        more.element.tap()
+        let newFolder = app.buttons.matching(NSPredicate(format: "label == %@", "New Folder"))
+        try await wait("Native New Folder action is unavailable", app: app) {
+            newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
+        }
+        newFolder.element.tap()
+        let files = picker.element.collectionViews.matching(identifier: "File View")
+        let inlineNames = files.element.textViews.matching(identifier: "DOC.inlineRenameField")
+        try await wait("Native folder-name editor is not unique and reachable", app: app) {
+            files.count == 1 && inlineNames.count == 1
+                && inlineNames.element.isEnabled && inlineNames.element.isHittable
+        }
+        // Files selects the default inline name. Do not collapse that selection
+        // by tapping the editor; verify that typing replaced the complete value.
+        inlineNames.element.typeText(ownedFolder)
+        try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
+                  app: app, "Native folder name differs from the exact owned UUID name")
+        let create = app.keyboards.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "Done", "done"
+        ))
+        try await wait("Native folder creation has no unique Done confirmation", app: app) {
+            inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder
+                && create.count == 1 && create.element.isEnabled && create.element.isHittable
+        }
+        capture(app, "Native folder exact name before the single Done")
+        create.element.tap()
+        // An updated folder-cell identifier must not masquerade as editor
+        // dismissal. Check the live editor identifier independently of its cell.
+        let remainingEditors = app.textViews.matching(identifier: "DOC.inlineRenameField")
+        try await wait("Native folder confirmation did not end editing with the exact destination", app: app) {
+            remainingEditors.count == 0
+                && (self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
+                    || (directory.count == 1 && directory.element.isEnabled && directory.element.isHittable))
+        }
+        if !isRecoveryFolder(ownedFolder, navigation: navigation.element) {
+            try check(directory.count == 1 && directory.element.isEnabled && directory.element.isHittable,
+                      app: app, "Created native folder is not uniquely reachable")
+            directory.element.tap()
+        }
+        try await wait("Native Files did not open the exact created folder", app: app) {
+            remainingEditors.count == 0 && self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
+        }
+        capture(app, "Native folder exact destination before host empty-folder verification")
+        // Never tap Save: the host must independently prove this native-created
+        // leaf empty after the fixture stops, before the separate seed phase.
+        app.terminate()
+        try await wait("Native-folder fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
     func testNativeSaveSeedsBothSyntheticOriginals() async throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
