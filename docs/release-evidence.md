@@ -115,15 +115,25 @@ Both catalog loads had completed; no purchase transaction or batch import was
 accepted. The original PDFs remained intact and all owned processes and the
 Simulator were cleaned up.
 
-The Pro screen now supplies StoreKit's SwiftUI environment `PurchaseAction` to
-the existing purchase manager. [Apple documents](https://developer.apple.com/documentation/storekit/purchaseaction)
-that this action includes the view's UI context for presenting confirmation.
+The next candidate supplied StoreKit's SwiftUI environment `PurchaseAction`
+to the existing purchase manager. Its [Xcode 16.4 Recovery build](https://github.com/4alvit/travel-documents-ios/actions/runs/41415005661/job/125176604610)
+at `f507c1c` failed before XCTest: that SDK's nonisolated async method rejected
+the main-actor-isolated, non-Sendable action. No recovery case executed. All
+owned process groups stopped and the complete Simulator inventory was restored.
+A successful local compile with a newer SDK did not establish this compatibility.
+
+The Pro screen instead retains a weak reference to its own attached UIKit
+controller. Purchases use that controller on iOS 18.2 and later, or its attached
+window scene on iOS 17 through 18.1. These are Apple's
+[explicit-context purchase APIs](https://developer.apple.com/documentation/storekit/product/purchase(confirmin:options:)-6dj6y).
+Missing, inactive or dismissing presentation context fails through the existing
+purchase-error path; there is no global scene lookup or contextless fallback.
 The manager retains its busy guard, verified-entitlement checks, transaction
 finishing and error handling; non-UI hosted calls retain their existing default.
-The captured error does not identify a missing scene as its precise cause, so
-this is a targeted presentation-context correction requiring fresh native
-validation. It adds no automatic purchase retry and does not relax the payment
-or Files assertions.
+No unsafe Sendable conformance or concurrency-check suppression is added.
+The earlier payment-service error did not establish a missing scene as its
+precise cause. This correction still requires fresh native validation; it adds
+no automatic purchase retry and does not relax payment or Files assertions.
 
 An earlier main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work
