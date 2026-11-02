@@ -51,13 +51,21 @@ identity, and no entries of any kind. It retains the two synthetic PDF source
 copies outside the provider; the host does not create a fixture folder or write
 fixture bytes into the provider.
 
+After preparation, the qualifier resolves the actual paths of all three test
+targets and records their compiled-product identities. Native seeding and the
+main suite both use `test-without-building` with that same preparation build.
+Missing products or changed bytes/modes stop qualification; no fallback build
+or product copy is substituted. The qualifier records installed app and data
+container identities at the phase boundaries. Sharing compiled products does
+not itself prove that Xcode skipped installation or that a Files error is fixed.
+
 A second invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
 each PDF from an opt-in Debug Simulator view into the exact local root through
 Save to Files. The host checks that the root is still empty immediately before
 seeding, then requires exactly the two expected regular files and compares all
 bytes against the retained sources. The provider identity must remain unchanged;
 successful UI actions alone are insufficient. This seed phase has a 300-second
-build/test cap and a 180-second case allowance.
+test cap and a 180-second case allowance.
 
 Native seeding, result inspection and the main functional invocation consume
 the same 1,200-second driver clock, started before destination preflight. No

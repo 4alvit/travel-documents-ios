@@ -319,15 +319,21 @@ class Driver:
         self.save()
 
     def run_test(self):
+        derived = getattr(self, "qualified_build", None)
+        if derived is not None:
+            if (not getattr(self.args, "native_root", False) or not derived.is_absolute()
+                    or not derived.is_dir() or derived.resolve(strict=True) != derived
+                    or not derived.is_relative_to(self.root / "build")):
+                raise RuntimeError("Invalid qualified shared build")
         command = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio",
                    "-configuration", "Debug", "-destination", f"platform=iOS Simulator,id={self.args.device}",
                    "-destination-timeout", "30", "-parallel-testing-enabled", "NO",
                    "-maximum-concurrent-test-simulator-destinations", "1", "-collect-test-diagnostics", "never",
                    "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "600",
-                   "-derivedDataPath", str(self.directory / "DerivedData"),
+                   "-derivedDataPath", str(derived if derived is not None else self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"],
                    *("-only-testing:" + test for test in TESTS),
-                   "CODE_SIGNING_ALLOWED=NO", "test"]
+                   "CODE_SIGNING_ALLOWED=NO", "test-without-building" if derived is not None else "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
                      "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}

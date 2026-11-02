@@ -77,6 +77,26 @@ required. The driver never removes the provider root itself. This simplifies
 the fixture setup; it does not establish the cause of earlier Files errors or
 assert that the new control has passed.
 
+The [native-root control](https://github.com/4alvit/travel-documents-ios/actions/runs/41408007587)
+at `7cb01f1` passed Files preparation, native saving of both PDFs and the hosted
+purchase prerequisite. The batch case failed after Open: retained system output
+again reported a FileProvider resolution failure and an empty URL array. Both
+source PDFs remained intact and owned-device cleanup passed. Seed and main used
+different build directories and installed app bundle paths. The next control uses the same prepared
+products for both phases, retaining all three result bundles and all byte,
+identity, deadline and cleanup checks. This tests a remaining lifecycle boundary;
+it does not establish that the boundary caused the failure.
+
+In the same candidate's [CI](https://github.com/4alvit/travel-documents-ios/actions/runs/41408003034),
+Recovery passed all three phases and independent original-byte and cleanup checks.
+Core passed 129 of 130 cases. The no-diagnostics purchase test stopped before its
+first purchase because the open Pro screen still showed a disabled price button
+and a loading indicator. Retained logs did not identify the suspended StoreKit
+operation. Bounded Debug Simulator stdout observations now distinguish load
+invocations and their entitlement/catalog await boundaries. They add no retries,
+UI diagnostic values or Release behavior, and do not relax the 15-second test
+condition. A new successful native run remains required.
+
 The subsequent main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work
 deadline and entered another resource scan, so the expected command timeout was

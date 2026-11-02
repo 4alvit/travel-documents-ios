@@ -94,7 +94,8 @@ review before their operator receipts can authorize a release promotion.
 Batch qualification retains three distinct result bundles: Files preparation,
 native saving of two synthetic PDF fixtures into the verified empty local
 provider root of an exclusively owned Simulator, and the two main purchase/import
-tests. Each phase must pass its own checks;
+tests. Seeding and the main suite reuse the same prepared Debug products, whose
+identities are checked across phase boundaries. Each phase must pass its own checks;
 fixture preparation does not establish successful import or original-byte preservation.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses

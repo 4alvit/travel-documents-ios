@@ -278,5 +278,32 @@ class BatchDriverTests(unittest.TestCase):
         close.assert_called_once()
 
 
+    def test_qualified_root_uses_same_verified_build_without_rebuilding(self):
+        run,_,_=self.fixture();run.args.native_root=True;run.token="12345678-1234-4234-8234-123456789abc"
+        run.native_root_identity=Mock();run.root=self.root.resolve();run.qualified_build=run.root/"build/qualification-prepared"
+        run.qualified_build.mkdir(parents=True)
+        process=Mock();process.wait.return_value=0
+        def spawn(argv,**kwargs):
+            kwargs["stdout"].write(log_bytes());kwargs["stdout"].flush();return process
+        with patch.object(driver.subprocess,"Popen",side_effect=spawn) as call,patch("builtins.print"):
+            run.run_test()
+        call.assert_called_once();argv=call.call_args.args[0]
+        self.assertEqual(argv[-1],"test-without-building")
+        self.assertEqual(argv[argv.index("-derivedDataPath")+1],str(run.qualified_build))
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],["-only-testing:"+x for x in SELECTORS])
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1],"600")
+        process.wait.assert_called_once_with(timeout=100)
+
+    def test_prebuilt_path_cannot_be_used_by_default_or_redirected(self):
+        for bad in ("default","outside","link"):
+            run,_,_=self.fixture();run.args.native_root=bad!="default"
+            p=self.root/"build"/bad;p.mkdir(parents=True)
+            if bad=="outside":p=self.root
+            if bad=="link":
+                link=self.root/"build/alias";link.symlink_to(p);p=link
+            run.qualified_build=p
+            with patch.object(driver.subprocess,"Popen") as call,self.assertRaises(RuntimeError):run.run_test()
+            call.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
