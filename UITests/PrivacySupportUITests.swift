@@ -54,7 +54,8 @@ final class PrivacySupportUITests: XCTestCase {
         attach(app, name: "Free Settings before guidance")
         let entry = app.buttons["privacySupport.entry"].firstMatch
         try await scrollTo(entry, in: app, navigationTitle: copy.settings,
-                           description: "Privacy and support entry", preferWholeFrame: true)
+                           description: "Privacy and support entry", preferWholeFrame: true,
+                           snapshotMatch: SnapshotMatch(type: .button, key: "privacySupport.entry"))
         entry.tap()
         try require(app.navigationBars[copy.title].waitForExistence(timeout: 5),
                     app: app, "Bundled guidance did not open from Free Settings")
@@ -74,7 +75,8 @@ final class PrivacySupportUITests: XCTestCase {
         for id in bodies {
             let body = app.staticTexts[id].firstMatch
             try await readWholeText(body, in: app, title: copy.title, name: id,
-                                    scrollContainer: guidanceContainer)
+                                    scrollContainer: guidanceContainer,
+                                    snapshotMatch: SnapshotMatch(type: .staticText, key: id))
             if id == "privacySupport.offline" {
                 try require(body.label == copy.offline, app: app, "Offline/Free introduction is incomplete or has wrong language")
             } else if id == "privacySupport.support.warning" {
@@ -106,7 +108,8 @@ final class PrivacySupportUITests: XCTestCase {
             let link = app.buttons["privacySupport.link." + kind].firstMatch
             try await scrollTo(link, in: app, navigationTitle: copy.title,
                                description: "Website confirmation entry " + kind, preferWholeFrame: true,
-                               searchDown: kind != "supportIssue", scrollContainer: guidanceContainer)
+                               searchDown: kind != "supportIssue", scrollContainer: guidanceContainer,
+                               snapshotMatch: SnapshotMatch(type: .button, key: "privacySupport.link." + kind))
             link.tap()
             let sheet = app.navigationBars[copy.externalTitle]
             try require(sheet.waitForExistence(timeout: 5), app: app, "Missing confirmation for " + kind)
@@ -116,28 +119,37 @@ final class PrivacySupportUITests: XCTestCase {
             // Use an exact label predicate rather than a very long identifier query.
             let explanation = app.staticTexts.matching(NSPredicate(format: "label == %@", copy.externalBody)).firstMatch
             try await readWholeText(explanation, in: app, title: copy.externalTitle,
-                                    name: kind + " external explanation", scrollContainer: confirmationContainer)
+                                    name: kind + " external explanation", scrollContainer: confirmationContainer,
+                                    snapshotMatch: SnapshotMatch(type: .staticText, label: copy.externalBody))
             let warning = app.staticTexts["privacySupport.external.warning"].firstMatch
             if kind == "supportIssue" {
                 try await readWholeText(warning, in: app, title: copy.externalTitle,
-                                        name: "Public support warning", scrollContainer: confirmationContainer)
+                                        name: "Public support warning", scrollContainer: confirmationContainer,
+                                        snapshotMatch: SnapshotMatch(type: .staticText, key: "privacySupport.external.warning"))
                 try require(warning.label == copy.warning, app: app, "Incorrect warning in public-support confirmation")
             } else {
                 try require(!warning.exists, app: app, "Unexpected public-issue warning for " + kind)
             }
             let destination = app.staticTexts["privacySupport.external.destination"].firstMatch
             try await readWholeText(destination, in: app, title: copy.externalTitle,
-                                    name: kind + " exact destination", scrollContainer: confirmationContainer)
+                                    name: kind + " exact destination", scrollContainer: confirmationContainer,
+                                    snapshotMatch: SnapshotMatch(type: .staticText, key: "privacySupport.external.destination"))
             try require(destination.label == expectedURL, app: app, "Unexpected destination for " + kind)
             let open = app.buttons["privacySupport.external.open"].firstMatch
-            try await scrollTo(open, in: app, navigationTitle: copy.externalTitle,
-                               description: "Explicit website action " + kind, preferWholeFrame: true,
-                               scrollContainer: confirmationContainer)
+            let acceptedOpen = try await scrollTo(open, in: app, navigationTitle: copy.externalTitle,
+                                                  description: "Explicit website action " + kind, preferWholeFrame: true,
+                                                  scrollContainer: confirmationContainer,
+                                                  snapshotMatch: SnapshotMatch(type: .button, key: "privacySupport.external.open"))
             try require(open.label == copy.open && open.isEnabled,
                         app: app, "Open action has incorrect language or is disabled")
-            try require(visibleViewport(in: app, navigationTitle: copy.externalTitle)
-                .intersection(confirmationContainer.frame)
-                .insetBy(dx: -1, dy: -1).contains(open.frame), app: app, "Open action is clipped")
+            let freshOpenFrame = open.frame
+            let openBounds = freshOpenFrame == acceptedOpen.targetFrame
+                ? acceptedOpen.visibleBounds
+                : visibleViewport(in: app, navigationTitle: copy.externalTitle)
+                    .intersection(confirmationContainer.element.frame)
+            let verifiedOpenFrame = freshOpenFrame == acceptedOpen.targetFrame ? freshOpenFrame : open.frame
+            try require(openBounds.insetBy(dx: -1, dy: -1).contains(verifiedOpenFrame),
+                        app: app, "Open action is clipped")
             let cancelCandidates = sheet.buttons.matching(identifier: "privacySupport.external.cancel").allElementsBoundByIndex
             try require(cancelCandidates.count == 1, app: app, "Cancel is missing or ambiguous in the current confirmation toolbar for " + kind)
             let cancel = cancelCandidates[0]
@@ -163,7 +175,8 @@ final class PrivacySupportUITests: XCTestCase {
         try require(app.navigationBars[copy.settings].waitForExistence(timeout: 5),
                     app: app, "Settings did not return from guidance")
         try await scrollTo(free, in: app, navigationTitle: copy.settings,
-                           description: "Free state after guidance", preferWholeFrame: true, searchDown: false)
+                           description: "Free state after guidance", preferWholeFrame: true, searchDown: false,
+                           snapshotMatch: SnapshotMatch(type: .staticText, key: copy.freeTitle))
         try require(free.exists && free.isHittable, app: app, "Free state changed during guidance")
         try await selectTab(copy.trips, navigationTitle: "TripDocket",
                             failure: "Trips did not return after guidance", in: app)
@@ -174,8 +187,9 @@ final class PrivacySupportUITests: XCTestCase {
     /// taller than one screen. A label existing in AX alone is insufficient.
     private func readWholeText(_ text: XCUIElement, in app: XCUIApplication,
                                title: String, name: String,
-                               scrollContainer: XCUIElement? = nil) async throws {
-        guard let container = scrollContainer ?? activeScrollContainer(in: app, navigationTitle: title) else {
+                               scrollContainer: ScrollContainer? = nil,
+                               snapshotMatch: SnapshotMatch) async throws {
+        guard let container = scrollContainer ?? identifiedScrollContainer(in: app, navigationTitle: title) else {
             attach(app, name: "No active text container — " + name)
             throw LayoutFailure(message: "No active text container for " + name)
         }
@@ -183,7 +197,7 @@ final class PrivacySupportUITests: XCTestCase {
         // confirmation. Geometry remains live after every scroll.
         let accepted = try await scrollTo(text, in: app, navigationTitle: title,
                                           description: name, preferWholeFrame: true,
-                                          scrollContainer: container, readingPrefix: true)
+                                          scrollContainer: container, readingPrefix: true, snapshotMatch: snapshotMatch)
         try require(!text.label.isEmpty, app: app, "Empty accessible text: " + name)
         let size = accepted.targetFrame.size
         var covered: CGFloat = 0
@@ -200,9 +214,15 @@ final class PrivacySupportUITests: XCTestCase {
                 containerFrame = accepted.containerFrame
                 viewport = accepted.visibleBounds.insetBy(dx: 1, dy: 1)
                 frame = firstFrame
+            } else if let observation = snapshotGeometry(
+                in: app, navigationTitle: title, target: snapshotMatch, container: container.match
+            ), let targetFrame = observation.targetFrame, let observedContainer = observation.containerFrame {
+                containerFrame = observedContainer
+                viewport = observation.viewport.bounds.intersection(observedContainer).insetBy(dx: 1, dy: 1)
+                frame = targetFrame
             } else {
-                containerFrame = container.frame
-                viewport = visibleViewport(in: app, navigationTitle: title)
+                containerFrame = container.element.frame
+                viewport = legacyViewportObservation(in: app, navigationTitle: title).bounds
                     .intersection(containerFrame).insetBy(dx: 1, dy: 1)
                 frame = text.frame
             }
@@ -239,7 +259,7 @@ final class PrivacySupportUITests: XCTestCase {
                 translation = -(visible.height - 64)
             }
             previous = frame
-            try await dragWithinViewport(translation, container: container,
+            try await dragWithinViewport(translation, container: container.element,
                                          containerFrame: containerFrame,
                                          viewport: viewport.insetBy(dx: 12, dy: 12),
                                          app: app, name: name)
@@ -351,21 +371,35 @@ final class PrivacySupportUITests: XCTestCase {
     private func scrollTo(
         _ target: XCUIElement, in app: XCUIApplication, navigationTitle: String,
         description: String, preferWholeFrame: Bool, searchDown: Bool = true,
-        scrollContainer: XCUIElement? = nil, readingPrefix: Bool = false
+        scrollContainer: ScrollContainer? = nil, readingPrefix: Bool = false,
+        snapshotMatch: SnapshotMatch
     ) async throws -> ScrollObservation {
         guard let container = scrollContainer
-            ?? activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
+            ?? identifiedScrollContainer(in: app, navigationTitle: navigationTitle) else {
             attach(app, name: "No active scroll container — \(description)")
             throw LayoutFailure(message: "No hittable app scrollView/collectionView for \(description)")
         }
         for attempt in 0...10 {
-            let exists = target.exists
-            let frame = exists ? target.frame : .null
-            // Settings has a collapsing large title. Keep the bounds live, but
-            // share this one geometry read between acceptance and the next drag.
-            let containerFrame = container.frame
-            let visibleBounds = visibleViewport(in: app, navigationTitle: navigationTitle)
-                .intersection(containerFrame)
+            let exists: Bool
+            let frame: CGRect
+            let containerFrame: CGRect
+            let visibleBounds: CGRect
+            // One fresh hierarchy observation keeps target, List and chrome
+            // geometry coherent. Ambiguous shapes use the original live queries.
+            if let observation = snapshotGeometry(
+                in: app, navigationTitle: navigationTitle, target: snapshotMatch, container: container.match
+            ), let observedContainer = observation.containerFrame {
+                exists = observation.targetFrame != nil
+                frame = observation.targetFrame ?? .null
+                containerFrame = observedContainer
+                visibleBounds = observation.viewport.bounds.intersection(observedContainer)
+            } else {
+                exists = target.exists
+                frame = exists ? target.frame : .null
+                containerFrame = container.element.frame
+                visibleBounds = legacyViewportObservation(in: app, navigationTitle: navigationTitle).bounds
+                    .intersection(containerFrame)
+            }
             let tallReadingText = readingPrefix && frame.height > visibleBounds.height
             // Start tall text near the top with its whole prefix visible, not a
             // 44 pt sliver at the bottom. Short text keeps full-frame acceptance.
@@ -391,7 +425,7 @@ final class PrivacySupportUITests: XCTestCase {
                 let correction = visibleBounds.minY + 24 - frame.minY
                 let distance = max(24, abs(correction))
                 try await dragWithinViewport(correction > 0 ? distance : -distance,
-                                             container: container, containerFrame: containerFrame,
+                                             container: container.element, containerFrame: containerFrame,
                                              viewport: viewport, app: app,
                                              name: "Align text prefix — " + description)
                 continue
@@ -411,7 +445,7 @@ final class PrivacySupportUITests: XCTestCase {
             }
             let distance = min(maximumStep, max(24, abs(correction)))
             let translation = correction > 0 ? distance : -distance
-            let origin = container.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            let origin = container.element.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
             let start = origin.withOffset(CGVector(
                 dx: viewport.midX - containerFrame.minX,
                 dy: viewport.midY - containerFrame.minY
@@ -453,12 +487,25 @@ final class PrivacySupportUITests: XCTestCase {
 
     private func requireActiveScrollContainer(
         in app: XCUIApplication, navigationTitle: String, description: String
-    ) throws -> XCUIElement {
-        guard let container = activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
+    ) throws -> ScrollContainer {
+        guard let container = identifiedScrollContainer(in: app, navigationTitle: navigationTitle) else {
             attach(app, name: "No active scroll container — " + description)
             throw LayoutFailure(message: "No hittable app scrollView/collectionView for " + description)
         }
         return container
+    }
+
+    private struct ScrollContainer {
+        let element: XCUIElement
+        let match: SnapshotMatch?
+    }
+
+    private func identifiedScrollContainer(in app: XCUIApplication, navigationTitle: String) -> ScrollContainer? {
+        guard let element = activeScrollContainer(in: app, navigationTitle: navigationTitle) else { return nil }
+        let identity = (try? element.snapshot()).map {
+            SnapshotMatch(type: $0.elementType, identifier: $0.identifier, label: $0.label)
+        }
+        return ScrollContainer(element: element, match: identity)
     }
 
     private func activeScrollContainer(in app: XCUIApplication, navigationTitle: String) -> XCUIElement? {
@@ -512,7 +559,79 @@ final class PrivacySupportUITests: XCTestCase {
         let navigationFrame: CGRect?
     }
 
+    private struct SnapshotMatch {
+        let type: XCUIElement.ElementType
+        var key: String? = nil
+        var identifier: String? = nil
+        var label: String? = nil
+
+        func matches(_ node: XCUIElementSnapshot) -> Bool {
+            node.elementType == type
+                && (key == nil || node.identifier == key || node.label == key)
+                && (identifier == nil || node.identifier == identifier)
+                && (label == nil || node.label == label)
+        }
+    }
+
+    private struct SnapshotGeometry {
+        let viewport: ViewportObservation
+        let targetFrame: CGRect?
+        let containerFrame: CGRect?
+    }
+
+    private func snapshotGeometry(
+        in app: XCUIApplication, navigationTitle: String?,
+        target: SnapshotMatch? = nil, container: SnapshotMatch? = nil
+    ) -> SnapshotGeometry? {
+        guard let root = try? app.snapshot() else { return nil }
+        var nodes: [XCUIElementSnapshot] = []
+        func visit(_ node: XCUIElementSnapshot, depth: Int) -> Bool {
+            guard depth <= 40, nodes.count < 2_000 else { return false }
+            nodes.append(node)
+            return node.children.allSatisfy { visit($0, depth: depth + 1) }
+        }
+        guard visit(root, depth: 0) else { return nil }
+        let windows = nodes.filter { $0.elementType == .window }
+        let bars = nodes.filter { $0.elementType == .tabBar }
+        let navigation = navigationTitle.map { title in
+            nodes.filter { SnapshotMatch(type: .navigationBar, key: title).matches($0) }
+        } ?? []
+        let targets = target.map { match in nodes.filter { match.matches($0) } } ?? []
+        let containers = container.map { match in nodes.filter { match.matches($0) } } ?? []
+        // No index-to-tree-order assumptions. In particular, an empty List ID
+        // is usable only when its complete typed identity is unique in the app.
+        guard windows.count == 1, bars.count <= 1,
+              navigationTitle == nil || navigation.count == 1,
+              targets.count <= 1, container == nil || containers.count == 1 else { return nil }
+        func finiteFrame(_ frame: CGRect) -> Bool {
+            !frame.isNull && !frame.isInfinite && !frame.isEmpty
+                && frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+        }
+        guard finiteFrame(windows[0].frame),
+              (navigation + bars + targets + containers).allSatisfy({ finiteFrame($0.frame) }) else { return nil }
+        var bounds = windows[0].frame.insetBy(dx: 2, dy: 2)
+        let navigationFrame = navigation.first?.frame
+        // Snapshot geometry never substitutes for live action/hit-test checks.
+        if let title = navigationTitle, let frame = navigationFrame,
+           app.navigationBars[title].isHittable {
+            let top = max(bounds.minY, frame.maxY)
+            bounds = CGRect(x: max(bounds.minX, frame.minX), y: top,
+                            width: min(bounds.width, frame.width), height: max(0, bounds.maxY - top))
+        }
+        if let frame = bars.first?.frame, app.tabBars.element.isHittable, frame.minY > bounds.midY {
+            bounds.size.height = max(0, min(bounds.maxY, frame.minY) - bounds.minY)
+        }
+        return SnapshotGeometry(viewport: ViewportObservation(bounds: bounds, navigationFrame: navigationFrame),
+                                targetFrame: targets.first?.frame, containerFrame: containers.first?.frame)
+    }
+
     private func viewportObservation(in app: XCUIApplication, navigationTitle: String?) -> ViewportObservation {
+        snapshotGeometry(in: app, navigationTitle: navigationTitle)?.viewport
+            ?? legacyViewportObservation(in: app, navigationTitle: navigationTitle)
+    }
+
+    private func legacyViewportObservation(in app: XCUIApplication, navigationTitle: String?) -> ViewportObservation {
         let window = app.windows.firstMatch
         var viewport = window.exists ? window.frame : app.frame
         viewport = viewport.insetBy(dx: 2, dy: 2)
