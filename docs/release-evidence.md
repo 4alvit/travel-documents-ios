@@ -1,12 +1,62 @@
 # Release evidence
 
-Current stage: development preview merged into `main` through
-[PR #1](https://github.com/4alvit/travel-documents-ios/pull/1).
-[GitHub releases](https://github.com/4alvit/travel-documents-ios/releases) carry
-their own exact-source acceptance records under the
+This document records development and device evidence, including historical
+results from [PR #1](https://github.com/4alvit/travel-documents-ios/pull/1).
+For the current source/Simulator stage, use
+[GitHub releases](https://github.com/4alvit/travel-documents-ios/releases) and
+their exact-source acceptance records under the
 [source/Simulator channel policy](github-releases.md). Live Apple distribution
 and physical-device gates remain open. Historical failures below remain
 attached to their original runs.
+
+## Source/Simulator integration and qualification evidence
+
+The matched Xcode 26.2 workflow and its native fixture-preparation phases define
+a candidate validation path, not an acceptance record. Release acceptance still
+requires complete CI and the ordinary Release smoke at the exact integrated
+main commit, plus the required independent qualification reviews. Results from
+different source trees cannot be combined into a passing candidate.
+
+The separate [matched-core control](https://github.com/4alvit/travel-documents-ios/actions/runs/41395856175)
+at `786555b` passed all 130 core/purchase cases with no skips. Its retained
+Release package and results were independently checked, including explicit
+empty XCTest warning and failure arrays using Xcode 27.1. The same workflow's
+English guidance case failed: short text was accepted at the edge of an expanded
+scroll viewport but was not fully covered by the inset reading viewport.
+The geometry correction aligns these two checks without reducing text coverage
+or changing action deadlines. Neither the passing core job nor the correction's
+offline checks establish a successful integrated workflow.
+
+Historical batch results distinguish setup success from completed import.
+[The earlier control](https://github.com/4alvit/travel-documents-ios/actions/runs/41385834936)
+passed Files selection but exhausted its former 300-second case allowance before
+save/relaunch and byte verification completed. Later controls with host-created
+fixtures and with native Save both failed after one valid Open action. Retained
+application output records FileProvider bookmark-resolution failures before
+selected URLs reached the app. The opaque provider item identifier was not
+mapped to a particular file or folder; these observations do not establish an
+application dismissal defect or prove that a compiler/runtime mismatch caused it.
+The [matched native Save control](https://github.com/4alvit/travel-documents-ios/actions/runs/41395661985)
+also failed at that boundary, so native saving and matching the SDK alone did not
+establish successful import.
+
+The subsequent four-phase control replaces the remaining host-created fixture
+folder with native New Folder, followed by native Save. Its required evidence is
+**one Files preparation case + one native folder case + one native seed case +
+two main cases**, in four separate original result bundles. Every phase needs
+exact-source/device, result, immutable-manifest and independent warning review;
+folder/seed phases additionally require destination identity and complete-byte
+checks. No passing outcome for this control is asserted here. A later accepted
+record must identify its exact run/attempt and final source, retain functional
+and visual evidence, and preserve the earlier failed controls as failures.
+
+The [first native-folder run](https://github.com/4alvit/travel-documents-ios/actions/runs/41398340866)
+passed Files preparation but stopped before Done: the keyboard's first-use
+swipe-typing introduction covered that control. Screenshots and native
+accessibility hit checks confirmed the obstruction. The native-folder test now
+acknowledges only that exact introduction once, verifies its dismissal and the
+unchanged folder name, then retains the original Done and empty-folder checks.
+The failed run did not execute native seeding or the main import tests.
 
 ## Release preparation — 1 November 2026
 
@@ -746,8 +796,10 @@ remain unverified. Test purchases are not sales.
 
 Public repository provisioning was completed through Terraform outside this
 source tree. The published `674cbb6` baseline has a successful CI gate and a
-verified Simulator package. No GitHub release or App Store release has yet been
-verified. Do not label this preview stable or ready for sale.
+verified Simulator package. That historical baseline predates the GitHub
+release channel described above. A GitHub source/Simulator release does not
+establish App Store availability or readiness for sale; those gates remain
+unverified.
 
 The consolidated `674cbb6` preview records its original build provenance in
 `provenance.json`, later scoped acceptance in `acceptance.json`, and artifact

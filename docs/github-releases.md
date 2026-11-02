@@ -37,23 +37,54 @@ old tag or relabel an old binary as fixed.
 ## Prepare without publishing
 
 The explicit `Release qualification` workflow captures the selected suite once.
-Batch mode pins Xcode 16.4 (16F6), SDK 18.5, runtime 26.2, and xcresulttool 23714
-(format 3.53). The SDK and runtime deliberately differ, as in the core purchase
-compatibility lane. Before the functional suite, a separate invocation runs the
-existing recovery preparation case once to initialize Files through Export and
+Both modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
+Batch qualification checks the complete path from selecting existing files to
+reviewing, saving and reopening their originals. Before that functional suite,
+a separate invocation runs the recovery preparation case once through Export and
 Save to Files. It checks an absent synthetic folder without saving a backup.
 This covers a preinitialized provider, not cold first use. Its own result bundle
 must pass the exact one-case, device and runtime checks before the driver starts.
-The preparation keeps a 600-second build/test cap and a 180-second case allowance;
-batch work has a 2,400-second budget to include this added phase. The functional
-driver's 1,200-second budget and the 180-second cleanup budget remain unchanged.
+The preparation keeps a 600-second build/test cap and a 180-second case allowance.
+The qualification driver next records an absent, uniquely named destination
+under the pinned local provider and retains the two synthetic PDF source copies.
+It does not create the destination folder. A separate invocation runs
+`testNativeCreateOwnedFilesFolder` once through the native New Folder interface.
+The host adopts the result only after the exact one-case result passes and the
+same provider contains the expected empty directory with a verified identity.
+This phase has a 240-second build/test cap and a 180-second case allowance.
+If the native keyboard presents its first-use swipe-typing introduction, the
+test acknowledges that exact prompt once and verifies the unchanged folder
+name before using the original Done control. It does not dismiss other prompts
+or bypass the keyboard's live reachability checks.
+If creation or validation fails, an unadopted leaf is not removed separately;
+it is retained for teardown of the exclusively owned Simulator.
+
+A third invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
+each PDF from an opt-in Debug Simulator view into that folder through Save to
+Files. The host requires the owned destination to be empty immediately before
+seeding, then verifies exactly the two expected filenames and complete bytes
+against the retained sources. Provider and destination directory identities
+must remain unchanged; successful UI actions alone are insufficient.
+This seed phase has a 300-second build/test cap and a 180-second case allowance.
+
+Folder creation, native seeding, their result inspection and the main functional
+invocation consume the same 1,200-second driver clock, started before destination
+preflight. No phase renews it. Admission requires enough remaining time for the
+following phases; startup and inspection still consume that budget, so it is
+not a completion guarantee. Batch work remains bounded by 2,400 seconds, with
+180 seconds for owned cleanup. A failed preparation, folder or seed phase
+prevents the main functional suite from starting. The standalone
+`test-batch-simulator.py` command retains its default direct creation of its own
+folder and fixture bytes; these native ingress phases belong to hosted qualification.
+
 The hosted purchase prerequisite keeps the runner's 300-second default allowance.
 The complete batch UI case explicitly uses 600 seconds, with the runner maximum
 set to 600. A retained run reached final reconfirmation at its former 300-second
 limit; its later Save action did not establish completed save, relaunch or
-original-byte verification. Those checks remain required. Build, startup, both
-cases and postprocessing still share the original driver budget; the larger
-case allowance does not guarantee completion or extend any UI-action deadline.
+original-byte verification. Those checks remain required. Folder creation,
+native seeding, inspection, build, startup, both functional cases and
+postprocessing share the original driver budget; the larger case allowance does
+not guarantee completion or extend any UI-action deadline.
 One serial functional invocation runs the exact hosted purchase/restore
 test followed by the exact real Files batch test. The hosted test verifies local
 StoreKit APIs and clears its transactions before the UI test makes its own purchase.
@@ -62,14 +93,12 @@ hosted start/pass followed by batch start/pass; the original bounded log is hash
 and checked again during independent review. The original StoreKit and UI assertions
 remain required. Successful purchase setup alone does not qualify the Files workflow.
 
-Xcode 16.4 has no `test-results --schema` API. Its batch preflight verifies and
-retains the exact reader version and reports `unsupported_by_producer`, without
-claiming verified schema documentation. It never substitutes empty schema or
-runtime-warning arrays. Explicit batch schema-validation requests fail.
-The mandatory independent Xcode 27.1 review below still applies.
+Earlier Xcode 16.4 captures retain their original producer identity and review
+limits. They do not qualify a new 26.2 Release binary. A passing run with either
+toolchain does not establish the cause of a failure with the other.
 
-Biometric mode pins Xcode 26.2 (17C52), SDK/runtime 26.2. Each real simulated
-Face ID request has a unique acknowledgement bound to its run, request, sequence
+Biometric mode checks privacy across authentication and app transitions.
+Each simulated Face ID request has a unique acknowledgement bound to its run, request, sequence
 and event. The test waits for the single host event command to complete before
 starting its existing 15-second UI postcondition. The 60-second transport limit
 covers the two existing 30-second command caps. The editor round-trip case uses
@@ -78,28 +107,28 @@ event/acknowledgement pairs and reached final UI capture at 127.3 seconds. Other
 case allowances and the suite limit remain unchanged. Missing controls are
 checked for existence before hittability to avoid implicit lookup retries.
 Acknowledgement means command completion, not successful authentication.
-This Xcode rejects an
-explicit schema version 0.4.0, and its default summary-schema documentation contains invalid JSON.
+
+For both qualification modes, Xcode 26.2 rejects an explicit schema version
+0.4.0, and its default summary-schema documentation contains invalid JSON.
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
 hash as proof that tests passed. An unknown document or toolchain fails before
 native work. Each mode requires one available pinned runtime compatible
 with the host architecture. The capture records the SDK and runtime separately,
 including the observed runtime build, and checks those fields against the native
-test result. Only the biometric profile claims an SDK match. Ordinary CI and the default `--validate-schemas`
-command retain the Xcode 26.2 documentation check. Core/purchase tests and the Release preview
-pin Xcode 16.4 (16F6) and retain their previously validated runtime selection;
-this compatibility lane does not claim that the runtime matches its SDK.
-Its result bundle records the actual device/runtime, and the original Release
-provenance records the producer.
+test result. Both profiles require an SDK match. Ordinary CI and the default
+`--validate-schemas` command use the same documentation check. The independent
+Xcode 27.1 review below must still establish actual results and warnings.
 
-The phone guidance job pins Xcode 26.2 (17C52) and requires a unique available
-runtime matching that Xcode's Simulator SDK, with a compatible iPhone and host
-architecture. A supplied device UUID must satisfy the same checks; there is no
-fallback to another runtime. Its test artifact contains the result bundle plus
+Core/purchase tests, phone guidance and the Release preview use Xcode 26.2
+(17C52). Both test jobs require a unique available runtime matching that Xcode's
+Simulator SDK, with a compatible iPhone and host architecture. A supplied device
+UUID must satisfy the same checks; there is no fallback to another runtime.
+Release provenance records the actual producer; test bundles record their actual
+devices and runtimes. Each test artifact contains its result bundle plus
 `ci-toolchain/simulator-selection.*/`; consumers must select the `.xcresult`
 bundle explicitly instead of assuming every archive entry belongs to it.
-This CI lane explicitly prepares the selected Simulator's local Files provider
+The phone guidance lane explicitly prepares the selected Simulator's local Files provider
 before running the unchanged UI cases. Preparation binds to the recorded
 selection and rechecks the complete inventory. It runs the existing recovery
 preparation case once: the synthetic app opens Export, Save to Files and the
@@ -121,10 +150,12 @@ guidance cohort retains its own result bundle and reuses the same build products
 The preparation receipt distinguishes owned host-command cleanup from the
 Simulator services that remain running for the tests.
 When the native Settings list reports a non-hittable wrapper, its scroll helper
-requires one geometrically aligned container with a live, visible descendant.
-Ambiguous containers are rejected. The target control must still be fully inside
-the safe viewport and hittable before use; the drag count and per-action deadlines
-are unchanged. Each scroll observation reuses its app, navigation, obstruction and selected-container frames. Count rows use one
+first filters geometrically aligned containers by a live, visible descendant,
+then requires exactly one active container. Covered containers cannot create
+false ambiguity; two active containers are still rejected. The target control
+must still be fully inside the safe viewport and hittable before use; the drag
+count and per-action deadlines are unchanged. Each scroll observation reuses
+its app, navigation, obstruction and selected-container frames. Count rows use one
 fresh snapshot for identity, label and value while retaining the global uniqueness
 and live hit checks; snapshots are never reused after a drag or a new observation.
 Phone preparation has a 900-second work budget and a 780-second build/test command
@@ -145,6 +176,10 @@ The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
 The recovery compatibility job retains its separately pinned profile.
+Privacy/support text reading uses the same one-point inset viewport for scroll
+acceptance and coverage checks. Short text must fit completely in that reading
+viewport; tall text still requires overlapping coverage. Action-control tolerance,
+real hittability, screenshots, hierarchy captures and case deadlines are unchanged.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
@@ -189,13 +224,26 @@ and output hashes. The reader must report the exact expected two or six passed
 cases, zero failures/skips/expected failures, the captured device, and explicit
 empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
 failure or any warning block acceptance. Inspect the retained screenshots and
-the mode-specific byte/cleanup evidence too. For batch mode, independently inspect
-the separate Files preparation bundle as well: exactly its one preparation case
-must pass on the same device, with no skips, failures or runtime warnings.
-Only this complete review may
-produce the separate operator `passed` receipt described below; never rewrite
-the raw capture report into a pass. These checks cover the retained XCTest
-record, not every application or system-console message.
+the mode-specific byte/cleanup evidence too. Batch mode requires four distinct
+result-bundle reviews, in execution order:
+
+1. Files preparation: `testRecoveryPrepareFilesProvider`, exactly one passed case.
+2. Native folder creation: `testNativeCreateOwnedFilesFolder`, exactly one passed case.
+3. Native PDF seeding: `testNativeSaveSeedsBothSyntheticOriginals`, exactly one passed case.
+4. Main flow: the two exact hosted purchase and batch-import methods listed below.
+
+Each bundle must match the same captured source and device, retain an unchanged
+original manifest, and have no skips, failures or runtime warnings. Review the
+folder's single Done action and verified empty destination, both native Save
+operations and their complete-byte proof, and the main test's purchase, import,
+review, save and relaunch evidence. The three preparation cases remain separate
+prerequisites; they do not add methods to the public two-method batch receipt.
+Only this complete review may produce the separate operator `passed` receipt
+described below; never rewrite the raw capture report into a pass. These checks
+cover the retained XCTest record, not every application or system-console message.
+An empty XCTest warning array does not negate a FileProvider error in retained
+application output. Investigate relevant console errors alongside the observed
+functional result; do not discard them or convert a failed import into a pass.
 
 `scripts/prepare-release.py` uses Python's standard library, local Git objects,
 and authenticated `gh` **GET** requests to github.com. Actions artifact downloads

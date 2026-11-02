@@ -17,7 +17,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     env:
-      # Diagnostic: keep the Release producer and core tests on matched 26.2.
+      # Keep the Release producer and core tests on matched Xcode 26.2.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
