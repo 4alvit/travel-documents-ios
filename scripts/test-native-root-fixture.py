@@ -222,24 +222,22 @@ class RootGuards(unittest.TestCase):
 
     def root_capture(self):
         run, result = self.prepared_capture()
-        # Older folder fixture remains on disk only as a counterexample. Its
-        # deliberately missing proof must not be represented as a fourth phase.
-        for key in tuple(run.report):
-            if key.startswith("native_folder"): del run.report[key]
         run.report["native_root"] = {"verified_empty_before_seed": True, "verified_after_main": True, "device": OWNED}
         run.report["final_inventory"] = {}; run.report["cleanup_verified"] = True
         return run, result
 
-    def test_final_capture_binds_only_actual_three_bundles_after_owned_teardown(self):
+    def test_final_capture_binds_only_actual_two_bundles_after_owned_teardown(self):
         run, result = self.root_capture()
         run.capture_original_result()
         self.assertTrue(run.report["files_preparation_original"]["unchanged_after_cleanup"])
-        self.assertTrue(run.report["native_seed_original"]["unchanged_after_cleanup"])
+        self.assertNotIn("native_seed_original", run.report)
+        self.assertFalse((run.out / "native-seed.xcresult").exists())
+        self.assertTrue(run.report["batch_checkpoint_verified"])
         self.assertNotIn("native_folder_verified", run.report)
         self.assertEqual(run.root / run.report["original_xcresult"]["path"], result)
 
-    def test_final_capture_rejects_missing_post_main_cleanup_and_changed_seed_result(self):
-        for fault in ("empty", "after", "device", "baseline", "cleanup", "seed"):
+    def test_final_capture_rejects_missing_post_main_cleanup_checkpoint_and_changed_prepare_result(self):
+        for fault in ("empty", "after", "device", "baseline", "cleanup", "checkpoint", "prepare"):
             root = self.root / fault; root.mkdir(); saved = self.root; self.root = root
             try: run, _ = self.root_capture()
             finally: self.root = saved
@@ -248,7 +246,8 @@ class RootGuards(unittest.TestCase):
             elif fault == "device": run.report["native_root"]["device"] = base.EXISTING
             elif fault == "baseline": run.report["final_inventory"] = {OWNED: {}}
             elif fault == "cleanup": run.report["cleanup_verified"] = False
-            else: (run.out / "native-seed.xcresult/Data/result").write_bytes(b"modified")
+            elif fault == "checkpoint": run.report["batch_checkpoint_verified"] = False
+            else: (run.out / "files-prepare.xcresult/Data/result").write_bytes(b"modified")
             with self.subTest(fault=fault), self.assertRaises(RuntimeError): run.capture_original_result()
             self.assertNotIn("original_xcresult", run.report)
 

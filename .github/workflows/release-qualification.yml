@@ -32,6 +32,8 @@ jobs:
         run: |
           python3 -B scripts/test-qualify-release.py
           python3 -B scripts/test-batch-driver.py
+          python3 -B scripts/test-batch-checkpoint.py
+          python3 -B scripts/test-batch-checkpoint-host.py
           python3 -B scripts/test-batch-scroll-container.py
           python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-native-batch-seed.py

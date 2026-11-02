@@ -50,6 +50,7 @@ def load_module(path, name):
     return module
 
 
+checkpoint = load_module(HERE / "batch_checkpoint.py", "qualification_batch_checkpoint")
 processes = load_module(HERE / "recovery_process.py", "qualification_processes")
 recovery = load_module(HERE / "recovery_core.py", "qualification_recovery_validation")
 
@@ -808,7 +809,11 @@ class Qualification:
         require(self.mode == "batch" and getattr(driver.args, "native_root", False)
                 and self.report.get("files_preparation_verified") is True
                 and not hasattr(self, "shared_products"), "Shared build requires one owned preparation")
-        require(driver.remaining() > SEED_SECONDS + 600 + 7 * 38 + 8,
+        # Combined mode removes one invocation; five settings/container RPCs
+        # surround it. The checkpoint is inside the unchanged main600 allowance.
+        admission = (SEED_SECONDS + 600 + 5 * 38 + 8 if getattr(driver.args, "combined_batch", False)
+                     else SEED_SECONDS + 600 + 7 * 38 + 8)
+        require(driver.remaining() > admission,
                 "Insufficient shared-build observation and native budget")
         derived = self.root / self.report["files_preparation"]["derived_data"]
         expected = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
@@ -880,6 +885,112 @@ class Qualification:
         self.report["shared_build"]["observations"][label] = {"path": name,
             "sha256": hashlib.sha256(raw.encode()).hexdigest()}
         self.save()
+
+    def prepare_combined_batch(self, driver):
+        require(self.mode == "batch" and getattr(driver.args, "combined_batch", False)
+                and "combined_batch" not in self.report and self.report.get("files_preparation_verified") is True
+                and self.report.get("native_root", {}).get("verified_empty_before_seed") is True,
+                "Combined batch requires verified owned root and preparation")
+        self.require_no_build_writer()
+        require(getattr(driver, "qualified_build", None)
+                    == self.root / self.report.get("files_preparation", {}).get("derived_data", "")
+                and "before_seed" in self.report.get("shared_build", {}).get("observations", {}),
+                "Combined batch lacks verified shared products")
+        require(driver.remaining() > SEED_SECONDS + 600 + 8,
+                "Insufficient combined seed and main budget")
+        self.native_seed_files(driver, empty=True)
+        driver.combined_protocol = checkpoint
+        driver.checkpoint_session = str(uuid.uuid4()).upper()
+        driver.checkpoint_callback = lambda request, deadline: self.acknowledge_batch_seed(driver, request, deadline)
+        self.report["combined_batch"] = {"session": driver.checkpoint_session, "token": driver.token,
+            "cases": list(checkpoint.CASES), "result_bundles": 2,
+            "driver_deadline": driver.deadline - self.started, "driver_seconds": 1200,
+            "seed_case_seconds": 180, "seed_observed_envelope_seconds": 300,
+            "seed_envelope_boundary": "Observed hosted PASS through observed seed PASS, including UI runner startup; initial startup and hosted case use original driver clock",
+            "main_case_seconds": 600, "checkpoint_seconds": 60,
+            "checkpoint_position": "main entry after observed seed PASS and deferred AUT termination"}
+        self.save()
+
+    def acknowledge_batch_seed(self, driver, request, deadline):
+        """One scoped auxiliary RPC group at a time while the owned primary waits."""
+        primary = driver.process
+        expected = {"session": driver.checkpoint_session, "token": driver.token,
+                    "nonce": checkpoint.upper_uuid(request.get("nonce")), "line": request.get("line"),
+                    "name": checkpoint.CHANNEL + "." + driver.checkpoint_session + "." + request.get("nonce"), "state": 1}
+        require(request == expected and type(request["line"]) is int and request["line"] > 0,
+                "Wrong checkpoint identity")
+        require("batch_checkpoint" not in self.report and self.driver_calls == 1
+                and driver.args.device == self.owned and self.owned not in self.baseline
+                and driver.summary.get("combined_batch") is True,
+                "Checkpoint is not exclusive or is repeated")
+        end = min(deadline, driver.deadline, self.work_deadline)
+        previous_limit = self.commands.limit
+        def active():
+            self.check()
+            require(time.monotonic() < end and self.xcode.active == {primary.pid: primary}
+                    and primary.poll() is None and not self.xcode.unknown_spawn
+                    and not self.commands.unknown_spawn, "Checkpoint primary/clock changed")
+        def idle():
+            active(); require(not self.commands.active, "Checkpoint auxiliary writer unresolved")
+        def command(label, argv):
+            idle()
+            seconds = min(10, end - time.monotonic() - 8)
+            require(seconds > 0, "Insufficient checkpoint RPC stop reserve")
+            raw = self.command(label, argv, seconds)
+            idle(); return raw
+        idle()
+        self.report["batch_checkpoint"] = {"request": request, "status": "verifying",
+            "start": time.monotonic() - self.started, "deadline": end - self.started}
+        self.commands.limit = min(previous_limit, end)
+        try:
+            # Query only the owned AUT. A producer PASS is insufficient by itself:
+            # require its exact current executable absent from a complete ps output.
+            raw = command("checkpoint-app", ["xcrun", "simctl", "get_app_container", self.owned, APP_ID, "app"])
+            bundle = self.container_path(raw.strip(), "Bundle", "Application")
+            require(bundle.name == "Tripfolio.app", "Wrong checkpoint app bundle")
+            executable = bundle / "Tripfolio"
+            require(stat.S_ISREG(executable.lstat().st_mode) and executable.resolve(strict=True) == executable,
+                    "Invalid checkpoint app executable")
+            listing = command("checkpoint-app-stopped", ["/bin/ps", "-axww", "-o", "pid=,command="])
+            rows = [row for row in self.commands.report["commands"] if row["id"] == "checkpoint-app-stopped"]
+            require(len(rows) == 1 and rows[0]["returncode"] == 0, "Unbound checkpoint process listing")
+            reader = rows[0]["pgid"]; reader_seen = False
+            owned_apps = Path.home() / "Library/Developer/CoreSimulator/Devices" / self.owned / "data/Containers/Bundle/Application"
+            owned_executable = re.compile(re.escape(str(owned_apps))
+                + r"/[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/Tripfolio\.app/Tripfolio(?: |$)")
+            require(listing.strip(), "Empty process listing")
+            for line in listing.splitlines():
+                active(); match = re.fullmatch(r"\s*([0-9]+)\s+(.*)", line)
+                require(match is not None, "Malformed process listing")
+                pid, cmd = int(match[1]), match[2]
+                if pid == reader:
+                    require(cmd.startswith("/bin/ps ") or cmd.startswith("ps "), "Wrong process reader")
+                    reader_seen = True
+                require(cmd != str(executable) and not cmd.startswith(str(executable) + " ")
+                        and owned_executable.match(cmd) is None
+                        and cmd != "Tripfolio" and not cmd.startswith("Tripfolio "), "AUT still running or ambiguous")
+            require(reader_seen, "Process listing omitted its own reader")
+            self.native_seed_files(driver)
+            for name, identity in self.before["files"].items():
+                active(); file = self.root / name; metadata = file.lstat()
+                raw = bounded_read(self.root, name, 128 * MIB, active)
+                require({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                         "executable": bool(metadata.st_mode & 0o111)} == identity,
+                        "Source changed before seed ACK")
+            idle()
+            proof = self.report["batch_checkpoint"]
+            proof.update(aut_stopped=True, app_bundle=str(bundle), source_unchanged=True,
+                provider=str(driver.fixture_directory), provider_identity=list(driver.provider_identity),
+                fixtures=[{key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]])
+            # Persist the completed byte/source/stopped-AUT proof before the
+            # external ACK can release the consumer's destructive reset.
+            self.save()
+            command("checkpoint-ack", ["xcrun", "simctl", "notify_set_state", self.owned, request["name"], "1"])
+            proof.update(status="acknowledged", finish=time.monotonic() - self.started)
+            self.report["batch_checkpoint_verified"] = True
+            self.save()
+        finally:
+            self.commands.limit = previous_limit
 
     def prepare_native_seed(self, driver):
         require(self.mode == "batch" and "native_seed" not in self.report
@@ -1005,7 +1116,7 @@ class Qualification:
         module.subprocess = self.facade()
         args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None,
                                native_seed=self.mode == "batch", native_folder=False,
-                               native_root=self.mode == "batch")
+                               native_root=self.mode == "batch", combined_batch=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
@@ -1013,7 +1124,7 @@ class Qualification:
             if self.mode == "batch":
                 self.prepare_native_root(driver)
                 self.prepare_shared_build(driver)
-                self.prepare_native_seed(driver)
+                self.prepare_combined_batch(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
             require(time.monotonic() + remaining + 8 < self.work_deadline,
                     "Insufficient full test and owned-stop budget after driver preparation")
@@ -1084,15 +1195,25 @@ class Qualification:
         if failure: raise failure
         require(self.driver_calls == 1, "Driver did not launch exactly once")
         require(result is not None, "Missing xcresult summary")
-        expected = list(module.CASES) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
+        expected = list(driver.expected_cases) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
         tree = json.loads(bounded_read(driver.directory, "xcresult-tests.json", 16 * MIB, self.check))
         validate_driver(self.mode, driver.summary, result, tree, expected, self.owned, self.job["GITHUB_SHA"])
         validate_runtime_result(self.mode, self.report.get("runtime_selection"), result)
         if self.mode == "batch":
-            self.report["batch_execution_order"] = validate_batch_order(
-                bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
-                driver.summary.get("execution_order"),
-            )
+            order = checkpoint.execution_order(bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
+                                               driver.checkpoint_session, driver.token)
+            require(order == driver.summary.get("execution_order")
+                    and self.report.get("batch_checkpoint_verified") is True
+                    and order["request"] == self.report["batch_checkpoint"]["request"],
+                    "Combined checkpoint/order proof mismatch")
+            monitor = driver.summary.get("combined_monitor", {})
+            elapsed = monitor.get("seed_observed_seconds")
+            require(monitor.get("returncode") == 0 and type(elapsed) in (int, float)
+                    and 0 <= elapsed <= 300 and monitor.get("seed_envelope_seconds") == 300
+                    and monitor.get("seed_envelope_boundary") == "observed hosted PASS to observed seed PASS",
+                    "Missing combined seed-envelope evidence")
+            self.report["batch_execution_order"] = order
+            self.report["combined_monitor"] = monitor
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
         self.report["driver_capture_verified"] = True
@@ -1240,7 +1361,21 @@ class Qualification:
                         and self.baseline is not None and self.owned not in self.baseline
                         and self.report.get("final_inventory") == self.baseline,
                         "Native root lacks original-byte or owned-device cleanup proof")
-                prerequisites = (("files_preparation", "files-prepare"), ("native_seed", "native-seed"))
+                if "combined_batch" in self.report:
+                    require(self.report.get("batch_checkpoint_verified") is True
+                            and self.report["combined_batch"].get("result_bundles") == 2
+                            and self.report["combined_batch"].get("cases") == list(checkpoint.CASES)
+                            and self.report.get("batch_execution_order", {}).get("request")
+                                == self.report.get("batch_checkpoint", {}).get("request"),
+                            "Combined capture lacks verified checkpoint and exact three cases")
+                    require(not any(key.startswith("native_seed") or key.startswith("native_folder")
+                                    for key in self.report)
+                            and not (self.out / "native-seed.xcresult").exists()
+                            and not (self.out / "native-folder.xcresult").exists(),
+                            "Combined capture cannot claim separate seed/folder result bundles")
+                    prerequisites = (("files_preparation", "files-prepare"),)
+                else:
+                    prerequisites = (("files_preparation", "files-prepare"), ("native_seed", "native-seed"))
             else:
                 prerequisites = (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
                                  ("native_seed", "native-seed"))
@@ -1288,7 +1423,9 @@ class Qualification:
             capture_ready = (not self.report["errors"] and self.report.get("driver_capture_verified")
                              and self.report.get("products_verified") and self.report["cleanup_verified"]
                              and (self.mode != "batch" or (self.report.get("batch_snapshot", {}).get("verified")
-                                  and self.report.get("files_preparation_verified") is True)))
+                                  and self.report.get("files_preparation_verified") is True
+                                  and self.report.get("batch_checkpoint_verified") is True
+                                  and self.report.get("combined_batch", {}).get("result_bundles") == 2)))
             if capture_ready:
                 try: self.capture_original_result()
                 except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))

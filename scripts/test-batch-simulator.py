@@ -6,8 +6,9 @@ unique Files folder and removes only that folder afterward. Qualification alone
 can select native Save into its fresh owned Simulator's empty provider root;
 that mode neither writes provider files nor removes the root or individual files,
 and defers cleanup to the qualification's verified whole-device teardown.
-Both modes run one hosted purchase precondition and one batch test in a single
-invocation. This driver neither boots simulators nor changes Apple accounts.
+The standalone modes run one hosted purchase precondition and one batch test.
+Qualification can additionally select the native seed in that same invocation,
+with one host byte-check checkpoint before the main case begins its actions. This driver neither boots simulators nor changes Apple accounts.
 Authentication is bypassed
 by this functional UI test; its result is not privacy or rendered-PDF proof.
 """
@@ -78,7 +79,7 @@ def execution_order(data):
             "cases": cases, "hosted_pass_before_batch_start": True}
 
 
-def read_execution_order(path, check):
+def read_execution_order(path, check, parse=execution_order):
     """Read only one stable, bounded regular log; never follow its symlink."""
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_LOG_BYTES:
@@ -101,7 +102,7 @@ def read_execution_order(path, check):
         if (size != before.st_size or identity(os.fstat(descriptor)) != identity(before)
                 or identity(path.lstat()) != identity(before)):
             raise RuntimeError("Execution log changed during read")
-        return execution_order(b"".join(chunks))
+        return parse(b"".join(chunks))
     finally:
         os.close(descriptor)
 
@@ -319,6 +320,17 @@ class Driver:
         self.save()
 
     def run_test(self):
+        combined = getattr(self.args, "combined_batch", False)
+        if combined:
+            if (not getattr(self.args, "native_root", False) or not getattr(self.args, "native_seed", False)
+                    or not callable(getattr(self, "checkpoint_callback", None))
+                    or not hasattr(self, "combined_protocol")):
+                raise RuntimeError("Combined batch requires qualifier-owned checkpoint")
+            self.combined_protocol.upper_uuid(self.checkpoint_session)
+            self.expected_tests = self.combined_protocol.TESTS
+            self.expected_cases = self.combined_protocol.CASES
+        else:
+            self.expected_tests, self.expected_cases = TESTS, CASES
         derived = getattr(self, "qualified_build", None)
         if derived is not None:
             if (not getattr(self.args, "native_root", False) or not derived.is_absolute()
@@ -332,7 +344,7 @@ class Driver:
                    "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "600",
                    "-derivedDataPath", str(derived if derived is not None else self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"],
-                   *("-only-testing:" + test for test in TESTS),
+                   *("-only-testing:" + test for test in self.expected_tests),
                    "CODE_SIGNING_ALLOWED=NO", "test-without-building" if derived is not None else "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
@@ -341,14 +353,27 @@ class Driver:
             self.native_root_identity()
             overrides.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
                               "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": self.token})
-        self.summary.update({"command": command, "environment_overrides": overrides})
+        if combined:
+            overrides.update({"TEST_RUNNER_TRIPDOCKET_COMBINED_BATCH_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_BATCH_CHECKPOINT_SESSION": self.checkpoint_session,
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": self.token})
+        self.summary.update({"command": command, "environment_overrides": overrides,
+                             "tests": list(self.expected_tests), "combined_batch": combined})
         self.save()
         self.record("xcodebuild_started", argv=command, environment_overrides=overrides)
         print(f"Hosted precondition and batch test; follow {self.directory / 'xcodebuild.log'}", flush=True)
         with (self.directory / "xcodebuild.log").open("wb") as log:
             self.process = subprocess.Popen(command, cwd=self.root, env={**os.environ, **overrides},
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            self.summary["xcodebuild_returncode"] = self.process.wait(timeout=self.remaining())
+            if combined:
+                observed = self.combined_protocol.monitor(
+                    self.process, self.directory / "xcodebuild.log", self.deadline,
+                    self.checkpoint_session, self.token, self.checkpoint_callback)
+                self.summary["combined_monitor"] = observed
+                self.summary["xcodebuild_returncode"] = observed["returncode"]
+            else:
+                self.summary["xcodebuild_returncode"] = self.process.wait(timeout=self.remaining())
         self.save()
         self.validate_result()
         if self.summary["xcodebuild_returncode"] != 0:
@@ -362,7 +387,8 @@ class Driver:
             (self.directory / f"xcresult-{kind}.json").write_bytes(data)
             results[kind] = json.loads(data)
         summary, tree = results["summary"], results["tests"]
-        expected_counts = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0,
+        expected_cases = getattr(self, "expected_cases", CASES)
+        expected_counts = {"totalTestCount": len(expected_cases), "passedTests": len(expected_cases), "failedTests": 0,
                            "skippedTests": 0, "expectedFailures": 0}
         self.summary["test_counts"] = {key: summary.get(key) for key in expected_counts}
         cases, nodes = [], list(tree["testNodes"])
@@ -378,16 +404,20 @@ class Driver:
         self.save()
         if (summary.get("result") != "Passed" or any(type(summary.get(key)) is not int or summary[key] != value
                 for key, value in expected_counts.items())
-                or len(cases) != len(CASES)
-                or any(cases.count({"identifier": identifier, "result": "Passed"}) != 1 for identifier in CASES)):
-            raise RuntimeError("xcresult must contain both exact selected cases: 2 passed, 0 failed, 0 skipped")
+                or len(cases) != len(expected_cases)
+                or any(cases.count({"identifier": identifier, "result": "Passed"}) != 1 for identifier in expected_cases)):
+            raise RuntimeError("xcresult must contain both exact selected cases: 2 passed, 0 failed, 0 skipped" if len(expected_cases) == 2 else "xcresult must contain all three exact selected cases: 3 passed, 0 failed, 0 skipped")
         if devices != [{"id": self.args.device, "platform": "iOS Simulator"}]:
             raise RuntimeError("xcresult did not run on exactly the requested device UUID")
         configurations = summary.get("devicesAndConfigurations", [])
         if (len(configurations) != 1
                 or configurations[0].get("device", {}).get("deviceId", "").upper() != self.args.device):
             raise RuntimeError("xcresult summary has an unexpected device configuration")
-        self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining)
+        if getattr(self.args, "combined_batch", False):
+            parse = lambda raw: self.combined_protocol.execution_order(raw, self.checkpoint_session, self.token)
+            self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining, parse)
+        else:
+            self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining)
         self.save()
 
     def stop_process(self):

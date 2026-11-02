@@ -22,6 +22,20 @@ Test Case '-[TripfolioTests.PlatformTests testVerifiedPurchaseAndRestoreFromLoca
 Test Case '-[TripfolioUITests.BatchImportUITests testRealFilesBatchRequiresEveryReviewAndPreservesOriginals]' started.
 Test Case '-[TripfolioUITests.BatchImportUITests testRealFilesBatchRequiresEveryReviewAndPreservesOriginals]' passed (2.000 seconds).
 """
+SESSION = "11111111-1111-4111-8111-111111111111"
+TOKEN = "22222222-2222-4222-8222-222222222222"
+NONCE = "33333333-3333-4333-8333-333333333333"
+def combined_log():
+    lines=[]
+    for n,test in enumerate(q.checkpoint.TESTS):
+        target,cls,method=test.split("/");prefix=f"Test Case '-[{target}.{cls} {method}]' "
+        lines.append(prefix+"started.")
+        if n==2:lines.append(f"{q.checkpoint.PREFIX} {SESSION} {TOKEN} {NONCE}")
+        lines.append(prefix+"passed (1.000 seconds).")
+    return ("\n".join(lines)+"\n").encode()
+COMBINED_LOG = combined_log()
+COMBINED_ORDER = q.checkpoint.execution_order(COMBINED_LOG, SESSION, TOKEN)
+
 HEAD = "a" * 40
 OWNED = "11111111-1111-4111-8111-111111111111"
 EXISTING = "22222222-2222-4222-8222-222222222222"
@@ -349,6 +363,10 @@ class Guards(unittest.TestCase):
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
+        cases=list(q.checkpoint.CASES);result.update(totalTestCount=3,passedTests=3)
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
+        summary["execution_order"]=copy.deepcopy(COMBINED_ORDER)
+        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"observed hosted PASS to observed seed PASS"}
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
         if missing_warnings:result.pop("runtimeWarnings")
@@ -358,11 +376,11 @@ class Guards(unittest.TestCase):
         module=SimpleNamespace(CASES=cases,execution_order=batch.execution_order,timestamp=lambda:"recorded")
         class Driver:
             def __init__(self,args):
-                self.args=args
+                self.args=args;self.expected_cases=cases;self.checkpoint_session=SESSION;self.token=TOKEN
                 self.directory=run.root/"build/BatchSimulator-fixture";self.directory.mkdir()
                 self.fixture_directory=self.directory/"owned-fixtures"
                 self.summary=copy.deepcopy(summary);self.actions=(self.directory/"actions.jsonl").open("w")
-                (self.directory/"xcodebuild.log").write_bytes(BATCH_LOG)
+                (self.directory/"xcodebuild.log").write_bytes(COMBINED_LOG)
             def prepare(self):events.append("prepare")
             def remaining(self):return 100
             def run_test(self):
@@ -384,7 +402,11 @@ class Guards(unittest.TestCase):
                                      send=lambda *_:self.fail("Completed process needs no signal"))
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
-        run.prepare_native_seed=lambda driver:events.append("native-seed")
+        def prepare_combined(driver):
+            events.append("combined-checkpoint-setup")
+            run.report["batch_checkpoint_verified"]=True
+            run.report["batch_checkpoint"]={"request":copy.deepcopy(COMBINED_ORDER["request"])}
+        run.prepare_combined_batch=prepare_combined
         run.prepare_shared_build=lambda driver:events.append("shared-build")
         if shared_failure:
             run.shared_products={}
@@ -421,7 +443,7 @@ class Guards(unittest.TestCase):
 
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","native-root","shared-build","native-seed","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-root","shared-build","combined-checkpoint-setup","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
 
     def test_post_main_extra_root_entry_prevents_capture_after_owned_process_stop(self):
@@ -467,7 +489,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(run.execute(),1)
         self.assertEqual(run.report["status"],"failed")
 
-    def prepared_capture(self, mode="batch"):
+    def prepared_capture(self, mode="batch", combined=True):
         run=self.run_object(mode);run.before={"head":HEAD}
         result=self.root/"build/OriginalDriver/Tests.xcresult"
         (result/"Data").mkdir(parents=True);(result/"Data/result").write_bytes(b"original result bytes")
@@ -481,12 +503,19 @@ class Guards(unittest.TestCase):
             self.preparation_fixture(run)
             run.inspect_files_preparation()
             run.report["files_preparation_verified"] = True
-            self.preparation_fixture(run, native_folder=True)
-            run.inspect_files_preparation(native_folder=True)
-            run.report["native_folder_verified"] = True
-            self.preparation_fixture(run, native_seed=True)
-            run.inspect_files_preparation(native_seed=True)
-            run.report["native_seed_verified"] = True
+            if combined:
+                run.report.update(native_root={"verified_empty_before_seed":True,"verified_after_main":True,"device":OWNED},
+                    final_inventory={},batch_checkpoint_verified=True,
+                    batch_checkpoint={"request":copy.deepcopy(COMBINED_ORDER["request"])},
+                    combined_batch={"result_bundles":2,"cases":list(q.checkpoint.CASES)},
+                    batch_execution_order=copy.deepcopy(COMBINED_ORDER))
+            else:
+                self.preparation_fixture(run, native_folder=True)
+                run.inspect_files_preparation(native_folder=True)
+                run.report["native_folder_verified"] = True
+                self.preparation_fixture(run, native_seed=True)
+                run.inspect_files_preparation(native_seed=True)
+                run.report["native_seed_verified"] = True
         return run,result
 
     def preparation_fixture(self, run, native_seed=False, native_folder=False):
@@ -674,6 +703,22 @@ class Guards(unittest.TestCase):
                 self.assertEqual(manifest["./Data/result"]["sha256"],hashlib.sha256(before["Data/result"]).hexdigest())
                 self.assertEqual(before,{str(p.relative_to(result)):p.read_bytes() for p in result.rglob("*") if p.is_file()})
                 self.root=saved
+
+    def test_combined_capture_has_two_real_bundles_and_requires_checkpoint(self):
+        run,result=self.prepared_capture()
+        self.assertFalse((run.out/"native-seed.xcresult").exists())
+        self.assertFalse((run.out/"native-folder.xcresult").exists())
+        run.report.pop("batch_checkpoint_verified")
+        self.assertEqual(run.execute(),1)
+        self.assertNotIn("original_xcresult",run.report)
+        run.report["batch_checkpoint_verified"]=True
+        run.report["combined_batch"]["cases"]=list(batch.CASES)
+        with self.assertRaisesRegex(RuntimeError,"exact three cases"):run.capture_original_result()
+
+    def test_combined_capture_rejects_fabricated_separate_seed_result(self):
+        run,result=self.prepared_capture();run.report["cleanup_verified"]=True
+        run.report["native_seed_verified"]=True
+        with self.assertRaisesRegex(RuntimeError,"separate seed"):run.capture_original_result()
 
     def test_result_manifest_failure_never_becomes_a_successful_capture(self):
         run,result=self.prepared_capture();(result/"Info.plist").unlink()
@@ -1094,7 +1139,7 @@ class Guards(unittest.TestCase):
                 q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.SEED_CASE)
 
     def test_final_capture_requires_native_seed_and_rechecks_seed_bytes_after_cleanup(self):
-        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run,_=self.prepared_capture(combined=False);run.report["cleanup_verified"]=True
         run.report.pop("native_seed_verified")
         with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
         run.report["native_seed_verified"]=True
@@ -1248,7 +1293,7 @@ class Guards(unittest.TestCase):
                 q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.FOLDER_CASE)
 
     def test_final_capture_requires_native_folder_and_rechecks_original_after_cleanup(self):
-        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run,_=self.prepared_capture(combined=False);run.report["cleanup_verified"]=True
         run.report.pop("native_folder_verified")
         with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
         run.report["native_folder_verified"]=True

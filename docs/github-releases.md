@@ -61,53 +61,65 @@ copies outside the provider; the host does not create a fixture folder or write
 fixture bytes into the provider.
 
 After preparation, the qualifier resolves the actual paths of all three test
-targets and records their compiled-product identities. Native seeding and the
-main suite both use `test-without-building` with that same preparation build.
-Missing products or changed bytes/modes stop qualification; no fallback build
-or product copy is substituted. The qualifier records installed app and data
-container identities at the phase boundaries. Sharing compiled products does
-not itself prove that Xcode skipped installation or that a Files error is fixed.
+targets and records their compiled-product identities. One serial
+`test-without-building` invocation reuses those products for the hosted purchase
+prerequisite, native seeding, and the real batch-import case. Missing products or
+changed bytes/modes stop qualification; no fallback build or product copy is
+substituted. Installed app and data-container identities are recorded. Sharing
+one invocation removes the separate seed-to-import launch boundary; it does not
+by itself prove that Xcode skipped installation or that a Files error is fixed.
 
-A second invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
-each PDF from an opt-in Debug Simulator view into the exact local root through
-Save to Files. The host checks that the root is still empty immediately before
-seeding, then requires exactly the two expected regular files and compares all
-bytes against the retained sources. The provider identity must remain unchanged;
-successful UI actions alone are insufficient. This seed phase has a 300-second
-test cap and a 180-second case allowance.
+The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, shares each PDF from
+an opt-in Debug Simulator view into the exact local root through Save to Files.
+Its existing 180-second case allowance and UI assertions remain. After all seed
+actions succeed, the UI test process records its run identity and terminates the
+synthetic app. At the start of the import case, before resetting or launching the
+app, the test consumes that same-process record and waits for one host response.
+A missing or restarted producer process cannot authorize import.
 
-Native seeding, result inspection and the main functional invocation consume
-the same 1,200-second driver clock, started before destination preflight. No
-phase renews it. Admission requires enough remaining time for following phases;
-startup and inspection still consume that budget, so it is not a completion
-guarantee. Batch work remains bounded by 2,400 seconds, with 180 seconds for
-owned cleanup. A failed preparation or seed phase prevents the main functional
-suite from starting.
+The host requires the actual hosted and seed XCTest pass markers in order,
+followed by the import-case start and its fresh checkpoint request. It then
+revalidates the owned destination and requires exactly the two expected regular
+files, comparing every byte with the retained sources. Only a successful,
+recorded verification permits one response on that run's nonce-specific channel.
+The response proves fixture verification, not successful purchase or import.
+Missing, duplicated, stale or out-of-order requests fail. The wait has a
+60-second transport limit within the import case's unchanged 600 seconds.
+
+Preparation and the combined suite produce two actual result bundles: one case
+and three cases, respectively. There is no separate seed result bundle or seed
+command exit code. Final independent review requires all four native cases,
+explicit empty warning/failure arrays, the real log order, checkpoint evidence,
+full original-byte comparisons, and visual checks. A prior three-bundle capture
+cannot be relabeled as this control.
+
+Startup, the hosted prerequisite, seed, host checkpoint, import and result
+inspection share the same 1,200-second driver clock, started before destination
+preflight. No phase renews it. The hosted prerequisite retains its 300-second
+default allowance; seed retains 180 seconds and import retains 600 seconds.
+A 300-second envelope runs from the observed hosted-test pass to the seed pass,
+including UI-runner startup between them. This differs from the former separate
+seed-command boundary; initial combined startup also consumes the driver clock.
+The original 2,400-second work budget, 180-second cleanup budget and UI-action
+waits remain.
+These limits are not a completion guarantee. Failed preparation or fixture
+verification prevents the import actions from starting.
 
 The root fixture mode belongs only to the hosted qualifier's exclusively owned
-Simulator. Its driver never recursively removes the provider root or deletes
-individual root entries: fixture cleanup is deferred to deletion of that whole
-owned Simulator. Capture remains incomplete until the qualifier proves that
-deletion and the unchanged inventory of other devices. The standalone
-`test-batch-simulator.py` command retains its default creation and cleanup of a
-unique fixture folder. The earlier native-folder experiment remains separate
-and does not supply a result or a fabricated pass for this three-phase route.
+Simulator. Its driver never removes the provider root or individual root
+entries: cleanup is deferred to deletion of that whole owned Simulator. The
+complete root and source bytes are checked again after the test writer stops,
+even after a native failure. Capture remains incomplete until owned cleanup and
+the unchanged inventory of other devices are proved. The standalone
+`test-batch-simulator.py` command retains its default two-case invocation and
+creation/cleanup of a unique fixture folder.
 
-The hosted purchase prerequisite keeps the runner's 300-second default allowance.
-The complete batch UI case explicitly uses 600 seconds, with the runner maximum
-set to 600. A retained run reached final reconfirmation at its former 300-second
-limit; its later Save action did not establish completed save, relaunch or
-original-byte verification. Those checks remain required. Native seeding,
-inspection, build, startup, both functional cases and
-postprocessing share the original driver budget; the larger case allowance does
-not guarantee completion or extend any UI-action deadline.
-One serial functional invocation runs the exact hosted purchase/restore
-test followed by the exact real Files batch test. The hosted test verifies local
-StoreKit APIs and clears its transactions before the UI test makes its own purchase.
-Both cases must pass with no skips. Four unique XCTest log markers must prove
-hosted start/pass followed by batch start/pass; the original bounded log is hashed
-and checked again during independent review. The original StoreKit and UI assertions
-remain required. Successful purchase setup alone does not qualify the Files workflow.
+The real import case still makes its own local Xcode purchase, selects the files,
+requires each review and reconfirmation after edits, saves, relaunches and opens
+the complete originals. Its 600-second allowance was introduced after a retained
+run exhausted the former 300 seconds before completing those checks. The hosted
+prerequisite clears its local transactions before the UI makes its own purchase.
+Successful purchase setup alone does not qualify the Files workflow.
 
 Earlier Xcode 16.4 captures retain their original producer identity and review
 limits. They do not qualify a new 26.2 Release binary. A passing run with either
