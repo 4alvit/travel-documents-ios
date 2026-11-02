@@ -192,13 +192,14 @@ that request. A matching result can finish while the interface is covered;
 replaced requests and discarded drafts reject late results and dispose owned
 copies. Picker errors belong to the draft so they survive view replacement. Each item
 stores a confirmation snapshot; changing metadata removes its confirmation.
-The batch picker requests temporary copies through UIKit. A selection lease
-accepts only regular files inside the app's temporary directory and retains
-them until preparation finishes, including any outstanding read after cancel.
-Rejected and stale selections also attempt cleanup. Cleanup checks the captured
-file and parent-directory identities before unlinking a file; replaced or
-unrecognized paths are left untouched. Provider originals are not cleanup
-targets. The model still enforces
+The batch picker opens provider originals through UIKit without requesting
+copies. A non-owning selection retains the exact returned URL values until
+preparation and any outstanding reads finish. The model balances security-scoped
+access and coordinates each bounded read; disposing this selection never removes
+or modifies the originals. The separate owned-copy selection accepts only regular
+files inside the app's temporary directory and attempts cleanup after consumption
+or rejection, checking captured file and parent identities before unlinking.
+Replaced or unrecognized paths remain untouched. The model still enforces
 the file-count, complete-content, size and entitlement checks before review.
 Pro gates new batch preparation and save, never old-data access or recovery.
 The batch editor, single-file import and existing-document editor are mutually exclusive. Privacy

@@ -115,10 +115,10 @@ final class BatchDocumentPickerTests: XCTestCase {
         try fixture { root in
             let copy = try file("copy.pdf", root: root)
             let session = BatchDocumentPicker.Session(draftID: UUID())
-            var delivered: BatchDocumentSelection?
+            var delivered: BatchPickerSelection?
             var completions = 0
             let coordinator = BatchDocumentPicker.Coordinator(session: session, capture: {
-                try BatchDocumentSelection.capture($0, temporaryDirectory: root)
+                .copied(try BatchDocumentSelection.capture($0, temporaryDirectory: root))
             }) { result in
                 completions += 1
                 XCTAssertFalse(session.active)
@@ -141,7 +141,7 @@ final class BatchDocumentPickerTests: XCTestCase {
             let session = BatchDocumentPicker.Session(draftID: UUID())
             var completions = 0
             let coordinator = BatchDocumentPicker.Coordinator(session: session, capture: {
-                try BatchDocumentSelection.capture($0, temporaryDirectory: root)
+                .copied(try BatchDocumentSelection.capture($0, temporaryDirectory: root))
             }) { result in
                 completions += 1
                 XCTAssertNil(result)
@@ -159,7 +159,7 @@ final class BatchDocumentPickerTests: XCTestCase {
             let copy = try file("copy.pdf", root: root)
             let session = BatchDocumentPicker.Session(draftID: UUID())
             let coordinator = BatchDocumentPicker.Coordinator(session: session, capture: {
-                try BatchDocumentSelection.capture($0, temporaryDirectory: root)
+                .copied(try BatchDocumentSelection.capture($0, temporaryDirectory: root))
             }) { _ in XCTFail("An explicitly invalidated picker must not publish") }
             let picker = controller()
             session.invalidate()

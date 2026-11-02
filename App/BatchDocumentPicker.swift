@@ -121,6 +121,38 @@ final class BatchDocumentSelection: @unchecked Sendable {
     }
 }
 
+/// Borrows the original URL values granted by the document picker. No path is
+/// normalized or recreated, and releasing this selection never deletes files.
+struct BatchExternalSelection: Sendable {
+    let urls: [URL]
+
+    init(_ urls: [URL]) throws {
+        guard (1...10).contains(urls.count) else { throw BatchImportError.invalidSelection }
+        guard urls.allSatisfy({ $0.isFileURL && ($0.host == nil || $0.host == "" || $0.host == "localhost") }) else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
+        self.urls = urls
+    }
+}
+
+/// Ownership is explicit: the opening picker borrows originals; only a
+/// separately captured temporary-copy lease may remove files on disposal.
+enum BatchPickerSelection: Sendable {
+    case external(BatchExternalSelection)
+    case copied(BatchDocumentSelection)
+
+    var urls: [URL] {
+        switch self {
+        case .external(let selection): selection.urls
+        case .copied(let selection): selection.urls
+        }
+    }
+
+    func dispose() {
+        if case .copied(let selection) = self { selection.dispose() }
+    }
+}
+
 @MainActor
 struct BatchDocumentPicker: UIViewControllerRepresentable {
     @MainActor
@@ -155,12 +187,12 @@ struct BatchDocumentPicker: UIViewControllerRepresentable {
     }
 
     let session: Session
-    let completion: (Result<BatchDocumentSelection, Error>?) -> Void
+    let completion: (Result<BatchPickerSelection, Error>?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, completion: completion) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf, .jpeg, .png], asCopy: true)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf, .jpeg, .png], asCopy: false)
         picker.allowsMultipleSelection = true
         picker.delegate = context.coordinator
         return picker
@@ -179,13 +211,13 @@ struct BatchDocumentPicker: UIViewControllerRepresentable {
     @MainActor
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
         let session: Session
-        private let completion: (Result<BatchDocumentSelection, Error>?) -> Void
-        private let capture: ([URL]) throws -> BatchDocumentSelection
+        private let completion: (Result<BatchPickerSelection, Error>?) -> Void
+        private let capture: ([URL]) throws -> BatchPickerSelection
         private var receivedSelection = false
         private var completed = false
 
-        init(session: Session, capture: @escaping ([URL]) throws -> BatchDocumentSelection = { try .capture($0) },
-             completion: @escaping (Result<BatchDocumentSelection, Error>?) -> Void) {
+        init(session: Session, capture: @escaping ([URL]) throws -> BatchPickerSelection = { .external(try BatchExternalSelection($0)) },
+             completion: @escaping (Result<BatchPickerSelection, Error>?) -> Void) {
             self.session = session
             self.capture = capture
             self.completion = completion
