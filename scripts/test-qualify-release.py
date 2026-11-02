@@ -1177,7 +1177,7 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
         self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
-        self.assertIn('run-name: "Diagnostic native Folder and Save with matched Xcode 26.2: ${{ inputs.mode }}"', workflow)
+        self.assertIn('run-name: "Release qualification: ${{ inputs.mode }}"', workflow)
         self.assertIn("python3 -B scripts/test-batch-scroll-container.py", workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)

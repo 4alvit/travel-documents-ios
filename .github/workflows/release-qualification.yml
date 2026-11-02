@@ -1,5 +1,5 @@
 name: Release qualification
-run-name: "Diagnostic native Folder and Save with matched Xcode 26.2: ${{ inputs.mode }}"
+run-name: "Release qualification: ${{ inputs.mode }}"
 on:
   workflow_dispatch:
     inputs:
