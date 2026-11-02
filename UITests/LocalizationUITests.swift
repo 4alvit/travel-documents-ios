@@ -512,7 +512,12 @@ final class LocalizationUITests: XCTestCase {
     }
 
     private func attach(_ app: XCUIApplication, name: String) {
+        // Keep the last completed boundary in the runner log if a native
+        // screenshot request itself never returns. Names contain test labels.
+        let started = ProcessInfo.processInfo.systemUptime
+        print("LOCALIZATION_ATTACHMENT screenshot-request name=\(name) runner=\(ProcessInfo.processInfo.processIdentifier)")
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        print("LOCALIZATION_ATTACHMENT screenshot-returned name=\(name) elapsed=\(ProcessInfo.processInfo.systemUptime - started)")
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
@@ -520,6 +525,7 @@ final class LocalizationUITests: XCTestCase {
         hierarchy.name = "\(name) — accessibility hierarchy"
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
+        print("LOCALIZATION_ATTACHMENT hierarchy-attached name=\(name)")
     }
 
     private struct LocalizationFailure: LocalizedError {

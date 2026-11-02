@@ -307,7 +307,7 @@ class Driver:
 
     def validate_result(self):
         output = self.command("xcresult_summary", [
-            "xcrun", "xcresulttool", "get", "test-results", "summary", "--schema-version", "0.4.0",
+            "xcrun", "xcresulttool", "get", "test-results", "summary",
             "--path", self.summary["result_bundle"], "--compact",
         ])
         try:
@@ -323,7 +323,7 @@ class Driver:
         # Keep counts even if the detailed manifest or device check fails.
         self.write_summary()
         tree_output = self.command("xcresult_tests", [
-            "xcrun", "xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0",
+            "xcrun", "xcresulttool", "get", "test-results", "tests",
             "--path", self.summary["result_bundle"], "--compact",
         ])
         (self.directory / "xcresult-tests.json").write_text(tree_output + "\n", encoding="utf-8")

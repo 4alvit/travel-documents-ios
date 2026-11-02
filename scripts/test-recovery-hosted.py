@@ -282,12 +282,12 @@ class BoundaryTests(unittest.TestCase):
     def test_ci_artifacts_bind_run_attempt_without_broadening_recovery_uploads(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         names=[line.strip() for line in workflow.splitlines() if 'name: TripDocket-' in line]
-        self.assertEqual(len(names),7)
-        self.assertEqual(len(set(names)),7)
+        self.assertEqual(len(names),8)
+        self.assertEqual(len(set(names)),8)
         self.assertEqual({name.split('${{')[0].strip() for name in names},
                          {'name: TripDocket-tests-core-purchase-', 'name: TripDocket-tests-ui-guidance-',
                           'name: TripDocket-simulator-', 'name: TripDocket-privacy-ipad-',
-                          'name: TripDocket-recovery-',
+                          'name: TripDocket-recovery-', 'name: TripDocket-qualification-toolchain-',
                           'name: TripDocket-files-picker-failure-core-purchase-',
                           'name: TripDocket-files-picker-failure-ui-guidance-'})
         self.assertTrue(all('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in name for name in names))
@@ -2323,6 +2323,88 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('resource_scan_failure',r.report)
         self.assertEqual(r.ops.processes,[])
 
+    def test_boot_scan_15_requires_active_exact_owned_wait_and_keeps_restart_disabled(self):
+        r=self.runner();r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':112.}
+        r.report['commands'].append(row);observed=[]
+        def scan(*args,**kwargs):
+            observed.append((args[3],kwargs['allow_xcresult_restart'],kwargs['allow_products_restart']))
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()  # Admission has no active owned process.
+            r.active[123]=SimpleNamespace(pid=123);r.monitor()
+            r.active[123]=SimpleNamespace(pid=456);r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);row['finish']=0.;r.monitor();del row['finish']
+            row['argv']=argv[:-2]+['unowned','-b'];r.monitor();row['argv']=argv
+            row['id']='boot';r.monitor();row['id']='boot-ready'
+            r.owned=None;r.monitor();r.owned=argv[3]
+            row['work_deadline']=7.;r.monitor();row['work_deadline']=112.
+            r.limit=4.;r.monitor();r.limit=1380.
+            probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[dict(row)]},
+                                  active={123:SimpleNamespace(pid=123)},owned=r.owned)
+            r.monitor(command_owner=probe)
+        self.assertEqual(observed,[(end,False,False) for end in [5.,15.,5.,5.,5.,5.,5.,7.,4.,5.]])
+        self.assertEqual((r.limit,r.final,hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']),
+                         (1380.,1500.,5,15))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_boot_scan_completes_full_uncached_traversal_after_six_second_span(self):
+        r=self.runner(Ops({'delay':6.}));r.owned='10000000-0000-0000-0000-000000000001'
+        payload=b'complete synthetic source';(r.out/'synthetic.bin').write_bytes(payload)
+        real=hosted.core.os.scandir;delayed=False
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if r.active and not delayed:delayed=True;r.ops.t+=6.
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertTrue(delayed);self.assertNotIn('resource_scan_failure',r.report)
+        self.assertGreaterEqual(r.report['resources'][-1]['logical'],len(payload))
+        self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
+        row=r.report['commands'][0]
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['returncode']),(112.,120.,0))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
+        real=hosted.core.os.scandir;delays=[]
+        def scan(fd):
+            value=real(fd)
+            if r.active:delays.append(r.ops.t);r.ops.t+=15.25
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(len(delays),1);self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual(failed['deadline_elapsed']-failed['started_elapsed'],15)
+        self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLess(r.ops.t,120.);self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_boot_scan_15_is_clipped_to_original_work_deadline_and_stop_reserve(self):
+        r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
+        r.ops.on_spawn=lambda argv:setattr(r.ops,'t',110.)
+        real=hosted.core.os.scandir;delayed=False
+        def scan(fd):
+            nonlocal delayed
+            value=real(fd)
+            if r.active and not delayed:delayed=True;r.ops.t+=2.25
+            return value
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),
+                         (110.,112.,112.25))
+        self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(112.,120.))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertLess(r.ops.t,120.);self.assertFalse(r.active)
+
     def test_phase_scan_cooperative_overshoot_keeps_failed_totals_and_never_renews(self):
         r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;calls=0
@@ -2426,8 +2508,9 @@ class BoundaryTests(unittest.TestCase):
                     active={456:SimpleNamespace(pid=456)})
                 def checkpoint(*,force_resources=False):
                     r.checkpoint(force_resources=force_resources,command_owner=bridge)
-                def scan(root,pin,now,deadline,check,*,observation,allow_xcresult_restart):
+                def scan(root,pin,now,deadline,check,*,observation,allow_xcresult_restart,allow_products_restart):
                     self.assertEqual(allow_xcresult_restart,expected);self.assertEqual(deadline,end)
+                    self.assertEqual(allow_products_restart,expected)
                     return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
                 with patch.object(hosted.core,'live_sizes',side_effect=scan):
                     checkpoint(force_resources=True)
@@ -2435,7 +2518,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_scan_policy_clips_allowance_to_global_and_pending_command_work(self):
         r=self.runner();deadlines=[]
-        def scan(root,identity,now,deadline,checkpoint,*,observation,allow_xcresult_restart):
+        def scan(root,identity,now,deadline,checkpoint,*,observation,allow_xcresult_restart,allow_products_restart):
             deadlines.append(deadline)
             return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
         with patch.object(hosted.core,'live_sizes',side_effect=scan):
@@ -2611,7 +2694,8 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(path.stat().st_size, size)
         return path
 
-    def derived_vanish_scan(self, *, relative=None, scenario='absent', entry_kind=None, allow_xcresult_restart=False, **caps):
+    def derived_vanish_scan(self, *, relative=None, scenario='absent', entry_kind=None,
+                           allow_xcresult_restart=False, allow_products_restart=False, **caps):
         relative=relative or 'DerivedData/Build/Intermediates.noindex/Tripfolio.build/Debug-iphonesimulator/Tripfolio.build/Objects-normal/arm64/OCRService-bf16349b.o.tmp'
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve();target=root/relative
         target.parent.mkdir(parents=True,exist_ok=True)
@@ -2627,6 +2711,7 @@ class ResourceAccountingTests(unittest.TestCase):
             if entry.name==target.name and not triggered[0]:
                 triggered[0]=True
                 if scenario=='entry_permission':raise PermissionError(errno.EACCES,'synthetic denied')
+                if scenario=='entry_eperm':raise PermissionError(errno.EPERM,'synthetic denied')
                 if scenario=='entry_other_errno':raise FileNotFoundError(errno.ENOTDIR,'synthetic wrong type')
                 if scenario=='directory_open':return entry.stat(follow_symlinks=follow_symlinks)
                 target.rmdir() if directory else target.unlink()
@@ -2651,6 +2736,7 @@ class ResourceAccountingTests(unittest.TestCase):
             if path==target.name and kwargs.get('dir_fd') is not None:
                 self.assertIs(kwargs.get('follow_symlinks'),False);absence_stats.append(path)
                 if scenario=='confirmation_permission':raise PermissionError(errno.EACCES,'synthetic denied')
+                if scenario=='confirmation_eperm':raise PermissionError(errno.EPERM,'synthetic denied')
                 if scenario=='confirmation_other_errno':raise FileNotFoundError(errno.ENOTDIR,'synthetic wrong type')
                 try:return real_stat(path,*args,**kwargs)
                 except FileNotFoundError:
@@ -2671,7 +2757,8 @@ class ResourceAccountingTests(unittest.TestCase):
              patch.object(hosted.core.os,'stat',side_effect=metadata),patch.object(hosted.core.os,'open',side_effect=open_fd), \
              patch.object(hosted.core.os,'close',side_effect=close_fd),patch.object(hosted.core.os,'fstat',side_effect=fd_stat):
             try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,observation=observation,
-                                             allow_xcresult_restart=allow_xcresult_restart)
+                                             allow_xcresult_restart=allow_xcresult_restart,
+                                             allow_products_restart=allow_products_restart)
             except BaseException as error:result=error
         self.assertTrue(triggered[0]);self.assertCountEqual(opened,closed)
         return result,observation,root,absence_stats,clock[0]
@@ -2826,13 +2913,18 @@ class ResourceAccountingTests(unittest.TestCase):
                 if scenario!='late_dense_cap':self.assertEqual(elapsed,10.)
 
     def xcresult_rescan_fixture(self, *, repeated=False, end_first=False,
-                                end_second=False, entry_cap=100000, dense_cap=None, staging=False, directory=False):
+                                end_second=False, entry_cap=100000, dense_cap=None, staging=False,
+                                directory=False, products=False, mixed=False):
         root=Path(tempfile.mkdtemp(dir=self.temp)).resolve()
-        data=root/'Tests.xcresult'/('Staging' if staging else 'Data');data.mkdir(parents=True)
+        data=(root/'DerivedData/Build/Products/Debug-iphonesimulator/Tripfolio.app/PlugIns/TripfolioTests.xctest/Frameworks/TravelCore_61B56BF175111D01_PackageProduct.framework/TravelCore_TravelCore.bundle'
+              if products else root/'Tests.xcresult'/('Staging' if staging else 'Data'))
+        data.mkdir(parents=True)
         stable=root/'00-stable';stable.write_bytes(b'old')
-        first=data/('9C21B21B-53DF-40FE-85BF-38A7361D7DD0' if staging else '_tmp.IJNVOw')
+        first=data/('Info.plist' if products else '9C21B21B-53DF-40FE-85BF-38A7361D7DD0' if staging else '_tmp.IJNVOw')
         first.mkdir() if directory else first.write_bytes(b'first incomplete writer entry')
-        second=data/('11111111-1111-4111-8111-111111111111' if staging else '_tmp.second')
+        second=(root/'Tests.xcresult/Data/_tmp.second' if mixed else
+                data/('Other.plist' if products else '11111111-1111-4111-8111-111111111111' if staging else '_tmp.second'))
+        if mixed:second.parent.mkdir(parents=True)
         if repeated:second.mkdir() if directory else second.write_bytes(b'second incomplete writer entry')
         identity=hosted.core.identity_of(root);clock=[0.];observation={}
         root_passes=[0];seen=[];triggered=set();opened=[];closed=[]
@@ -2841,7 +2933,8 @@ class ResourceAccountingTests(unittest.TestCase):
             seen.append((root_passes[0],entry.name))
             if entry.name in (first.name,second.name) and entry.name not in triggered:
                 triggered.add(entry.name)
-                (data/entry.name).rmdir() if directory else (data/entry.name).unlink()
+                target=first if entry.name==first.name else second
+                target.rmdir() if directory else target.unlink()
                 stable.write_bytes(b'fresh complete sample'*4096)
             return entry.stat(follow_symlinks=follow_symlinks)
         @contextlib.contextmanager
@@ -2866,10 +2959,64 @@ class ResourceAccountingTests(unittest.TestCase):
         with patch.dict(hosted.core.CAPS,caps),patch.object(hosted.core.os,'scandir',side_effect=entries), \
              patch.object(hosted.core.os,'open',side_effect=open_fd),patch.object(hosted.core.os,'close',side_effect=close_fd):
             try:result=hosted.core.live_sizes(root,identity,lambda:clock[0],10,
-                    observation=observation,allow_xcresult_restart=True)
+                    observation=observation,allow_xcresult_restart=True,allow_products_restart=products)
             except BaseException as error:result=error
         self.assertCountEqual(opened,closed)
         return result,observation,root,root_passes[0],seen,clock[0]
+
+    def test_products_plist_disappearance_requires_fresh_complete_accounting(self):
+        result,observation,root,passes,seen,_=self.xcresult_rescan_fixture(products=True)
+        self.assertIsInstance(result,dict);self.assertEqual(passes,2)
+        paths=[root]+list(root.rglob('*'))
+        self.assertEqual(result['allocated'],sum(p.lstat().st_blocks*512 for p in paths))
+        self.assertEqual(result['logical'],sum(p.stat().st_size for p in paths if p.is_file()))
+        self.assertEqual(result['entries'],len(paths)-1)
+        self.assertEqual([name for _,name in seen].count('00-stable'),2)
+        self.assertEqual(result['complete_scan_attempts'],2)
+        self.assertTrue(observation['discarded_scan']['partial_counts_are_not_valid_accounting'])
+        self.assertEqual(observation['discarded_scan']['kind'],'products')
+        self.assertTrue(result['products_rescan_path'].endswith('TravelCore_TravelCore.bundle/Info.plist'))
+        self.assertNotEqual(observation['discarded_scan']['partial_totals']['logical'],result['logical'])
+        self.assertNotIn('confirmed_absent_derived_entries',result)
+        self.assertEqual(observation['status'],'completed')
+
+    def test_products_and_xcresult_churn_share_one_restart(self):
+        for mixed in [False,True]:
+            with self.subTest(mixed=mixed):
+                result,observation,_,passes,_,_=self.xcresult_rescan_fixture(products=True,repeated=True,mixed=mixed)
+                self.assertIsInstance(result,FileNotFoundError);self.assertEqual(passes,2)
+                self.assertEqual(observation['status'],'failed')
+                self.assertEqual(observation['traversal_attempts'],2)
+
+    def test_products_restart_retains_original_deadline_encounter_and_byte_caps(self):
+        for options,expected in [({'end_first':True},'deadline'),({'end_second':True},'deadline'),
+                                ({'entry_cap':20},'entry cap'),({'dense_cap':32768},'size cap')]:
+            with self.subTest(options=options):
+                result,observation,_,passes,_,elapsed=self.xcresult_rescan_fixture(products=True,**options)
+                self.assertIsInstance(result,RuntimeError);self.assertIn(expected,str(result))
+                self.assertLessEqual(passes,2);self.assertEqual(observation['status'],'failed')
+                if expected=='deadline':self.assertEqual(elapsed,10.)
+
+    def test_products_restart_requires_regular_leaf_and_stable_identity(self):
+        relative='DerivedData/Build/Products/Debug-iphonesimulator/Tripfolio.app/PlugIns/TripfolioTests.xctest/Frameworks/TravelCore_61B56BF175111D01_PackageProduct.framework/TravelCore_TravelCore.bundle/Info.plist'
+        for scenario in ['directory','symlink','unknown_kind','directory_open','reappeared',
+                         'root_replaced','parent_replaced','fd_replaced','final_root_replaced',
+                         'entry_permission','entry_eperm','entry_other_errno','confirmation_permission',
+                         'confirmation_eperm','confirmation_other_errno','late_entry','late_confirmation']:
+            with self.subTest(scenario=scenario):
+                result,observation,_,_,_=self.derived_vanish_scan(relative=relative,scenario=scenario,
+                    allow_products_restart=True)
+                self.assertIsInstance(result,(OSError,RuntimeError));self.assertEqual(observation['status'],'failed')
+                self.assertEqual(observation['traversal_attempts'],1)
+                self.assertNotIn('discarded_scan',observation)
+        for path,enabled in [(relative,False),('DerivedData/Build/Products',True),
+                             ('Source/Info.plist',True),('Tests.xcresult/Data/final-record',True),
+                             ('DerivedData/Build/Products/Test.xcresult/Data/Info.plist',True)]:
+            with self.subTest(path=path,enabled=enabled):
+                result,observation,_,probes,_=self.derived_vanish_scan(relative=path,
+                    allow_xcresult_restart=True,allow_products_restart=enabled)
+                self.assertIsInstance(result,FileNotFoundError);self.assertEqual(probes,[])
+                self.assertNotIn('discarded_scan',observation)
 
     def test_staging_disappearance_discards_partial_and_requires_complete_fresh_pass(self):
         for directory in [False,True]:
@@ -2997,8 +3144,9 @@ class ResourceAccountingTests(unittest.TestCase):
                     if finished:command['finish']=1.
                     owner.report['commands']=[command]
                     if active:owner.active[123]=SimpleNamespace(pid=123)
-                    def sample(root,pin,now,deadline,checkpoint,*,observation,allow_xcresult_restart):
+                    def sample(root,pin,now,deadline,checkpoint,*,observation,allow_xcresult_restart,allow_products_restart):
                         self.assertEqual(allow_xcresult_restart,expected)
+                        self.assertEqual(allow_products_restart,expected)
                         self.assertEqual(deadline,5. if finished else 2.)
                         return {'allocated':0,'logical':0,'entries':0,'xcresults':{}}
                     with patch.object(hosted.core,'live_sizes',side_effect=sample), \

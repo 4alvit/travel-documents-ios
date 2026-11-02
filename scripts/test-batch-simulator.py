@@ -227,7 +227,7 @@ class Driver:
         results = {}
         for kind in ["summary", "tests"]:
             data = self.command("xcrun", "xcresulttool", "get", "test-results", kind,
-                                "--schema-version", "0.4.0", "--path", self.summary["result_bundle"], "--compact")
+                                "--path", self.summary["result_bundle"], "--compact")
             (self.directory / f"xcresult-{kind}.json").write_bytes(data)
             results[kind] = json.loads(data)
         summary, tree = results["summary"], results["tests"]

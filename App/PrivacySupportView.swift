@@ -5,6 +5,10 @@ import SwiftUI
 struct PrivacySupportView: View {
     @Environment(\.openURL) private var openURL
     @State private var selectedLink: PrivacySupportLink?
+    #if DEBUG && targetEnvironment(simulator)
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var diagnostics = GuidanceDiagnostics()
+    #endif
 
     var body: some View {
         List {
@@ -78,9 +82,16 @@ struct PrivacySupportView: View {
             }
         }
         .accessibilityIdentifier("privacySupport.content")
+        #if DEBUG && targetEnvironment(simulator)
+        .modifier(GuidanceDiagnosticValue(value: diagnostics.value(selection: selectedLink, scene: scenePhase)))
+        #endif
         .navigationTitle(L10n.ui("privacySupport.title", defaultValue: "Privacy & support"))
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $selectedLink) { link in
+        .sheet(item: $selectedLink, onDismiss: {
+            #if DEBUG && targetEnvironment(simulator)
+            diagnostics.didDismiss()
+            #endif
+        }) { link in
             NavigationStack {
                 List {
                     Text(L10n.ui("privacySupport.external.body", defaultValue: "This opens GitHub outside TripDocket and needs an internet connection. GitHub handles the web visit under its own policies. TripDocket does not attach your documents to this link."))
@@ -106,9 +117,18 @@ struct PrivacySupportView: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button(L10n.ui("common.cancel", defaultValue: "Cancel")) {
+                            #if DEBUG && targetEnvironment(simulator)
+                            diagnostics.receivedCancel(link)
+                            #endif
                             selectedLink = nil
+                            #if DEBUG && targetEnvironment(simulator)
+                            diagnostics.recordSelectionAfterCancel(selectedLink)
+                            #endif
                         }
                         .accessibilityIdentifier("privacySupport.external.cancel")
+                        #if DEBUG && targetEnvironment(simulator)
+                        .modifier(GuidanceDiagnosticValue(value: diagnostics.value(selection: selectedLink, scene: scenePhase)))
+                        #endif
                     }
                 }
             }
@@ -116,13 +136,79 @@ struct PrivacySupportView: View {
     }
 
     private func websiteButton(_ link: PrivacySupportLink) -> some View {
-        Button { selectedLink = link } label: {
+        Button {
+            selectedLink = link
+            #if DEBUG && targetEnvironment(simulator)
+            diagnostics.didPresent(link)
+            #endif
+        } label: {
             Label(link.title, systemImage: "arrow.up.right.square")
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityIdentifier("privacySupport.link.\(link.rawValue)")
     }
 }
+
+#if DEBUG && targetEnvironment(simulator)
+/// Opt-in observations only. Values contain fixed link kinds and counters, never
+/// document data, destinations, error payloads or a replacement acceptance result.
+private struct GuidanceDiagnostics {
+    private let enabled = ProcessInfo.processInfo.arguments.contains("--ui-testing-guidance-diagnostics")
+    private var presentations = 0
+    private var cancellations = 0
+    private var dismissals = 0
+    private var lastPresented: PrivacySupportLink?
+    private var lastCancelled: PrivacySupportLink?
+    private var selectionAfterCancel = "notObserved"
+
+    mutating func didPresent(_ link: PrivacySupportLink) {
+        guard enabled else { return }
+        presentations += 1
+        lastPresented = link
+    }
+
+    mutating func receivedCancel(_ link: PrivacySupportLink) {
+        guard enabled else { return }
+        cancellations += 1
+        lastCancelled = link
+    }
+
+    mutating func recordSelectionAfterCancel(_ selection: PrivacySupportLink?) {
+        guard enabled else { return }
+        selectionAfterCancel = selection?.rawValue ?? "none"
+    }
+
+    mutating func didDismiss() {
+        guard enabled else { return }
+        dismissals += 1
+    }
+
+    func value(selection: PrivacySupportLink?, scene: ScenePhase) -> String? {
+        guard enabled else { return nil }
+        let phase: String
+        switch scene {
+        case .active: phase = "active"
+        case .inactive: phase = "inactive"
+        case .background: phase = "background"
+        @unknown default: phase = "unknown"
+        }
+        return "guidance-diagnostic presentations=\(presentations) lastPresented=\(lastPresented?.rawValue ?? "none") cancellations=\(cancellations) lastCancelled=\(lastCancelled?.rawValue ?? "none") selectionAfterCancel=\(selectionAfterCancel) selection=\(selection?.rawValue ?? "none") dismissals=\(dismissals) scene=\(phase)"
+    }
+}
+
+private struct GuidanceDiagnosticValue: ViewModifier {
+    let value: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let value {
+            content.accessibilityValue(value)
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 /// Fixed, public destinations only. Preview documents stay pinned to an audited
 /// published commit until stable production policies are approved and published.

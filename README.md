@@ -66,17 +66,29 @@ test products; its transactions never count as sales.
 Run `bash scripts/test-simulator.sh` with an installed runtime to execute app,
 StoreKit and UI tests serially. `TRIPFOLIO_SIMULATOR_ID` can select a specific
 device. The result bundle is written under `build/`.
+Pass `--require-sdk-match` before any `--cohort` option to require an available
+iPhone in the selected Xcode's exact Simulator SDK runtime; a supplied device
+UUID is checked against the same requirements. Ordinary local use keeps its
+existing selection behavior. The guidance CI job enables this check and pins
+Xcode 26.2 (17C52); its captured inventories and selected device are retained
+with the test artifact. Core/purchase tests and the Release preview pin
+Xcode 16.4 (16F6), retaining the previously validated runtime selection. This
+compatibility lane does not claim an SDK-matched runtime; the test result
+records its actual device/runtime. The separate recovery compatibility job
+keeps its own pinned toolchain/profile.
 
-The accepted executable baseline is `674cbb6`. [CI 40169628635](https://github.com/4alvit/travel-documents-ios/actions/runs/40169628635)
-passed 38 core tests, 95 phone tests with zero failures and seven expected opt-in
-skips, and two separately selected iPad guidance tests. All seven StoreKit cases
-passed. The tested merge `5cb2d0a9` has the same tree as that source commit.
-Earlier failures remain historical evidence. Later documentation or source
-commits require their own checks; these results are not relabelled as new runs.
+Check the [current CI](https://github.com/4alvit/travel-documents-ios/actions/workflows/ci.yml)
+for the exact revision you intend to build. Historical successful runs and their
+scope are recorded in [release evidence](docs/release-evidence.md); they do not
+replace a later failed or incomplete run.
 
-This exact Release ZIP subsequently passed one ordinary Simulator launch to the
-system passcode prompt and verified cleanup. Authentication was not completed;
-unlocked workflows, physical devices and live purchases remain unverified.
+[GitHub release channels](docs/github-releases.md) distribute source and an
+unsigned Simulator build with exact source, CI and validation receipts. Beta,
+release candidate and final promotion retain the same verified payload bytes.
+Those channels do not qualify physical-device behavior, live purchases,
+TestFlight or App Store distribution.
+Hosted qualification captures require an independent result-bundle and visual
+review before their operator receipts can authorize a release promotion.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.
@@ -87,6 +99,9 @@ Debug builds with real sensitive documents. Release builds omit these flags.
 
 The hosted iPad guidance job runs the existing English normal-size and Russian
 maximum Dynamic Type cases with `bash scripts/test-privacy-support-ipad.sh`.
+CI pins Xcode 26.2 (17C52); the driver requires an available Simulator runtime
+matching the selected Xcode's iOS Simulator SDK. A missing or ambiguous match
+fails before device creation. Local use requires the same SDK/runtime match.
 It creates a dedicated compatible iPad, builds once, sets and reads back the
 system text size before each separate test, then deletes only that simulator
 and checks that its UUID is absent. Both CI jobs must succeed. Evidence under

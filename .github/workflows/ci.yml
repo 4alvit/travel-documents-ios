@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   # Preserve the recovery job's bounded owned-process cleanup window.
   cancel-in-progress: false
 jobs:
@@ -16,17 +16,40 @@ jobs:
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15
     timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Toolchain
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           mkdir -p build/ci-toolchain
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 16.4\nBuild version 16F6'
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
+          # Recognize exact producer documentation; runtime acceptance is separate.
+          TRIPDOCKET_QUALIFY_DEVELOPER_DIR=/Applications/Xcode_26.2.app/Contents/Developer
+          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcodebuild -version > build/ci-toolchain/qualification-xcode.txt
+          test "$(cat build/ci-toolchain/qualification-xcode.txt)" = "$(printf 'Xcode 26.2\nBuild version 17C52')"
+          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results summary --schema > build/ci-toolchain/qualification-summary-schema.json
+          DEVELOPER_DIR="$TRIPDOCKET_QUALIFY_DEVELOPER_DIR" xcrun xcresulttool get test-results tests --schema > build/ci-toolchain/qualification-tests-schema.json
+          python3 -B scripts/qualify-release.py --validate-schemas build/ci-toolchain/qualification-summary-schema.json build/ci-toolchain/qualification-tests-schema.json
+      - name: Qualification toolchain evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TripDocket-qualification-toolchain-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-toolchain/qualification-*
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Simulator selector regression checks
+        timeout-minutes: 2
+        run: python3 -B scripts/test-select-simulator.py
       - name: Verify
         run: |
           set -euo pipefail
@@ -64,7 +87,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/*.xcresult
+          path: |
+            build/*.xcresult
           if-no-files-found: warn
           retention-days: 7
       - name: Simulator artifact
@@ -81,6 +105,8 @@ jobs:
     name: Accessibility, localization and guidance UI
     runs-on: macos-15
     timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,11 +116,12 @@ jobs:
           set -euo pipefail
           mkdir -p build/ci-toolchain
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
+          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 26.2\nBuild version 17C52'
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh --cohort ui-guidance
+        run: bash scripts/test-simulator.sh --require-sdk-match --cohort ui-guidance
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -120,7 +147,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-tests-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/*.xcresult
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
@@ -137,6 +166,8 @@ jobs:
             step_minutes: 40
             job_minutes: 46
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -145,7 +176,9 @@ jobs:
       - name: Toolchain
         timeout-minutes: 3
         run: |
-          xcodebuild -version
+          TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)
+          printf '%s\n' "$TRIPDOCKET_IPAD_XCODE_VERSION"
+          test "$TRIPDOCKET_IPAD_XCODE_VERSION" = $'Xcode 26.2\nBuild version 17C52'
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
@@ -178,6 +211,8 @@ jobs:
           python3 -B scripts/test-files-readiness.py
           python3 -B scripts/test-privacy-support-ipad-unit.py
           python3 -B scripts/test-verify-recovery-evidence.py
+          python3 -B scripts/test-prepare-release.py
+          python3 -B scripts/test-qualify-release.py
       - name: One bounded recovery attempt
         timeout-minutes: 27
         env:

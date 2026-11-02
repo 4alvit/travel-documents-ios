@@ -3,10 +3,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # No arguments preserves the complete local test run. CI uses two disjoint
 # cohorts so long guidance tests and purchase tests have separate job budgets.
+TRIPFOLIO_REQUIRE_SDK_MATCH=0
+if [[ "${1:-}" == "--require-sdk-match" ]]; then
+  TRIPFOLIO_REQUIRE_SDK_MATCH=1
+  shift
+fi
 TEST_ARGUMENTS=(test)
 if [[ $# -ne 0 ]]; then
   if [[ $# -ne 2 || "$1" != "--cohort" ]]; then
-    echo "Usage: $0 [--cohort core-purchase|ui-guidance]" >&2
+    echo "Usage: $0 [--require-sdk-match] [--cohort core-purchase|ui-guidance]" >&2
     exit 2
   fi
   case "$2" in
@@ -29,7 +34,20 @@ if [[ $# -ne 0 ]]; then
   esac
 fi
 xcodegen generate
-if [[ -z "${TRIPFOLIO_SIMULATOR_ID:-}" ]]; then
+if [[ "$TRIPFOLIO_REQUIRE_SDK_MATCH" == 1 ]]; then
+  mkdir -p build/ci-toolchain
+  TRIPFOLIO_SELECTION_DIR=$(mktemp -d build/ci-toolchain/simulator-selection.XXXXXX)
+  xcrun --sdk iphonesimulator --show-sdk-version > "$TRIPFOLIO_SELECTION_DIR/sdk.txt"
+  uname -m > "$TRIPFOLIO_SELECTION_DIR/architecture.txt"
+  xcrun simctl list runtimes --json > "$TRIPFOLIO_SELECTION_DIR/runtimes.json"
+  xcrun simctl list devicetypes --json > "$TRIPFOLIO_SELECTION_DIR/device-types.json"
+  xcrun simctl list devices --json > "$TRIPFOLIO_SELECTION_DIR/devices.json"
+  TRIPFOLIO_SELECTION_ARGS=(--inventory "$TRIPFOLIO_SELECTION_DIR")
+  if [[ -n "${TRIPFOLIO_SIMULATOR_ID:-}" ]]; then
+    TRIPFOLIO_SELECTION_ARGS+=(--requested-udid "$TRIPFOLIO_SIMULATOR_ID")
+  fi
+  TRIPFOLIO_SIMULATOR_ID=$(python3 -B scripts/select-simulator.py "${TRIPFOLIO_SELECTION_ARGS[@]}")
+elif [[ -z "${TRIPFOLIO_SIMULATOR_ID:-}" ]]; then
   TRIPFOLIO_SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
 devices = json.load(sys.stdin)["devices"]
