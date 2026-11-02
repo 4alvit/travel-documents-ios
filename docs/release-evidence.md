@@ -145,14 +145,32 @@ compiled-product bytes remained unchanged; installed container paths changed
 between the separate invocations. This establishes the observed failure boundary,
 not a causal proof about installation or the opaque provider item identifier.
 
-The next control keeps the hosted prerequisite, native seed and real import as
-three separate XCTest cases in one invocation. A checkpoint at import entry
-requires the seed's actual pass marker, a record from the same UI test process,
-and a host comparison of both complete destination files before import actions
-begin. Its evidence is one preparation bundle plus one three-case bundle; no
-separate seed result is fabricated. Existing native assertions, case allowances,
-process ownership and original work/cleanup budgets remain required. A new
-successful capture and independent review are still needed before acceptance.
+The C3 control kept the hosted prerequisite, native seed and real import as
+three separate XCTest cases in one invocation, after separate Files preparation.
+A checkpoint at import entry requires the seed's actual pass marker, a record
+from the same UI test process, and a host comparison of both complete destination
+files before import actions begin. Its evidence layout was one preparation
+case plus one three-case bundle; no separate seed result was fabricated.
+
+The [C3 Arm run](https://github.com/4alvit/travel-documents-ios/actions/runs/41426202230)
+passed preparation and the hosted purchase prerequisite. The first native PDF
+seed then reached an incomplete Save to Files screen: On My iPhone and the
+filename were visible, but its provider root, file grid and Save action were
+absent. Application output recorded a SaveToFiles hosted-scene action timeout.
+The seed failed after 65.552 seconds; the import case correctly rejected the
+missing successful producer before requesting a checkpoint or importing files.
+This did not exercise the seed-to-import continuity hypothesis and does not
+establish the cause of the native scene timeout.
+
+The next controlled run moves the hosted prerequisite before Files preparation
+in the first invocation, followed by native seed and real import in one
+uninterrupted UI-test invocation. Both original bundles must contain exactly
+two passes, with all four cases, cross-phase order and the host checkpoint
+verified. The three functional methods in the public batch receipt span both
+bundles; preparation remains an additional required case. This ordering change
+preserves the native actions, case allowances, process ownership and work/cleanup
+budgets. It is not a demonstrated fix; a fresh complete capture and independent
+review are still required.
 
 An earlier main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work

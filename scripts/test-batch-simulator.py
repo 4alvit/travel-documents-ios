@@ -7,8 +7,10 @@ can select native Save into its fresh owned Simulator's empty provider root;
 that mode neither writes provider files nor removes the root or individual files,
 and defers cleanup to the qualification's verified whole-device teardown.
 The standalone modes run one hosted purchase precondition and one batch test.
-Qualification can additionally select the native seed in that same invocation,
-with one host byte-check checkpoint before the main case begins its actions. This driver neither boots simulators nor changes Apple accounts.
+Qualification instead runs native seed and main together after a separate
+verified hosted/Files preparation, with one host byte-check checkpoint before
+the main case begins its actions. This driver neither boots simulators nor
+changes Apple accounts.
 Authentication is bypassed
 by this functional UI test; its result is not privacy or rendered-PDF proof.
 """
@@ -362,14 +364,15 @@ class Driver:
                              "tests": list(self.expected_tests), "combined_batch": combined})
         self.save()
         self.record("xcodebuild_started", argv=command, environment_overrides=overrides)
-        print(f"Hosted precondition and batch test; follow {self.directory / 'xcodebuild.log'}", flush=True)
+        print(f"Selected batch cases; follow {self.directory / 'xcodebuild.log'}", flush=True)
         with (self.directory / "xcodebuild.log").open("wb") as log:
+            started = time.monotonic()
             self.process = subprocess.Popen(command, cwd=self.root, env={**os.environ, **overrides},
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             if combined:
                 observed = self.combined_protocol.monitor(
                     self.process, self.directory / "xcodebuild.log", self.deadline,
-                    self.checkpoint_session, self.token, self.checkpoint_callback)
+                    self.checkpoint_session, self.token, self.checkpoint_callback, started=started)
                 self.summary["combined_monitor"] = observed
                 self.summary["xcodebuild_returncode"] = observed["returncode"]
             else:

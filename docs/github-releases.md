@@ -40,10 +40,12 @@ The explicit `Release qualification` workflow captures the selected suite once.
 Both modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
 Batch qualification checks the complete path from selecting existing files to
 reviewing, saving and reopening their originals. Before that functional suite,
-a separate invocation runs the recovery preparation case once through Export and
-Save to Files. It checks an absent synthetic folder without saving a backup.
-This covers a preinitialized provider, not cold first use. Its own result bundle
-must pass the exact one-case, device and runtime checks before the driver starts.
+a separate invocation runs the hosted purchase prerequisite, then the recovery
+preparation case once through Export and Save to Files. Preparation checks an
+absent synthetic folder without saving a backup. This covers a preinitialized
+provider, not cold first use. The first result bundle must contain both exact
+passed cases, with the hosted pass before preparation starts, and match the
+captured device and runtime before the driver starts.
 The preparation has a 780-second build/test cap and an unchanged 180-second case
 allowance. A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
 spent about 531–532 seconds in build and runner startup before its case began; its former 600-second command cap stopped
@@ -62,10 +64,10 @@ fixture bytes into the provider.
 
 After preparation, the qualifier resolves the actual paths of all three test
 targets and records their compiled-product identities. One serial
-`test-without-building` invocation reuses those products for the hosted purchase
-prerequisite, native seeding, and the real batch-import case. Missing products or
-changed bytes/modes stop qualification; no fallback build or product copy is
-substituted. Installed app and data-container identities are recorded. Sharing
+`test-without-building` invocation reuses those products for native seeding and
+the real batch-import case, with no hosted-test phase between preparation and
+seeding. Missing products or changed bytes/modes stop qualification; no fallback
+build or product copy is substituted. Installed app and data-container identities are recorded. Sharing
 one invocation removes the separate seed-to-import launch boundary; it does not
 by itself prove that Xcode skipped installation or that a Files error is fixed.
 
@@ -77,29 +79,30 @@ synthetic app. At the start of the import case, before resetting or launching th
 app, the test consumes that same-process record and waits for one host response.
 A missing or restarted producer process cannot authorize import.
 
-The host requires the actual hosted and seed XCTest pass markers in order,
-followed by the import-case start and its fresh checkpoint request. It then
-revalidates the owned destination and requires exactly the two expected regular
-files, comparing every byte with the retained sources. Only a successful,
+The host requires the earlier hosted/preparation pass evidence, then the actual
+seed XCTest pass followed by the import-case start and its fresh checkpoint
+request in the second invocation. It then revalidates the owned destination and
+requires exactly the two expected regular files, comparing every byte with the retained sources. Only a successful,
 recorded verification permits one response on that run's nonce-specific channel.
 The response proves fixture verification, not successful purchase or import.
 Missing, duplicated, stale or out-of-order requests fail. The wait has a
 60-second transport limit within the import case's unchanged 600 seconds.
 
-Preparation and the combined suite produce two actual result bundles: one case
-and three cases, respectively. There is no separate seed result bundle or seed
-command exit code. Final independent review requires all four native cases,
-explicit empty warning/failure arrays, the real log order, checkpoint evidence,
-full original-byte comparisons, and visual checks. A prior three-bundle capture
-cannot be relabeled as this control.
+The first bundle, `files-prepare.xcresult`, contains the hosted prerequisite and
+Files preparation. The second, `Tests.xcresult`, contains native seeding and the
+real import case. Each must report exactly two passes. There is no separate
+seed result bundle or seed command exit code. Final independent review requires
+all four native cases, explicit empty warning/failure arrays, the real log order,
+checkpoint evidence, full original-byte comparisons, and visual checks. Prior
+one-plus-three or three-bundle captures cannot be relabeled as this control.
 
-Startup, the hosted prerequisite, seed, host checkpoint, import and result
-inspection share the same 1,200-second driver clock, started before destination
-preflight. No phase renews it. The hosted prerequisite retains its 300-second
-default allowance; seed retains 180 seconds and import retains 600 seconds.
-A 300-second envelope runs from the observed hosted-test pass to the seed pass,
-including UI-runner startup between them. This differs from the former separate
-seed-command boundary; initial combined startup also consumes the driver clock.
+The first invocation shares the unchanged 780-second preparation command cap.
+The hosted prerequisite retains its 300-second default allowance and Files
+preparation retains 180 seconds. Startup, seed, host checkpoint, import and
+result inspection share the same 1,200-second driver clock, started before
+destination preflight. No phase renews it. Seed retains 180 seconds and import
+retains 600 seconds. A 300-second envelope runs from the second native command's
+start to the seed pass, including UI-runner startup.
 The original 2,400-second work budget, 180-second cleanup budget and UI-action
 waits remain.
 These limits are not a completion guarantee. Failed preparation or fixture
@@ -269,23 +272,27 @@ explicit `runtimeWarnings` array. Verify the Actions artifact digest, exact
 run/attempt/source commit and tree, and the original bundle's complete file
 manifest before making the copy. Preserve the original unchanged and verify
 its manifest again after review. Record the reader version, commands, schema
-and output hashes. The reader must report the exact expected two or six passed
-cases, zero failures/skips/expected failures, the captured device, and explicit
-empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
-failure or any warning block acceptance. Inspect the retained screenshots and
-the mode-specific byte/cleanup evidence too. Batch mode requires three distinct
-result-bundle reviews, in execution order:
+and output hashes. The reader must report the exact expected passed cases,
+zero failures/skips/expected failures, the captured device, and explicit empty
+`runtimeWarnings` and `testFailures` arrays. Missing fields, a reader failure or
+any warning block acceptance. Biometric mode requires its six exact cases.
+Inspect the retained screenshots and the mode-specific byte/cleanup evidence
+too. Batch mode requires two distinct result-bundle reviews, in execution order:
 
-1. Files preparation: `testRecoveryPrepareFilesProvider`, exactly one passed case.
-2. Native PDF seeding: `testNativeSaveSeedsBothSyntheticOriginals`, exactly one passed case.
-3. Main flow: the two exact hosted purchase and batch-import methods listed below.
+1. `files-prepare.xcresult`: `testVerifiedPurchaseAndRestoreFromLocalHistory`,
+   then `testRecoveryPrepareFilesProvider`, exactly two passed cases.
+2. `Tests.xcresult`: `testNativeSaveSeedsBothSyntheticOriginals`, then
+   `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`, exactly two
+   passed cases.
 
 Each bundle must match the same captured source and device, retain an unchanged
 original manifest, and have no skips, failures or runtime warnings. Review the
 verified empty provider root and unchanged identity, both native Save operations
 and their complete-byte proof, and the main test's purchase, import, review,
-save and relaunch evidence. The two preparation cases remain separate
-prerequisites; they do not add methods to the public two-method batch receipt.
+save and relaunch evidence. The public batch receipt retains the three named
+functional methods: hosted purchase/restore, native seeding, and real batch
+import. They span the two bundles; the second bundle must not be reported as a
+three-case result. Files preparation is a separately required prerequisite.
 Only this complete review may produce the separate operator `passed` receipt
 described below; never rewrite the raw capture report into a pass. These checks
 cover the retained XCTest record, not every application or system-console message.
@@ -409,9 +416,11 @@ candidate being considered; it does **not** claim the Release ZIP was executed
 by those tests. The source commit/tree must still match exactly. Preserve any
 remaining runtime/toolchain limitations.
 
-The batch receipt requires exactly these two passed methods:
+The batch receipt requires exactly these three passed methods across the two
+reviewed result bundles:
 
 - `testVerifiedPurchaseAndRestoreFromLocalHistory`
+- `testNativeSaveSeedsBothSyntheticOriginals`
 - `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`
 
 The biometric receipt requires all six distinct passed methods:
