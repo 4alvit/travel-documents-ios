@@ -170,11 +170,24 @@ SCHEMA_DOCUMENTS = {
 }
 
 
-def validate_schemas(summary, tests):
+def toolchain_profile(mode):
+    require(mode in MODES, "Select exactly batch or biometrics")
+    if mode == "batch":
+        return {"developer_dir": "/Applications/Xcode_16.4.app/Contents/Developer",
+                "xcode_version": "Xcode 16.4\nBuild version 16F6", "sdk_version": "18.5",
+                "xcresulttool_version": "xcresulttool version 23714, format version 3.53 (current)",
+                "schema_documents": None}
+    return {"developer_dir": DEVELOPER_DIR, "xcode_version": XCODE_VERSION, "sdk_version": "26.2",
+            "xcresulttool_version": None, "schema_documents": dict(SCHEMA_DOCUMENTS)}
+
+
+def validate_schemas(summary, tests, mode="biometrics"):
     """Recognize exact pinned-toolchain docs without loosening any JSON parser."""
+    documents = toolchain_profile(mode)["schema_documents"]
+    require(documents is not None, "Pinned batch producer does not support schema documentation")
     for kind, raw in (("summary", summary), ("tests", tests)):
         require(isinstance(raw, bytes) and 0 < len(raw) <= MIB, "Invalid schema documentation bytes")
-        require(hashlib.sha256(raw).hexdigest() == SCHEMA_DOCUMENTS[kind],
+        require(hashlib.sha256(raw).hexdigest() == documents[kind],
                 "Unrecognized " + kind + " schema documentation for pinned Xcode")
     return {"selection": "pinned-toolchain-default", "documentation_verified": True,
             "runtime_evidence": "Independent pinned-reader review must provide explicit warnings, failures, counts, cases and device identity"}
@@ -289,6 +302,21 @@ class Qualification:
         return value
 
     def preflight_schemas(self):
+        profile = toolchain_profile(self.mode)
+        if profile["schema_documents"] is None:
+            # Xcode 16.4 has no test-results --schema API. Pin the real reader
+            # version; only independent 27.1 review can finish qualification.
+            raw = self.command("xcresulttool-version", ["xcrun", "xcresulttool", "version"])
+            require(raw.strip() == profile["xcresulttool_version"], "Unexpected batch xcresulttool version")
+            name = "xcresulttool-version.txt"
+            (self.out / name).write_bytes(raw.encode())
+            self.report["xcresult_schema"] = {
+                "status": "unsupported_by_producer", "selection": "pinned-toolchain-default",
+                "xcresulttool_version": raw.strip(), "version_file": name,
+                "version_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+                "runtime_evidence": "Independent pinned-reader review must provide explicit warnings, failures, counts, cases and device identity"}
+            self.save()
+            return
         schemas, hashes = {}, {}
         for kind in ("summary", "tests"):
             raw = self.command("xcresult-schema-" + kind,
@@ -297,7 +325,7 @@ class Qualification:
             schemas[kind] = raw
             (self.out / ("xcresult-schema-" + kind + ".json")).write_bytes(raw)
             hashes[kind] = hashlib.sha256(raw).hexdigest()
-        self.report["xcresult_schema"] = {**validate_schemas(schemas["summary"], schemas["tests"]),
+        self.report["xcresult_schema"] = {**validate_schemas(schemas["summary"], schemas["tests"], self.mode),
                                           "sha256": hashes}
         self.save()
 
@@ -311,8 +339,11 @@ class Qualification:
             toolchain[name] = self.command(name, argv).strip()
         toolchain["developer_environment"] = os.environ.get("DEVELOPER_DIR")
         self.report["toolchain"] = toolchain
-        require(toolchain["developer_environment"] == DEVELOPER_DIR and toolchain["xcode"] == XCODE_VERSION,
-                "Qualification requires the pinned Xcode 26.2 build 17C52")
+        profile = toolchain_profile(self.mode)
+        require(toolchain["developer_environment"] == profile["developer_dir"]
+                and toolchain["xcode"] == profile["xcode_version"]
+                and toolchain["sdk"] == profile["sdk_version"],
+                "Qualification requires its mode's pinned Xcode, developer directory and SDK")
         self.preflight_schemas()
         self.command("generate-project", ["xcodegen", "generate"], 120)
         original = self.commands.limit
@@ -641,13 +672,17 @@ def main():
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--mode", choices=MODES)
     selection.add_argument("--validate-schemas", nargs=2, metavar=("SUMMARY", "TESTS"))
+    parser.add_argument("--schema-mode", choices=MODES,
+                        help="Producer mode for --validate-schemas (default: biometrics / Xcode 26.2)")
     args = parser.parse_args()
+    if args.schema_mode is not None and not args.validate_schemas:
+        parser.error("--schema-mode requires --validate-schemas")
     if args.validate_schemas:
         documents = []
         for name in args.validate_schemas:
             path = Path(name).absolute()
             documents.append(bounded_read(path.parent, path.name, MIB, lambda: None))
-        validate_schemas(*documents)
+        validate_schemas(*documents, mode=args.schema_mode or "biometrics")
         return 0
     run = Qualification(HERE.parent, args.mode, os.environ)
     def interrupt(_signal, _frame):
