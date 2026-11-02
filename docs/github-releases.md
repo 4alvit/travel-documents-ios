@@ -47,6 +47,13 @@ must pass the exact one-case, device and runtime checks before the driver starts
 The preparation keeps a 600-second build/test cap and a 180-second case allowance;
 batch work has a 2,400-second budget to include this added phase. The functional
 driver's 1,200-second budget and the 180-second cleanup budget remain unchanged.
+The hosted purchase prerequisite keeps the runner's 300-second default allowance.
+The complete batch UI case explicitly uses 600 seconds, with the runner maximum
+set to 600. A retained run reached final reconfirmation at its former 300-second
+limit; its later Save action did not establish completed save, relaunch or
+original-byte verification. Those checks remain required. Build, startup, both
+cases and postprocessing still share the original driver budget; the larger
+case allowance does not guarantee completion or extend any UI-action deadline.
 One serial functional invocation runs the exact hosted purchase/restore
 test followed by the exact real Files batch test. The hosted test verifies local
 StoreKit APIs and clears its transactions before the UI test makes its own purchase.

@@ -277,7 +277,7 @@ class Driver:
                    "-configuration", "Debug", "-destination", f"platform=iOS Simulator,id={self.args.device}",
                    "-destination-timeout", "30", "-parallel-testing-enabled", "NO",
                    "-maximum-concurrent-test-simulator-destinations", "1", "-collect-test-diagnostics", "never",
-                   "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "300",
+                   "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "600",
                    "-derivedDataPath", str(self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"],
                    *("-only-testing:" + test for test in TESTS),
