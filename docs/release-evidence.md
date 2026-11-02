@@ -95,9 +95,37 @@ and a loading indicator. Retained logs did not identify the suspended StoreKit
 operation. Bounded Debug Simulator stdout observations now distinguish load
 invocations and their entitlement/catalog await boundaries. They add no retries,
 UI diagnostic values or Release behavior, and do not relax the 15-second test
-condition. A new successful native run remains required.
+condition. The [subsequent Core run](https://github.com/4alvit/travel-documents-ios/actions/runs/41411424834/job/125165114095)
+at `3b467b8` passed all 130 iOS cases, including that purchase test, and 38 package
+cases. This successful observation does not establish that diagnostic logging
+fixed the earlier load stall.
 
-The subsequent main-branch CI stopped in its subprocess capability probe before
+The [same-product batch control](https://github.com/4alvit/travel-documents-ios/actions/runs/41411434684)
+at `3b467b8` passed Files preparation, native saving of both PDFs and the hosted
+purchase prerequisite. All four compiled products retained identical bytes and
+Unix modes across the three observations; installed app content matched them.
+Xcode still changed the installed app and data container paths, so using the
+same products did not eliminate that lifecycle boundary. The data directory's
+recorded inode remained the same; path changes alone do not establish data loss.
+
+This attempt failed before Files selection: after the sole Unlock tap, Xcode's
+payment service returned `AMSErrorDomain` code 10, `Presentation failed`, wrapped
+in `ASDErrorDomain` code 5115. The app displayed its purchase-failure alert.
+Both catalog loads had completed; no purchase transaction or batch import was
+accepted. The original PDFs remained intact and all owned processes and the
+Simulator were cleaned up.
+
+The Pro screen now supplies StoreKit's SwiftUI environment `PurchaseAction` to
+the existing purchase manager. [Apple documents](https://developer.apple.com/documentation/storekit/purchaseaction)
+that this action includes the view's UI context for presenting confirmation.
+The manager retains its busy guard, verified-entitlement checks, transaction
+finishing and error handling; non-UI hosted calls retain their existing default.
+The captured error does not identify a missing scene as its precise cause, so
+this is a targeted presentation-context correction requiring fresh native
+validation. It adds no automatic purchase retry and does not relax the payment
+or Files assertions.
+
+An earlier main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work
 deadline and entered another resource scan, so the expected command timeout was
 misclassified as a scan deadline failure. The loop now checks the unchanged work
