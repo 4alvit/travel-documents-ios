@@ -1078,6 +1078,24 @@ unchanged, the owned Simulator was deleted and the complete local device
 baseline matched. This used Xcode/SDK 27.1 with iOS Simulator 27.0; it validates
 the gesture locally and does not substitute for the hosted qualification.
 
+## Generic destination for shared-build metadata
+
+The [`61dc730` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41492348354)
+passed its hosted prerequisite in 4.556 seconds and direct Files preparation in
+39.091 seconds. The retained pixels and hierarchy show the empty On My iPhone
+root. The subsequent `shared-build-settings` command produced no stdout or
+stderr and reached its 30-second work limit; its owned process group was
+terminated and reaped. Seed and import did not run, so this remains failed
+qualification evidence.
+
+The metadata query now targets the generic iOS Simulator platform while actual
+preparation and test execution retain the owned device. Its configuration,
+scheme action, derived-data path, source selection, product validation and
+30-second limit are unchanged. An earlier retained local generic query returned
+all three target paths in 2.552 seconds on Xcode 27.1; that supports the command
+form but does not establish Xcode 26.2 performance or the cause of this timeout.
+A new complete hosted capture remains required before acceptance.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large
