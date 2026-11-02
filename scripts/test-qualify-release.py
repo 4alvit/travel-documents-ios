@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -117,6 +118,66 @@ class Guards(unittest.TestCase):
                                ("sdk_matched", 1), ("build", "wrong"), ("architecture", "x86_64")]:
                 with self.subTest(mode=mode, key=key), self.assertRaises(RuntimeError):
                     q.validate_runtime_result(mode, {**selection, key: value}, result)
+
+    def test_intel_runtime_requires_matching_native_architecture_and_exact_build(self):
+        runtime = {"version": "26.2", "buildversion": "23C54", "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                   "isAvailable": True, "supportedArchitectures": ["x86_64"],
+                   "supportedDeviceTypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+        self.assertEqual(q.choose_runtime({"runtimes":[runtime]}, "26.2", "x86_64")[0], runtime["identifier"])
+        with self.assertRaises(RuntimeError): q.choose_runtime({"runtimes":[runtime]}, "26.2", "arm64")
+        for mode in q.MODES:
+            selection = {"identifier":runtime["identifier"], "version":"26.2", "build":"23C54",
+                         "architecture":"x86_64", "sdk_version":"26.2", "sdk_matched":True}
+            result = self.fixture(mode)[1]
+            result["devicesAndConfigurations"][0]["device"]["architecture"] = "x86_64"
+            q.validate_runtime_result(mode, selection, result)
+            for key,value in [("architecture","arm64"), ("osBuildNumber","other")]:
+                bad = copy.deepcopy(result); bad["devicesAndConfigurations"][0]["device"][key] = value
+                with self.assertRaises(RuntimeError): q.validate_runtime_result(mode, selection, bad)
+            result["devicesAndConfigurations"][0]["device"]["osBuildNumber"] = "other"
+            with self.assertRaises(RuntimeError): q.validate_runtime_result(mode, {**selection,"build":"other"}, result)
+
+    def test_intel_preflight_checks_runtime_build_before_any_device_inventory_or_creation(self):
+        for mode in q.MODES:
+            for build in ("23C54", "other"):
+                with tempfile.TemporaryDirectory() as directory:
+                    run = q.Qualification(Path(directory), mode, ENV)
+                    run.source = lambda label: {"head":HEAD,"tree":"b"*40}
+                    run.preflight_schemas = lambda: None
+                    runtime = {"version":"26.2", "buildversion":build, "identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                               "isAvailable":True, "supportedArchitectures":["x86_64"],
+                               "supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+                    outputs = {"xcode":q.XCODE_VERSION, "developer":q.DEVELOPER_DIR, "sdk":"26.2",
+                               "architecture":"x86_64", "generate-project":"", "runtimes":json.dumps({"runtimes":[runtime]})}
+                    calls=[]
+                    run.command=lambda label,argv,seconds=30: calls.append(label) or outputs[label]
+                    with patch.object(run,"inventory",side_effect=RuntimeError("Inventory boundary")) as inventory, \
+                         patch.dict(q.os.environ,{"DEVELOPER_DIR":q.DEVELOPER_DIR}):
+                        with self.assertRaisesRegex(RuntimeError,"Inventory boundary" if build=="23C54" else "runtime build 23C54"):
+                            run.prepare()
+                    self.assertEqual(inventory.call_count, 1 if build=="23C54" else 0)
+                    self.assertIsNone(run.owned)
+                    self.assertNotIn("create", calls)
+
+    def test_manual_runner_choice_is_closed_and_architecture_check_runs_before_capture(self):
+        workflow=(Path(__file__).parent.parent/".github/workflows/release-qualification.yml").read_text()
+        self.assertIn("default: macos-15\n        options: [macos-15, macos-15-intel]", workflow)
+        match=re.search(r"runs-on: \$\{\{ fromJSON\('([^']+)'\)\[inputs.runner \|\| 'macos-15'\] \}\}",workflow)
+        self.assertIsNotNone(match)
+        self.assertEqual(json.loads(match[1]),{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"})
+        for invalid in ("self-hosted", "macos-26", "", "$(touch injected)"):
+            self.assertNotIn(invalid,json.loads(match[1]))
+        block=workflow.split("      - name: Verify selected runner architecture\n",1)[1].split("      - name:",1)[0]
+        self.assertIn("QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}",block)
+        shell=block.split("        run: |\n",1)[1]
+        shell="\n".join(line[10:] for line in shell.splitlines())
+        for label,arch,machine,ok in [("macos-15","ARM64","arm64",True), ("macos-15-intel","X64","x86_64",True),
+                                     ("macos-15","X64","x86_64",False), ("macos-15-intel","ARM64","arm64",False),
+                                     ("macos-15-intel","X64","arm64",False), ("self-hosted","X64","x86_64",False)]:
+            env={**os.environ,"QUALIFICATION_RUNNER":label,"QUALIFICATION_RUNNER_ARCH":arch,"SYNTHETIC_MACHINE":machine}
+            result=subprocess.run(["/bin/bash","-euo","pipefail","-c",'uname() { printf \'%s\\n\' "$SYNTHETIC_MACHINE"; }\n'+shell],env=env,capture_output=True,timeout=5)
+            self.assertEqual(result.returncode==0,ok,(label,arch,machine,result.stderr))
+        self.assertLess(workflow.index("Verify selected runner architecture"),workflow.index("Capture selected suite"))
 
     def test_batch_order_must_match_the_original_bounded_log(self):
         proof = batch.execution_order(BATCH_LOG)
@@ -1309,7 +1370,7 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
         self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
-        self.assertIn('run-name: "Release qualification: ${{ inputs.mode }}"', workflow)
+        self.assertIn("run-name: \"Release qualification: ${{ inputs.mode }} / ${{ inputs.runner || 'macos-15' }}\"", workflow)
         self.assertIn("python3 -B scripts/test-batch-scroll-container.py", workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)

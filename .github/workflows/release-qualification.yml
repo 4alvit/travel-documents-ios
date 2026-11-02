@@ -1,5 +1,5 @@
 name: Release qualification
-run-name: "Release qualification: ${{ inputs.mode }}"
+run-name: "Release qualification: ${{ inputs.mode }} / ${{ inputs.runner || 'macos-15' }}"
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +8,12 @@ on:
         type: choice
         required: true
         options: [batch, biometrics]
+      runner:
+        description: Hosted runner architecture (Intel is an explicit contingency)
+        type: choice
+        required: true
+        default: macos-15
+        options: [macos-15, macos-15-intel]
 permissions:
   contents: read
 concurrency:
@@ -15,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify:
-    runs-on: macos-15
+    runs-on: ${{ fromJSON('{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"}')[inputs.runner || 'macos-15'] }}
     timeout-minutes: 55
     # A successful capture still requires independent xcresult and visual review.
     env:
@@ -24,6 +30,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify selected runner architecture
+        timeout-minutes: 1
+        env:
+          QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}
+          QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          case "$QUALIFICATION_RUNNER:$QUALIFICATION_RUNNER_ARCH:$(uname -m)" in
+            macos-15:ARM64:arm64|macos-15-intel:X64:x86_64) ;;
+            *) echo 'Unexpected qualification runner label or architecture' >&2; exit 1 ;;
+          esac
       - name: Prepare XcodeGen
         timeout-minutes: 3
         run: brew install xcodegen

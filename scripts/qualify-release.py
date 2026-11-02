@@ -36,6 +36,7 @@ RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
 DEVELOPER_DIR = "/Applications/Xcode_26.2.app/Contents/Developer"
 XCODE_VERSION = "Xcode 26.2\nBuild version 17C52"
+INTEL_RUNTIME_BUILD = "23C54"
 
 
 def require(value, message):
@@ -326,6 +327,8 @@ def validate_runtime_result(mode, selection, result):
             and selection["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
             and isinstance(selection["build"], str) and 0 < len(selection["build"]) <= 100
             and selection["architecture"] in ("arm64", "x86_64"), "Wrong runtime selection evidence")
+    if selection["architecture"] == "x86_64":
+        require(selection["build"] == INTEL_RUNTIME_BUILD, "Intel qualification requires runtime build 23C54")
     configurations = result.get("devicesAndConfigurations", [])
     require(len(configurations) == 1, "Wrong runtime result configuration")
     device = configurations[0].get("device", {})
@@ -488,6 +491,9 @@ class Qualification:
                             if item["identifier"] == runtime and item.get("version") == profile["runtime_version"])
             require(isinstance(selected.get("buildversion"), str) and selected["buildversion"],
                     "Selected runtime is missing its observed build")
+            if toolchain["architecture"] == "x86_64":
+                require(selected["buildversion"] == INTEL_RUNTIME_BUILD,
+                        "Intel qualification requires runtime build 23C54")
             self.report["runtime_selection"] = {
                 "identifier": runtime, "version": selected["version"], "build": selected["buildversion"],
                 "architecture": toolchain["architecture"], "sdk_version": toolchain["sdk"],
