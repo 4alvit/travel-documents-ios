@@ -16,6 +16,22 @@ final class BatchImportDraft: Identifiable {
     var preparedCount = 0
     var selectedCount = 0
     var errorMessage: String?
+    private var pickerRequestID: UUID?
+
+    /// A picker belongs to an explicit choosing action, not to a visible sheet.
+    /// Replacing the request makes every older callback ineligible.
+    @discardableResult
+    func beginPickerRequest(_ requestID: UUID) -> Bool {
+        guard phase == .choosing else { return false }
+        pickerRequestID = requestID
+        return true
+    }
+
+    func consumePickerRequest(_ requestID: UUID) -> Bool {
+        guard pickerRequestID == requestID else { return false }
+        pickerRequestID = nil
+        return phase == .choosing
+    }
 
     var canSave: Bool {
         phase == .reviewing && !items.isEmpty && items.allSatisfy(\.isReviewed)

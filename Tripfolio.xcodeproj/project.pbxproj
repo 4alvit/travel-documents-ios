@@ -13,6 +13,7 @@
 		0B3770E249E344C3E3996A3F /* BatchImportUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BF8510B7CF001D9C59B6E9F /* BatchImportUITests.swift */; };
 		0F01869B2A937C2DE76269FD /* PurchaseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79056FFFA3062E9F111CA82D /* PurchaseUITests.swift */; };
 		0F18006E7FC4D2C69F6C86BD /* Services.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = C8908F6C15EF7B2747CFDF4D /* Services.xcstrings */; };
+		139F331FA3F45E69C6FC72C5 /* BatchPickerRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2478E73533D93B09BAB89815 /* BatchPickerRequestTests.swift */; };
 		1599BB43FC0C03770E6A0F20 /* PlatformTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D492D84779BF6546C00BE4 /* PlatformTests.swift */; };
 		1A2E0D395AE52667726BD9B1 /* ReminderLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2CEF21072B50D393CA4454A /* ReminderLifecycleTests.swift */; };
 		1EFBA9F190AF8761FC6A7A1E /* PrivacyLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F403AE4048DAC284D3AF04 /* PrivacyLock.swift */; };
@@ -76,6 +77,7 @@
 		1A312D790BB74B5CEC6684DB /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		1F33A90F3670447D8F829317 /* TripfolioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripfolioUITests.swift; sourceTree = "<group>"; };
 		243EB656243F5E44A358447F /* UI.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = UI.xcstrings; sourceTree = "<group>"; };
+		2478E73533D93B09BAB89815 /* BatchPickerRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchPickerRequestTests.swift; sourceTree = "<group>"; };
 		2555719F3059A652D9E54C63 /* travel-documents-ios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "travel-documents-ios"; path = .; sourceTree = SOURCE_ROOT; };
 		2CEA03F4F217D84EE08AE4FC /* LocalizationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationUITests.swift; sourceTree = "<group>"; };
 		30FCCD75AE6D6BD43CF2F8DC /* OCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRService.swift; sourceTree = "<group>"; };
@@ -213,6 +215,7 @@
 				708EC99A6C5970157578D800 /* BatchCopiedSelectionTests.swift */,
 				D008B0A42C8AEB88F1B9CF28 /* BatchDocumentPickerTests.swift */,
 				D6D52FC358510A28DB7FBF25 /* BatchImportTests.swift */,
+				2478E73533D93B09BAB89815 /* BatchPickerRequestTests.swift */,
 				AD873016A17F554729960B4A /* ExternalReadCoordinationTests.swift */,
 				56A3601A57C8B752B2685A50 /* LocalizationTests.swift */,
 				ED552FC9222C76F18259166B /* NotificationSystemTests.swift */,
@@ -397,6 +400,7 @@
 				C84485577D9CC19F26756121 /* BatchCopiedSelectionTests.swift in Sources */,
 				039E8A0D459AE81A46BC0750 /* BatchDocumentPickerTests.swift in Sources */,
 				DDADA36742A90F95A0D797BD /* BatchImportTests.swift in Sources */,
+				139F331FA3F45E69C6FC72C5 /* BatchPickerRequestTests.swift in Sources */,
 				8682A20C789EC40C63017CD5 /* ExternalReadCoordinationTests.swift in Sources */,
 				DBAEE72DE8E76CD8FF59CE4E /* LocalizationTests.swift in Sources */,
 				8050B3D385669628F45C49AA /* NotificationSystemTests.swift in Sources */,

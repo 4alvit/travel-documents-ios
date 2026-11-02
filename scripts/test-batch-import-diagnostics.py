@@ -278,7 +278,10 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         app = APP.read_text()
         callback = section(app, "    private func receivedPickerResult(", "\n}\n\n#if DEBUG")
         self.assertEqual(callback.count("importerDiagnostics.record("), 1)
-        self.assertLess(callback.index("importerDiagnostics.record(result.map(\\.urls))"), callback.index("guard model.batchImportDraft?.id"))
+        self.assertLess(callback.index("session.consumeRequest(from: model.batchImportDraft, clearing: &pickerSession)"), callback.index("importerDiagnostics.record(result.map(\\.urls))"))
+        self.assertNotIn("guard pickerSession?.id", callback)
+        self.assertNotIn(".onDisappear", app)
+        self.assertLess(callback.index("guard let result else"), callback.index("importerDiagnostics.record("))
         ui = UI.read_text()
         selection = section(ui, "    private func selectRealFiles(", "\n    private func reviewRows(")
         self.assertEqual(selection.count("open.tap()"), 1)
@@ -303,6 +306,51 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         self.assertIn("executionTimeAllowance = 600", batch)
         recovery = section(ui, "    private func recoveryConfiguration(", "\n    private func recoveryTab(")
         self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', recovery)
+
+
+class PickerLifecycleDiagnosticTests(unittest.TestCase):
+    def test_trace_and_call_sites_are_debug_simulator_only(self):
+        source = (ROOT / "App/BatchDocumentPicker.swift").read_text()
+        stack = []
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#if "):
+                stack.append(stripped)
+            elif stripped == "#endif":
+                stack.pop()
+            elif any(token in line for token in ["TraceEvent", "traceCount", "trace(", "BATCH_PICKER"]):
+                self.assertIn("#if DEBUG && targetEnvironment(simulator)", stack, line)
+        self.assertFalse(stack)
+        gate = section(source, "        func consumeRequest(", "\n        #if DEBUG")
+        self.assertIn("draft?.id == draftID", gate)
+        self.assertIn("draft?.consumePickerRequest(id) == true", gate)
+        self.assertNotIn("active", gate)
+        full_gate = section(source, "        func consumeRequest(", "\n        #if DEBUG && targetEnvironment(simulator)\n        enum TraceEvent")
+        self.assertIn("if accepted, presentation?.id == id { presentation = nil }", full_gate)
+        dismantle = section(source, "    static func dismantleUIViewController(", "\n    @MainActor")
+        self.assertNotIn("invalidate()", dismantle)
+
+    def test_actual_trace_is_opt_in_bounded_and_uses_only_fixed_values(self):
+        source = (ROOT / "App/BatchDocumentPicker.swift").read_text()
+        trace = section(source, "        enum TraceEvent:", "\n        #endif")
+        harness = "import Foundation\n@MainActor final class TraceHarness {\n" + trace + "\n}\n"
+        harness += "@main struct Main { @MainActor static func main() { let x = TraceHarness(); x.trace(.didPick, urlCount: -1); x.trace(.didPick, urlCount: Int.max); for _ in 0..<100 { x.trace(.dismantle) }; let y = TraceHarness(); y.trace(.nativeCancel); y.trace(.resultAccepted); y.trace(.resultRejected) } }"
+        with tempfile.TemporaryDirectory(prefix="tripdocket-picker-trace-") as directory:
+            swift = Path(directory) / "main.swift"
+            binary = Path(directory) / "trace-tests"
+            swift.write_text(harness)
+            built = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            disabled = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+            self.assertEqual((disabled.returncode, disabled.stdout, disabled.stderr), (0, "", ""))
+            enabled = subprocess.run([str(binary), FLAG], capture_output=True, text=True, timeout=5)
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(enabled.stderr, "")
+            lines = enabled.stdout.splitlines()
+            self.assertEqual(len(lines), 19)  # 16 per first session, then three in a fresh session.
+            self.assertEqual(lines[:2], ["BATCH_PICKER event=didPick urls=0", "BATCH_PICKER event=didPick urls=11"])
+            self.assertEqual(lines[2:16], ["BATCH_PICKER event=dismantle urls=0"] * 14)
+            self.assertEqual(lines[16:], ["BATCH_PICKER event=nativeCancel urls=0", "BATCH_PICKER event=resultAccepted urls=0", "BATCH_PICKER event=resultRejected urls=0"])
 
 
 if __name__ == "__main__":

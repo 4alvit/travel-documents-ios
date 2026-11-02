@@ -154,15 +154,15 @@ final class BatchDocumentPickerTests: XCTestCase {
         }
     }
 
-    func testTeardownThenLateSelectionDisposesWithoutPublishing() throws {
+    func testExplicitInvalidationThenLateSelectionDisposesWithoutPublishing() throws {
         try fixture { root in
             let copy = try file("copy.pdf", root: root)
             let session = BatchDocumentPicker.Session(draftID: UUID())
             let coordinator = BatchDocumentPicker.Coordinator(session: session, capture: {
                 try BatchDocumentSelection.capture($0, temporaryDirectory: root)
-            }) { _ in XCTFail("A dismissed picker must not publish") }
+            }) { _ in XCTFail("An explicitly invalidated picker must not publish") }
             let picker = controller()
-            BatchDocumentPicker.dismantleUIViewController(picker, coordinator: coordinator)
+            session.invalidate()
             coordinator.documentPicker(picker, didPickDocumentsAt: [copy])
             coordinator.documentPickerWasCancelled(picker)
             XCTAssertFalse(exists(copy))
