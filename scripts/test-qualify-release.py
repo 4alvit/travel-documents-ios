@@ -95,7 +95,7 @@ class Guards(unittest.TestCase):
             profile = q.toolchain_profile(mode)
             selection = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2",
                          "build": "23C54", "architecture": "arm64", "sdk_version": profile["sdk_version"],
-                         "sdk_matched": mode == "biometrics"}
+                         "sdk_matched": True}
             result = self.fixture(mode)[1]
             q.validate_runtime_result(mode, selection, result)
             for key, value in [("version", "18.5"), ("sdk_version", "unknown"),
@@ -346,7 +346,7 @@ class Guards(unittest.TestCase):
     def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False):
         run=self.run_object();run.owned=OWNED
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
-            "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "18.5", "sdk_matched": False}
+            "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
@@ -358,9 +358,11 @@ class Guards(unittest.TestCase):
         class Driver:
             def __init__(self,args):
                 self.directory=run.root/"build/BatchSimulator-fixture";self.directory.mkdir()
+                self.fixture_directory=self.directory/"owned-fixtures"
                 self.summary=copy.deepcopy(summary);self.actions=(self.directory/"actions.jsonl").open("w")
                 (self.directory/"xcodebuild.log").write_bytes(BATCH_LOG)
             def prepare(self):events.append("prepare")
+            def remaining(self):return 100
             def run_test(self):
                 events.append("test")
                 module.subprocess.Popen(["xcodebuild","-destination","platform=iOS Simulator,id="+OWNED],
@@ -376,6 +378,8 @@ class Guards(unittest.TestCase):
                                      send=lambda *_:self.fail("Completed process needs no signal"))
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
+        run.prepare_native_seed=lambda driver:events.append("native-seed")
+        run.prepare_native_folder=lambda driver:events.append("native-folder")
         with patch.object(q,"load_module",return_value=module),patch.object(q.subprocess,"Popen",return_value=child):
             if skipped or runtime_warning:
                 with self.assertRaises(RuntimeError):run.run_driver()
@@ -388,7 +392,7 @@ class Guards(unittest.TestCase):
 
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-folder","native-seed","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
 
     def test_skipped_driver_result_never_reaches_product_acceptance(self):
@@ -437,23 +441,31 @@ class Guards(unittest.TestCase):
             self.preparation_fixture(run)
             run.inspect_files_preparation()
             run.report["files_preparation_verified"] = True
+            self.preparation_fixture(run, native_folder=True)
+            run.inspect_files_preparation(native_folder=True)
+            run.report["native_folder_verified"] = True
+            self.preparation_fixture(run, native_seed=True)
+            run.inspect_files_preparation(native_seed=True)
+            run.report["native_seed_verified"] = True
         return run,result
 
-    def preparation_fixture(self, run):
+    def preparation_fixture(self, run, native_seed=False, native_folder=False):
+        prefix = "native-folder" if native_folder else "native-seed" if native_seed else "files-prepare"
         run.owned=OWNED;run.baseline={};run.intent={"name":"owned","runtime":"iOS-26-2","type":"iPhone"}
         run.report["runtime_selection"]={"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
-            "version":"26.2","build":"23C54","architecture":"arm64","sdk_version":"18.5","sdk_matched":False}
-        original=run.out/"files-prepare.xcresult"
+            "version":"26.2","build":"23C54","architecture":"arm64","sdk_version":"26.2","sdk_matched":True}
+        original=run.out/(prefix+".xcresult")
         (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
         (original/"Info.plist").write_bytes(b"preparation metadata")
         _,summary,tree,_=self.fixture()
         summary.update(totalTestCount=1,passedTests=1)
         summary["devicesAndConfigurations"][0]["device"]["platform"]="iOS Simulator"
-        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":q.PREPARE_CASE,"result":"Passed"}]
+        case=q.FOLDER_CASE if native_folder else q.SEED_CASE if native_seed else q.PREPARE_CASE
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"}]
         def command(label, argv, seconds=30):
-            kind=label.removeprefix("files-prepare-")
+            kind=label.removeprefix(prefix+"-")
             self.assertIn(kind,("summary","tests"));self.assertEqual(seconds,60)
-            self.assertIn(str(run.out/"files-prepare-inspection.xcresult"),[str(a) for a in argv])
+            self.assertIn(str(run.out/(prefix+"-inspection.xcresult")),[str(a) for a in argv])
             path=run.commands.out/(kind+".json")
             path.write_text(json.dumps(summary if kind=="summary" else tree))
             run.commands.report["commands"].append({"logs":{"stdout":str(path)}})
@@ -757,30 +769,30 @@ class Guards(unittest.TestCase):
         self.assertFalse(any("simctl" in argv or "xcodegen" in argv for argv in calls))
         self.assertIsNone(run.owned); self.assertIsNone(run.baseline)
 
-    def test_batch_preflight_pins_observed_reader_without_claiming_schema_support(self):
-        raw = (Path(__file__).parent / "fixtures/xcresult-xcode-16.4/xcresulttool-version.txt").read_bytes()
-        run = self.run_object(); calls = []
-        run.command = lambda label, argv, seconds=30: calls.append(argv) or raw.decode()
+    def test_batch_preflight_requires_the_exact_26_2_schema_documents(self):
+        run = self.run_object(); calls = []; schemas = self.schemas()
+        outputs = {kind: schemas[n].decode() for n, kind in enumerate(("summary", "tests"))}
+        run.command = lambda label, argv, seconds=30: calls.append(argv) or outputs[argv[4]]
         run.preflight_schemas()
-        self.assertEqual(calls, [["xcrun", "xcresulttool", "version"]])
+        self.assertEqual(calls, [["xcrun", "xcresulttool", "get", "test-results", kind, "--schema"]
+                                 for kind in ("summary", "tests")])
         report = run.report["xcresult_schema"]
-        self.assertEqual(report["status"], "unsupported_by_producer")
-        self.assertEqual(report["xcresulttool_version"], q.toolchain_profile("batch")["xcresulttool_version"])
-        self.assertEqual((run.out / report["version_file"]).read_bytes(), raw)
-        self.assertEqual(report["version_sha256"], hashlib.sha256(raw).hexdigest())
-        self.assertNotIn("documentation_verified", report)
+        self.assertTrue(report["documentation_verified"])
+        self.assertEqual(report["selection"], "pinned-toolchain-default")
         self.assertIn("Independent pinned-reader review", report["runtime_evidence"])
-        self.assertFalse(list(run.out.glob("xcresult-schema-*")))
+        for n, kind in enumerate(("summary", "tests")):
+            self.assertEqual((run.out / ("xcresult-schema-" + kind + ".json")).read_bytes(), schemas[n])
+            self.assertEqual(report["sha256"][kind], hashlib.sha256(schemas[n]).hexdigest())
+        self.assertFalse((run.out / "xcresulttool-version.txt").exists())
         self.assertIsNone(run.owned)
-        with self.assertRaisesRegex(RuntimeError, "does not support"):
-            q.validate_schemas(*self.schemas(), mode="batch")
+        self.assertTrue(q.validate_schemas(*schemas, mode="batch")["documentation_verified"])
 
-    def test_batch_preflight_rejects_unknown_reader_before_device_actions(self):
+    def test_batch_preflight_rejects_unknown_documents_before_device_actions(self):
         run = self.run_object()
-        for raw in ["", "xcresulttool version 23715, format version 3.53 (current)",
-                    "xcresulttool version 23714, format version 3.54 (current)", "Xcode 16.4"]:
+        old_version = (Path(__file__).parent / "fixtures/xcresult-xcode-16.4/xcresulttool-version.txt").read_text()
+        for raw in ["", old_version, "{}", self.schemas()[0].decode() + "\n"]:
             run.command = lambda *args: raw
-            with self.subTest(raw=raw), self.assertRaisesRegex(RuntimeError, "xcresulttool"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(RuntimeError, "schema"):
                 run.preflight_schemas()
             self.assertNotIn("xcresult_schema", run.report)
             self.assertIsNone(run.owned)
@@ -788,9 +800,8 @@ class Guards(unittest.TestCase):
     def test_mode_profiles_reject_wrong_xcode_sdk_or_environment_before_native_work(self):
         for mode in q.MODES:
             profile = q.toolchain_profile(mode)
-            other = q.toolchain_profile("biometrics" if mode == "batch" else "batch")
-            for key, value in [("xcode", other["xcode_version"]), ("sdk", other["sdk_version"]),
-                               ("environment", other["developer_dir"])]:
+            for key, value in [("xcode", "Xcode 16.4\nBuild version 16F6"), ("sdk", "18.5"),
+                               ("environment", "/Applications/Xcode_16.4.app/Contents/Developer")]:
                 directory = self.root / (mode + key); directory.mkdir()
                 run = q.Qualification(directory, mode, ENV)
                 run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
@@ -810,9 +821,10 @@ class Guards(unittest.TestCase):
 
     def test_mode_profiles_keep_default_26_2_schema_contract(self):
         batch, bio = q.toolchain_profile("batch"), q.toolchain_profile("biometrics")
-        self.assertEqual((batch["xcode_version"], batch["sdk_version"]), ("Xcode 16.4\nBuild version 16F6", "18.5"))
+        self.assertEqual(batch, bio)
+        self.assertEqual((batch["xcode_version"], batch["sdk_version"]), ("Xcode 26.2\nBuild version 17C52", "26.2"))
         self.assertEqual(batch["runtime_version"], "26.2")
-        self.assertIsNone(batch["schema_documents"])
+        self.assertEqual(batch["schema_documents"], q.SCHEMA_DOCUMENTS)
         self.assertEqual((bio["xcode_version"], bio["developer_dir"]), (q.XCODE_VERSION, q.DEVELOPER_DIR))
         self.assertEqual(bio["runtime_version"], bio["sdk_version"])
         self.assertEqual(bio["schema_documents"], q.SCHEMA_DOCUMENTS)
@@ -836,8 +848,9 @@ class Guards(unittest.TestCase):
             with patch.dict(q.os.environ, {"DEVELOPER_DIR": profile["developer_dir"]}):
                 with self.assertRaisesRegex(RuntimeError, "Discovery boundary reached"): run.prepare()
             self.assertEqual(calls[-2:], ["generate-project", "runtimes"])
-            self.assertEqual("xcresulttool-version" in calls, mode == "batch")
-            self.assertEqual("xcresult-schema-summary" in calls, mode == "biometrics")
+            self.assertNotIn("xcresulttool-version", calls)
+            self.assertIn("xcresult-schema-summary", calls)
+            self.assertIn("xcresult-schema-tests", calls)
             self.assertIsNone(run.owned)
 
     def test_prepare_records_runtime_independently_from_compiler_sdk(self):
@@ -861,7 +874,7 @@ class Guards(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Before any device mutation"): run.prepare()
             self.assertEqual(run.report["runtime_selection"], {
                 "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2", "build": "23C54",
-                "architecture": "arm64", "sdk_version": profile["sdk_version"], "sdk_matched": mode == "biometrics"})
+                "architecture": "arm64", "sdk_version": profile["sdk_version"], "sdk_matched": True})
             self.assertIsNone(run.owned)
 
     def test_schema_cli_uses_only_files_and_rejects_mixed_execution_mode(self):
@@ -874,12 +887,286 @@ class Guards(unittest.TestCase):
             with patch.object(q.sys, "argv", ["qualify-release.py", "--mode", "batch", "--validate-schemas", *paths]):
                 with self.assertRaises(SystemExit): q.main()
             with patch.object(q.sys, "argv", ["qualify-release.py", "--schema-mode", "batch", "--validate-schemas", *paths]):
-                with self.assertRaisesRegex(RuntimeError, "does not support"): q.main()
+                self.assertEqual(q.main(), 0)
             with patch.object(q.sys, "argv", ["qualify-release.py", "--mode", "batch", "--schema-mode", "biometrics"]):
                 with self.assertRaises(SystemExit): q.main()
         link = self.root / "link"; link.symlink_to(paths[0])
         with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", str(link), paths[1]]):
             with self.assertRaises(RuntimeError): q.main()
+
+    def seed_fixture(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        run.report["files_preparation_verified"]=True
+        run.report["native_folder_verified"]=True
+        derived=run.root/"build/QualificationPreparationDerivedData-123-1";derived.mkdir()
+        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root))}
+        group=self.root/"group";provider=group/"File Provider Storage";provider.mkdir(parents=True)
+        token="12345678-1234-4234-8234-123456789abc"
+        owned=provider/("TripDocket-Batch-QA-"+token);owned.mkdir()
+        directory=run.root/"build/driver";copies=directory/"fixtures";copies.mkdir(parents=True)
+        fixtures=[]
+        for name,title in [("synthetic-ticket.pdf","SYNTHETIC TICKET"),("synthetic-insurance.pdf","SYNTHETIC INSURANCE")]:
+            data=batch.pdf(title);(copies/name).write_bytes(data)
+            fixtures.append({"name":name,"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest()})
+        driver=SimpleNamespace(token=token,folder_name=owned.name,fixture_directory=owned,directory=directory,
+            provider_identity=(provider.stat().st_dev,provider.stat().st_ino),
+            fixture_identity=(owned.stat().st_dev,owned.stat().st_ino),summary={"fixtures":fixtures},
+            deadline=time.monotonic()+1200,record=lambda *a,**k:None)
+        driver.remaining=lambda:driver.deadline-time.monotonic()
+        def container(value,*kind):
+            self.assertEqual((value,kind),(str(group),("Shared","AppGroup")))
+            return group
+        run.container_path=container
+        return run,driver
+
+    def test_seed_destination_is_empty_then_exact_bytes_with_pinned_identity(self):
+        run,driver=self.seed_fixture();run.native_seed_files(driver,empty=True)
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+        for item in driver.summary["fixtures"]:
+            (driver.fixture_directory/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        run.native_seed_files(driver)
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver,empty=True)
+        driver.fixture_identity=(0,0)
+        with self.assertRaisesRegex(RuntimeError,"identity changed"):run.native_seed_files(driver)
+
+    def test_seed_destination_rejects_hash_link_extra_file_and_bad_token(self):
+        run,driver=self.seed_fixture();owned=driver.fixture_directory
+        for item in driver.summary["fixtures"]:
+            (owned/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        target=owned/"synthetic-ticket.pdf";original=target.read_bytes()
+        target.write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError,"original bytes"):run.native_seed_files(driver)
+        target.unlink();target.symlink_to(driver.directory/"fixtures/synthetic-ticket.pdf")
+        with self.assertRaises((RuntimeError,OSError)):run.native_seed_files(driver)
+        target.unlink();target.write_bytes(original);(owned/"extra").write_bytes(b"")
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+        (owned/"extra").unlink();driver.token=driver.token.upper()
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+
+    def test_seed_one_owned_invocation_consumes_existing_clock_and_restores_environment(self):
+        run,driver=self.seed_fixture();deadline=driver.deadline;previous=run.commands.ops.env;calls=[]
+        def command(label,argv,seconds):
+            calls.append((label,[str(x) for x in argv],seconds,dict(run.commands.ops.env)))
+            for item in driver.summary["fixtures"]:
+                (driver.fixture_directory/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        run.command=command;run.inspect_files_preparation=lambda native_seed=False:self.assertTrue(native_seed)
+        run.prepare_native_seed(driver)
+        self.assertEqual(driver.deadline,deadline);self.assertIs(run.commands.ops.env,previous)
+        self.assertTrue(run.report["native_seed_verified"]);self.assertEqual(len(calls),1)
+        label,argv,seconds,env=calls[0]
+        self.assertEqual((label,seconds),("native-seed-ui",300))
+        self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:TripfolioUITests/"+q.SEED_CASE.removesuffix("()")])
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1],"180")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN"],driver.token)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER"],driver.folder_name)
+        self.assertNotIn("TEST_RUNNER_TRIPDOCKET_RECOVERY_UI",env)
+        with self.assertRaises(RuntimeError):run.prepare_native_seed(driver)
+        self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
+
+    def test_seed_native_failure_is_primary_even_with_invalid_inspection(self):
+        run,driver=self.seed_fixture();previous=run.commands.ops.env
+        def fail(*a,**k):raise RuntimeError("native seed failed")
+        def bad(*a,**k):raise RuntimeError("inspection failed")
+        run.command=fail;run.inspect_files_preparation=bad
+        with self.assertRaisesRegex(RuntimeError,"native seed failed"):run.prepare_native_seed(driver)
+        self.assertIs(run.commands.ops.env,previous)
+        self.assertIn("inspection failed",run.report["native_seed_inspection_error"])
+        self.assertNotIn("native_seed_verified",run.report)
+
+    def test_seed_rejects_wrong_owner_exhausted_shared_deadline_and_unresolved_writer(self):
+        for fault in ("owner","driver-deadline","outer-deadline","writer","mode","prep","folder"):
+            with tempfile.TemporaryDirectory() as temporary:
+                saved=self.root;self.root=Path(temporary).resolve()
+                try:run,driver=self.seed_fixture()
+                finally:self.root=saved
+                if fault=="owner":run.baseline[OWNED]={}
+                elif fault=="driver-deadline":driver.deadline=time.monotonic()+900
+                elif fault=="outer-deadline":run.work_deadline=time.monotonic()+900
+                elif fault=="writer":run.commands.unknown_spawn=True
+                elif fault=="mode":run.mode="biometrics"
+                elif fault=="folder":run.report["native_folder_verified"]=False
+                else:run.report["files_preparation_verified"]=False
+                run.command=lambda *a,**k:self.fail("Native command must not start")
+                with self.subTest(fault=fault),self.assertRaises(RuntimeError):run.prepare_native_seed(driver)
+
+    def test_seed_result_requires_its_own_exact_case_and_preserves_original(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run,native_seed=True)
+        before=run.preparation_manifest(original);run.inspect_files_preparation(native_seed=True)
+        self.assertEqual(run.preparation_manifest(original),before)
+        self.assertEqual(run.report["native_seed_result"]["cases"],[q.SEED_CASE])
+        for fault in ("case","skip","warnings","missing-failures","runtime"):
+            result=copy.deepcopy(summary);nodes=copy.deepcopy(tree)
+            if fault=="case":nodes["testNodes"][0]["nodeIdentifier"]=q.PREPARE_CASE
+            elif fault=="skip":result.update(skippedTests=1,passedTests=0)
+            elif fault=="warnings":result["runtimeWarnings"]=[{"message":"warning"}]
+            elif fault=="missing-failures":result.pop("testFailures")
+            else:result["devicesAndConfigurations"][0]["device"]["osVersion"]="18.5"
+            with self.subTest(fault=fault),self.assertRaises(RuntimeError):
+                q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.SEED_CASE)
+
+    def test_final_capture_requires_native_seed_and_rechecks_seed_bytes_after_cleanup(self):
+        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run.report.pop("native_seed_verified")
+        with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
+        run.report["native_seed_verified"]=True
+        (run.out/"native-seed.xcresult/Data/result").write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
+
+    def folder_fixture(self):
+        run,driver=self.seed_fixture()
+        run.report.pop("native_folder_verified")
+        driver.native_folder_destination=driver.fixture_directory
+        driver.native_folder_destination.rmdir()
+        driver.fixture_directory=None;driver.fixture_identity=None
+        return run,driver
+
+    def test_native_folder_absence_then_empty_adoption_preserves_single_clock_and_environment(self):
+        run,driver=self.folder_fixture();calls=[]
+        before=driver.deadline;previous=run.commands.ops.env
+        def command(label,argv,seconds):
+            calls.append((label,[str(a) for a in argv],seconds,dict(run.commands.ops.env)))
+            self.assertIsNone(driver.fixture_directory)
+            driver.native_folder_destination.mkdir()
+        run.command=command
+        run.inspect_files_preparation=lambda **kw:self.assertEqual(kw,{"native_folder":True})
+        run.prepare_native_folder(driver)
+        self.assertEqual(driver.deadline,before);self.assertIs(run.commands.ops.env,previous)
+        self.assertEqual(driver.fixture_directory,driver.native_folder_destination)
+        self.assertTrue(run.report["native_folder_verified"])
+        self.assertTrue(run.report["native_folder"]["empty_after"])
+        self.assertEqual(run.report["native_folder"]["leaf_identity"],list(driver.fixture_identity))
+        self.assertEqual(len(calls),1)
+        label,argv,seconds,env=calls[0]
+        self.assertEqual((label,seconds),("native-folder-ui",240))
+        self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1],"180")
+        self.assertEqual([a for a in argv if a.startswith("-only-testing:")],
+                         ["-only-testing:TripfolioUITests/"+q.FOLDER_CASE.removesuffix("()")])
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_TOKEN"],driver.token)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER"],driver.folder_name)
+        self.assertNotIn("TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI",env)
+        with self.assertRaises(RuntimeError):run.prepare_native_folder(driver)
+        self.assertEqual(len(calls),1)
+
+    def test_native_folder_leaf_rejects_preexisting_link_nonempty_identity_and_bad_token(self):
+        for fault in ("existing","link","file","nonempty","provider","token","wrong-name"):
+            with tempfile.TemporaryDirectory() as temporary:
+                saved=self.root;self.root=Path(temporary).resolve()
+                try:run,driver=self.folder_fixture()
+                finally:self.root=saved
+                target=driver.native_folder_destination
+                if fault=="existing":target.mkdir()
+                elif fault=="link":target.symlink_to(target.parent,target_is_directory=True)
+                elif fault=="file":target.write_bytes(b"not a directory")
+                elif fault=="nonempty":target.mkdir();(target/"unexpected").write_bytes(b"retained")
+                elif fault=="provider":driver.provider_identity=(0,0)
+                elif fault=="token":driver.token=driver.token.upper()
+                else:driver.folder_name="wrong"
+                with self.subTest(fault=fault),self.assertRaises((RuntimeError,OSError)):
+                    run.native_folder_leaf(driver,absent=fault in ("existing","provider","token","wrong-name"))
+                self.assertIsNone(driver.fixture_directory)
+                if fault=="nonempty":self.assertEqual((target/"unexpected").read_bytes(),b"retained")
+
+    def test_native_folder_provider_replacement_during_empty_scan_is_rejected(self):
+        run,driver=self.folder_fixture();target=driver.native_folder_destination;target.mkdir()
+        original=q.os.scandir
+        def replace(path):
+            driver.provider_identity=(0,0)
+            return original(path)
+        with patch.object(q.os,"scandir",side_effect=replace):
+            with self.assertRaisesRegex(RuntimeError,"identity changed"):run.native_folder_leaf(driver)
+        self.assertIsNone(driver.fixture_directory)
+
+    def test_native_folder_failed_or_invalid_case_never_adopts_partial_leaf_or_masks_original(self):
+        for fault in ("native","inspection","nonempty"):
+            with tempfile.TemporaryDirectory() as temporary:
+                saved=self.root;self.root=Path(temporary).resolve()
+                try:run,driver=self.folder_fixture()
+                finally:self.root=saved
+                previous=run.commands.ops.env;target=driver.native_folder_destination
+                def command(*args):
+                    target.mkdir()
+                    if fault=="nonempty":(target/"keep").write_bytes(b"keep")
+                    if fault=="native":raise RuntimeError("primary native failure")
+                def inspect(**kw):
+                    if fault in ("native","inspection"):raise RuntimeError("invalid result")
+                run.command=command;run.inspect_files_preparation=inspect
+                with self.subTest(fault=fault),self.assertRaisesRegex(RuntimeError,
+                    "primary native failure" if fault=="native" else "invalid result" if fault=="inspection" else "not empty"):
+                    run.prepare_native_folder(driver)
+                self.assertIs(run.commands.ops.env,previous);self.assertIsNone(driver.fixture_directory)
+                self.assertTrue(target.exists());self.assertFalse(run.report["native_folder"]["adopted"])
+                self.assertNotIn("native_folder_verified",run.report)
+
+    def test_failed_folder_phase_never_starts_main_or_removes_unadopted_leaf(self):
+        run=self.run_object();run.owned=OWNED
+        leaf=run.root/"partial-native-folder";leaf.mkdir();(leaf/"keep").write_bytes(b"keep")
+        module=SimpleNamespace(timestamp=lambda:"recorded")
+        class Driver:
+            def __init__(self,args):
+                self.directory=run.root/"build/failed-driver";self.directory.mkdir()
+                self.summary={};self.fixture_directory=None
+                self.actions=(self.directory/"actions.jsonl").open("w")
+            def prepare(self):pass
+            def run_test(self):raise AssertionError("Main must not run")
+            def verify_fixtures(self):raise AssertionError("Unadopted leaf must not be accessed")
+            def remove_fixtures(self):raise AssertionError("Unadopted leaf must not be removed")
+            def source_snapshot(self):return {"head":HEAD}
+            def save(self):(self.directory/"summary.json").write_text(json.dumps(self.summary))
+        module.Driver=Driver
+        def failed(driver):raise RuntimeError("original folder failure")
+        run.prepare_native_folder=failed
+        with patch.object(q,"load_module",return_value=module):
+            with self.assertRaisesRegex(RuntimeError,"original folder failure"):run.run_driver()
+        self.assertEqual((leaf/"keep").read_bytes(),b"keep")
+        summary=json.loads((run.root/run.report["driver_directory"]/"summary.json").read_text())
+        self.assertEqual(summary["status"],"failed")
+        self.assertIn("owned Simulator teardown only",summary["fixture_cleanup"])
+        self.assertEqual(run.driver_calls,0)
+
+    def test_native_folder_admission_requires_full_remaining_original_budget_and_owner(self):
+        for fault in ("owner","driver-deadline","outer-deadline","writer","mode","prep","already-exists"):
+            with tempfile.TemporaryDirectory() as temporary:
+                saved=self.root;self.root=Path(temporary).resolve()
+                try:run,driver=self.folder_fixture()
+                finally:self.root=saved
+                if fault=="owner":run.baseline[OWNED]={}
+                elif fault=="driver-deadline":driver.deadline=time.monotonic()+1140
+                elif fault=="outer-deadline":run.work_deadline=time.monotonic()+1260
+                elif fault=="writer":run.xcode.unknown_spawn=True
+                elif fault=="mode":run.mode="biometrics"
+                elif fault=="already-exists":driver.native_folder_destination.mkdir()
+                else:run.report["files_preparation_verified"]=False
+                run.command=lambda *a,**k:self.fail("Native command must not start")
+                with self.subTest(fault=fault),self.assertRaises(RuntimeError):run.prepare_native_folder(driver)
+                self.assertIsNone(driver.fixture_directory)
+
+    def test_native_folder_result_is_exact_single_case_and_preserves_original(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run,native_folder=True)
+        before=run.preparation_manifest(original);run.inspect_files_preparation(native_folder=True)
+        self.assertEqual(before,run.preparation_manifest(original))
+        self.assertEqual(run.report["native_folder_result"]["cases"],[q.FOLDER_CASE])
+        with self.assertRaisesRegex(RuntimeError,"Ambiguous"):
+            run.inspect_files_preparation(native_seed=True,native_folder=True)
+        for fault in ("case","skip","warnings","missing-failures","runtime"):
+            result=copy.deepcopy(summary);nodes=copy.deepcopy(tree)
+            if fault=="case":nodes["testNodes"][0]["nodeIdentifier"]=q.SEED_CASE
+            elif fault=="skip":result.update(skippedTests=1,passedTests=0)
+            elif fault=="warnings":result["runtimeWarnings"]=[{}]
+            elif fault=="missing-failures":result.pop("testFailures")
+            else:result["devicesAndConfigurations"][0]["device"]["osVersion"]="18.5"
+            with self.subTest(fault=fault),self.assertRaises(RuntimeError):
+                q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.FOLDER_CASE)
+
+    def test_final_capture_requires_native_folder_and_rechecks_original_after_cleanup(self):
+        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run.report.pop("native_folder_verified")
+        with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
+        run.report["native_folder_verified"]=True
+        (run.out/"native-folder.xcresult/Data/result").write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
 
     def test_workflow_is_explicit_read_only_and_uses_original_drivers(self):
         workflow=(Path(__file__).parent.parent/".github/workflows/release-qualification.yml").read_text()
@@ -889,8 +1176,9 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",workflow)
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
-        self.assertIn("DEVELOPER_DIR: ${{ inputs.mode == 'batch' && '" + q.toolchain_profile("batch")["developer_dir"]
-                      + "' || '" + q.DEVELOPER_DIR + "' }}", workflow)
+        self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
+        self.assertIn('run-name: "Diagnostic native Folder and Save with matched Xcode 26.2: ${{ inputs.mode }}"', workflow)
+        self.assertIn("python3 -B scripts/test-batch-scroll-container.py", workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)
         self.assertIn('summary --schema >', ci)

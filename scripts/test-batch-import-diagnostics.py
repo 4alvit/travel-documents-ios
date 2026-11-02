@@ -53,13 +53,53 @@ struct PrivateFailure: LocalizedError {
     var errorDescription: String? { "/private/secret-user-document.pdf token=secret" }
 }
 @MainActor
+final class XCUIApplication {}
+@MainActor
+final class XCUIElement {
+    var exists = true
+    var lateResult = false
+    var requests: [TimeInterval] = []
+    func waitForNonExistence(timeout: TimeInterval) -> Bool {
+        requests.append(timeout)
+        return lateResult
+    }
+}
+@MainActor
+final class XCTAttachment {
+    enum Lifetime { case keepAlways }
+    let text: String
+    var name = ""
+    var lifetime = Lifetime.keepAlways
+    init(string: String) { text = string }
+}
+final class BatchTestFailure: Error, @unchecked Sendable {}
+@MainActor
+final class DismissalHarness {
+    let original = BatchTestFailure()
+    var cancelled = false
+    var captures: [String] = []
+    var attachments: [XCTAttachment] = []
+    func wait(_ message: String, app: XCUIApplication, condition: @MainActor () -> Bool) async throws {
+        if cancelled { throw CancellationError() }
+        if condition() { return }
+        capture(app, message, batchDiagnostic: true)
+        throw original
+    }
+    func capture(_ app: XCUIApplication, _ name: String, batchDiagnostic: Bool) { captures.append(name) }
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
+    func run(_ navigation: XCUIElement) async throws {
+        try await requireFilesDismissal(XCUIApplication(), navigation: navigation, openedAt: .now)
+    }
+    // ACTUAL_DISMISSAL
+}
+@MainActor
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else { print("FAIL " + message); exit(1) }
 }
 @main
 struct Main {
     @MainActor
-    static func main() {
+    static func main() async {
         let name = CommandLine.arguments[1]
         var state = BatchImporterDiagnostics()
         let reader = Reader()
@@ -112,6 +152,41 @@ struct Main {
             expect(reader.read(valid) == initial, "1024 total nodes must be admitted")
             let excessive = Node(identifier: "root", type: .other, children: [Node(initial)] + Array(repeating: leaf, count: 1023))
             expect(reader.read(excessive) == "unavailable", "Excessive tree must fail")
+        case "dismissal-success", "dismissal-late", "dismissal-still-present", "dismissal-cancelled":
+            let harness = DismissalHarness()
+            let navigation = XCUIElement()
+            navigation.exists = name != "dismissal-success"
+            navigation.lateResult = name == "dismissal-late"
+            harness.cancelled = name == "dismissal-cancelled"
+            var returned = false
+            var originalRethrown = false
+            var cancellationRethrown = false
+            do {
+                try await harness.run(navigation)
+                returned = true
+            } catch let error as BatchTestFailure {
+                originalRethrown = error === harness.original
+            } catch is CancellationError {
+                cancellationRethrown = true
+            } catch { expect(false, "Unexpected replacement error") }
+            if name == "dismissal-success" || name == "dismissal-cancelled" {
+                expect(returned == (name == "dismissal-success"), "Success must retain original outcome")
+                expect(cancellationRethrown == (name == "dismissal-cancelled"), "Cancellation must propagate")
+                expect(navigation.requests.isEmpty && harness.captures.isEmpty && harness.attachments.isEmpty,
+                       "No passive diagnostic outside the original dismissal failure")
+            } else {
+                expect(!returned && originalRethrown, "Late disappearance must still throw exact original failure")
+                expect(navigation.requests == [30], "Exactly one passive request")
+                expect(harness.captures == ["Files remained after opening the selection",
+                    "Files after passive late observation — original failure retained"], "Before/after capture order")
+                expect(harness.attachments.count == 1, "One timing attachment")
+                let timing = harness.attachments[0].text
+                for key in ["originalDismissalCriterion=failed", "requestedObservationSeconds=30",
+                            "observationStartedSinceOpenReturned=", "observationFinishedSinceOpenReturned=",
+                            "observedElapsed=", "navigationDisappeared=\(navigation.lateResult)", "acceptance=failed"] {
+                    expect(timing.contains(key), "Missing timing/result field: " + key)
+                }
+            }
         default: preconditionFailure("Unknown fixture")
         }
         print("PASS " + name)
@@ -127,8 +202,10 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         cls.addClassCleanup(cls.directory.cleanup)
         source = section(APP.read_text(), "@MainActor\nprivate struct BatchImporterDiagnostics", "\nprivate struct BatchImporterDiagnosticValue")
         reader = section(UI.read_text(), "    private func batchImporterDiagnosticValue(", "\n    private struct BatchTestFailure")
+        dismissal = section(UI.read_text(), "    private func requireFilesDismissal(", "\n    private func reviewRows(")
         swift = Path(cls.directory.name) / "main.swift"
-        swift.write_text(FIXTURE.replace("// ACTUAL_STATE", source).replace("    // ACTUAL_READER", reader))
+        swift.write_text(FIXTURE.replace("// ACTUAL_STATE", source).replace("    // ACTUAL_READER", reader)
+                         .replace("    // ACTUAL_DISMISSAL", dismissal))
         cls.binary = Path(cls.directory.name) / "diagnostic-tests"
         result = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
                                  str(swift), "-o", str(cls.binary)], capture_output=True, text=True, timeout=60)
@@ -158,6 +235,31 @@ class BatchImportDiagnosticTests(unittest.TestCase):
 
     def test_snapshot_work_bounds(self):
         self.run_case("tree-bounds")
+
+    def test_original_dismissal_success_has_no_extra_observation(self):
+        self.run_case("dismissal-success")
+
+    def test_late_disappearance_still_throws_original_failure(self):
+        self.run_case("dismissal-late")
+
+    def test_still_present_still_throws_original_failure(self):
+        self.run_case("dismissal-still-present")
+
+    def test_cancellation_is_not_observed_or_replaced(self):
+        self.run_case("dismissal-cancelled")
+
+    def test_late_observation_has_no_actions_or_polling_loop(self):
+        ui = UI.read_text()
+        dismissal = section(ui, "    private func requireFilesDismissal(", "\n    private func reviewRows(")
+        self.assertEqual(dismissal.count("waitForNonExistence(timeout: 30)"), 1)
+        self.assertEqual(dismissal.count('try await wait("Files remained after opening the selection", app: app) { !navigation.exists }'), 1)
+        self.assertIn("catch let originalFailure as BatchTestFailure", dismissal)
+        self.assertIn("throw originalFailure", dismissal)
+        self.assertNotIn("timeout:", dismissal.split("catch let")[0])
+        for forbidden in [".tap(", ".swipe", ".launch(", ".terminate(", "Task.sleep", "while ", "repeat {", "try?"]:
+            self.assertNotIn(forbidden, dismissal)
+        self.assertLess(dismissal.index("add(timing)"), dismissal.index("capture(app,"))
+        self.assertLess(dismissal.index("capture(app,"), dismissal.index("throw originalFailure"))
 
     def test_all_app_diagnostics_are_debug_simulator_only(self):
         stack = []
