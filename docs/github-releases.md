@@ -48,8 +48,9 @@ absent synthetic folder without saving a backup. This covers a preinitialized
 provider, not cold first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
-The preparation has a 780-second build/test cap and an unchanged 180-second case
-allowance. A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
+Default Arm preparation has a 780-second build/test cap and an unchanged
+180-second case allowance. The Intel envelope is described below.
+A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
 spent about 531–532 seconds in build and runner startup before its case began; its former 600-second command cap stopped
 active preparation at about 68.5 seconds. That failed run did not reach native
 seeding or the main batch flow. The command cap now accommodates that observed
@@ -103,7 +104,7 @@ all four native cases, explicit empty warning/failure arrays, the real log order
 checkpoint evidence, full original-byte comparisons, and visual checks. Prior
 one-plus-three or three-bundle captures cannot be relabeled as this control.
 
-The first invocation shares the unchanged 780-second preparation command cap.
+The first invocation shares its profile-specific preparation command cap.
 The hosted prerequisite retains its 300-second default allowance and Files
 preparation retains 180 seconds. Startup, seed, host checkpoint, import and
 result inspection share the same 1,200-second driver clock, started before
@@ -122,13 +123,32 @@ anchored to the original qualification start. Its capture step allows 54 minutes
 and its job
 65 minutes. A [boot-only observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
 measured 279.406 seconds for boot, followed by 88.267 seconds for ready inventory.
-The original work budget left insufficient room for the unchanged 2,100-second
-reservation for preparation, driver and postchecks. This profile accommodates
-that measured startup; it does not establish that the Files failure is repaired.
-Arm and all biometric captures retain their existing budgets. Native case,
-preparation and driver limits, the 180-second cleanup budget, runtime matching,
-source verification and complete device-inventory checks remain unchanged.
-The job envelope is not a completion guarantee.
+The original work budget left insufficient room for the then-current
+2,100-second reservation for preparation, driver and postchecks. This profile
+accommodates that measured startup; it does not establish that the Files failure
+is repaired.
+
+Intel batch preparation now has a fixed 1,200-second command envelope, including
+build, install, runner startup and both selected cases. In the retained
+[`9d8766d` capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41470558345),
+the 780-second envelope expired while the Files case was still active at about
+148.5 seconds; the hosted prerequisite had passed in 8.419 seconds. These timings
+imply approximately 624 seconds outside the two case bodies, not an isolated
+compiler benchmark. The new envelope allocates 720 seconds for that overhead
+and result finalization, plus the existing 300-second hosted and 180-second
+Files allowances. It neither renews a clock nor retries a phase.
+
+Admission reserves the same selected 1,200-second preparation cap, the full
+1,200-second driver and 120 seconds for postchecks within the original
+3,000-second work deadline. Insufficient remaining time fails before preparation
+starts, including after a slow boot. The receipt records the selected phase cap;
+the actual command uses that same cap. This allocation is not a guarantee that
+preparation, subsequent import or result inspection will finish.
+
+Arm and all biometric captures retain their existing budgets. Native case and
+driver limits, the 180-second cleanup budget, runtime matching, source verification
+and complete device-inventory checks remain unchanged. The 54-minute capture
+and 65-minute job envelopes are unchanged.
 
 The Intel batch build compiles only the complete test source files needed by
 this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
@@ -236,7 +256,7 @@ the same total work budget. Result inspection, provider checks and final invento
 share the remaining budget and still fail if it expires; their completion is not
 guaranteed. The startup delay and the failed run's unconfirmed process-group
 cleanup are not claimed fixed. Recovery retains its 600-second command cap; batch release qualification
-preparation has the separate 780-second cap described above. The guidance test
+preparation has the profile-specific cap described above. The guidance test
 deadlines and 30-second cleanup budget are unchanged. The phone integration step
 has a 40-minute cap within a 60-minute job. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
 completed its integration step in 37 minutes 56 seconds but exceeded the former

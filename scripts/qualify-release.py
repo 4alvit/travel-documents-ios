@@ -754,11 +754,13 @@ class Qualification:
         require(not self.commands.active and not self.commands.unknown_spawn
                 and not self.xcode.active and not self.xcode.unknown_spawn,
                 "Files preparation writer ownership unresolved")
-        require(time.monotonic() + PREPARE_SECONDS + MODES["batch"][1] + 120 < self.work_deadline,
+        phase_seconds = 1200 if self.profile["name"] == "intel-batch" else PREPARE_SECONDS
+        require(time.monotonic() + phase_seconds + MODES["batch"][1] + 120 < self.work_deadline,
                 "Insufficient Files preparation and full driver budget")
         self.preparation_calls += 1
         # This owned preparation build supplies the verified seed/main products.
-        # Startup and both selected cases share the unchanged 780s phase cap.
+        # Intel reserves 720s overhead plus the existing 300s/180s native cases.
+        # Other profiles retain 780s; the original global deadline is unchanged.
         # Keep compiler intermediates outside the evidence upload glob.
         derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
@@ -766,7 +768,7 @@ class Qualification:
         folder = "TripDocket-Recovery-" + str(uuid.uuid4())
         self.report["files_preparation"] = {"calls": self.preparation_calls, "cases": list(checkpoint.PREPARATION_CASES),
             "hosted_case_seconds": 300,
-            "phase_seconds": PREPARE_SECONDS, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
+            "phase_seconds": phase_seconds, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
             "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
@@ -781,7 +783,7 @@ class Qualification:
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         failure = None
         try:
-            self.command("files-prepare-ui", argv, PREPARE_SECONDS)
+            self.command("files-prepare-ui", argv, phase_seconds)
         except BaseException as error:
             failure = error
         finally:
