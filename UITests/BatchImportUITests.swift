@@ -958,10 +958,7 @@ final class BatchImportUITests: XCTestCase {
             let frame = element.exists ? element.frame : .null
             if element.exists && element.isHittable && !frame.isEmpty && viewport.contains(frame) { return }
             let candidates = app.collectionViews.allElementsBoundByIndex + app.scrollViews.allElementsBoundByIndex
-            let container = candidates.reversed().first {
-                $0.exists && $0.isHittable && $0.frame.width <= bar.frame.width + 32
-                    && $0.frame.intersection(viewport).height > 100
-            }
+            let container = revealContainer(candidates, navigationFrame: bar.frame, viewport: viewport)
             guard let container else { throw failure("No active scroll container for \(navigation)", app: app) }
             viewport = viewport.intersection(container.frame).insetBy(dx: 8, dy: 8)
             try check(viewport.height > 80, app: app, "No safe scroll viewport for \(navigation)")
@@ -974,6 +971,44 @@ final class BatchImportUITests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         throw failure("Required control did not become fully reachable in \(navigation): \(element.identifier)", app: app)
+    }
+
+    private func revealContainer(_ candidates: [XCUIElement], navigationFrame: CGRect,
+                                 viewport: CGRect) -> XCUIElement? {
+        // Keep the directly hittable path and its existing selection order.
+        if let direct = candidates.reversed().first(where: {
+            $0.exists && $0.isHittable && $0.frame.width <= navigationFrame.width + 32
+                && $0.frame.intersection(viewport).height > 100
+        }) { return direct }
+
+        func finite(_ frame: CGRect) -> Bool {
+            !frame.isNull && !frame.isInfinite && !frame.isEmpty
+                && frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+        }
+        guard finite(navigationFrame), finite(viewport) else { return nil }
+        // A visible native List can report a non-hittable wrapper. Require one
+        // unambiguous aligned container and a live, visible descendant before
+        // using that wrapper's geometry for the existing bounded drag.
+        let wrappers = candidates.compactMap { candidate -> (XCUIElement, CGRect)? in
+            guard candidate.exists else { return nil }
+            let frame = candidate.frame
+            guard finite(frame), frame.width <= navigationFrame.width + 32,
+                  abs(frame.midX - navigationFrame.midX) < max(32, navigationFrame.width / 4),
+                  frame.intersection(viewport).height > 100 else { return nil }
+            return (candidate, frame)
+        }
+        guard wrappers.count == 1, let (wrapper, frame) = wrappers.first else { return nil }
+        let descendants = wrapper.buttons.allElementsBoundByIndex + wrapper.staticTexts.allElementsBoundByIndex
+        guard descendants.contains(where: { child in
+            guard child.exists, child.isHittable else { return false }
+            let childFrame = child.frame
+            guard finite(childFrame) else { return false }
+            let visible = childFrame.intersection(frame).intersection(viewport)
+            return !visible.isNull && visible.width >= min(44, childFrame.width)
+                && visible.height >= min(44, childFrame.height)
+        }) else { return nil }
+        return wrapper
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,

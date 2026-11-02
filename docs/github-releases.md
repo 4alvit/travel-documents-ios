@@ -105,6 +105,10 @@ the selected device. Its separate result bundle records this case; the following
 guidance cohort retains its own result bundle and reuses the same build products.
 The preparation receipt distinguishes owned host-command cleanup from the
 Simulator services that remain running for the tests.
+When the native Settings list reports a non-hittable wrapper, its scroll helper
+requires one geometrically aligned container with a live, visible descendant.
+Ambiguous containers are rejected. The target control must still be fully inside
+the safe viewport and hittable before use; the drag count and deadlines are unchanged.
 Preparation has a 900-second work budget and a 600-second build/test command cap;
 the case still has its existing 120-second allowance. The prior recovery runs
 measured 349–486 seconds for this build/test phase. These bounds cover the added
