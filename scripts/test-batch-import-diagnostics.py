@@ -187,7 +187,12 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         self.assertNotIn(".tap()", capture)
         self.assertNotIn("sleep", capture)
         self.assertIn("timeout: Duration = .seconds(15)", ui)
-        self.assertIn("executionTimeAllowance = 300", ui)
+        batch = section(ui, "    func testRealFilesBatchRequiresEveryReviewAndPreservesOriginals()",
+                        "\n    // Opt-in prepare/export/restore phases.")
+        self.assertEqual(batch.count("executionTimeAllowance ="), 1)
+        self.assertIn("executionTimeAllowance = 600", batch)
+        recovery = section(ui, "    private func recoveryConfiguration(", "\n    private func recoveryTab(")
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', recovery)
 
 
 if __name__ == "__main__":

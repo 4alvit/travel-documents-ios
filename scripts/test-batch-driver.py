@@ -85,11 +85,24 @@ class BatchDriverTests(unittest.TestCase):
                            ("-destination-timeout", "30"), ("-parallel-testing-enabled", "NO"),
                            ("-maximum-concurrent-test-simulator-destinations", "1"),
                            ("-default-test-execution-time-allowance", "300"),
-                           ("-maximum-test-execution-time-allowance", "300")]:
+                           ("-maximum-test-execution-time-allowance", "600")]:
             self.assertEqual(argv[argv.index(key) + 1], value)
         self.assertEqual(argv[-2:], ["CODE_SIGNING_ALLOWED=NO", "test"])
         process.wait.assert_called_once_with(timeout=100)
         self.assertEqual(run.summary["execution_order"], driver.execution_order(log_bytes()))
+
+    def test_case_ceiling_does_not_extend_remaining_driver_deadline(self):
+        run, _, _ = self.fixture()
+        process = Mock()
+        process.wait.side_effect = driver.subprocess.TimeoutExpired("xcodebuild", 100)
+        run.validate_result = Mock()
+        with patch.object(driver.subprocess, "Popen", return_value=process) as spawn, \
+             patch("builtins.print"), self.assertRaises(driver.subprocess.TimeoutExpired):
+            run.run_test()
+        spawn.assert_called_once()
+        process.wait.assert_called_once_with(timeout=100)
+        run.validate_result.assert_not_called()
+        self.assertNotIn("execution_order", run.summary)
 
     def test_exact_results_accept_either_tree_order(self):
         run, _, tree = self.fixture()

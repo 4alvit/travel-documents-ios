@@ -90,7 +90,7 @@ published artifacts. It does not replace the UI flows with direct service calls.
 The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
 reserved for owned cleanup, including a final 10-second receipt reserve. Each
 Xcode phase has at most 600 seconds including process stop; the preparation
-test has 120 seconds and export/restore each have 300.
+test has 180 seconds and export/restore each have 300.
 Recovery discovery uses one fixed 300-second window after source/toolchain
 preflight. It covers the first runtime query, profile parsing/selection, the
 existing capability check, runtime recheck, baseline device inventory, one

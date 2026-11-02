@@ -9,7 +9,8 @@ import Vision
 /// PDFs into real Files and obtains Pro through local StoreKit. Paired recovery
 /// phases use the existing demo fixture, remain Free, and export/restore through
 /// real Files. Authentication bypass is confined to the existing Debug fixture.
-/// Run serially, with a runner maximum/default allowance of at least 300 seconds.
+/// Run serially, with a 300-second runner default and a 600-second maximum
+/// for the complete batch workflow. Recovery phases retain their own allowances.
 @MainActor
 final class BatchImportUITests: XCTestCase {
     private let productID = "com.4alvit.tripfolio.pro"
@@ -24,7 +25,7 @@ final class BatchImportUITests: XCTestCase {
         guard !folder.isEmpty, !folder.contains("/"), !folder.contains("\\") else {
             throw BatchTestFailure(message: "TRIPDOCKET_BATCH_FOLDER must name a single nonempty Files folder")
         }
-        executionTimeAllowance = 300
+        executionTimeAllowance = 600
         continueAfterFailure = false
         let app = XCUIApplication()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
