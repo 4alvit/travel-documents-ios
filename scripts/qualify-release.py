@@ -473,6 +473,10 @@ class Commands(processes.Smoke):
 class Qualification:
     def __init__(self, root, mode, env):
         self.job = context(mode, env); self.root = Path(root).resolve(); self.mode = mode
+        reopen_control = env.get("TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL", "")
+        require(reopen_control in ("", "1") and (not reopen_control or mode == "batch"),
+                "Invalid native reopen diagnostic selection")
+        self.native_reopen_control = reopen_control == "1"
         self.started = time.monotonic()
         self.profile = execution_profile(mode, env, os.uname().machine)
         self.work_deadline = self.started + self.profile["work_seconds"]
@@ -489,6 +493,10 @@ class Qualification:
                        "execution_profile": self.profile,
                        "limits": {"work_seconds": self.profile["work_seconds"], "cleanup_seconds": CLEANUP_SECONDS},
                        "errors": [], "cleanup_verified": False}
+        if self.native_reopen_control:
+            self.report["diagnostic_native_reopen"] = {
+                "enabled": True, "release_acceptance": False,
+                "scope": "Same AUT process exports and reopens both originals before the unchanged main relaunch"}
         self.commands = Commands(self, "commands"); self.xcode = Commands(self, "xcode-process")
         self.save()
 
@@ -1630,8 +1638,10 @@ class Qualification:
                 except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))
             self.report["status"] = ("captured_pending_review" if capture_ready and not self.report["errors"]
                                      and self.report.get("original_xcresult") else "failed")
+            if self.native_reopen_control and self.report["status"] == "captured_pending_review":
+                self.report["status"] = "diagnostic_captured_pending_review"
             self.save()
-        return 0 if self.report["status"] == "captured_pending_review" else 1
+        return 0 if self.report["status"] in {"captured_pending_review", "diagnostic_captured_pending_review"} else 1
 
 
 def main():
