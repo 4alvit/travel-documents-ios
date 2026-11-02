@@ -294,6 +294,14 @@ actor Reader {
         }
         await Task.yield()
         if mode == "read-error" { throw ProbeError.rejected }
+        if mode == "read-error-known" {
+            throw NSError(domain: NSCocoaErrorDomain, code: 257,
+                          userInfo: [NSLocalizedDescriptionKey: "private description", NSFilePathErrorKey: "/private/secret.pdf"])
+        }
+        if mode == "read-error-unknown" {
+            throw NSError(domain: "/private/secret-domain", code: 93,
+                          userInfo: [NSLocalizedDescriptionKey: "private description"])
+        }
         if mode == "cancelled-read" { throw CancellationError() }
         if mode == "wrong-bytes" { return Data("incorrect".utf8) }
         if calls == 2 && mode == "array-wrong-second" { return Data("incorrect".utf8) }
@@ -337,6 +345,8 @@ actor Reader {
         case "empty": urls = []
         case "multiple": urls = [destination,destination]
         case "wrong-name": urls = [root.appendingPathComponent("destination/another.pdf")]
+        case "private-name": urls = [root.appendingPathComponent("destination/private-secret-name.pdf")]
+        case "directory-result": urls = [destination.deletingLastPathComponent()]
         case "remote": urls = [URL(string:"https://example.invalid/synthetic-ticket.pdf")!]
         case "foreign-host": urls = [URL(string:"file://foreign.invalid/synthetic-ticket.pdf")!]
         case "source": urls = [source]
@@ -352,6 +362,9 @@ actor Reader {
         default: break
         }
         session.receive(urls)
+        if mode == "array-observation-cap" {
+            for _ in 0..<80 { session.receive([]); session.cancel() }
+        }
         if mode == "duplicate" { session.receive([destination]); session.cancel() }
         if mode == "failure-then-valid" { session.receive([destination]) }
         if mode == "array-failed-then-valid" { session.receive([destination,secondDestination]) }
@@ -399,10 +412,17 @@ actor Reader {
         subprocess.run(["swiftc", "-swift-version", "6", "-strict-concurrency=complete", "-parse-as-library",
                         str(source), "-o", str(cls.binary)], check=True, capture_output=True, text=True, timeout=60)
 
-    def probe(self, mode):
+    def probe(self, mode, diagnostics=None):
         with tempfile.TemporaryDirectory() as temp:
-            out = subprocess.run([str(self.binary), mode, temp], check=True, capture_output=True, text=True, timeout=5)
-            value = json.loads(out.stdout)
+            arguments = [str(self.binary), mode, temp]
+            if diagnostics is not None:
+                arguments.append(diagnostics)
+            out = subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=5)
+            lines = out.stdout.splitlines()
+            self.last_trace = lines[:-1]
+            self.assertTrue(all(line.startswith("NATIVE_SEED_EXPORT ") for line in self.last_trace))
+            self.assertEqual(out.stderr, "")
+            value = json.loads(lines[-1])
             self.assertTrue(value["stable"])
             self.assertTrue(value["source_unchanged"])
             self.assertTrue(value["destination_unchanged"])
@@ -454,6 +474,74 @@ actor Reader {
                 self.assertEqual(value["calls"],2);self.assertTrue(value["exact_urls"])
                 if mode.startswith("array-held"):
                     self.assertTrue(value["held_without_success"])
+
+    def test_export_trace_requires_exact_flag_and_stays_in_debug_simulator_fixture(self):
+        for flag in (None, "--ui-testing-batch-diagnostics-extra", "ui-testing-batch-diagnostics"):
+            self.assertTrue(self.probe("array-success", diagnostics=flag)["verified"])
+            self.assertEqual(self.last_trace, [])
+        self.assertTrue(self.probe("array-success", diagnostics="--ui-testing-batch-diagnostics")["verified"])
+        self.assertTrue(self.last_trace)
+        conditional = APP[APP.index("#if DEBUG && targetEnvironment(simulator)\n// Diagnostic branch fixture"):]
+        self.assertIn("NATIVE_SEED_EXPORT", conditional)
+        self.assertNotIn("NATIVE_SEED_EXPORT", APP[:APP.index(conditional)])
+        self.assertTrue(conditional.rstrip().endswith("#endif"))
+
+    def test_export_trace_preserves_actual_outcomes_reads_and_late_event_behavior(self):
+        modes = ["success", "read-error", "wrong-bytes", "cancelled-read", "empty", "multiple",
+                 "wrong-name", "remote", "foreign-host", "source", "source-alias", "empty-expected",
+                 "large-expected", "cancel-before", "duplicate", "array-success", "array-reverse",
+                 "array-missing", "array-duplicate", "array-extra", "array-source", "array-wrong-name",
+                 "array-cancel-before", "array-failed-then-valid", "array-held-success",
+                 "array-held-wrong", "array-wrong-second", "array-error-second"]
+        for mode in modes:
+            with self.subTest(mode=mode):
+                quiet = self.probe(mode)
+                observed = self.probe(mode, diagnostics="--ui-testing-batch-diagnostics")
+                self.assertEqual(observed, quiet)
+                self.assertLessEqual(len(self.last_trace), 16)
+
+    def test_export_trace_discriminates_guard_and_read_failures_without_private_strings(self):
+        buckets = {"empty": "resultCount", "private-name": "resultNames", "directory-result": "resultNames",
+                   "remote": "nonFile", "foreign-host": "foreignHost", "source-alias": "sourceAlias",
+                   "empty-expected": "expectedSize", "array-missing": "resultCount"}
+        for mode, bucket in buckets.items():
+            with self.subTest(mode=mode):
+                value = self.probe(mode, diagnostics="--ui-testing-batch-diagnostics")
+                log = "\n".join(self.last_trace)
+                self.assertFalse(value["verified"]); self.assertEqual(value["calls"], 0)
+                self.assertIn("event=guardRejected bucket=" + bucket, log)
+                self.assertNotIn("event=readStart", log)
+                for private in ("/private", "private-secret-name", "https://", "file://", "another.pdf"):
+                    self.assertNotIn(private, log)
+                if mode == "directory-result":
+                    self.assertIn("roles=other directoryHints=1", log)
+        for mode, domain, code in [("read-error-known", "NSCocoaErrorDomain", 257),
+                                   ("read-error-unknown", "other", 93)]:
+            value = self.probe(mode, diagnostics="--ui-testing-batch-diagnostics")
+            log = "\n".join(self.last_trace)
+            self.assertFalse(value["verified"]); self.assertEqual(value["calls"], 1)
+            self.assertIn(f"event=readError role=ticket domain={domain} code={code}", log)
+            self.assertNotIn("private", log)
+            self.assertNotIn("secret", log)
+
+    def test_export_trace_cap_cannot_stop_reads_or_turn_late_events_into_acceptance(self):
+        value = self.probe("array-observation-cap", diagnostics="--ui-testing-batch-diagnostics")
+        self.assertEqual(len(self.last_trace), 16)
+        self.assertTrue(value["verified"]); self.assertEqual(value["calls"], 2)
+        value = self.probe("array-failed-then-valid", diagnostics="--ui-testing-batch-diagnostics")
+        self.assertFalse(value["verified"]); self.assertEqual(value["calls"], 0)
+        self.assertIn("event=didPick callback=2 phase=failed urls=2 roles=ticket,insurance", "\n".join(self.last_trace))
+        self.assertIn("event=lateIgnored phase=failed", "\n".join(self.last_trace))
+
+    def test_export_trace_matches_reversed_roles_and_waits_for_second_read(self):
+        self.probe("array-reverse", diagnostics="--ui-testing-batch-diagnostics")
+        log = "\n".join(self.last_trace)
+        self.assertIn("roles=insurance,ticket", log)
+        self.assertLess(log.index("event=readStart role=insurance"), log.index("event=readStart role=ticket"))
+        self.probe("array-held-success", diagnostics="--ui-testing-batch-diagnostics")
+        log = "\n".join(self.last_trace)
+        self.assertLess(log.index("event=lateIgnored phase=verifying"), log.index("event=readResult role=insurance"))
+        self.assertLess(log.index("event=readResult role=insurance"), log.index("event=terminal phase=verified"))
 
 
 if __name__ == "__main__":
