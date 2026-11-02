@@ -96,6 +96,11 @@ final class PrivacyTransitionUITests: XCTestCase {
     }
 
     func testEditDraftIsPrivateAcrossBackgroundAndReturn() async throws {
+        // This editor round trip used 46.6 seconds for its two event/ACK
+        // pairs and reached final UI capture at 127.3 seconds in CI. Use
+        // the driver's existing maximum for this case, keeping every local
+        // postcondition and the other cases' default allowance unchanged.
+        executionTimeAllowance = 180
         let app = try await launchLocked()
         defer { app.terminate() }
         try await unlockInitialFixture(app)
@@ -292,13 +297,18 @@ final class PrivacyTransitionUITests: XCTestCase {
 
     private func requireUnlocked(_ app: XCUIApplication) async throws {
         try await require("Successful Face ID did not restore a usable document interface", app: app) {
-            !self.lockTitle(in: app).exists && !self.hasAuthenticationUI(in: app) && (
-                app.staticTexts["Coast weekend"].isHittable
-                || app.navigationBars["Coast weekend"].buttons["Add document"].isHittable
-                || app.navigationBars["Original document"].buttons["Done"].isHittable
-                || app.textFields["Document title"].isHittable
-                || app.buttons["Settings"].firstMatch.isHittable || self.hasShareSheet(in: app)
-            )
+            guard !self.lockTitle(in: app).exists && !self.hasAuthenticationUI(in: app) else { return false }
+            let controls = [
+                app.staticTexts["Coast weekend"],
+                app.navigationBars["Coast weekend"].buttons["Add document"],
+                app.navigationBars["Original document"].buttons["Done"],
+                app.textFields["Document title"],
+                app.buttons["Settings"].firstMatch,
+            ]
+            // Missing controls are normal across these distinct screens.
+            // Avoid XCTest's implicit missing-element retries before reading
+            // live hittability; an existing but covered control still fails.
+            return controls.contains { $0.exists && $0.isHittable } || self.hasShareSheet(in: app)
         }
     }
 

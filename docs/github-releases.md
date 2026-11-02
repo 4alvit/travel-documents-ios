@@ -65,8 +65,12 @@ Biometric mode pins Xcode 26.2 (17C52), SDK/runtime 26.2. Each real simulated
 Face ID request has a unique acknowledgement bound to its run, request, sequence
 and event. The test waits for the single host event command to complete before
 starting its existing 15-second UI postcondition. The 60-second transport limit
-covers the two existing 30-second command caps; case and suite limits remain
-unchanged. Acknowledgement means command completion, not successful authentication.
+covers the two existing 30-second command caps. The editor round-trip case uses
+the existing 180-second maximum: one captured run spent 46.6 seconds on its two
+event/acknowledgement pairs and reached final UI capture at 127.3 seconds. Other
+case allowances and the suite limit remain unchanged. Missing controls are
+checked for existence before hittability to avoid implicit lookup retries.
+Acknowledgement means command completion, not successful authentication.
 This Xcode rejects an
 explicit schema version 0.4.0, and its default summary-schema documentation contains invalid JSON.
 The preflight recognizes the exact captured documentation by SHA-256, retaining
