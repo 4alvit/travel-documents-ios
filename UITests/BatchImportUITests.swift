@@ -279,15 +279,24 @@ final class BatchImportUITests: XCTestCase {
                     && inlineNames.element.value as? String == ownedFolder
             }
         }
-        let create = app.keyboards.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "Done", "done"
-        ))
-        try await wait("Native folder creation has no unique Done confirmation", app: app) {
-            inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder
-                && create.count == 1 && create.element.isEnabled && create.element.isHittable
+        try check(files.count == 1 && inlineNames.count == 1
+                  && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                  && inlineNames.element.value as? String == ownedFolder
+                  && isRecoveryFolder(localTitle, navigation: navigation.element),
+                  app: app, "Native folder editor is not ready for explicit end-editing")
+        guard let before = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle) else {
+            capture(app, "Native folder has no verified blank grid area")
+            throw BatchTestFailure(message: "Native folder has no verified blank grid area")
         }
-        capture(app, "Native folder exact name before the single Done")
-        create.element.tap()
+        capture(app, "Native folder exact name before the single blank-grid end-editing tap")
+        guard let current = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle),
+              current.point == before.point, current.normalized == before.normalized,
+              files.count == 1 && inlineNames.count == 1
+                && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                && inlineNames.element.value as? String == ownedFolder else {
+            throw BatchTestFailure(message: "Native folder blank grid area changed before end-editing")
+        }
+        files.element.coordinate(withNormalizedOffset: current.normalized).tap()
         // An updated folder-cell identifier must not masquerade as editor
         // dismissal. Check the live editor identifier independently of its cell.
         let remainingEditors = app.textViews.matching(identifier: "DOC.inlineRenameField")
@@ -355,6 +364,99 @@ final class BatchImportUITests: XCTestCase {
             capture(app, "Native seed returned after Save — " + filename)
         }
         // Host compares both exact destination bytes; completion alone is not proof.
+    }
+
+    @MainActor
+    private func nativeFolderBlankPoint(
+        in snapshot: XCUIElementSnapshot, ownedFolder: String, localTitle: String
+    ) -> (point: CGPoint, normalized: CGVector)? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return [] }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return [] }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func finite(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width >= 0 && frame.height >= 0
+        }
+        let all = nodes(snapshot)
+        let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
+        guard pickers.count == 1,
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
+        let pickerNodes = nodes(pickers[0])
+        let rootIdentifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
+        let roots = pickerNodes.filter { $0.elementType == .other && $0.identifier == rootIdentifier }
+        guard roots.count == 1 else { return nil }
+        let rootNodes = nodes(roots[0])
+        guard rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
+              rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1 else { return nil }
+        let files = pickerNodes.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
+        let navigation = pickerNodes.filter {
+            $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar"
+        }
+        let keyboards = all.filter { $0.elementType == .keyboard }
+        let windows = snapshot.children.filter { $0.elementType == .window }
+        guard files.count == 1, navigation.count == 1, keyboards.count == 1, !windows.isEmpty,
+              windows.allSatisfy({ finite($0.frame) && !$0.frame.isEmpty }) else { return nil }
+        let titles = nodes(navigation[0]).filter {
+            ($0.elementType == .staticText && $0.label == localTitle)
+                || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
+        }
+        let fileNodes = nodes(files[0])
+        let editors = fileNodes.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
+        let cells = fileNodes.filter { $0.elementType == .cell }
+        let owners = cells.filter { cell in
+            nodes(cell).contains { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
+        }
+        guard titles.count == 1, editors.count == 1, editors[0].value as? String == ownedFolder,
+              owners.count == 1 else { return nil }
+        let frame = files[0].frame
+        let keyboardFrame = keyboards[0].frame
+        let navigationFrame = navigation[0].frame
+        let ownerFrame = owners[0].frame
+        guard [frame, keyboardFrame, navigationFrame, ownerFrame, editors[0].frame].allSatisfy(finite),
+              !frame.isEmpty, !keyboardFrame.isEmpty, !navigationFrame.isEmpty, !ownerFrame.isEmpty else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        let top = max(frame.minY, navigationFrame.maxY, ownerFrame.minY, window.minY)
+        let bottom = min(frame.maxY, keyboardFrame.minY, ownerFrame.maxY, window.maxY)
+        guard bottom > top else { return nil }
+        let region = CGRect(x: max(frame.minX, window.minX), y: top,
+                            width: min(frame.maxX, window.maxX) - max(frame.minX, window.minX),
+                            height: bottom - top).insetBy(dx: 12, dy: 12)
+        guard finite(region), !region.isEmpty else { return nil }
+        // Containers describe the grid itself. Every other semantic node is an
+        // exclusion, including cells, images, text, editors and action controls.
+        let exclusions = pickerNodes.filter { node in
+            if node.elementType == .collectionView || node.elementType == .scrollView { return false }
+            if node.elementType == .other {
+                if node.identifier == "Browse View (Picker)"
+                    || node.identifier == rootIdentifier {
+                    return false
+                }
+                return !node.identifier.isEmpty || !node.label.isEmpty || node.value != nil
+            }
+            return true
+        }.map { $0.frame }
+        guard exclusions.allSatisfy(finite) else { return nil }
+        for xFraction: CGFloat in [0.5, 0.75, 0.25] {
+            for yFraction: CGFloat in [0.5, 0.25, 0.75] {
+                let point = CGPoint(x: region.minX + region.width * xFraction,
+                                    y: region.minY + region.height * yFraction)
+                let touch = CGRect(x: point.x - 11, y: point.y - 11, width: 22, height: 22)
+                guard region.contains(touch),
+                      !exclusions.contains(where: { !$0.isEmpty && $0.insetBy(dx: -8, dy: -8).intersects(touch) }) else { continue }
+                return (point, CGVector(dx: (point.x - frame.minX) / frame.width,
+                                       dy: (point.y - frame.minY) / frame.height))
+            }
+        }
+        return nil
     }
 
     private func presentRecoverySave(_ app: XCUIApplication) async throws {

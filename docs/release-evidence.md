@@ -53,10 +53,15 @@ and visual evidence, and preserve the earlier failed controls as failures.
 The [first native-folder run](https://github.com/4alvit/travel-documents-ios/actions/runs/41398340866)
 passed Files preparation but stopped before Done: the keyboard's first-use
 swipe-typing introduction covered that control. Screenshots and native
-accessibility hit checks confirmed the obstruction. The native-folder test now
-acknowledges only that exact introduction once, verifies its dismissal and the
-unchanged folder name, then retains the original Done and empty-folder checks.
-The failed run did not execute native seeding or the main import tests.
+accessibility hit checks confirmed the obstruction. A subsequent correction
+acknowledged only that exact introduction once and verified its dismissal and
+the unchanged folder name. The [following run](https://github.com/4alvit/travel-documents-ios/actions/runs/41400000817)
+delivered the single Done key event, but the editor and keyboard remained
+active. Neither failed run executed native seeding or the main import tests.
+The next control replaces Done with one tap in a verified empty part of the
+Files grid. It retains the editor-dismissal, exact-destination and host
+empty-folder checks. Its offline geometry checks do not establish native
+folder creation or completed import.
 
 ## Release preparation — 1 November 2026
 

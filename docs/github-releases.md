@@ -54,8 +54,11 @@ same provider contains the expected empty directory with a verified identity.
 This phase has a 240-second build/test cap and a 180-second case allowance.
 If the native keyboard presents its first-use swipe-typing introduction, the
 test acknowledges that exact prompt once and verifies the unchanged folder
-name before using the original Done control. It does not dismiss other prompts
-or bypass the keyboard's live reachability checks.
+name. It then ends editing with one tap in a verified empty part of the current
+Files grid, outside the captured item and control frames and above the keyboard.
+Two snapshots must agree on the target, and the exact editor must remain
+reachable before the tap. Success still requires the editor to disappear and
+the exact destination to open; the tap itself does not establish creation.
 If creation or validation fails, an unadopted leaf is not removed separately;
 it is retained for teardown of the exclusively owned Simulator.
 
@@ -234,7 +237,7 @@ result-bundle reviews, in execution order:
 
 Each bundle must match the same captured source and device, retain an unchanged
 original manifest, and have no skips, failures or runtime warnings. Review the
-folder's single Done action and verified empty destination, both native Save
+folder's single end-editing action and verified empty destination, both native Save
 operations and their complete-byte proof, and the main test's purchase, import,
 review, save and relaunch evidence. The three preparation cases remain separate
 prerequisites; they do not add methods to the public two-method batch receipt.

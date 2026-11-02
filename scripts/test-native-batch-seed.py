@@ -168,13 +168,18 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',case)
         self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder',case)
         self.assertIn("executionTimeAllowance = 180",case)
-        for action in ("more.element.tap()","newFolder.element.tap()","create.element.tap()"):
+        for action in ("more.element.tap()","newFolder.element.tap()",
+                       "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"):
             self.assertEqual(case.count(action),1)
         self.assertIn("remainingEditors.count == 0",case)
         self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)",case)
         self.assertIn('app.state == .notRunning',case)
         self.assertNotIn('buttons["Save"]',case)
-        self.assertNotIn('coordinate(',case)
+        self.assertEqual(case.count('coordinate('),1)
+        self.assertNotIn("create.element.tap()",case)
+        self.assertEqual(case.count("nativeFolderBlankPoint(in: try app.snapshot()"),2)
+        self.assertIn("current.point == before.point, current.normalized == before.normalized",case)
+        self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
         self.assertNotIn('press(forDuration',case)
 
 
