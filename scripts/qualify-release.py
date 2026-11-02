@@ -231,8 +231,14 @@ def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
     require(not before.get("dirty") and not before.get("status")
             and not before.get("status_porcelain_v1_z"), "Driver source was dirty")
     if mode == "batch":
-        require(summary.get("source_originals_unchanged") is True and summary.get("fixture_cleanup")
-                == "removed only the uniquely created fixture folder", "Batch originals/cleanup unverified")
+        cleanup = ("native root retained for verified owned Simulator teardown"
+                   if summary.get("fixture_destination_mode") == "native_root"
+                   else "removed only the uniquely created fixture folder")
+        require(summary.get("source_originals_unchanged") is True and summary.get("fixture_cleanup") == cleanup,
+                "Batch originals/cleanup unverified")
+        if summary.get("fixture_destination_mode") == "native_root":
+            require(summary.get("native_root_post_main_verified") is True,
+                    "Native root originals not verified after main flow")
     else:
         require(summary.get("selected_method") is None and all(summary.get("requests", {}).get(k, 0) > 0
                 for k in ("match", "nomatch")), "Full biometric sequence missing")
@@ -669,10 +675,20 @@ class Qualification:
     def native_seed_files(self, driver, *, empty=False):
         """Verify the exclusive destination; never create provider file bytes."""
         owned = driver.fixture_directory
+        root_mode = getattr(getattr(driver, "args", None), "native_root", False)
         require(owned is not None and str(uuid.UUID(driver.token)) == driver.token
-                and owned.name == "TripDocket-Batch-QA-" + driver.token,
-                "Invalid native seed folder")
-        provider = owned.parent
+                and driver.folder_name == "TripDocket-Batch-QA-" + driver.token,
+                "Invalid native seed destination")
+        if root_mode:
+            require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline
+                    and driver.args.device == self.owned and getattr(driver.args, "native_seed", False)
+                    and not getattr(driver.args, "native_folder", False)
+                    and owned == driver.native_root_provider, "Native root lacks exclusive device ownership")
+            driver.native_root_identity()
+            provider = owned
+        else:
+            require(owned.name == "TripDocket-Batch-QA-" + driver.token, "Invalid native seed folder")
+            provider = owned.parent
         self.container_path(str(provider.parent), "Shared", "AppGroup")
         def identity(path):
             value = path.lstat()
@@ -701,12 +717,32 @@ class Qualification:
                         "Native Save to Files changed original bytes")
         require(identity(provider) == driver.provider_identity and identity(owned) == driver.fixture_identity,
                 "Native seed directory changed during verification")
+        if root_mode: driver.native_root_identity()
+
+    def prepare_native_root(self, driver):
+        """Pin a truly empty provider root on this qualification's new device."""
+        require(self.mode == "batch" and "native_root" not in self.report
+                and getattr(getattr(driver, "args", None), "native_root", False) is True
+                and self.report.get("files_preparation_verified") is True,
+                "Native root requires one verified Files preparation")
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Native root writer unresolved")
+        self.native_seed_files(driver, empty=True)
+        self.report["native_root"] = {"verified_empty_before_seed": True,
+            "device": self.owned, "provider": str(driver.fixture_directory),
+            "provider_identity": list(driver.provider_identity),
+            "group_identity": list(driver.native_root_group_identity),
+            "cleanup": "deferred to exclusive owned Simulator teardown"}
+        self.save()
 
     def prepare_native_seed(self, driver):
         require(self.mode == "batch" and "native_seed" not in self.report
                 and self.report.get("files_preparation_verified") is True
-                and self.report.get("native_folder_verified") is True,
-                "Native seed requires verified Files preparation and native folder")
+                and ((getattr(getattr(driver, "args", None), "native_root", False)
+                      and self.report.get("native_root", {}).get("verified_empty_before_seed") is True)
+                     or (not getattr(getattr(driver, "args", None), "native_root", False)
+                         and self.report.get("native_folder_verified") is True)),
+                "Native seed requires verified Files preparation and destination")
         require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
                 "Native seed requires exclusive device ownership")
         require(not self.commands.active and not self.commands.unknown_spawn
@@ -739,6 +775,9 @@ class Qualification:
             "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": driver.token,
             "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        if getattr(getattr(driver, "args", None), "native_root", False):
+            self.commands.ops.env.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
+                                          "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": driver.token})
         failure = None
         try:
             self.command("native-seed-ui", argv, min(SEED_SECONDS, driver.remaining()))
@@ -759,7 +798,8 @@ class Qualification:
         self.report["native_seed_verified"] = True
         self.report["native_seed"]["destination_fixtures"] = [
             {key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]]
-        driver.record("native_saved_owned_folder", fixtures=driver.summary["fixtures"])
+        driver.record("native_saved_provider_root" if getattr(getattr(driver, "args", None), "native_root", False)
+                      else "native_saved_owned_folder", fixtures=driver.summary["fixtures"])
         self.save()
 
     def container_path(self, value, *kind):
@@ -814,13 +854,14 @@ class Qualification:
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
         args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None,
-                               native_seed=self.mode == "batch", native_folder=self.mode == "batch")
+                               native_seed=self.mode == "batch", native_folder=False,
+                               native_root=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
             driver.prepare()
             if self.mode == "batch":
-                self.prepare_native_folder(driver)
+                self.prepare_native_root(driver)
                 self.prepare_native_seed(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
             require(time.monotonic() + remaining + 8 < self.work_deadline,
@@ -848,7 +889,15 @@ class Qualification:
                 try:
                     if self.mode == "batch":
                         if driver.fixture_directory is not None:
-                            driver.verify_fixtures(); driver.remove_fixtures()
+                            driver.verify_fixtures()
+                            if getattr(getattr(driver, "args", None), "native_root", False):
+                                # Recheck the complete directory, not just the two
+                                # expected files, after the last native writer stops.
+                                self.native_seed_files(driver)
+                                if failure is None:
+                                    driver.summary["native_root_post_main_verified"] = True
+                                    self.report["native_root"]["verified_after_main"] = True
+                            driver.remove_fixtures()
                         else:
                             driver.summary["fixture_cleanup"] = "Unadopted native folder intent; owned Simulator teardown only"
                         driver.summary["source_after"] = driver.source_snapshot()
@@ -1021,8 +1070,18 @@ class Qualification:
                 and not self.commands.active and not self.commands.unknown_spawn,
                 "Original result capture requires complete owned cleanup")
         if self.mode == "batch":
-            for key, prefix in (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
-                                ("native_seed", "native-seed")):
+            root = self.report.get("native_root")
+            if root is not None:
+                require(root.get("verified_empty_before_seed") is True
+                        and root.get("verified_after_main") is True and root.get("device") == self.owned
+                        and self.baseline is not None and self.owned not in self.baseline
+                        and self.report.get("final_inventory") == self.baseline,
+                        "Native root lacks original-byte or owned-device cleanup proof")
+                prerequisites = (("files_preparation", "files-prepare"), ("native_seed", "native-seed"))
+            else:
+                prerequisites = (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
+                                 ("native_seed", "native-seed"))
+            for key, prefix in prerequisites:
                 proof = self.report.get(key + "_original", {})
                 require(self.report.get(key + "_verified") is True
                         and proof.get("path") == prefix + ".xcresult"

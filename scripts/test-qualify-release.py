@@ -343,8 +343,8 @@ class Guards(unittest.TestCase):
         (app/"payload").write_bytes(b"changed")
         self.assertNotEqual(q.tree_manifest(app,lambda:None),manifest)
 
-    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False):
-        run=self.run_object();run.owned=OWNED
+    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False, root_extra=False):
+        run=self.run_object();run.owned=OWNED;run.baseline={}
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
@@ -357,6 +357,7 @@ class Guards(unittest.TestCase):
         module=SimpleNamespace(CASES=cases,execution_order=batch.execution_order,timestamp=lambda:"recorded")
         class Driver:
             def __init__(self,args):
+                self.args=args
                 self.directory=run.root/"build/BatchSimulator-fixture";self.directory.mkdir()
                 self.fixture_directory=self.directory/"owned-fixtures"
                 self.summary=copy.deepcopy(summary);self.actions=(self.directory/"actions.jsonl").open("w")
@@ -370,7 +371,10 @@ class Guards(unittest.TestCase):
                 (self.directory/"xcresult-summary.json").write_text(json.dumps(result))
                 (self.directory/"xcresult-tests.json").write_text(json.dumps(tree))
             def verify_fixtures(self):events.append("verify-fixtures")
-            def remove_fixtures(self):events.append("remove-fixtures")
+            def remove_fixtures(self):
+                events.append("defer-root-cleanup")
+                self.summary["fixture_destination_mode"]="native_root"
+                self.summary["fixture_cleanup"]="native root retained for verified owned Simulator teardown"
             def source_snapshot(self):return copy.deepcopy(source)
             def save(self):(self.directory/"summary.json").write_text(json.dumps(self.summary))
         module.Driver=Driver
@@ -379,9 +383,20 @@ class Guards(unittest.TestCase):
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
         run.prepare_native_seed=lambda driver:events.append("native-seed")
-        run.prepare_native_folder=lambda driver:events.append("native-folder")
+        def prepare_root(driver):
+            self.assertTrue(driver.args.native_root)
+            self.assertTrue(driver.args.native_seed)
+            self.assertFalse(driver.args.native_folder)
+            events.append("native-root")
+            run.report["native_root"]={"verified_empty_before_seed":True}
+        run.prepare_native_root=prepare_root
+        def verify_root(driver):
+            events.append("verify-complete-root")
+            if root_extra: raise RuntimeError("Unexpected native seed destination entries")
+        run.native_seed_files=verify_root
+        run.prepare_native_folder=lambda driver:self.fail("Native root must not create a folder")
         with patch.object(q,"load_module",return_value=module),patch.object(q.subprocess,"Popen",return_value=child):
-            if skipped or runtime_warning:
+            if skipped or runtime_warning or root_extra:
                 with self.assertRaises(RuntimeError):run.run_driver()
             else:run.run_driver()
         self.assertFalse(run.xcode.active)
@@ -392,8 +407,19 @@ class Guards(unittest.TestCase):
 
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","native-folder","native-seed","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-root","native-seed","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
+
+    def test_post_main_extra_root_entry_prevents_capture_after_owned_process_stop(self):
+        run,events=self.exercise_driver(root_extra=True)
+        self.assertIn("verify-complete-root",events)
+        self.assertNotIn("products",events)
+        self.assertNotIn("driver_capture_verified",run.report)
+        self.assertNotIn("verified_after_main",run.report["native_root"])
+        summary=json.loads((run.root/run.report["driver_directory"]/"summary.json").read_text())
+        self.assertEqual(summary["status"],"failed")
+        self.assertIn("Unexpected native seed destination entries",summary["error"])
+        self.assertNotIn("native_root_post_main_verified",summary)
 
     def test_skipped_driver_result_never_reaches_product_acceptance(self):
         run,events=self.exercise_driver(skipped=True)
@@ -1100,7 +1126,7 @@ class Guards(unittest.TestCase):
                 self.assertTrue(target.exists());self.assertFalse(run.report["native_folder"]["adopted"])
                 self.assertNotIn("native_folder_verified",run.report)
 
-    def test_failed_folder_phase_never_starts_main_or_removes_unadopted_leaf(self):
+    def test_failed_root_admission_never_starts_main_or_removes_unowned_path(self):
         run=self.run_object();run.owned=OWNED
         leaf=run.root/"partial-native-folder";leaf.mkdir();(leaf/"keep").write_bytes(b"keep")
         module=SimpleNamespace(timestamp=lambda:"recorded")
@@ -1116,10 +1142,10 @@ class Guards(unittest.TestCase):
             def source_snapshot(self):return {"head":HEAD}
             def save(self):(self.directory/"summary.json").write_text(json.dumps(self.summary))
         module.Driver=Driver
-        def failed(driver):raise RuntimeError("original folder failure")
-        run.prepare_native_folder=failed
+        def failed(driver):raise RuntimeError("original root admission failure")
+        run.prepare_native_root=failed
         with patch.object(q,"load_module",return_value=module):
-            with self.assertRaisesRegex(RuntimeError,"original folder failure"):run.run_driver()
+            with self.assertRaisesRegex(RuntimeError,"original root admission failure"):run.run_driver()
         self.assertEqual((leaf/"keep").read_bytes(),b"keep")
         summary=json.loads((run.root/run.report["driver_directory"]/"summary.json").read_text())
         self.assertEqual(summary["status"],"failed")

@@ -25,6 +25,7 @@ final class BatchImportUITests: XCTestCase {
         guard !folder.isEmpty, !folder.contains("/"), !folder.contains("\\") else {
             throw BatchTestFailure(message: "TRIPDOCKET_BATCH_FOLDER must name a single nonempty Files folder")
         }
+        let nativeRoot = try nativeRootMode("batch")
         executionTimeAllowance = 600
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -54,7 +55,7 @@ final class BatchImportUITests: XCTestCase {
         try await wait("The purchased batch entry did not open", app: app) { choose.exists && choose.isEnabled }
         try await reveal(choose, app: app, navigation: "Import files")
         choose.tap()
-        try await selectRealFiles(app)
+        try await selectRealFiles(app, nativeRoot: nativeRoot)
         try await wait("Both real files were not prepared for individual review", app: app) {
             self.reviewRow(self.filenames[0], in: app).exists
                 && self.reviewRow(self.filenames[1], in: app).exists
@@ -331,6 +332,7 @@ final class BatchImportUITests: XCTestCase {
               environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
             throw BatchTestFailure(message: "Native seed requires its exact canonical owned folder token")
         }
+        let nativeRoot = try nativeRootMode("seed")
         executionTimeAllowance = 180
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -350,13 +352,25 @@ final class BatchImportUITests: XCTestCase {
             ))
             try await waitForStableShareAction(saveToFiles, app: app)
             saveToFiles.element.tap()
-            let picker = try await openLocalFilesFolder(folder, app: app)
-            let navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            let picker: XCUIElement
+            let navigation: XCUIElement
+            if nativeRoot {
+                picker = try await openNativeFilesRoot(app)
+                navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar").element
+            } else {
+                picker = try await openLocalFilesFolder(folder, app: app)
+                navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            }
             let save = navigation.buttons["Save"]
             try await wait("Native seed destination Save is unavailable", app: app) {
                 save.exists && save.isEnabled && save.isHittable
             }
             capture(app, "Native seed exact destination before Save — " + filename)
+            if nativeRoot {
+                try check(isNativeFilesRoot(app)
+                          && navigation.buttons.matching(NSPredicate(format: "label == %@", "Save")).count == 1,
+                          app: app, "Native seed left its verified local root or unique Save action")
+            }
             save.tap()
             try await wait("Native seed Save did not finish", app: app) {
                 !navigation.exists && seed.exists && seed.isHittable
@@ -1015,6 +1029,78 @@ final class BatchImportUITests: XCTestCase {
         batch.tap()
     }
 
+    private func nativeRootMode(_ mode: String) throws -> Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        return try Self.nativeRootConfiguration(ProcessInfo.processInfo.environment,
+                                                mode: mode, debugSimulator: debugSimulator)
+    }
+
+    private static func nativeRootConfiguration(_ environment: [String: String], mode: String,
+                                                debugSimulator: Bool) throws -> Bool {
+        guard environment["TRIPDOCKET_NATIVE_ROOT_UI"] != nil
+                || environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] != nil else { return false }
+        let token = environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] ?? ""
+        guard debugSimulator, environment["TRIPDOCKET_NATIVE_ROOT_UI"] == "1",
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token,
+              (mode == "seed" && environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1"
+                && environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] == token)
+                || (mode == "batch" && environment["TRIPDOCKET_BATCH_UI"] == "1") else {
+            throw BatchTestFailure(message: "Native root fixture requires its exact Debug Simulator opt-in and owned token")
+        }
+        return true
+    }
+
+    private func isNativeFilesRoot(_ app: XCUIApplication) -> Bool {
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        guard navigations.count == 1, pickers.count == 1, pickers.element.exists else { return false }
+        let roots = pickers.element.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: On My iPhone")
+        guard roots.count == 1, roots.element.exists,
+              pickers.element.collectionViews.matching(identifier: "File View").count == 1 else { return false }
+        let rootNavigation = roots.element.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let grids = roots.element.collectionViews.matching(identifier: "File View")
+        return rootNavigation.count == 1 && grids.count == 1 && grids.element.exists
+            && isRecoveryFolder("On My iPhone", navigation: rootNavigation.element)
+    }
+
+    private func openNativeFilesRoot(_ app: XCUIApplication) async throws -> XCUIElement {
+        try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
+                  "Native root fixture requires its selected iPhone")
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let recents = app.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.DocumentManager.RecentDocuments, Title: Recents")
+        let tabs = app.tabBars.matching(identifier: "DOC.browsingModeTabBar")
+        let browse = tabs.element.buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let browseReady = { tabs.count == 1 && browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        let browserReady = { navigations.count == 1 && pickers.count == 1 && pickers.element.exists }
+        let recentsReady = {
+            navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
+                && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
+        }
+        try await wait("Native root Files browser or supported Recents screen is missing", app: app) {
+            browserReady() || recentsReady()
+        }
+        if !browserReady() {
+            try check(recentsReady(), app: app, "Native root Files Recents route changed")
+            browse.element.tap()
+        }
+        try await wait("Native root Files browser is missing", app: app) { browserReady() }
+        let location = app.cells.matching(identifier: "DOC.sidebar.item.On My iPhone")
+        try await reachRecoveryLocalRoot("On My iPhone", navigation: navigations,
+                                         location: location, browse: browse, app: app)
+        try await wait("Native Files did not identify the exact local provider root", app: app) {
+            self.isNativeFilesRoot(app)
+        }
+        return pickers.element
+    }
+
     private func openLocalFilesFolder(_ folder: String, app: XCUIApplication) async throws -> XCUIElement {
         let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let navigation = navigations.element
@@ -1089,19 +1175,34 @@ final class BatchImportUITests: XCTestCase {
         return picker
     }
 
-    private func selectRealFiles(_ app: XCUIApplication) async throws {
+    private func selectRealFiles(_ app: XCUIApplication, nativeRoot: Bool) async throws {
         let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
-        let picker = try await openLocalFilesFolder(folder, app: app)
+        let picker: XCUIElement
+        if nativeRoot {
+            picker = try await openNativeFilesRoot(app)
+        } else {
+            picker = try await openLocalFilesFolder(folder, app: app)
+        }
         for filename in filenames {
             let basename = (filename as NSString).deletingPathExtension
-            let file = picker.cells.matching(NSPredicate(format: "label BEGINSWITH %@", basename)).firstMatch
+            let matchingFiles = picker.cells.matching(NSPredicate(format: "label BEGINSWITH %@", basename))
+            let file = matchingFiles.firstMatch
             try await wait("Missing selectable real Files original: \(filename)", app: app) { file.exists && file.isHittable }
+            if nativeRoot {
+                try check(isNativeFilesRoot(app) && matchingFiles.count == 1,
+                          app: app, "Batch selection left its verified local root or unique original")
+            }
             file.tap()
             try check(navigation.exists, app: app, "Files closed before both originals could be selected")
         }
-        let open = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open (")).firstMatch
+        let openActions = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open ("))
+        let open = openActions.firstMatch
         try await wait("Files did not expose Open after selecting both originals", app: app) { open.exists && open.isEnabled && open.isHittable }
         capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)
+        if nativeRoot {
+            try check(isNativeFilesRoot(app) && openActions.count == 1,
+                      app: app, "Batch selection left its verified local root or unique Open action")
+        }
         open.tap()
         try await requireFilesDismissal(app, navigation: navigation, openedAt: .now)
     }

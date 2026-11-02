@@ -91,6 +91,29 @@ class BatchDriverTests(unittest.TestCase):
         process.wait.assert_called_once_with(timeout=100)
         self.assertEqual(run.summary["execution_order"], driver.execution_order(log_bytes()))
 
+    def test_native_root_adds_only_explicit_destination_flags_to_same_single_pair(self):
+        run, _, _ = self.fixture()
+        run.args.native_root = True
+        run.token = "12345678-1234-4234-8234-123456789abc"
+        run.native_root_identity = Mock()
+        process = Mock(); process.wait.return_value = 0
+        def spawn(argv, **kwargs):
+            kwargs["stdout"].write(log_bytes()); kwargs["stdout"].flush()
+            return process
+        with patch.object(driver.subprocess, "Popen", side_effect=spawn) as call, patch("builtins.print"):
+            run.run_test()
+        call.assert_called_once(); run.native_root_identity.assert_called_once()
+        argv = call.call_args.args[0]; env = call.call_args.kwargs["env"]
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:" + x for x in SELECTORS])
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI"], "1")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN"], run.token)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_UI"], "1")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER"], run.folder_name)
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "600")
+        process.wait.assert_called_once_with(timeout=100)
+        self.assertEqual(run.summary["execution_order"], driver.execution_order(log_bytes()))
+
     def test_case_ceiling_does_not_extend_remaining_driver_deadline(self):
         run, _, _ = self.fixture()
         process = Mock()

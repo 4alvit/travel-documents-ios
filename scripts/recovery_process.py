@@ -110,6 +110,8 @@ class Smoke:
             record['bytes'][channel] += len(accepted)
             self.log_total += len(accepted)
             require(len(accepted) == len(chunk), 'Output cap exceeded')
+        # Output reads and writes may also resume after the work deadline.
+        require(self.ops.now() < self.t0 + record['work_deadline'], 'Command timeout')
         self.checkpoint()
 
     def stop(self, p, deadline, record):
@@ -241,6 +243,9 @@ class Smoke:
             self.ops.prepare(p)
             self.save()
             while True:
+                # A scheduler wakeup can arrive after the work window. Do not
+                # enter output/resource checks using the reserved stop time.
+                require(self.ops.now() < end - 8, 'Command timeout')
                 self.pump(p, record, handles)
                 if observed(self, record, 'command', 'poll', p.poll) is not None:
                     # Drain bounded pipe output after leader exit; deadline still applies.

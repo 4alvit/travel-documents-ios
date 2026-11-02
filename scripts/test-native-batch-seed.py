@@ -99,7 +99,10 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token',seed)
         self.assertIn("executionTimeAllowance = 180",seed)
         self.assertIn("defer { app.terminate() }",seed)
-        self.assertEqual(seed.count(".tap()"),3)  # source, share action, exact-folder Save per file
+        self.assertEqual(seed.count(".tap()"),3)  # source, share action, verified destination Save per file
+        self.assertIn('let nativeRoot = try nativeRootMode("seed")',seed)
+        self.assertIn("picker = try await openNativeFilesRoot(app)",seed)
+        self.assertIn("isNativeFilesRoot(app)",seed)
         self.assertIn("recoveryFilesNavigation(folder, picker: picker, app: app)",seed)
         self.assertEqual(driver.CASES,(
             "PlatformTests/testVerifiedPurchaseAndRestoreFromLocalHistory()",

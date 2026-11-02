@@ -91,9 +91,10 @@ Those channels do not qualify physical-device behavior, live purchases,
 TestFlight or App Store distribution.
 Hosted qualification captures require an independent result-bundle and visual
 review before their operator receipts can authorize a release promotion.
-Batch qualification retains four distinct result bundles: Files preparation,
-native folder creation, native saving of the two synthetic PDF fixtures, and
-the two main purchase/import tests. Each phase must pass its own checks;
+Batch qualification retains three distinct result bundles: Files preparation,
+native saving of two synthetic PDF fixtures into the verified empty local
+provider root of an exclusively owned Simulator, and the two main purchase/import
+tests. Each phase must pass its own checks;
 fixture preparation does not establish successful import or original-byte preservation.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
