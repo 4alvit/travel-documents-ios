@@ -514,28 +514,46 @@ final class AppModel {
 
     nonisolated static func readExternal(_ url: URL, maximum: Int) async throws -> Data {
         try Task.checkCancellation()
+        let cancellation = ExternalReadCancellation()
         let read = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard values.isRegularFile == true, let size = values.fileSize, size > 0, size <= maximum else {
-                throw ImportError.unsupportedSize
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            cancellation.install(coordinator)
+            defer { cancellation.clear() }
+            try Task.checkCancellation()
+            var coordinationError: NSError?
+            var result: Result<Data, Error>?
+            // The complete read stays inside the coordinated access, using the
+            // possibly relocated URL supplied by the provider.
+            coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+                result = Result {
+                    try Task.checkCancellation()
+                    let values = try coordinatedURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    guard values.isRegularFile == true, let size = values.fileSize, size > 0, size <= maximum else {
+                        throw ImportError.unsupportedSize
+                    }
+                    // The provider may change a file after the metadata check. Bound the
+                    // read itself, so a racing or misreported file cannot fill memory.
+                    let handle = try FileHandle(forReadingFrom: coordinatedURL)
+                    defer { try? handle.close() }
+                    var data = Data()
+                    while true {
+                        try Task.checkCancellation()
+                        let chunk = try handle.read(upToCount: min(1_024 * 1_024, maximum - data.count + 1)) ?? Data()
+                        if chunk.isEmpty { break }
+                        guard data.count + chunk.count <= maximum else { throw ImportError.unsupportedSize }
+                        data.append(chunk)
+                    }
+                    guard !data.isEmpty else { throw ImportError.unsupportedSize }
+                    return data
+                }
             }
-            // The provider may change a file after the metadata check. Bound the
-            // read itself, so a racing or misreported file cannot fill memory.
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            var data = Data()
-            while true {
-                try Task.checkCancellation()
-                let chunk = try handle.read(upToCount: min(1_024 * 1_024, maximum - data.count + 1)) ?? Data()
-                if chunk.isEmpty { break }
-                guard data.count + chunk.count <= maximum else { throw ImportError.unsupportedSize }
-                data.append(chunk)
-            }
-            guard !data.isEmpty else { throw ImportError.unsupportedSize }
-            return data
+            try Task.checkCancellation()
+            if let coordinationError { throw coordinationError }
+            guard let result else { throw CocoaError(.fileReadUnknown) }
+            return try result.get()
         }
         return try await withTaskCancellationHandler {
             let data = try await read.value
@@ -543,6 +561,7 @@ final class AppModel {
             return data
         } onCancel: {
             read.cancel()
+            cancellation.cancel()
         }
     }
 
@@ -816,5 +835,36 @@ extension AppModel {
         } onCancel: {
             validation.cancel()
         }
+    }
+}
+
+// Only cancel() crosses threads; Apple explicitly permits that operation from
+// any thread. The worker alone creates and uses the coordinator for file access.
+// The lock protects publication/lifetime and remembers cancellation that wins
+// the race with installation. This bridge never invokes accessors or performs
+// file I/O under the lock.
+private final class ExternalReadCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var coordinator: NSFileCoordinator?
+    private var isCancelled = false
+
+    func install(_ coordinator: NSFileCoordinator) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.coordinator = coordinator
+        if isCancelled { coordinator.cancel() }
+    }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        coordinator = nil
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        isCancelled = true
+        coordinator?.cancel()
     }
 }
