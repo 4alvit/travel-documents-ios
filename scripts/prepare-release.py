@@ -38,7 +38,10 @@ BIOMETRIC_TESTS = {
 }
 TESTS = {
     "release-smoke": {"ordinary-release-launch"},
-    "batch-import": {"testRealFilesBatchRequiresEveryReviewAndPreservesOriginals"},
+    "batch-import": {
+        "testVerifiedPurchaseAndRestoreFromLocalHistory",
+        "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals",
+    },
     "privacy-biometric": BIOMETRIC_TESTS,
 }
 

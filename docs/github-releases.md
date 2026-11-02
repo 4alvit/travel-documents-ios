@@ -37,11 +37,15 @@ old tag or relabel an old binary as fixed.
 ## Prepare without publishing
 
 The explicit `Release qualification` workflow captures the selected suite once.
-Batch mode pins Xcode 16.4 (16F6), SDK/runtime 18.5, and xcresulttool 23714
-(format 3.53). This is a controlled environment change after two cold Xcode 26.2
-batch attempts failed in the synthetic StoreKit preflight before app launch;
-it does not establish the cause of the missing transaction JWS or a successful
-repair. The original StoreKit and UI assertions remain required.
+Batch mode pins Xcode 16.4 (16F6), SDK 18.5, runtime 26.2, and xcresulttool 23714
+(format 3.53). The SDK and runtime deliberately differ, as in the core purchase
+compatibility lane. One serial invocation runs the exact hosted purchase/restore
+test followed by the exact real Files batch test. The hosted test verifies local
+StoreKit APIs and clears its transactions before the UI test makes its own purchase.
+Both cases must pass with no skips. Four unique XCTest log markers must prove
+hosted start/pass followed by batch start/pass; the original bounded log is hashed
+and checked again during independent review. The original StoreKit and UI assertions
+remain required. Successful purchase setup alone does not qualify the Files workflow.
 
 Xcode 16.4 has no `test-results --schema` API. Its batch preflight verifies and
 retains the exact reader version and reports `unsupported_by_producer`, without
@@ -54,8 +58,10 @@ explicit schema version 0.4.0, and its default summary-schema documentation cont
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
 hash as proof that tests passed. An unknown document or toolchain fails before
-native work. Both modes require one available SDK-matched runtime compatible
-with the host architecture. Ordinary CI and the default `--validate-schemas`
+native work. Each mode requires one available pinned runtime compatible
+with the host architecture. The capture records the SDK and runtime separately,
+including the observed runtime build, and checks those fields against the native
+test result. Only the biometric profile claims an SDK match. Ordinary CI and the default `--validate-schemas`
 command retain the Xcode 26.2 documentation check. Core/purchase tests and the Release preview
 pin Xcode 16.4 (16F6) and retain their previously validated runtime selection;
 this compatibility lane does not claim that the runtime matches its SDK.
@@ -109,7 +115,7 @@ explicit `runtimeWarnings` array. Verify the Actions artifact digest, exact
 run/attempt/source commit and tree, and the original bundle's complete file
 manifest before making the copy. Preserve the original unchanged and verify
 its manifest again after review. Record the reader version, commands, schema
-and output hashes. The reader must report the exact expected one or six passed
+and output hashes. The reader must report the exact expected two or six passed
 cases, zero failures/skips/expected failures, the captured device, and explicit
 empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
 failure or any warning block acceptance. Inspect the retained screenshots and
@@ -234,8 +240,9 @@ candidate being considered; it does **not** claim the Release ZIP was executed
 by those tests. The source commit/tree must still match exactly. Preserve any
 remaining runtime/toolchain limitations.
 
-The batch receipt requires exactly this passed method:
+The batch receipt requires exactly these two passed methods:
 
+- `testVerifiedPurchaseAndRestoreFromLocalHistory`
 - `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`
 
 The biometric receipt requires all six distinct passed methods:

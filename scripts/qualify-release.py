@@ -71,13 +71,15 @@ def device_map(data):
     return result
 
 
-def choose_runtime(data, sdk, architecture):
-    require(re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", sdk), "Invalid SDK version")
-    matches = [r for r in data.get("runtimes", []) if r.get("version") == sdk
+def choose_runtime(data, version, architecture):
+    require(re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", version), "Invalid runtime version")
+    matches = [r for r in data.get("runtimes", []) if r.get("version") == version
                and r.get("isAvailable") is True
                and r.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
                and architecture in r.get("supportedArchitectures", [])]
-    require(len(matches) == 1, "No unique SDK-matched available runtime")
+    require(len(matches) == 1, "No unique pinned available runtime")
+    require(sum(item.get("identifier") == matches[0]["identifier"] for item in data["runtimes"]) == 1,
+            "Selected runtime identifier appears more than once")
     phones = [d["identifier"] for d in matches[0].get("supportedDeviceTypes", [])
               if d.get("identifier", "").startswith("com.apple.CoreSimulator.SimDeviceType.iPhone-")]
     require(phones and len(phones) == len(set(phones)), "No unambiguous compatible iPhone")
@@ -175,9 +177,11 @@ def toolchain_profile(mode):
     if mode == "batch":
         return {"developer_dir": "/Applications/Xcode_16.4.app/Contents/Developer",
                 "xcode_version": "Xcode 16.4\nBuild version 16F6", "sdk_version": "18.5",
+                "runtime_version": "26.2",
                 "xcresulttool_version": "xcresulttool version 23714, format version 3.53 (current)",
                 "schema_documents": None}
     return {"developer_dir": DEVELOPER_DIR, "xcode_version": XCODE_VERSION, "sdk_version": "26.2",
+            "runtime_version": "26.2",
             "xcresulttool_version": None, "schema_documents": dict(SCHEMA_DOCUMENTS)}
 
 
@@ -229,6 +233,33 @@ def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
     else:
         require(summary.get("selected_method") is None and all(summary.get("requests", {}).get(k, 0) > 0
                 for k in ("match", "nomatch")), "Full biometric sequence missing")
+
+
+def validate_runtime_result(mode, selection, result):
+    profile = toolchain_profile(mode)
+    require(isinstance(selection, dict) and set(selection) == {
+        "identifier", "version", "build", "architecture", "sdk_version", "sdk_matched"
+    }, "Missing runtime selection evidence")
+    require(selection["version"] == profile["runtime_version"]
+            and selection["sdk_version"] == profile["sdk_version"]
+            and selection["sdk_matched"] is (profile["runtime_version"] == profile["sdk_version"])
+            and isinstance(selection["identifier"], str)
+            and selection["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+            and isinstance(selection["build"], str) and 0 < len(selection["build"]) <= 100
+            and selection["architecture"] in ("arm64", "x86_64"), "Wrong runtime selection evidence")
+    configurations = result.get("devicesAndConfigurations", [])
+    require(len(configurations) == 1, "Wrong runtime result configuration")
+    device = configurations[0].get("device", {})
+    require(device.get("osVersion") == selection["version"]
+            and device.get("osBuildNumber") == selection["build"]
+            and device.get("architecture") == selection["architecture"], "Native result runtime differs from selection")
+
+
+def validate_batch_order(raw, recorded):
+    driver = load_module(HERE / "test-batch-simulator.py", "qualification_batch_order")
+    observed = driver.execution_order(raw)
+    require(recorded == observed, "Batch execution order differs from original log")
+    return observed
 
 
 class Commands(processes.Smoke):
@@ -350,7 +381,16 @@ class Qualification:
         self.commands.limit = min(original, time.monotonic() + 300)
         try:
             runtimes = json.loads(self.command("runtimes", ["xcrun", "simctl", "list", "runtimes", "--json"], 150))
-            runtime, dtype = choose_runtime(runtimes, toolchain["sdk"], toolchain["architecture"])
+            runtime, dtype = choose_runtime(runtimes, profile["runtime_version"], toolchain["architecture"])
+            selected = next(item for item in runtimes["runtimes"]
+                            if item["identifier"] == runtime and item.get("version") == profile["runtime_version"])
+            require(isinstance(selected.get("buildversion"), str) and selected["buildversion"],
+                    "Selected runtime is missing its observed build")
+            self.report["runtime_selection"] = {
+                "identifier": runtime, "version": selected["version"], "build": selected["buildversion"],
+                "architecture": toolchain["architecture"], "sdk_version": toolchain["sdk"],
+                "sdk_matched": selected["version"] == toolchain["sdk"],
+            }
             self.baseline = self.inventory("baseline")
             self.intent = {"name": "TripDocket-Qualification-" + str(uuid.uuid4()), "runtime": runtime, "type": dtype}
             require(all(d["name"] != self.intent["name"] for d in self.baseline.values()), "Device name collision")
@@ -493,9 +533,15 @@ class Qualification:
         if failure: raise failure
         require(self.driver_calls == 1, "Driver did not launch exactly once")
         require(result is not None, "Missing xcresult summary")
-        expected = [module.CASE] if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
+        expected = list(module.CASES) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
         tree = json.loads(bounded_read(driver.directory, "xcresult-tests.json", 16 * MIB, self.check))
         validate_driver(self.mode, driver.summary, result, tree, expected, self.owned, self.job["GITHUB_SHA"])
+        validate_runtime_result(self.mode, self.report.get("runtime_selection"), result)
+        if self.mode == "batch":
+            self.report["batch_execution_order"] = validate_batch_order(
+                bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
+                driver.summary.get("execution_order"),
+            )
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
         self.report["driver_capture_verified"] = True

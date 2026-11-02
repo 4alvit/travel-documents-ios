@@ -35,7 +35,7 @@ final class BatchImportUITests: XCTestCase {
             session.clearTransactions()
             session.resetToDefaultState()
         }
-        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
+        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-batch-diagnostics",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         try await openTrip(app)
@@ -843,7 +843,7 @@ final class BatchImportUITests: XCTestCase {
         }
         let open = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open (")).firstMatch
         try await wait("Files did not expose Open after selecting both originals", app: app) { open.exists && open.isEnabled && open.isHittable }
-        capture(app, "Two synthetic originals selected in real Files")
+        capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)
         open.tap()
         try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
     }
@@ -984,7 +984,7 @@ final class BatchImportUITests: XCTestCase {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
         } while ContinuousClock.now < deadline
-        capture(app, message, springboard: springboard)
+        capture(app, message, springboard: springboard, batchDiagnostic: true)
         throw BatchTestFailure(message: message)
     }
 
@@ -993,7 +993,7 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func failure(_ message: String, app: XCUIApplication) -> BatchTestFailure {
-        capture(app, message)
+        capture(app, message, batchDiagnostic: true)
         return BatchTestFailure(message: message)
     }
 
@@ -1055,7 +1055,16 @@ final class BatchImportUITests: XCTestCase {
         add(attachment)
     }
 
-    private func capture(_ app: XCUIApplication, _ name: String, springboard: XCUIApplication? = nil) {
+    private func capture(_ app: XCUIApplication, _ name: String, springboard: XCUIApplication? = nil,
+                         batchDiagnostic: Bool = false) {
+        if batchDiagnostic && app.launchArguments.contains("--ui-testing-batch-diagnostics") {
+            var value = "unavailable"
+            if let snapshot = try? app.snapshot() { value = batchImporterDiagnosticValue(snapshot) }
+            let diagnostic = XCTAttachment(string: value)
+            diagnostic.name = name + " — batch importer state"
+            diagnostic.lifetime = .keepAlways
+            add(diagnostic)
+        }
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
@@ -1064,6 +1073,28 @@ final class BatchImportUITests: XCTestCase {
         tree.name = name + " — accessibility hierarchy"
         tree.lifetime = .keepAlways
         add(tree)
+    }
+
+    private func batchImporterDiagnosticValue(_ root: any XCUIElementSnapshot) -> String {
+        // One immutable snapshot avoids a count-to-live-value race during dismissal.
+        // Traverse only a bounded number/depth of nodes and reject duplicates.
+        var pending: [(any XCUIElementSnapshot, Int)] = [(root, 0)]
+        var visited = 0
+        var found: String?
+        while let (node, depth) = pending.popLast() {
+            visited += 1
+            guard visited <= 1_024, depth <= 64 else { return "unavailable" }
+            if node.elementType == .collectionView && node.identifier == "batch.importer" {
+                guard found == nil, let value = node.value as? String,
+                      value.utf8.count <= 128,
+                      value.range(of: #"\Abatch-importer showsFiles=[01] callbackCount=(?:0|[1-9][0-9]?) resultKind=(?:none|success|failure) urlCount=(?:[0-9]|10|11) draftPhase=(?:choosing|preparing|reviewing|committing)\z"#,
+                                  options: .regularExpression) != nil else { return "unavailable" }
+                found = value
+            }
+            guard node.children.count <= 1_024 - visited - pending.count else { return "unavailable" }
+            pending.append(contentsOf: node.children.map { ($0, depth + 1) })
+        }
+        return found ?? "unavailable"
     }
 
     private struct BatchTestFailure: LocalizedError {

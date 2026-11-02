@@ -2,7 +2,8 @@
 """Opt-in real Files / local StoreKit batch UI test on one already booted UUID.
 
 Run xcodegen generate first. This driver creates only synthetic PDFs in its own
-unique Files folder, runs one test once, and removes only that folder afterward.
+unique Files folder, runs one hosted purchase precondition and one batch test
+in a single invocation, and removes only that folder afterward.
 It neither boots simulators nor changes Apple accounts. Authentication is bypassed
 by this functional UI test; its result is not privacy or rendered-PDF proof.
 """
@@ -25,7 +26,80 @@ import uuid
 
 TEST = "TripfolioUITests/BatchImportUITests/testRealFilesBatchRequiresEveryReviewAndPreservesOriginals"
 CASE = TEST.split("/", 1)[1] + "()"
+TESTS = ("TripfolioTests/PlatformTests/testVerifiedPurchaseAndRestoreFromLocalHistory", TEST)
+CASES = tuple(test.split("/", 1)[1] + "()" for test in TESTS)
+MAX_LOG_BYTES = 16 * 1024 * 1024
 GROUP = "group.com.apple.FileProvider.LocalStorage"
+
+
+def execution_order(data):
+    """Bind the exact two successful cases to their original output order.
+
+    This is execution evidence from the owned process, not an attestation or a
+    substitute for the independent xcresult case/count/warning review.
+    """
+    if not isinstance(data, bytes) or not 0 < len(data) <= MAX_LOG_BYTES:
+        raise RuntimeError("Execution log is empty, oversized, or not bytes")
+    try:
+        text = data.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("Execution log must be strict UTF-8") from error
+    if "\0" in text:
+        raise RuntimeError("Execution log contains a NUL character")
+    cases = []
+    for test, identifier in zip(TESTS, CASES):
+        target, cls, method = test.split("/")
+        prefix = f"Test Case '-[{target}.{cls} {method}]' "
+        events = []
+        for number, raw in enumerate(text.split("\n"), 1):
+            line = raw.removesuffix("\r")
+            if not line.startswith(prefix):
+                continue
+            suffix = line[len(prefix):]
+            if suffix == "started.":
+                events.append(("started", number, None))
+            else:
+                match = re.fullmatch(r"passed \(((?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,9})?) seconds\)\.", suffix)
+                if match is None:
+                    raise RuntimeError("Selected case has a failed or malformed execution marker")
+                events.append(("passed", number, match[1]))
+        if len(events) != 2 or [event[0] for event in events] != ["started", "passed"]:
+            raise RuntimeError("Selected case must have one start and one pass marker")
+        cases.append({"identifier": identifier, "started_line": events[0][1],
+                      "passed_line": events[1][1], "duration_seconds": events[1][2]})
+    if cases[0]["passed_line"] >= cases[1]["started_line"]:
+        raise RuntimeError("Hosted precondition must pass before the batch case starts")
+    return {"schema_version": 1,
+            "log": {"path": "xcodebuild.log", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()},
+            "cases": cases, "hosted_pass_before_batch_start": True}
+
+
+def read_execution_order(path, check):
+    """Read only one stable, bounded regular log; never follow its symlink."""
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_LOG_BYTES:
+        raise RuntimeError("Execution log must be a bounded regular file")
+    identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if identity(os.fstat(descriptor)) != identity(before):
+            raise RuntimeError("Execution log changed during open")
+        chunks, size = [], 0
+        while True:
+            check()
+            chunk = os.read(descriptor, min(1024 * 1024, MAX_LOG_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_LOG_BYTES:
+                raise RuntimeError("Execution log grew beyond its byte bound")
+        if (size != before.st_size or identity(os.fstat(descriptor)) != identity(before)
+                or identity(path.lstat()) != identity(before)):
+            raise RuntimeError("Execution log changed during read")
+        return execution_order(b"".join(chunks))
+    finally:
+        os.close(descriptor)
 
 
 def device_uuid(value):
@@ -81,7 +155,7 @@ class Driver:
         self.fixture_identity = None
         self.provider_identity = None
         self.summary = {"status": "running", "started_at": timestamp(), "device": args.device,
-                        "folder": self.folder_name, "test": TEST, "timeout_seconds": args.timeout,
+                        "folder": self.folder_name, "tests": list(TESTS), "timeout_seconds": args.timeout,
                         "result_bundle": str(self.directory / "Tests.xcresult"),
                         "limits": "Rendered PDF pixels and saved-library byte identity require independent review; this is not an authentication test."}
         self.save()
@@ -205,7 +279,8 @@ class Driver:
                    "-maximum-concurrent-test-simulator-destinations", "1", "-collect-test-diagnostics", "never",
                    "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "300",
                    "-derivedDataPath", str(self.directory / "DerivedData"),
-                   "-resultBundlePath", self.summary["result_bundle"], "-only-testing:" + TEST,
+                   "-resultBundlePath", self.summary["result_bundle"],
+                   *("-only-testing:" + test for test in TESTS),
                    "CODE_SIGNING_ALLOWED=NO", "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
@@ -213,7 +288,7 @@ class Driver:
         self.summary.update({"command": command, "environment_overrides": overrides})
         self.save()
         self.record("xcodebuild_started", argv=command, environment_overrides=overrides)
-        print(f"One batch test; follow {self.directory / 'xcodebuild.log'}", flush=True)
+        print(f"Hosted precondition and batch test; follow {self.directory / 'xcodebuild.log'}", flush=True)
         with (self.directory / "xcodebuild.log").open("wb") as log:
             self.process = subprocess.Popen(command, cwd=self.root, env={**os.environ, **overrides},
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -231,7 +306,7 @@ class Driver:
             (self.directory / f"xcresult-{kind}.json").write_bytes(data)
             results[kind] = json.loads(data)
         summary, tree = results["summary"], results["tests"]
-        expected_counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0,
+        expected_counts = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0,
                            "skippedTests": 0, "expectedFailures": 0}
         self.summary["test_counts"] = {key: summary.get(key) for key in expected_counts}
         cases, nodes = [], list(tree["testNodes"])
@@ -247,14 +322,17 @@ class Driver:
         self.save()
         if (summary.get("result") != "Passed" or any(type(summary.get(key)) is not int or summary[key] != value
                 for key, value in expected_counts.items())
-                or cases != [{"identifier": CASE, "result": "Passed"}]):
-            raise RuntimeError("xcresult must contain exactly the selected case: 1 passed, 0 failed, 0 skipped")
+                or len(cases) != len(CASES)
+                or any(cases.count({"identifier": identifier, "result": "Passed"}) != 1 for identifier in CASES)):
+            raise RuntimeError("xcresult must contain both exact selected cases: 2 passed, 0 failed, 0 skipped")
         if devices != [{"id": self.args.device, "platform": "iOS Simulator"}]:
             raise RuntimeError("xcresult did not run on exactly the requested device UUID")
         configurations = summary.get("devicesAndConfigurations", [])
         if (len(configurations) != 1
                 or configurations[0].get("device", {}).get("deviceId", "").upper() != self.args.device):
             raise RuntimeError("xcresult summary has an unexpected device configuration")
+        self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining)
+        self.save()
 
     def stop_process(self):
         if self.process is None:

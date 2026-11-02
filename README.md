@@ -119,7 +119,9 @@ python3 scripts/test-batch-simulator.py --device <simulator-uuid>
 ```
 
 The driver creates a unique Files folder with two fictional PDFs, records their
-hashes, runs exactly one case and removes only its own folder. Its source
+hashes, runs the exact hosted purchase/restore precondition followed by the real
+batch UI case in one invocation, and removes only its own folder. Both cases and
+their execution order must be verified. Its source
 inventory, fixture copies, log and result bundle remain under `build/`. The case
 requires an actual local Xcode purchase, confirms each document individually,
 checks that later edits require confirmation again and opens the saved originals

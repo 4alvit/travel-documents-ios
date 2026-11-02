@@ -565,6 +565,7 @@ final class PrivacySupportUITests: XCTestCase {
         var identifier: String? = nil
         var label: String? = nil
 
+        @MainActor
         func matches(_ node: XCUIElementSnapshot) -> Bool {
             node.elementType == type
                 && (key == nil || node.identifier == key || node.label == key)

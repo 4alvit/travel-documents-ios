@@ -558,7 +558,7 @@ struct BatchTestFailure: Error { let message: String }
 }
 @MainActor final class Harness {
     var captures = 0
-    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?) {
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?, batchDiagnostic: Bool = false) {
         captures += 1
     }
     // ACTUAL_HELPER
