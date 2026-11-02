@@ -86,12 +86,21 @@ class SeedGuards(unittest.TestCase):
         self.assertEqual(self.probe("create","../outside",self.root),"rejected")
         self.assertEqual(list(self.root.iterdir()),[])
 
-    def test_gate_and_ui_keep_explicit_share_and_separate_opt_in_case(self):
+    def test_gate_and_ui_keep_explicit_export_and_separate_opt_in_case(self):
         self.assertIn("#if DEBUG && targetEnvironment(simulator)\n// Diagnostic branch fixture",APP)
         self.assertIn("#if DEBUG && targetEnvironment(simulator)\n                if let token",APP)
         view=APP[APP.index("private struct NativeBatchSeedView"):]
-        self.assertIn("ExplicitShareSheet(url: selected.url)",view)
-        self.assertIn("Button(file.lastPathComponent) { share = SeedShare(url: file) }",view)
+        self.assertIn("NativeSeedExportPicker(request: request)",view)
+        self.assertIn("Button(file.lastPathComponent) { beginExport(file) }",view)
+        self.assertIn("UIDocumentPickerViewController(forExporting: [request.source], asCopy: true)",view)
+        self.assertIn('Text("Export verified")',view)
+        self.assertIn('"nativeSeed.failure"',view)
+        self.assertIn('"nativeSeed.saved." + file.lastPathComponent',view)
+        self.assertIn("= AppModel.readExternal",view)
+        self.assertIn("try await read(destination, 1024)",view)
+        self.assertIn("verified = bytes == expected",view)
+        self.assertNotIn("removeItem",view)
+        self.assertNotIn("unlink",view)
         self.assertNotIn("isPro",view);self.assertNotIn("importDocument",view)
         seed=UI[UI.index("func testNativeSaveSeedsBothSyntheticOriginals"):
                 UI.index("private func presentRecoverySave")]
@@ -99,7 +108,10 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token',seed)
         self.assertIn("executionTimeAllowance = 180",seed)
         self.assertIn("defer { app.terminate() }",seed)
-        self.assertEqual(seed.count(".tap()"),3)  # source, share action, verified destination Save per file
+        self.assertEqual(seed.count(".tap()"),2)  # source, verified destination Save per file
+        self.assertNotIn("saveToFiles",seed)
+        self.assertIn('let verified = app.staticTexts["nativeSeed.saved." + filename]',seed)
+        self.assertIn('try check(!failed.exists && verified.exists',seed)
         self.assertIn('let nativeRoot = try nativeRootMode("seed")',seed)
         self.assertIn("picker = try await openNativeFilesRoot(app)",seed)
         self.assertIn("isNativeFilesRoot(app)",seed)
@@ -184,6 +196,115 @@ class SeedGuards(unittest.TestCase):
         self.assertIn("current.point == before.point, current.normalized == before.normalized",case)
         self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
         self.assertNotIn('press(forDuration',case)
+
+
+class ExportResultGuards(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.scratch.cleanup)
+        folder = Path(cls.scratch.name)
+        helper = APP[APP.index("@MainActor\n@Observable\nprivate final class NativeSeedExportSession"):
+                     APP.index("@MainActor\nprivate struct NativeSeedExportPicker")]
+        code = r"""
+import Foundation
+import Observation
+
+enum ProbeError: Error { case rejected }
+enum AppModel {
+    static func readExternal(_ url: URL, maximum: Int) async throws -> Data { throw ProbeError.rejected }
+}
+actor Reader {
+    var calls = 0
+    var url: URL?
+    var maximum = 0
+    let mode: String
+    init(_ mode: String) { self.mode = mode }
+    func read(_ url: URL, _ maximum: Int) async throws -> Data {
+        calls += 1; self.url = url; self.maximum = maximum
+        await Task.yield()
+        if mode == "read-error" { throw ProbeError.rejected }
+        if mode == "cancelled-read" { throw CancellationError() }
+        if mode == "wrong-bytes" { return Data("incorrect".utf8) }
+        return try Data(contentsOf: url)
+    }
+}
+"""
+        main = r"""
+@main struct Probe {
+    @MainActor static func main() async throws {
+        let mode = CommandLine.arguments[1]
+        let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+        let source = root.appendingPathComponent("source/synthetic-ticket.pdf")
+        let destination = root.appendingPathComponent("destination/synthetic-ticket.pdf")
+        let bytes = Data("known complete source bytes".utf8)
+        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try bytes.write(to: source); try bytes.write(to: destination)
+        let reader = Reader(mode)
+        let expected = mode == "empty-expected" ? Data() : mode == "large-expected" ? Data(repeating: 1,count:1025) : bytes
+        let session = NativeSeedExportSession(source: source, expected: expected, read: { url, limit in
+            try await reader.read(url,limit)
+        })
+        var urls = [destination]
+        switch mode {
+        case "empty": urls = []
+        case "multiple": urls = [destination,destination]
+        case "wrong-name": urls = [root.appendingPathComponent("destination/another.pdf")]
+        case "remote": urls = [URL(string:"https://example.invalid/synthetic-ticket.pdf")!]
+        case "foreign-host": urls = [URL(string:"file://foreign.invalid/synthetic-ticket.pdf")!]
+        case "source": urls = [source]
+        case "source-alias": urls = [source.deletingLastPathComponent().appendingPathComponent("../source/synthetic-ticket.pdf")]
+        case "cancel-before": session.cancel()
+        default: break
+        }
+        session.receive(urls)
+        if mode == "duplicate" { session.receive([destination]); session.cancel() }
+        if mode == "failure-then-valid" { session.receive([destination]) }
+        while session.phase == .verifying { await Task.yield() }
+        let first = session.phase == .verified
+        session.receive([destination]); session.cancel()
+        while session.phase == .verifying { await Task.yield() }
+        let result:[String:Any] = ["verified":session.phase == .verified,"stable":first == (session.phase == .verified),
+            "calls":await reader.calls,"exact_url":await reader.url == destination,"maximum":await reader.maximum,
+            "source_unchanged":try Data(contentsOf:source) == bytes,
+            "destination_unchanged":try Data(contentsOf:destination) == bytes]
+        print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)
+    }
+}
+"""
+        source = folder / "Probe.swift"; cls.binary = folder / "probe"
+        source.write_text(code + helper + main)
+        subprocess.run(["swiftc", "-swift-version", "6", "-strict-concurrency=complete", "-parse-as-library",
+                        str(source), "-o", str(cls.binary)], check=True, capture_output=True, text=True, timeout=60)
+
+    def probe(self, mode):
+        with tempfile.TemporaryDirectory() as temp:
+            out = subprocess.run([str(self.binary), mode, temp], check=True, capture_output=True, text=True, timeout=5)
+            value = json.loads(out.stdout)
+            self.assertTrue(value["stable"])
+            self.assertTrue(value["source_unchanged"])
+            self.assertTrue(value["destination_unchanged"])
+            return value
+
+    def test_actual_export_state_requires_single_correct_external_destination_before_read(self):
+        for mode in ["empty", "multiple", "wrong-name", "remote", "foreign-host", "source", "source-alias",
+                     "empty-expected", "large-expected", "cancel-before"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertFalse(value["verified"]); self.assertEqual(value["calls"],0)
+
+    def test_actual_export_state_requires_complete_bytes_and_preserves_both_files(self):
+        for mode in ["success", "read-error", "wrong-bytes", "cancelled-read"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertEqual(value["verified"],mode=="success")
+                self.assertEqual(value["calls"],1);self.assertEqual(value["maximum"],1024)
+                self.assertTrue(value["exact_url"])
+
+    def test_actual_export_state_rejects_duplicate_and_late_events(self):
+        value = self.probe("duplicate")
+        self.assertTrue(value["verified"]);self.assertEqual(value["calls"],1)
 
 
 if __name__ == "__main__":

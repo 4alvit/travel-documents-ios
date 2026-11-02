@@ -353,13 +353,6 @@ final class BatchImportUITests: XCTestCase {
             let seed = app.buttons["nativeSeed." + filename]
             try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isHittable }
             seed.tap()
-            let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
-                format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
-                NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
-                NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
-            ))
-            try await waitForStableShareAction(saveToFiles, app: app)
-            saveToFiles.element.tap()
             let picker: XCUIElement
             let navigation: XCUIElement
             if nativeRoot {
@@ -380,9 +373,13 @@ final class BatchImportUITests: XCTestCase {
                           app: app, "Native seed left its verified local root or unique Save action")
             }
             save.tap()
-            try await wait("Native seed Save did not finish", app: app) {
-                !navigation.exists && seed.exists && seed.isHittable
+            let verified = app.staticTexts["nativeSeed.saved." + filename]
+            let failed = app.staticTexts["nativeSeed.failure"]
+            try await wait("Native seed export did not finish destination verification", app: app) {
+                failed.exists || (!navigation.exists && verified.exists)
             }
+            try check(!failed.exists && verified.exists, app: app,
+                      "Native seed export destination was not verified")
             capture(app, "Native seed returned after Save — " + filename)
         }
         // Host compares both exact destination bytes; completion alone is not proof.

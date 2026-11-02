@@ -200,7 +200,10 @@ class CheckpointTests(unittest.TestCase):
         seed = source[source.index('    func testNativeSaveSeedsBothSyntheticOriginals()'):source.index('    // Combined qualification preserves')]
         self.assertIn('executionTimeAllowance = 180', seed)
         self.assertIn('defer { app.terminate() }', seed)
-        self.assertEqual(seed.count('.tap()'), 3)
+        self.assertEqual(seed.count('.tap()'), 2)  # source and direct-export Save
+        verified = seed.index('try check(!failed.exists && verified.exists')
+        self.assertLess(seed.index('save.tap()'), verified)
+        self.assertLess(verified, seed.index('capture(app, "Native seed returned after Save'))
         self.assertGreater(seed.index('try Self.recordBatchProducer('), seed.index('capture(app, "Native seed returned after Save'))
         self.assertNotIn('awaitBatchCheckpoint(', seed)
 

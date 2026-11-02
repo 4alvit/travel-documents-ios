@@ -71,9 +71,14 @@ build or product copy is substituted. Installed app and data-container identitie
 one invocation removes the separate seed-to-import launch boundary; it does not
 by itself prove that Xcode skipped installation or that a Files error is fixed.
 
-The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, shares each PDF from
-an opt-in Debug Simulator view into the exact local root through Save to Files.
-Its existing 180-second case allowance and UI assertions remain. After all seed
+The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, exports each PDF from
+an opt-in Debug Simulator view through a document picker in copy mode. The test
+selects the exact local root and presses Save once for each file. Before reporting
+success, the app requires one matching destination URL and reads that exact URL
+through the existing security-scoped, coordinated reader, capped at 1024 bytes.
+The complete bytes must match the synthetic source. A missing callback, failed
+read or mismatch fails preparation; the destination is never removed by the app.
+Its existing 180-second case allowance and destination assertions remain. After all seed
 actions succeed, the UI test process records its run identity and terminates the
 synthetic app. At the start of the import case, before resetting or launching the
 app, the test consumes that same-process record and waits for one host response.

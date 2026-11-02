@@ -172,6 +172,20 @@ preserves the native actions, case allowances, process ownership and work/cleanu
 budgets. It is not a demonstrated fix; a fresh complete capture and independent
 review are still required.
 
+The [C9 Arm capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41449915788)
+selected both synthetic PDFs, but Files remained visible after Open. Retained
+output records File Provider error -1005 with resolver error -1012 and an empty
+internal document selection before any accepted app result. The destination
+bytes were intact; that alone does not prove valid provider registration.
+
+The next seed control uses a direct document picker export in copy mode instead
+of the activity sheet. Each export must return one destination URL whose complete
+coordinated read matches the source, followed by the existing host verification
+of both files in the exact local root. The production importer, main assertions
+and time limits are unchanged. This adds evidence at the preparation boundary;
+it is not a demonstrated fix for the earlier File Provider failure. Native
+export access and the complete import sequence still require validation.
+
 An earlier main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work
 deadline and entered another resource scan, so the expected command timeout was

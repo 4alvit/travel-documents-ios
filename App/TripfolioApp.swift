@@ -1,6 +1,8 @@
 import SwiftUI
 #if DEBUG && targetEnvironment(simulator)
 import Darwin
+import Observation
+import UIKit
 #endif
 
 @main
@@ -68,7 +70,8 @@ private struct TripfolioRoot: View {
 #if DEBUG && targetEnvironment(simulator)
 // Diagnostic branch fixture only. These are the exact two driver-generated PDFs.
 // Sources stay in this exclusive owned Simulator until its verified teardown:
-// UIActivity completion also fires on cancellation and is not a byte proof.
+// Export completion and a coordinated read verify each returned destination;
+// the host independently checks both exact provider-root files before main.
 @MainActor
 private enum NativeBatchSeedFiles {
     enum Failure: Error { case invalid }
@@ -130,27 +133,137 @@ private struct NativeBatchSeedView: View {
     @State private var files: [URL] = []
     @State private var attempted = false
     @State private var failed = false
-    @State private var share: SeedShare?
-    private struct SeedShare: Identifiable { let url: URL; var id: String { url.lastPathComponent } }
+    @State private var exports: [String: NativeSeedExportSession] = [:]
+    @State private var presentedExport: NativeSeedExportSession?
+
+    private var unavailable: Bool { failed || exports.values.contains { $0.phase == .failed } }
+    private var pending: Bool { exports.values.contains { $0.phase == .waiting || $0.phase == .verifying } }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
-                Text(failed ? "Seed unavailable" : "Synthetic PDF export")
+                if unavailable {
+                    Text("Seed unavailable").accessibilityIdentifier("nativeSeed.failure")
+                } else {
+                    Text("Synthetic PDF export")
+                }
                 ForEach(files, id: \.lastPathComponent) { file in
-                    Button(file.lastPathComponent) { share = SeedShare(url: file) }
+                    Button(file.lastPathComponent) { beginExport(file) }
                         .accessibilityIdentifier("nativeSeed." + file.lastPathComponent)
+                        .disabled(unavailable || pending || exports[file.lastPathComponent] != nil)
+                    if exports[file.lastPathComponent]?.phase == .verified {
+                        Text("Export verified")
+                            .accessibilityIdentifier("nativeSeed.saved." + file.lastPathComponent)
+                    }
                 }
             }
             .navigationTitle("Native fixture seed")
-            .sheet(item: $share) { selected in
-                ExplicitShareSheet(url: selected.url) { share = nil }
+            .sheet(item: $presentedExport) { request in
+                NativeSeedExportPicker(request: request)
             }
+        }
+        .onChange(of: pending) { _, isPending in
+            // Clear only presentation after the retained request is terminal.
+            if !isPending { presentedExport = nil }
         }
         .task {
             guard !attempted else { return }
             attempted = true
             do { files = try NativeBatchSeedFiles.create(token) }
             catch { failed = true }
+        }
+    }
+
+    private func beginExport(_ file: URL) {
+        guard !unavailable, !pending, exports[file.lastPathComponent] == nil,
+              let encoded = NativeBatchSeedFiles.fixtures.first(where: { $0.0 == file.lastPathComponent })?.1,
+              let bytes = Data(base64Encoded: encoded) else { failed = true; return }
+        let request = NativeSeedExportSession(source: file, expected: bytes)
+        // Semantic ownership survives UIKit's automatic sheet dismissal.
+        // There is no destination deletion; this Simulator is qualifier-owned.
+        exports[file.lastPathComponent] = request
+        presentedExport = request
+    }
+}
+
+@MainActor
+@Observable
+private final class NativeSeedExportSession: Identifiable {
+    enum Phase { case waiting, verifying, verified, failed }
+    let id = UUID()
+    let source: URL
+    private let expected: Data
+    private let read: @Sendable (URL, Int) async throws -> Data
+    private(set) var phase: Phase = .waiting
+
+    init(source: URL, expected: Data,
+         read: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
+        self.source = source
+        self.expected = expected
+        self.read = read
+    }
+
+    func receive(_ urls: [URL]) {
+        // The first terminal delegate event owns the result. Duplicate or
+        // late events cannot start another read or overwrite a failed export.
+        guard phase == .waiting else { return }
+        guard !expected.isEmpty, expected.count <= 1024, urls.count == 1,
+              let destination = urls.first, destination.isFileURL,
+              destination.host == nil || destination.host == "" || destination.host == "localhost",
+              destination.lastPathComponent == source.lastPathComponent,
+              destination.standardizedFileURL != source.standardizedFileURL else {
+            phase = .failed
+            return
+        }
+        phase = .verifying
+        let read = self.read
+        let expected = self.expected
+        Task { [weak self] in
+            let verified: Bool
+            do {
+                // Preserve the exact returned URL, including its access grant.
+                // The production reader coordinates off-main, balances its
+                // security scope, and bounds the full byte stream to1024 bytes.
+                let bytes = try await read(destination, 1024)
+                try Task.checkCancellation()
+                verified = bytes == expected
+            } catch {
+                verified = false
+            }
+            guard let self, self.phase == .verifying else { return }
+            self.phase = verified ? .verified : .failed
+        }
+    }
+
+    func cancel() {
+        guard phase == .waiting else { return }
+        phase = .failed
+    }
+}
+
+@MainActor
+private struct NativeSeedExportPicker: UIViewControllerRepresentable {
+    let request: NativeSeedExportSession
+
+    func makeCoordinator() -> Coordinator { Coordinator(request: request) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [request.source], asCopy: true)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+
+    @MainActor
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let request: NativeSeedExportSession
+        init(request: NativeSeedExportSession) { self.request = request }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            request.receive(urls)
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            request.cancel()
         }
     }
 }
