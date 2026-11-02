@@ -276,8 +276,9 @@ class BatchImportDiagnosticTests(unittest.TestCase):
 
     def test_capture_is_observation_only_and_before_existing_screenshot(self):
         app = APP.read_text()
-        callback = section(app, "                          allowsMultipleSelection: true)", "\nprivate struct BatchItemReviewView")
-        self.assertLess(callback.index("importerDiagnostics.record(result)"), callback.index("guard model.batchImportDraft?.id"))
+        callback = section(app, "    private func receivedPickerResult(", "\n}\n\n#if DEBUG")
+        self.assertEqual(callback.count("importerDiagnostics.record("), 1)
+        self.assertLess(callback.index("importerDiagnostics.record(result.map(\\.urls))"), callback.index("guard model.batchImportDraft?.id"))
         ui = UI.read_text()
         selection = section(ui, "    private func selectRealFiles(", "\n    private func reviewRows(")
         self.assertEqual(selection.count("open.tap()"), 1)

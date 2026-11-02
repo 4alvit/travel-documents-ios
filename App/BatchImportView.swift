@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 struct BatchImportView: View {
     @Environment(AppModel.self) private var model
     @Bindable var draft: BatchImportDraft
-    @State private var showsFiles = false
+    @State private var pickerSession: BatchDocumentPicker.Session?
     @State private var pickerError: String?
     #if DEBUG && targetEnvironment(simulator)
     @State private var importerDiagnostics = BatchImporterDiagnostics()
@@ -34,7 +34,7 @@ struct BatchImportView: View {
                     Section {
                         Button(L10n.ui("batch.choose", defaultValue: "Choose files"), systemImage: "folder") {
                             pickerError = nil
-                            showsFiles = true
+                            pickerSession = BatchDocumentPicker.Session(draftID: draft.id)
                         }
                         .disabled(!model.canUseBatchImport)
                         .accessibilityIdentifier("batch.chooseFiles")
@@ -120,7 +120,7 @@ struct BatchImportView: View {
             }
             #if DEBUG && targetEnvironment(simulator)
             .modifier(BatchImporterDiagnosticValue(value: importerDiagnostics.value(
-                showsFiles: showsFiles, phase: draft.phase
+                showsFiles: pickerSession != nil, phase: draft.phase
             )))
             #endif
             .navigationTitle(L10n.ui("batch.navigationTitle", defaultValue: "Import files"))
@@ -135,27 +135,49 @@ struct BatchImportView: View {
                 }
             }
             .interactiveDismissDisabled(true)
-            .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.pdf, .jpeg, .png],
-                          allowsMultipleSelection: true) { [draftID = draft.id] result in
-                #if DEBUG && targetEnvironment(simulator)
-                importerDiagnostics.record(result)
-                #endif
-                guard model.batchImportDraft?.id == draftID else { return }
-                switch result {
-                case .success(let urls):
-                    guard !urls.isEmpty else { return }
-                    guard urls.count <= 10 else {
-                        pickerError = L10n.ui("batch.tooMany", defaultValue: "Choose no more than 10 files. No files were prepared or added.")
-                        return
-                    }
-                    pickerError = nil
-                    model.prepareBatchImport(urls: urls, draftID: draftID)
-                case .failure(let error):
-                    let failure = error as NSError
-                    if failure.domain != NSCocoaErrorDomain || failure.code != CocoaError.userCancelled.rawValue {
-                        pickerError = error.localizedDescription
-                    }
+            .sheet(item: $pickerSession) { session in
+                BatchDocumentPicker(session: session) { result in
+                    receivedPickerResult(result, from: session)
                 }
+            }
+        }
+        .onDisappear {
+            pickerSession?.invalidate()
+            pickerSession = nil
+        }
+    }
+
+    private func receivedPickerResult(_ result: Result<BatchDocumentSelection, Error>?,
+                                      from session: BatchDocumentPicker.Session) {
+        guard pickerSession?.id == session.id else {
+            if case .success(let selection) = result { selection.dispose() }
+            return
+        }
+        pickerSession = nil
+        guard let result else { return }
+        #if DEBUG && targetEnvironment(simulator)
+        importerDiagnostics.record(result.map(\.urls))
+        #endif
+        guard model.batchImportDraft?.id == session.draftID else {
+            if case .success(let selection) = result { selection.dispose() }
+            return
+        }
+        switch result {
+        case .success(let selection):
+            let urls = selection.urls
+            guard !urls.isEmpty else { selection.dispose(); return }
+            guard urls.count <= 10 else {
+                selection.dispose()
+                pickerError = L10n.ui("batch.tooMany", defaultValue: "Choose no more than 10 files. No files were prepared or added.")
+                return
+            }
+            pickerError = nil
+            model.prepareBatchImport(urls: urls, draftID: session.draftID,
+                                     onConsumptionFinished: { selection.dispose() })
+        case .failure(let error):
+            let failure = error as NSError
+            if failure.domain != NSCocoaErrorDomain || failure.code != CocoaError.userCancelled.rawValue {
+                pickerError = error.localizedDescription
             }
         }
     }
