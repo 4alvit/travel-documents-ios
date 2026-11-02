@@ -130,6 +130,19 @@ preparation and driver limits, the 180-second cleanup budget, runtime matching,
 source verification and complete device-inventory checks remain unchanged.
 The job envelope is not a completion guarantee.
 
+The Intel batch build compiles only the complete test source files needed by
+this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
+the package tests. A validated `EXCLUDED_SOURCE_FILE_NAMES` argument excludes
+the other sixteen test files in preparation, build-settings inspection and the
+subsequent invocation. It does not exclude production App or TravelCore code,
+StoreKit resources, or any of the four selected test methods. The exact source
+selection is recorded in the capture receipt. Unexpected test files or an
+excluded filename colliding with another tracked source fail before the build.
+The tracked project and test plan are unchanged; ordinary full CI, Arm batch
+and biometric qualification keep their original compilation scope. This
+reduces unnecessary compilation, but does not establish a measured speedup or
+a passing native result.
+
 The root fixture mode belongs only to the hosted qualifier's exclusively owned
 Simulator. Its driver never removes the provider root or individual root
 entries: cleanup is deferred to deletion of that whole owned Simulator. The

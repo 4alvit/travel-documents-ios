@@ -339,6 +339,18 @@ class Driver:
                     or not derived.is_dir() or derived.resolve(strict=True) != derived
                     or not derived.is_relative_to(self.root / "build")):
                 raise RuntimeError("Invalid qualified shared build")
+        build_settings = getattr(self, "qualified_build_settings", ())
+        if type(build_settings) is not tuple:
+            raise RuntimeError("Qualified build settings must be an immutable tuple")
+        if build_settings:
+            if (not combined or derived is None or len(build_settings) != 1
+                    or not isinstance(build_settings[0], str)
+                    or re.fullmatch(r"EXCLUDED_SOURCE_FILE_NAMES=[A-Za-z0-9_]+\.swift(?: [A-Za-z0-9_]+\.swift)*",
+                                    build_settings[0]) is None):
+                raise RuntimeError("Build exclusions require the qualified combined batch")
+            names = build_settings[0].split("=", 1)[1].split()
+            if len(names) != len(set(names)):
+                raise RuntimeError("Qualified build exclusions must be unique")
         command = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio",
                    "-configuration", "Debug", "-destination", f"platform=iOS Simulator,id={self.args.device}",
                    "-destination-timeout", "30", "-parallel-testing-enabled", "NO",
@@ -347,7 +359,7 @@ class Driver:
                    "-derivedDataPath", str(derived if derived is not None else self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"],
                    *("-only-testing:" + test for test in self.expected_tests),
-                   "CODE_SIGNING_ALLOWED=NO", "test-without-building" if derived is not None else "test"]
+                   "CODE_SIGNING_ALLOWED=NO", *build_settings, "test-without-building" if derived is not None else "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
                      "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}

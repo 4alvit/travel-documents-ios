@@ -38,6 +38,23 @@ DEVELOPER_DIR = "/Applications/Xcode_26.2.app/Contents/Developer"
 XCODE_VERSION = "Xcode 26.2\nBuild version 17C52"
 INTEL_RUNTIME_BUILD = "23C54"
 
+# Complete source files, never extracted test bodies. LocalizationTests remains
+# included because its basename is shared with a TravelCore package test.
+BATCH_BUILD_RETAINED = (
+    "AppTests/LocalizationTests.swift", "AppTests/PlatformTests.swift",
+    "AppTests/StoreKitTestBootstrap.swift", "UITests/BatchImportUITests.swift",
+)
+BATCH_BUILD_EXCLUDED = (
+    "AppTests/AppModelTests.swift", "AppTests/BatchCopiedSelectionTests.swift",
+    "AppTests/BatchDocumentPickerTests.swift", "AppTests/BatchExternalSelectionTests.swift",
+    "AppTests/BatchImportTests.swift", "AppTests/BatchPickerRequestTests.swift",
+    "AppTests/ExternalReadCoordinationTests.swift", "AppTests/NotificationSystemTests.swift",
+    "AppTests/PrivacySupportTests.swift", "AppTests/ReminderLifecycleTests.swift",
+    "UITests/AccessibilityUITests.swift", "UITests/LocalizationUITests.swift",
+    "UITests/PrivacySupportUITests.swift", "UITests/PrivacyTransitionUITests.swift",
+    "UITests/PurchaseUITests.swift", "UITests/TripfolioUITests.swift",
+)
+
 
 def require(value, message):
     if not value:
@@ -84,6 +101,25 @@ def execution_profile(mode, env, architecture):
             "runner_architecture": runner_arch, "architecture": architecture,
             "work_seconds": 3000 if intel_batch else WORK_SECONDS[mode],
             "boot_seconds": 600 if intel_batch else 180}
+
+def focused_build_selection(mode, profile, files):
+    """Bind the Intel-only literal exclusion setting to the captured source set."""
+    if profile["name"] != "intel-batch":
+        return None
+    require(mode == "batch" and profile["runner"] == "macos-15-intel"
+            and profile["runner_architecture"] == "X64" and profile["architecture"] == "x86_64",
+            "Focused build requires the verified Intel batch profile")
+    require(isinstance(files, dict), "Focused build requires captured source files")
+    expected = set(BATCH_BUILD_RETAINED + BATCH_BUILD_EXCLUDED)
+    actual = {name for name in files if name.startswith(("AppTests/", "UITests/"))}
+    require(actual == expected, "Focused build test source set changed")
+    names = sorted(Path(name).name for name in BATCH_BUILD_EXCLUDED)
+    require(len(names) == len(set(names)) and all(re.fullmatch(r"[A-Za-z0-9_]+\.swift", name) for name in names),
+            "Focused build exclusions must be unique literal Swift basenames")
+    require({name for name in files if Path(name).name in names} == set(BATCH_BUILD_EXCLUDED),
+            "Focused build exclusion collides with another source or resource")
+    return {"retained_sources": list(BATCH_BUILD_RETAINED), "excluded_sources": list(BATCH_BUILD_EXCLUDED),
+            "build_settings": ["EXCLUDED_SOURCE_FILE_NAMES=" + " ".join(names)]}
 
 
 def device_map(data):
@@ -164,7 +200,7 @@ def compiled_identity(path, check):
     return {"content": content, "modes": modes}
 
 
-def shared_product_paths(raw, derived):
+def shared_product_paths(raw, derived, build_settings=()):
     """Use the producer's actual target paths; never select a guessed output."""
     require(len(raw.encode()) <= MIB, "Build settings output too large")
     values = json.loads(raw)
@@ -180,6 +216,10 @@ def shared_product_paths(raw, derived):
                 and settings.get("PLATFORM_NAME") == "iphonesimulator"
                 and settings.get("PRODUCT_BUNDLE_IDENTIFIER") == identifier,
                 "Unexpected compiled target identity")
+        if build_settings:
+            require(settings.get("EXCLUDED_SOURCE_FILE_NAMES", "").split() == build_settings[0].split("=", 1)[1].split()
+                    and not settings.get("INCLUDED_SOURCE_FILE_NAMES", "").strip(),
+                    "Compiled target exclusion settings differ from the qualified build")
         paths = {}
         for key in ("SYMROOT", "BUILT_PRODUCTS_DIR", "TARGET_BUILD_DIR"):
             value = settings.get(key)
@@ -437,6 +477,7 @@ class Qualification:
         self.cleanup_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = self.interrupted = self.acquiring = self.finalizing_driver = False
         self.owned = self.intent = self.baseline = None; self.driver_calls = self.preparation_calls = 0
+        self.build_settings = ()
         self.out = self.root / "build" / ("ReleaseQualification-" + mode + "-" + self.job["GITHUB_RUN_ID"]
                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not self.out.parent.is_symlink() and (not self.out.parent.exists()
@@ -530,6 +571,11 @@ class Qualification:
                 and toolchain["xcode"] == profile["xcode_version"]
                 and toolchain["sdk"] == profile["sdk_version"],
                 "Qualification requires its mode's pinned Xcode, developer directory and SDK")
+        selection = focused_build_selection(self.mode, self.profile, self.before.get("files"))
+        if selection is not None:
+            self.build_settings = tuple(selection["build_settings"])
+            self.report["focused_build"] = selection
+            self.save()
         self.preflight_schemas()
         self.command("generate-project", ["xcodegen", "generate"], 120)
         original = self.commands.limit
@@ -728,7 +774,7 @@ class Qualification:
             "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "300",
             "-maximum-test-execution-time-allowance", "600", "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "files-prepare.xcresult",
-            *("-only-testing:" + case for case in checkpoint.PREPARATION_TESTS), "CODE_SIGNING_ALLOWED=NO", "test"]
+            *("-only-testing:" + case for case in checkpoint.PREPARATION_TESTS), "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "test"]
         previous = self.commands.ops.env
         self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
             "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
@@ -942,9 +988,9 @@ class Qualification:
         self.require_no_build_writer()
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
                 "-destination", "platform=iOS Simulator,id=" + self.owned, "-derivedDataPath", derived,
-                "CODE_SIGNING_ALLOWED=NO", "-showBuildSettings", "-json", "build-for-testing"]
+                "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "-showBuildSettings", "-json", "build-for-testing"]
         raw = self.shared_build_command(driver, "shared-build-settings", argv)
-        self.shared_products = shared_product_paths(raw, derived)
+        self.shared_products = shared_product_paths(raw, derived, self.build_settings)
         (self.out / "shared-build-settings.json").write_text(raw)
         self.report["shared_build"] = {"derived_data": str(derived.relative_to(self.root)),
             "action": "test-without-building", "settings_sha256": hashlib.sha256(raw.encode()).hexdigest(),
@@ -952,6 +998,7 @@ class Qualification:
             "observations": {}}
         self.shared_derived_identity = (derived.stat().st_dev, derived.stat().st_ino)
         driver.qualified_build = derived
+        driver.qualified_build_settings = self.build_settings
         driver.summary["qualified_build"] = self.report["shared_build"]["derived_data"]
         self.observe_shared_build(driver, "before_seed")
 
@@ -1221,6 +1268,9 @@ class Qualification:
                     "Driver may launch exactly one owned xcodebuild")
             require("platform=iOS Simulator,id=" + self.owned in argv,
                     "Driver selected another destination")
+            require([arg for arg in argv if isinstance(arg, str) and arg.startswith(
+                ("EXCLUDED_SOURCE_FILE_NAMES=", "INCLUDED_SOURCE_FILE_NAMES="))] == list(self.build_settings),
+                "Driver changed the qualified build settings")
             self.check(); self.driver_calls += 1
             record = {"id": "driver-xcodebuild", "argv": argv, "start": time.monotonic() - self.started}
             self.xcode.report["commands"].append(record); self.save()

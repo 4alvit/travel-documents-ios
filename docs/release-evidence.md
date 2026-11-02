@@ -915,7 +915,7 @@ cold-device CLI probes did not establish their local test environment. Later
 accepted historical hosted CI passed all seven StoreKit cases. No physical-device or
 live-store acceptance follows from that result.
 
-## Latest hosted candidate and Intel contingency
+## Hosted candidate evidence and Intel contingency
 
 Candidate `cb6dbbb` completed [all six CI jobs](https://github.com/4alvit/travel-documents-ios/actions/runs/41456799658).
 Independent review confirmed 171 native Core tests and 38 Swift package tests,
@@ -942,6 +942,25 @@ profile in [GitHub release guidance](github-releases.md) enables a bounded
 comparison on that environment without changing the import assertions or
 cleanup requirements. Native Intel acceptance remains pending until captured
 and independently reviewed.
+
+The subsequent [`70ca40a` Intel batch run](https://github.com/4alvit/travel-documents-ios/actions/runs/41464296256)
+completed boot readiness in 323.134 seconds, then exhausted the unchanged
+780-second preparation limit while compiling the test targets. No native test
+case started; seed, checkpoint and import were not reached. The capture
+retained compiler output and two empty result-staging logs, not a completed
+test result. All 22 owned process groups were stopped and reaped; the owned
+Simulator was deleted and all 127 other-device inventory records matched.
+Source-before matched the candidate, but source-after and product proofs were
+unavailable. This failure establishes neither a FileProvider failure nor
+successful import. Individual compiler tasks have no retained timestamps, so
+the elapsed time cannot be attributed to a particular source file.
+
+The following Intel-only compilation selection keeps the complete test source
+files containing the same four required methods and their StoreKit bootstrap,
+while excluding unrelated test files with a validated build argument. It
+preserves production code, resources, the test plan and all existing deadlines.
+Full ordinary CI remains required. A successful compilation alone does not
+qualify this change; the full native capture still requires independent review.
 
 ## Distribution and physical-device limits
 

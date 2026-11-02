@@ -159,7 +159,8 @@ class Guards(unittest.TestCase):
                      patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
                     run = q.Qualification(directory, mode, env)
                     deadline = run.work_deadline
-                    run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+                    run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                        "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
                     run.preflight_schemas = lambda: None
                     runtime = {"version": "26.2", "buildversion": "23C54", "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
                         "isAvailable": True, "supportedArchitectures": [machine],
@@ -179,6 +180,13 @@ class Guards(unittest.TestCase):
                         run.prepare()
                     self.assertEqual(calls[-2:], [("boot", 60), ("boot-ready", 600 if mode == "batch" and machine == "x86_64" else 180)])
                     self.assertEqual((run.work_deadline, run.commands.limit), (deadline, deadline))
+                    selected = mode == "batch" and machine == "x86_64"
+                    self.assertEqual(bool(run.build_settings), selected)
+                    self.assertEqual(type(run.build_settings), tuple)
+                    saved = json.loads((run.out / "receipt.json").read_text())
+                    self.assertEqual("focused_build" in saved, selected)
+                    if selected:
+                        self.assertEqual(saved["focused_build"]["build_settings"], list(run.build_settings))
 
     def test_intel_boot_command_keeps_global_clip_and_existing_eight_second_stop_reserve(self):
         env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
@@ -257,7 +265,8 @@ class Guards(unittest.TestCase):
                     env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
                     with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
                         run = q.Qualification(Path(directory), mode, env)
-                    run.source = lambda label: {"head":HEAD,"tree":"b"*40}
+                    run.source = lambda label: {"head":HEAD,"tree":"b"*40,
+                        "files":dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED,{})}
                     run.preflight_schemas = lambda: None
                     runtime = {"version":"26.2", "buildversion":build, "identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
                                "isAvailable":True, "supportedArchitectures":["x86_64"],
@@ -1607,7 +1616,104 @@ class Guards(unittest.TestCase):
         self.assertNotIn('--schema-version', ci)
         self.assertNotIn('export DEVELOPER_DIR=', ci)
 
+class FocusedBuildGuards(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")))
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        self.profile = q.execution_profile("batch", self.env, "x86_64")
+        self.retained = ["AppTests/LocalizationTests.swift", "AppTests/PlatformTests.swift",
+                         "AppTests/StoreKitTestBootstrap.swift", "UITests/BatchImportUITests.swift"]
+        self.excluded = ["AppTests/" + name + ".swift" for name in (
+            "AppModelTests", "BatchCopiedSelectionTests", "BatchDocumentPickerTests", "BatchExternalSelectionTests",
+            "BatchImportTests", "BatchPickerRequestTests", "ExternalReadCoordinationTests", "NotificationSystemTests",
+            "PrivacySupportTests", "ReminderLifecycleTests")] + ["UITests/" + name + ".swift" for name in (
+            "AccessibilityUITests", "LocalizationUITests", "PrivacySupportUITests", "PrivacyTransitionUITests",
+            "PurchaseUITests", "TripfolioUITests")]
+        self.files = dict.fromkeys(self.retained + self.excluded + ["App/Views.swift", "Sources/TravelCore/Models.swift",
+            "Tests/TravelCoreTests/LocalizationTests.swift", "App/Tripfolio.storekit"], {})
+        self.setting = "EXCLUDED_SOURCE_FILE_NAMES=" + " ".join(sorted(Path(path).name for path in self.excluded))
 
+    def test_exact_four_complete_files_and_sixteen_literal_exclusions(self):
+        selected = q.focused_build_selection("batch", self.profile, self.files)
+        self.assertEqual(selected, {"retained_sources": self.retained, "excluded_sources": self.excluded,
+                                    "build_settings": [self.setting]})
+        self.assertNotIn("LocalizationTests.swift", self.setting)
+        self.assertEqual((len(self.retained), len(self.excluded)), (4, 16))
+
+    def test_default_arm_and_all_biometrics_do_not_request_exclusions(self):
+        for mode, env, arch in (("batch", ENV, "arm64"), ("biometrics", ENV, "arm64"),
+                                ("biometrics", self.env, "x86_64")):
+            profile = q.execution_profile(mode, env, arch)
+            self.assertIsNone(q.focused_build_selection(mode, profile, None))
+
+    def test_wrong_mode_or_profile_identity_cannot_enable_focused_build(self):
+        for key, value in (("runner", "macos-15"), ("runner_architecture", "ARM64"), ("architecture", "arm64")):
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "verified Intel"):
+                q.focused_build_selection("batch", {**self.profile, key: value}, self.files)
+        with self.assertRaisesRegex(RuntimeError, "verified Intel"):
+            q.focused_build_selection("biometrics", self.profile, self.files)
+
+    def test_changed_test_source_set_fails_closed(self):
+        for files in (None, {k:v for k,v in self.files.items() if k != self.retained[0]},
+                      {**self.files, "UITests/NewTest.swift": {}}, {**self.files, "AppTests/Nested/NewTest.swift": {}},
+                      {**self.files, "AppTests/NewHelper.m": {}}):
+            with self.subTest(files=files), self.assertRaises(RuntimeError):
+                q.focused_build_selection("batch", self.profile, files)
+
+    def test_colliding_app_package_or_resource_name_fails_closed(self):
+        for path in ("App/AppModelTests.swift", "Sources/TravelCore/AccessibilityUITests.swift",
+                     "Tests/TravelCoreTests/BatchImportTests.swift", "Resources/PurchaseUITests.swift"):
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "collides"):
+                q.focused_build_selection("batch", self.profile, {**self.files, path: {}})
+
+    def test_invalid_exclusion_patterns_cannot_become_cli_settings(self):
+        for name in ("AppTests/*.swift", "AppTests/Bad Name.swift", "AppTests/Bad;Name.swift"):
+            paths = q.BATCH_BUILD_EXCLUDED + (name,)
+            with patch.object(q, "BATCH_BUILD_EXCLUDED", paths), self.assertRaisesRegex(RuntimeError, "literal"):
+                q.focused_build_selection("batch", self.profile, {**self.files, name: {}})
+
+    def test_preparation_uses_one_exact_setting_and_retains_native_limits(self):
+        run = q.Qualification(self.root, "batch", self.env)
+        run.build_settings = tuple(q.focused_build_selection("batch", run.profile, self.files)["build_settings"])
+        run.owned = OWNED; run.baseline = {}; run.intent = {}
+        calls = []
+        run.command = lambda label, argv, seconds=30: calls.append((label, list(map(str, argv)), seconds))
+        run.inspect_files_preparation = lambda: None
+        run.prepare_files_ui()
+        self.assertEqual(len(calls), 1)
+        label, argv, cap = calls[0]
+        self.assertEqual((label, cap), ("files-prepare-ui", 780))
+        self.assertEqual(argv.count(self.setting), 1)
+        self.assertEqual(argv[-3:], ["CODE_SIGNING_ALLOWED=NO", self.setting, "test"])
+        self.assertEqual([s for s in argv if s.startswith("-only-testing:")],
+                         ["-only-testing:" + case for case in q.checkpoint.PREPARATION_TESTS])
+        self.assertEqual(argv[argv.index("-default-test-execution-time-allowance")+1], "300")
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1], "600")
+
+    def test_facade_rejects_missing_changed_duplicate_or_extra_override_before_spawn(self):
+        run = q.Qualification(self.root, "batch", self.env); run.owned = OWNED
+        run.build_settings = (self.setting,)
+        base = ["xcodebuild", "-destination", "platform=iOS Simulator,id=" + OWNED]
+        for settings in ([], ["EXCLUDED_SOURCE_FILE_NAMES=Other.swift"], [self.setting, self.setting],
+                         [self.setting, "INCLUDED_SOURCE_FILE_NAMES=*.swift"]):
+            with self.subTest(settings=settings), patch.object(q.subprocess, "Popen", return_value=SimpleNamespace(pid=987654)) as spawn,                  self.assertRaisesRegex(RuntimeError, "changed the qualified"):
+                run.facade().Popen(base + settings, cwd=self.root, start_new_session=True)
+            spawn.assert_not_called()
+            self.assertEqual(run.driver_calls, 0)
+        with patch.object(q.subprocess, "Popen", return_value=SimpleNamespace(pid=987654)) as spawn:
+            argv = base + [self.setting]
+            run.facade().Popen(argv, cwd=self.root, start_new_session=True)
+        self.assertEqual(spawn.call_args.args[0], argv)
+        self.assertEqual(run.xcode.report["commands"][0]["argv"], argv)
+
+    def test_default_facade_rejects_unrequested_override(self):
+        run = q.Qualification(self.root, "biometrics", self.env); run.owned = OWNED
+        with patch.object(q.subprocess, "Popen") as spawn, self.assertRaisesRegex(RuntimeError, "changed the qualified"):
+            run.facade().Popen(["xcodebuild", "-destination", "platform=iOS Simulator,id=" + OWNED, self.setting],
+                               cwd=self.root, start_new_session=True)
+        spawn.assert_not_called()
 
 class SharedBuildGuards(unittest.TestCase):
     def setUp(self):
@@ -1664,6 +1770,28 @@ class SharedBuildGuards(unittest.TestCase):
             self.assertIn("modes",value["products"]["Tripfolio"])
             self.assertIn("identity",value["installed"]["data"])
         with self.assertRaises(RuntimeError):self.run.observe_shared_build(self.driver,"after_main")
+
+    def test_focused_settings_are_identical_in_query_and_qualified_driver(self):
+        setting = "EXCLUDED_SOURCE_FILE_NAMES=Other.swift Another.swift"
+        self.run.build_settings = (setting,)
+        for item in self.settings:
+            item["buildSettings"]["EXCLUDED_SOURCE_FILE_NAMES"] = setting.split("=", 1)[1]
+        self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls[0][1].count(setting), 1)
+        self.assertIs(self.driver.qualified_build_settings, self.run.build_settings)
+        self.assertEqual(self.driver.qualified_build, self.derived)
+
+    def test_dropped_changed_or_counteracting_target_setting_rejected(self):
+        setting = "EXCLUDED_SOURCE_FILE_NAMES=Other.swift Another.swift"
+        for target in range(3):
+            for key, value in (("EXCLUDED_SOURCE_FILE_NAMES", ""), ("EXCLUDED_SOURCE_FILE_NAMES", "Other.swift"),
+                               ("INCLUDED_SOURCE_FILE_NAMES", "Other.swift")):
+                settings = copy.deepcopy(self.settings)
+                for item in settings:
+                    item["buildSettings"]["EXCLUDED_SOURCE_FILE_NAMES"] = setting.split("=", 1)[1]
+                settings[target]["buildSettings"][key] = value
+                with self.subTest(target=target, key=key, value=value),                      self.assertRaisesRegex(RuntimeError, "exclusion settings differ"):
+                    q.shared_product_paths(json.dumps(settings), self.derived, (setting,))
 
     def test_missing_duplicate_wrong_platform_identity_or_escaped_target_fails(self):
         variants=[self.settings[:-1],self.settings+[self.settings[0]]]
