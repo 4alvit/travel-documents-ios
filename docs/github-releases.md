@@ -209,6 +209,15 @@ acceptance and coverage checks. Short text must fit completely in that reading
 viewport; tall text still requires overlapping coverage. Action-control tolerance,
 real hittability, screenshots, hierarchy captures and case deadlines are unchanged.
 
+The iPad driver allows up to 480 seconds for its single fresh build, within the
+unchanged 2,100-second work budget and separate 180-second cleanup reserve.
+An [observed Russian run](https://github.com/4alvit/travel-documents-ios/actions/runs/41417736277/job/125185590697)
+was still compiling when its former 360-second build cap expired. This allocation does not guarantee completion or admission: that
+run had about 1,539 seconds left, only 52.1 seconds beyond the mandatory
+1,487-second preparation, test and post-validation allowance. Native case
+limits, full-budget admission and failure handling remain unchanged; no build
+or test is retried or reused from another run.
+
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
 booted state themselves. This avoids the redundant CLI `available` filter;
