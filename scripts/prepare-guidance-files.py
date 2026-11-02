@@ -29,8 +29,9 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # preparation invocation owns startup of the exact selected device. Every
 # command includes the shared primitive's 8s stop
 # reserve. The existing Recovery preparation case has taken 348-486s including
-# its build; retain that phase's 600s cap and 120s XCTest allowance. Their sum
-# cannot extend this independent 900s setup budget or the surrounding CI job.
+# its build; retain that phase's 600s cap. The shared 180s XCTest allowance
+# covers the measured cold UI path and remains inside this independent
+# 900s setup budget and the surrounding CI job.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 
@@ -202,8 +203,8 @@ class Bootstrap(process.Smoke):
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.selected["udid"], "-destination-timeout", "30",
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "120",
-            "-maximum-test-execution-time-allowance", "120", "-derivedDataPath", str(derived),
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS),
+            "-maximum-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS), "-derivedDataPath", str(derived),
             "-resultBundlePath", str(self.out / "prepare.xcresult"),
             "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"),
             "CODE_SIGNING_ALLOWED=NO", "test"]

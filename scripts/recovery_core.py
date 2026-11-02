@@ -32,6 +32,9 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             work_free_bytes=8*GIB, output_bytes=8*GIB, xcresult_bytes=2*GIB,
             stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
+# Preparation reached local Files checks at 132s on a cold hosted run.
+# Keep this case bounded inside the unchanged 600s phase/work deadlines.
+PREPARE_CASE_SECONDS = 180
 CASES = {
     'prepare': 'BatchImportUITests/testRecoveryPrepareFilesProvider()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -983,7 +986,7 @@ class Recovery:
         return root
 
     def phase_argv(self, phase):
-        testcase = '120' if phase=='prepare' else '300'
+        testcase = str(PREPARE_CASE_SECONDS) if phase=='prepare' else '300'
         return [self.host['developer_dir']+'/usr/bin/xcodebuild','-project','Tripfolio.xcodeproj','-scheme','Tripfolio',
                 '-configuration','Debug','-destination','platform=iOS Simulator,id='+self.owned,
                 '-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1',
@@ -1013,7 +1016,7 @@ class Recovery:
                   'original_work_deadline_elapsed':self.limit-self.t0,
                   'remaining_work_before_seconds':self.limit-started,
                   'requested_command_cap_seconds':CAPS['phase_seconds'],
-                  'selected_case_max_seconds':120 if phase=='prepare' else 300,
+                  'selected_case_max_seconds':PREPARE_CASE_SECONDS if phase=='prepare' else 300,
                   'stop_reserve_seconds':8,
                   'command_deadline_ceiling_elapsed':min(self.limit,started+CAPS['phase_seconds'])-self.t0}
         self.report.setdefault('phase_budget',{})[phase] = budget

@@ -626,7 +626,7 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertIn(call, source)
         self.assertIn('if actions.count == 1, header.count == 1', source)
         self.assertIn('if action.isEnabled, action.isHittable', source)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', SOURCE.read_text())
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', SOURCE.read_text())
 
 
 class SDKSourceTests(unittest.TestCase):

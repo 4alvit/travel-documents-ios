@@ -520,13 +520,13 @@ class Qualification:
         require(not derived.exists() and not derived.is_symlink(), "Files preparation output already exists")
         folder = "TripDocket-Recovery-" + str(uuid.uuid4())
         self.report["files_preparation"] = {"calls": self.preparation_calls, "case": PREPARE_CASE,
-            "phase_seconds": PREPARE_SECONDS, "case_seconds": 120, "absent_folder_probe": folder,
+            "phase_seconds": PREPARE_SECONDS, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
             "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "120",
-            "-maximum-test-execution-time-allowance", "120", "-derivedDataPath", derived,
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS),
+            "-maximum-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS), "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "files-prepare.xcresult",
             "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
         previous = self.commands.ops.env
