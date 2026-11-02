@@ -71,6 +71,21 @@ def context(mode, env):
                                      "GITHUB_RUN_ATTEMPT", "GITHUB_EVENT_NAME", "GITHUB_WORKFLOW")}
 
 
+def execution_profile(mode, env, architecture):
+    """Select the explicit runner profile before allocating its work deadline."""
+    require(mode in MODES, "Select exactly batch or biometrics")
+    runner = env.get("QUALIFICATION_RUNNER")
+    runner_arch = env.get("QUALIFICATION_RUNNER_ARCH")
+    require((runner, runner_arch, architecture) in (
+        ("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")),
+        "Qualification runner label or host architecture mismatch")
+    intel_batch = mode == "batch" and runner == "macos-15-intel"
+    return {"name": "intel-batch" if intel_batch else "default", "runner": runner,
+            "runner_architecture": runner_arch, "architecture": architecture,
+            "work_seconds": 3000 if intel_batch else WORK_SECONDS[mode],
+            "boot_seconds": 600 if intel_batch else 180}
+
+
 def device_map(data):
     require(isinstance(data, dict) and isinstance(data.get("devices"), dict), "Invalid inventory")
     result = {}
@@ -416,7 +431,9 @@ class Commands(processes.Smoke):
 class Qualification:
     def __init__(self, root, mode, env):
         self.job = context(mode, env); self.root = Path(root).resolve(); self.mode = mode
-        self.started = time.monotonic(); self.work_deadline = self.started + WORK_SECONDS[mode]
+        self.started = time.monotonic()
+        self.profile = execution_profile(mode, env, os.uname().machine)
+        self.work_deadline = self.started + self.profile["work_seconds"]
         self.cleanup_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = self.interrupted = self.acquiring = self.finalizing_driver = False
         self.owned = self.intent = self.baseline = None; self.driver_calls = self.preparation_calls = 0
@@ -426,7 +443,8 @@ class Qualification:
                 or self.out.parent.resolve() == self.out.parent), "Unsafe build output parent")
         self.out.mkdir(parents=True, exist_ok=False)
         self.report = {"status": "running", "mode": mode, "job": self.job,
-                       "limits": {"work_seconds": WORK_SECONDS[mode], "cleanup_seconds": CLEANUP_SECONDS},
+                       "execution_profile": self.profile,
+                       "limits": {"work_seconds": self.profile["work_seconds"], "cleanup_seconds": CLEANUP_SECONDS},
                        "errors": [], "cleanup_verified": False}
         self.commands = Commands(self, "commands"); self.xcode = Commands(self, "xcode-process")
         self.save()
@@ -505,6 +523,8 @@ class Qualification:
             toolchain[name] = self.command(name, argv).strip()
         toolchain["developer_environment"] = os.environ.get("DEVELOPER_DIR")
         self.report["toolchain"] = toolchain
+        require(toolchain["architecture"] == self.profile["architecture"],
+                "Captured host architecture differs from qualification profile")
         profile = toolchain_profile(self.mode)
         require(toolchain["developer_environment"] == profile["developer_dir"]
                 and toolchain["xcode"] == profile["xcode_version"]
@@ -543,7 +563,7 @@ class Qualification:
         finally:
             self.acquiring = False; self.commands.limit = original
         self.command("boot", ["xcrun", "simctl", "boot", self.owned], 60)
-        self.command("boot-ready", ["xcrun", "simctl", "bootstatus", self.owned, "-b"], 180)
+        self.command("boot-ready", ["xcrun", "simctl", "bootstatus", self.owned, "-b"], self.profile["boot_seconds"])
         if self.mode == "batch":
             self.prepare_files_ui()
             # The separate real UI case initializes the provider. These reads
