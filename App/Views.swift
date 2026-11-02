@@ -1,5 +1,6 @@
 import SwiftUI
 import StoreKit
+import UIKit
 import TravelCore
 import UniformTypeIdentifiers
 
@@ -1018,8 +1019,55 @@ private struct PurchaseStateDiagnosticValue: ViewModifier {
 }
 #endif
 
+/// The purchase surface belongs to this Pro view, including when it is a sheet.
+@MainActor
+private final class PurchasePresentationContext {
+    weak var controller: UIViewController?
+    var isActive = false
+
+    func purchase(_ product: Product) async throws -> Product.PurchaseResult {
+        guard isActive, let controller, controller.parent != nil,
+              let window = controller.viewIfLoaded?.window,
+              let scene = window.windowScene,
+              scene.activationState == .foregroundActive else {
+            throw PresentationError.unavailable
+        }
+        var ancestor: UIViewController? = controller
+        while let current = ancestor {
+            guard !current.isBeingDismissed, !current.isMovingFromParent else {
+                throw PresentationError.unavailable
+            }
+            ancestor = current.parent
+        }
+        if #available(iOS 18.2, *) {
+            return try await product.purchase(confirmIn: controller)
+        }
+        return try await product.purchase(confirmIn: scene)
+    }
+
+    private enum PresentationError: Error { case unavailable }
+}
+
+@MainActor
+private struct PurchasePresentationBridge: UIViewControllerRepresentable {
+    let presentation: PurchasePresentationContext
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let controller = UIViewController()
+        controller.view.backgroundColor = .clear
+        controller.view.isUserInteractionEnabled = false
+        presentation.controller = controller
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIViewController, context: Context) {
+        presentation.controller = controller
+    }
+}
+
+@MainActor
 private struct ProView: View {
-    @Environment(\.purchase) private var purchase
+    @State private var purchasePresentation = PurchasePresentationContext()
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var purchaseFeedback = PurchaseFeedback()
@@ -1054,7 +1102,7 @@ private struct ProView: View {
                             let generation = purchaseFeedback.begin()
                             Task {
                                 let failure = await model.purchases.purchase(using: { product in
-                                    try await purchase(product)
+                                    try await purchasePresentation.purchase(product)
                                 })
                                 guard !model.purchases.isPro else {
                                     purchaseFeedback.reset()
@@ -1113,7 +1161,17 @@ private struct ProView: View {
             } }
             .task { await model.purchases.load() }
         }
-        .onDisappear { purchaseFeedback.reset() }
+        .background {
+            PurchasePresentationBridge(presentation: purchasePresentation)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onAppear { purchasePresentation.isActive = true }
+        .onDisappear {
+            purchasePresentation.isActive = false
+            purchaseFeedback.reset()
+        }
         .onChange(of: model.purchases.isPro) { _, isPro in
             if isPro { purchaseFeedback.reset() }
         }
