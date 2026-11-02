@@ -1,4 +1,5 @@
 import SwiftUI
+import StoreKit
 import TravelCore
 import UniformTypeIdentifiers
 
@@ -1018,6 +1019,7 @@ private struct PurchaseStateDiagnosticValue: ViewModifier {
 #endif
 
 private struct ProView: View {
+    @Environment(\.purchase) private var purchase
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var purchaseFeedback = PurchaseFeedback()
@@ -1051,7 +1053,9 @@ private struct ProView: View {
                         Button {
                             let generation = purchaseFeedback.begin()
                             Task {
-                                let failure = await model.purchases.purchase()
+                                let failure = await model.purchases.purchase(using: { product in
+                                    try await purchase(product)
+                                })
                                 guard !model.purchases.isPro else {
                                     purchaseFeedback.reset()
                                     return
