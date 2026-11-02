@@ -36,14 +36,27 @@ old tag or relabel an old binary as fixed.
 
 ## Prepare without publishing
 
-The explicit `Release qualification` workflow pins Xcode 26.2 (17C52) and
-captures the selected suite once. This Xcode rejects an explicit schema version
-0.4.0, and its default summary-schema documentation contains invalid JSON.
+The explicit `Release qualification` workflow captures the selected suite once.
+Batch mode pins Xcode 16.4 (16F6), SDK/runtime 18.5, and xcresulttool 23714
+(format 3.53). This is a controlled environment change after two cold Xcode 26.2
+batch attempts failed in the synthetic StoreKit preflight before app launch;
+it does not establish the cause of the missing transaction JWS or a successful
+repair. The original StoreKit and UI assertions remain required.
+
+Xcode 16.4 has no `test-results --schema` API. Its batch preflight verifies and
+retains the exact reader version and reports `unsupported_by_producer`, without
+claiming verified schema documentation. It never substitutes empty schema or
+runtime-warning arrays. Explicit batch schema-validation requests fail.
+The mandatory independent Xcode 27.1 review below still applies.
+
+Biometric mode pins Xcode 26.2 (17C52), SDK/runtime 26.2. This Xcode rejects an
+explicit schema version 0.4.0, and its default summary-schema documentation contains invalid JSON.
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
 hash as proof that tests passed. An unknown document or toolchain fails before
-native work. Ordinary CI performs the same read-only preflight using an
-explicit Xcode 26.2 environment. Core/purchase tests and the Release preview
+native work. Both modes require one available SDK-matched runtime compatible
+with the host architecture. Ordinary CI and the default `--validate-schemas`
+command retain the Xcode 26.2 documentation check. Core/purchase tests and the Release preview
 pin Xcode 16.4 (16F6) and retain their previously validated runtime selection;
 this compatibility lane does not claim that the runtime matches its SDK.
 Its result bundle records the actual device/runtime, and the original Release

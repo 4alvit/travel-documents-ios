@@ -547,7 +547,7 @@ class Guards(unittest.TestCase):
         with self.assertRaises(RuntimeError): q.validate_schemas(*reversed(self.schemas()))
 
     def test_preflight_captures_exact_raw_schemas_before_any_device_action(self):
-        run = self.run_object(); calls = []; schemas = self.schemas()
+        run = self.run_object("biometrics"); calls = []; schemas = self.schemas()
         outputs = {kind: schemas[n].decode() for n, kind in enumerate(("summary", "tests"))}
         def command(label, argv, seconds=30):
             calls.append(argv); return outputs[argv[4]]
@@ -560,7 +560,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(len(calls), 2); self.assertIsNone(run.owned)
 
     def test_unrecognized_schema_stops_prepare_before_project_or_device_mutation(self):
-        run = self.run_object(); run.source = lambda label: {"head": HEAD, "tree": "b" * 40}; calls = []
+        run = self.run_object("biometrics"); run.source = lambda label: {"head": HEAD, "tree": "b" * 40}; calls = []
         schemas = self.schemas()
         outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2", "architecture": "arm64",
                    "xcresult-schema-summary": schemas[0].decode() + "\n", "xcresult-schema-tests": schemas[1].decode()}
@@ -572,6 +572,87 @@ class Guards(unittest.TestCase):
         self.assertFalse(any("simctl" in argv or "xcodegen" in argv for argv in calls))
         self.assertIsNone(run.owned); self.assertIsNone(run.baseline)
 
+    def test_batch_preflight_pins_observed_reader_without_claiming_schema_support(self):
+        raw = (Path(__file__).parent / "fixtures/xcresult-xcode-16.4/xcresulttool-version.txt").read_bytes()
+        run = self.run_object(); calls = []
+        run.command = lambda label, argv, seconds=30: calls.append(argv) or raw.decode()
+        run.preflight_schemas()
+        self.assertEqual(calls, [["xcrun", "xcresulttool", "version"]])
+        report = run.report["xcresult_schema"]
+        self.assertEqual(report["status"], "unsupported_by_producer")
+        self.assertEqual(report["xcresulttool_version"], q.toolchain_profile("batch")["xcresulttool_version"])
+        self.assertEqual((run.out / report["version_file"]).read_bytes(), raw)
+        self.assertEqual(report["version_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertNotIn("documentation_verified", report)
+        self.assertIn("Independent pinned-reader review", report["runtime_evidence"])
+        self.assertFalse(list(run.out.glob("xcresult-schema-*")))
+        self.assertIsNone(run.owned)
+        with self.assertRaisesRegex(RuntimeError, "does not support"):
+            q.validate_schemas(*self.schemas(), mode="batch")
+
+    def test_batch_preflight_rejects_unknown_reader_before_device_actions(self):
+        run = self.run_object()
+        for raw in ["", "xcresulttool version 23715, format version 3.53 (current)",
+                    "xcresulttool version 23714, format version 3.54 (current)", "Xcode 16.4"]:
+            run.command = lambda *args: raw
+            with self.subTest(raw=raw), self.assertRaisesRegex(RuntimeError, "xcresulttool"):
+                run.preflight_schemas()
+            self.assertNotIn("xcresult_schema", run.report)
+            self.assertIsNone(run.owned)
+
+    def test_mode_profiles_reject_wrong_xcode_sdk_or_environment_before_native_work(self):
+        for mode in q.MODES:
+            profile = q.toolchain_profile(mode)
+            other = q.toolchain_profile("biometrics" if mode == "batch" else "batch")
+            for key, value in [("xcode", other["xcode_version"]), ("sdk", other["sdk_version"]),
+                               ("environment", other["developer_dir"])]:
+                directory = self.root / (mode + key); directory.mkdir()
+                run = q.Qualification(directory, mode, ENV)
+                run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+                outputs = {"xcode": profile["xcode_version"], "developer": profile["developer_dir"],
+                           "sdk": profile["sdk_version"], "architecture": "arm64"}
+                if key != "environment": outputs[key] = value
+                calls = []
+                def command(label, argv, seconds=30):
+                    calls.append(argv); return outputs[label]
+                run.command = command
+                with patch.dict(q.os.environ, {"DEVELOPER_DIR": value if key == "environment" else profile["developer_dir"]}):
+                    with self.subTest(mode=mode, key=key), self.assertRaisesRegex(RuntimeError, "pinned"):
+                        run.prepare()
+                self.assertFalse(any("simctl" in argv or "xcodegen" in argv or "xcresulttool" in argv for argv in calls))
+                self.assertIsNone(run.owned)
+        with self.assertRaises(RuntimeError): q.toolchain_profile("unknown")
+
+    def test_mode_profiles_keep_default_26_2_schema_contract(self):
+        batch, bio = q.toolchain_profile("batch"), q.toolchain_profile("biometrics")
+        self.assertEqual((batch["xcode_version"], batch["sdk_version"]), ("Xcode 16.4\nBuild version 16F6", "18.5"))
+        self.assertIsNone(batch["schema_documents"])
+        self.assertEqual((bio["xcode_version"], bio["developer_dir"]), (q.XCODE_VERSION, q.DEVELOPER_DIR))
+        self.assertEqual(bio["schema_documents"], q.SCHEMA_DOCUMENTS)
+        self.assertTrue(q.validate_schemas(*self.schemas())["documentation_verified"])
+
+    def test_each_exact_profile_completes_its_preflight_before_discovery(self):
+        for mode in q.MODES:
+            directory = self.root / mode; directory.mkdir()
+            run = q.Qualification(directory, mode, ENV)
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            profile = q.toolchain_profile(mode); schemas = self.schemas(); calls = []
+            outputs = {"xcode": profile["xcode_version"], "developer": profile["developer_dir"],
+                       "sdk": profile["sdk_version"], "architecture": "arm64", "generate-project": "",
+                       "xcresulttool-version": (profile["xcresulttool_version"] or "") + "\n",
+                       "xcresult-schema-summary": schemas[0].decode(), "xcresult-schema-tests": schemas[1].decode()}
+            def command(label, argv, seconds=30):
+                calls.append(label)
+                if label == "runtimes": raise RuntimeError("Discovery boundary reached")
+                return outputs[label]
+            run.command = command
+            with patch.dict(q.os.environ, {"DEVELOPER_DIR": profile["developer_dir"]}):
+                with self.assertRaisesRegex(RuntimeError, "Discovery boundary reached"): run.prepare()
+            self.assertEqual(calls[-2:], ["generate-project", "runtimes"])
+            self.assertEqual("xcresulttool-version" in calls, mode == "batch")
+            self.assertEqual("xcresult-schema-summary" in calls, mode == "biometrics")
+            self.assertIsNone(run.owned)
+
     def test_schema_cli_uses_only_files_and_rejects_mixed_execution_mode(self):
         paths = []
         for n, schema in enumerate(self.schemas()):
@@ -580,6 +661,10 @@ class Guards(unittest.TestCase):
             with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", *paths]):
                 self.assertEqual(q.main(), 0)
             with patch.object(q.sys, "argv", ["qualify-release.py", "--mode", "batch", "--validate-schemas", *paths]):
+                with self.assertRaises(SystemExit): q.main()
+            with patch.object(q.sys, "argv", ["qualify-release.py", "--schema-mode", "batch", "--validate-schemas", *paths]):
+                with self.assertRaisesRegex(RuntimeError, "does not support"): q.main()
+            with patch.object(q.sys, "argv", ["qualify-release.py", "--mode", "batch", "--schema-mode", "biometrics"]):
                 with self.assertRaises(SystemExit): q.main()
         link = self.root / "link"; link.symlink_to(paths[0])
         with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", str(link), paths[1]]):
@@ -593,7 +678,8 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",workflow)
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
-        self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
+        self.assertIn("DEVELOPER_DIR: ${{ inputs.mode == 'batch' && '" + q.toolchain_profile("batch")["developer_dir"]
+                      + "' || '" + q.DEVELOPER_DIR + "' }}", workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)
         self.assertIn('summary --schema >', ci)
