@@ -915,6 +915,34 @@ cold-device CLI probes did not establish their local test environment. Later
 accepted historical hosted CI passed all seven StoreKit cases. No physical-device or
 live-store acceptance follows from that result.
 
+## Latest hosted candidate and Intel contingency
+
+Candidate `cb6dbbb` completed [all six CI jobs](https://github.com/4alvit/travel-documents-ios/actions/runs/41456799658).
+Independent review confirmed 171 native Core tests and 38 Swift package tests,
+phone guidance, and all three recovery phases including complete backup and
+original-byte equality after restore. These are scoped candidate results; they
+do not substitute for final-main release evidence.
+
+Its [first batch capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41456805668)
+verified both native exports and their destination reads, then stopped on an
+empty presented Files panel before selection. One [same-source confirmation](https://github.com/4alvit/travel-documents-ios/actions/runs/41459579883)
+again verified both exports and reached selection of both originals. Open did
+not dismiss Files. The retained application log reported File Provider `-1005`
+with resolver `-1012`, followed by an empty system selection result. The opaque
+item identifier is not mapped to a filename. Neither capture qualifies batch
+import, and the confirmation does not establish the cause of the earlier empty
+panel.
+
+An [earlier Intel attempt](https://github.com/4alvit/travel-documents-ios/actions/runs/41453967728)
+never reached native tests because its initial boot exhausted 180 seconds.
+A separate [boot-only measurement](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
+completed boot in 279.406 seconds and verified all owned processes and complete
+non-owned device inventory. It performed no app tests. The Intel batch startup
+profile in [GitHub release guidance](github-releases.md) enables a bounded
+comparison on that environment without changing the import assertions or
+cleanup requirements. Native Intel acceptance remains pending until captured
+and independently reviewed.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large

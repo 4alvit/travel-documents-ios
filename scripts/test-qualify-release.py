@@ -43,11 +43,13 @@ EXISTING = "22222222-2222-4222-8222-222222222222"
 ENV = {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS", "GITHUB_EVENT_NAME": "workflow_dispatch",
        "GITHUB_WORKFLOW": "Release qualification", "GITHUB_JOB": "qualify",
        "GITHUB_REPOSITORY": "4alvit/travel-documents-ios", "GITHUB_SHA": HEAD,
-       "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+       "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+       "QUALIFICATION_RUNNER": "macos-15", "QUALIFICATION_RUNNER_ARCH": "ARM64"}
 
 
 class Guards(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")))
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -85,6 +87,117 @@ class Guards(unittest.TestCase):
                            ("GITHUB_JOB", "other"), ("GITHUB_REPOSITORY", "other/repo"),
                            ("GITHUB_SHA", "main"), ("GITHUB_RUN_ID", "../123"), ("GITHUB_RUN_ATTEMPT", "0")]:
             with self.subTest(key=key), self.assertRaises(RuntimeError): q.context("batch", {**ENV, key: value})
+
+    def test_execution_profiles_change_only_explicit_intel_batch_startup_limits(self):
+        for mode in q.MODES:
+            for runner, arch, machine in (("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")):
+                env = {**ENV, "QUALIFICATION_RUNNER": runner, "QUALIFICATION_RUNNER_ARCH": arch}
+                profile = q.execution_profile(mode, env, machine)
+                intel_batch = mode == "batch" and machine == "x86_64"
+                self.assertEqual(profile, {"name": "intel-batch" if intel_batch else "default",
+                    "runner": runner, "runner_architecture": arch, "architecture": machine,
+                    "work_seconds": 3000 if intel_batch else 2400, "boot_seconds": 600 if intel_batch else 180})
+        self.assertEqual(q.WORK_SECONDS, {"batch": 2400, "biometrics": 2400})
+        self.assertEqual((q.PREPARE_SECONDS, q.MODES["batch"][1], q.MODES["biometrics"][1],
+                          q.SEED_SECONDS, q.SEED_CASE_SECONDS, q.CLEANUP_SECONDS), (780, 1200, 1200, 300, 180, 180))
+
+    def test_execution_profile_rejects_missing_unknown_or_mismatched_runner_before_output(self):
+        for runner in (None, "macos-15", "macos-15-intel", "self-hosted"):
+            for arch in (None, "ARM64", "X64"):
+                for machine in ("arm64", "x86_64", "unknown"):
+                    if (runner, arch, machine) in (("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")):
+                        continue
+                    env = {**ENV, "QUALIFICATION_RUNNER": runner, "QUALIFICATION_RUNNER_ARCH": arch}
+                    with self.subTest(runner=runner, arch=arch, machine=machine), \
+                         patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                        with self.assertRaisesRegex(RuntimeError, "runner label or host architecture"):
+                            q.Qualification(self.root, "batch", env)
+                    self.assertFalse((self.root / "build").exists())
+
+    def test_profile_deadlines_are_anchored_before_host_observation_and_never_renewed(self):
+        clock = [100.0]
+        def observe_host():
+            clock[0] = 175.0
+            return SimpleNamespace(machine="x86_64")
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(q.os, "uname", side_effect=observe_host):
+            run = q.Qualification(self.root, "batch", env)
+            self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline), (100.0, 3100.0, 3280.0))
+            self.assertEqual((run.commands.limit, run.xcode.limit, run.commands.write_deadline), (3100.0, 3100.0, 3290.0))
+            saved = json.loads((run.out / "receipt.json").read_text())
+            self.assertEqual(saved["limits"], {"work_seconds": 3000, "cleanup_seconds": 180})
+            self.assertEqual(saved["execution_profile"], run.profile)
+            clock[0] = 3100.0
+            with self.assertRaisesRegex(RuntimeError, "deadline expired"): run.check()
+            run.cleaning = True; run.check()
+            clock[0] = 3280.0
+            with self.assertRaisesRegex(RuntimeError, "deadline expired"): run.check()
+
+    def test_captured_architecture_must_match_initial_profile_before_any_device_or_project_action(self):
+        for machine, captured in (("arm64", "x86_64"), ("x86_64", "arm64")):
+            env = {**ENV, "QUALIFICATION_RUNNER": "macos-15" if machine == "arm64" else "macos-15-intel",
+                   "QUALIFICATION_RUNNER_ARCH": "ARM64" if machine == "arm64" else "X64"}
+            with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                run = q.Qualification(directory, "batch", env)
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2", "architecture": captured}
+            calls = []
+            run.command = lambda label, argv, seconds=30: calls.append(label) or outputs[label]
+            with self.assertRaisesRegex(RuntimeError, "Captured host architecture"):
+                run.prepare()
+            self.assertEqual(calls, ["xcode", "developer", "sdk", "architecture"])
+            self.assertIsNone(run.owned); self.assertIsNone(run.baseline)
+
+    def test_real_prepare_uses_only_selected_boot_cap_without_renewing_the_work_deadline(self):
+        for mode in q.MODES:
+            for machine in ("arm64", "x86_64"):
+                env = {**ENV, "QUALIFICATION_RUNNER": "macos-15" if machine == "arm64" else "macos-15-intel",
+                       "QUALIFICATION_RUNNER_ARCH": "ARM64" if machine == "arm64" else "X64"}
+                with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                     patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                    run = q.Qualification(directory, mode, env)
+                    deadline = run.work_deadline
+                    run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+                    run.preflight_schemas = lambda: None
+                    runtime = {"version": "26.2", "buildversion": "23C54", "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                        "isAvailable": True, "supportedArchitectures": [machine],
+                        "supportedDeviceTypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+                    outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2",
+                               "architecture": machine, "generate-project": "", "runtimes": json.dumps({"runtimes": [runtime]}),
+                               "create": OWNED, "boot": ""}
+                    calls = []
+                    def command(label, argv, seconds=30):
+                        calls.append((label, seconds))
+                        if label == "boot-ready": raise RuntimeError("Stopped at boot observation")
+                        return outputs[label]
+                    run.command = command
+                    run.inventory = lambda label: {} if label == "baseline" else {OWNED: dict(run.intent)}
+                    with patch.dict(q.os.environ, {"DEVELOPER_DIR": q.DEVELOPER_DIR}), \
+                         self.assertRaisesRegex(RuntimeError, "Stopped at boot observation"):
+                        run.prepare()
+                    self.assertEqual(calls[-2:], [("boot", 60), ("boot-ready", 600 if mode == "batch" and machine == "x86_64" else 180)])
+                    self.assertEqual((run.work_deadline, run.commands.limit), (deadline, deadline))
+
+    def test_intel_boot_command_keeps_global_clip_and_existing_eight_second_stop_reserve(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        for now, expected_end in ((2200.0, 2808.0), (2700.0, 3100.0)):
+            with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                 patch.object(q.time, "monotonic", return_value=100.0), \
+                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                run = q.Qualification(directory, "batch", env)
+                with patch.object(q.time, "monotonic", return_value=now), \
+                     patch.object(run.commands.ops, "now", return_value=now), \
+                     patch.object(run.commands.ops, "spawn", side_effect=RuntimeError("No native execution")):
+                    with self.assertRaisesRegex(RuntimeError, "boot-ready failed"):
+                        run.command("boot-ready", ["synthetic-command"], run.profile["boot_seconds"])
+                record = run.commands.report["commands"][0]
+                self.assertEqual(record["requested_cap_seconds"], 608)
+                self.assertEqual(record["stop_reserve_seconds"], 8)
+                self.assertEqual(record["command_deadline"], expected_end - run.started)
+                self.assertEqual(record["work_deadline"], expected_end - run.started - 8)
+                self.assertEqual((run.work_deadline, run.cleanup_deadline), (3100.0, 3280.0))
 
     def test_output_never_reuses_existing_or_symlinked_location(self):
         self.run_object()
@@ -141,7 +254,9 @@ class Guards(unittest.TestCase):
         for mode in q.MODES:
             for build in ("23C54", "other"):
                 with tempfile.TemporaryDirectory() as directory:
-                    run = q.Qualification(Path(directory), mode, ENV)
+                    env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+                    with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                        run = q.Qualification(Path(directory), mode, env)
                     run.source = lambda label: {"head":HEAD,"tree":"b"*40}
                     run.preflight_schemas = lambda: None
                     runtime = {"version":"26.2", "buildversion":build, "identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
@@ -178,6 +293,11 @@ class Guards(unittest.TestCase):
             result=subprocess.run(["/bin/bash","-euo","pipefail","-c",'uname() { printf \'%s\\n\' "$SYNTHETIC_MACHINE"; }\n'+shell],env=env,capture_output=True,timeout=5)
             self.assertEqual(result.returncode==0,ok,(label,arch,machine,result.stderr))
         self.assertLess(workflow.index("Verify selected runner architecture"),workflow.index("Capture selected suite"))
+        capture=workflow.split("      - name: Capture selected suite for review\n",1)[1].split("      - name:",1)[0]
+        for declaration in ("QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}", "QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}"):
+            self.assertIn(declaration,capture)
+        self.assertIn("    timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 65 || 55 }}",workflow)
+        self.assertIn("        timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 54 || 44 }}",capture)
 
     def test_batch_order_must_match_the_original_bounded_log(self):
         proof = batch.execution_order(BATCH_LOG)
@@ -1491,6 +1611,7 @@ class Guards(unittest.TestCase):
 
 class SharedBuildGuards(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")))
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name).resolve();self.run=q.Qualification(self.root,"batch",ENV)
         self.run.owned=OWNED;self.run.baseline={}

@@ -38,6 +38,8 @@ old tag or relabel an old binary as fixed.
 
 The explicit `Release qualification` workflow captures the selected suite once.
 Both modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
+The default Arm profile uses the budgets below; the Intel batch contingency
+is described separately.
 Batch qualification checks the complete path from selecting existing files to
 reviewing, saving and reopening their originals. Before that functional suite,
 a separate invocation runs the hosted purchase prerequisite, then the recovery
@@ -108,10 +110,25 @@ result inspection share the same 1,200-second driver clock, started before
 destination preflight. No phase renews it. Seed retains 180 seconds and import
 retains 600 seconds. A 300-second envelope runs from the second native command's
 start to the seed pass, including UI-runner startup.
-The original 2,400-second work budget, 180-second cleanup budget and UI-action
-waits remain.
+For the default Arm profile, the 2,400-second work budget, 180-second cleanup
+budget and UI-action waits remain.
 These limits are not a completion guarantee. Failed preparation or fixture
 verification prevents the import actions from starting.
+
+The explicitly selected Intel batch profile reserves 3,000 seconds of work
+and 600 seconds for the initial boot-readiness check (`simctl bootstatus`). The
+separate `simctl boot` command retains its 60-second cap. The work deadline stays
+anchored to the original qualification start. Its capture step allows 54 minutes
+and its job
+65 minutes. A [boot-only observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
+measured 279.406 seconds for boot, followed by 88.267 seconds for ready inventory.
+The original work budget left insufficient room for the unchanged 2,100-second
+reservation for preparation, driver and postchecks. This profile accommodates
+that measured startup; it does not establish that the Files failure is repaired.
+Arm and all biometric captures retain their existing budgets. Native case,
+preparation and driver limits, the 180-second cleanup budget, runtime matching,
+source verification and complete device-inventory checks remain unchanged.
+The job envelope is not a completion guarantee.
 
 The root fixture mode belongs only to the hosted qualifier's exclusively owned
 Simulator. Its driver never removes the provider root or individual root
@@ -207,7 +224,12 @@ share the remaining budget and still fail if it expires; their completion is not
 guaranteed. The startup delay and the failed run's unconfirmed process-group
 cleanup are not claimed fixed. Recovery retains its 600-second command cap; batch release qualification
 preparation has the separate 780-second cap described above. The guidance test
-deadlines, 30-second cleanup budget and 35-minute job cap are unchanged.
+deadlines and 30-second cleanup budget are unchanged. The phone integration step
+has a 40-minute cap within a 60-minute job. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
+completed its integration step in 37 minutes 56 seconds but exceeded the former
+35-minute job limit. Raw test artifacts upload before optional failure extraction
+so that extraction cannot consume the time reserved for preserving the original
+results.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.

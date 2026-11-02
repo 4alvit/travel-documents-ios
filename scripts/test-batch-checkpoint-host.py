@@ -173,6 +173,8 @@ class HostGuards(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name).resolve()
   env={'GITHUB_ACTIONS':'true','RUNNER_OS':'macOS','GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_WORKFLOW':'Release qualification','GITHUB_JOB':'qualify','GITHUB_REPOSITORY':'4alvit/travel-documents-ios','GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'12','GITHUB_RUN_ATTEMPT':'1'}
+  env.update(QUALIFICATION_RUNNER='macos-15',QUALIFICATION_RUNNER_ARCH='ARM64')
+  self.enterContext(patch.object(q.os,'uname',return_value=SimpleNamespace(machine='arm64')))
   self.run=q.Qualification(self.root,'batch',env);r=self.run;r.owned=OWNED;r.baseline={};r.driver_calls=1
   self.preparation_proof={'order':cp.preparation_order(raw(preparation_lines())), 'original_manifest_sha256':'c'*64,'summary_sha256':'d'*64,'tests_sha256':'e'*64}
   r.verify_preparation_prerequisite=Mock(return_value=copy.deepcopy(self.preparation_proof))
