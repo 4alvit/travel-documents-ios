@@ -49,7 +49,9 @@ jobs:
           retention-days: 7
       - name: Simulator selector regression checks
         timeout-minutes: 2
-        run: python3 -B scripts/test-select-simulator.py
+        run: |
+          python3 -B scripts/test-select-simulator.py
+          python3 -B scripts/test-prepare-guidance-files.py
       - name: Verify
         run: |
           set -euo pipefail
@@ -121,7 +123,8 @@ jobs:
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh --require-sdk-match --cohort ui-guidance
+        # Provider initialization is explicit; this is not cold Files first-use coverage.
+        run: bash scripts/test-simulator.sh --require-sdk-match --prepare-files --cohort ui-guidance
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true

@@ -74,6 +74,15 @@ architecture. A supplied device UUID must satisfy the same checks; there is no
 fallback to another runtime. Its test artifact contains the result bundle plus
 `ci-toolchain/simulator-selection.*/`; consumers must select the `.xcresult`
 bundle explicitly instead of assuming every archive entry belongs to it.
+This CI lane explicitly prepares the selected Simulator's local Files provider
+before running the unchanged UI cases. Preparation binds to the recorded
+selection, rechecks the complete inventory, launches Files once, and observes
+its existing local provider directory. It creates no user files and does not
+erase or delete the selected device. Its receipt distinguishes owned host-command
+cleanup from the Simulator services that remain running for the tests.
+The original navigation-readiness, single Cancel action, and dismissal checks
+remain unchanged. Provider preparation alone is not UI
+acceptance; this lane covers a preinitialized provider, not cold first use.
 The recovery compatibility job retains its separately pinned profile.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory

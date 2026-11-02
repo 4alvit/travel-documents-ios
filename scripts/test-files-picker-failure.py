@@ -517,7 +517,7 @@ class Controls(unittest.TestCase):
             self.assertIn('    timeout-minutes: 35\n',body)
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
-            match_option = ' --require-sdk-match' if sdk_match else ''
+            match_option = ' --require-sdk-match --prepare-files' if sdk_match else ''
             self.assertIn('run: bash scripts/test-simulator.sh'+match_option+' --cohort '+cohort+'\n',original)
             self.assertNotIn('continue-on-error',original)
             self.assertIn("if: ${{ failure() && steps.integration.outcome == 'failure' }}",body)
