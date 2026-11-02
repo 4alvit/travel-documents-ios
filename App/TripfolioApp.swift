@@ -260,6 +260,9 @@ private final class NativeSeedExportSession: Identifiable {
     private let expected: [String: Data]
     private let read: @Sendable (URL, Int) async throws -> Data
     private(set) var phase: Phase = .waiting
+    private let diagnosticsEnabled = ProcessInfo.processInfo.arguments.contains("--ui-testing-batch-diagnostics")
+    @ObservationIgnored private var diagnosticLineCount = 0
+    @ObservationIgnored private var diagnosticCallbackCount = 0
 
     convenience init(source: URL, expected: Data,
                      read: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
@@ -271,11 +274,14 @@ private final class NativeSeedExportSession: Identifiable {
         self.sources = sources
         self.expected = expected
         self.read = read
+        trace("event=requestCreated sources=\(sources.count)")
     }
 
     func receive(_ urls: [URL]) {
         // The first terminal delegate event owns the result. Duplicate or
         // late events cannot start another read or overwrite a failed export.
+        traceCallback(urls)
+        if phase != .waiting { trace("event=lateIgnored phase=\(phase)") }
         guard phase == .waiting else { return }
         let sourceURLs = Set(sources.map(\.standardizedFileURL))
         let names = Set(expected.keys)
@@ -292,36 +298,102 @@ private final class NativeSeedExportSession: Identifiable {
                       && !sourceURLs.contains(destination.standardizedFileURL)
               }) else {
             phase = .failed
+            trace("event=guardRejected bucket=\(failedGuardBucket(urls)) phase=failed")
             return
         }
         phase = .verifying
+        trace("event=guardAccepted phase=verifying")
         let read = self.read
         let expected = self.expected
         Task { [weak self] in
             var verified = true
+            var readingRole = "none"
             do {
                 // Preserve the exact returned URL, including its access grant.
                 // The production reader coordinates off-main, balances its
                 // security scope, and bounds the full byte stream to1024 bytes.
                 for destination in urls {
+                    readingRole = Self.diagnosticRole(destination)
+                    self?.trace("event=readStart role=\(readingRole)")
                     let bytes = try await read(destination, 1024)
                     try Task.checkCancellation()
+                    self?.trace("event=readResult role=\(readingRole) bytes=\(bytes.count) match=\(bytes == expected[destination.lastPathComponent])")
                     guard bytes == expected[destination.lastPathComponent] else {
                         verified = false
                         break
                     }
                 }
             } catch {
+                self?.trace("event=readError role=\(readingRole) domain=\(Self.diagnosticDomain(error)) code=\((error as NSError).code)")
                 verified = false
             }
             guard let self, self.phase == .verifying else { return }
             self.phase = verified ? .verified : .failed
+            self.trace("event=terminal phase=\(self.phase)")
         }
     }
 
     func cancel() {
+        trace("event=cancel phase=\(phase)")
         guard phase == .waiting else { return }
         phase = .failed
+        trace("event=terminal phase=failed")
+    }
+
+    // This entire fixture is DEBUG + Simulator only. Logging additionally
+    // requires the existing exact diagnostic flag and never inspects files.
+    private func trace(_ message: @autoclosure () -> String) {
+        guard diagnosticsEnabled, diagnosticLineCount < 16 else { return }
+        diagnosticLineCount += 1
+        print("NATIVE_SEED_EXPORT \(message())")
+    }
+
+    private func traceCallback(_ urls: [URL]) {
+        guard diagnosticsEnabled, diagnosticLineCount < 16 else { return }
+        diagnosticCallbackCount += 1
+        let roles = urls.prefix(3).map(Self.diagnosticRole).joined(separator: ",")
+        // URL syntax only; this does not assert that a directory exists.
+        let directoryHints = urls.prefix(3).map { $0.hasDirectoryPath ? "1" : "0" }.joined(separator: ",")
+        trace("event=didPick callback=\(diagnosticCallbackCount) phase=\(phase) urls=\(urls.count) roles=\(roles) directoryHints=\(directoryHints)")
+    }
+
+    private static func diagnosticRole(_ url: URL) -> String {
+        switch url.lastPathComponent {
+        case "synthetic-ticket.pdf": return "ticket"
+        case "synthetic-insurance.pdf": return "insurance"
+        default: return "other"
+        }
+    }
+
+    private static func diagnosticDomain(_ error: Error) -> String {
+        let domain = (error as NSError).domain
+        switch domain {
+        case NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain, NSOSStatusErrorDomain,
+             "NSFileProviderErrorDomain", "NSFileProviderInternalErrorDomain",
+             "NSFileProviderResolverErrorDomain", "FPErrorDomain": return domain
+        default: return "other"
+        }
+    }
+
+    // Called lazily only after the unchanged acceptance guard fails. Repeat
+    // its pure predicates in order to explain the first failed condition.
+    private func failedGuardBucket(_ urls: [URL]) -> String {
+        let sourceURLs = Set(sources.map(\.standardizedFileURL))
+        let names = Set(expected.keys)
+        guard (1...2).contains(sources.count) else { return "sourceCount" }
+        guard expected.count == sources.count else { return "expectedCount" }
+        guard expected.values.allSatisfy({ !$0.isEmpty && $0.count <= 1024 }) else { return "expectedSize" }
+        guard sourceURLs.count == sources.count else { return "sourceUnique" }
+        guard Set(sources.map(\.lastPathComponent)) == names else { return "sourceNames" }
+        guard urls.count == sources.count else { return "resultCount" }
+        guard Set(urls.map(\.lastPathComponent)) == names else { return "resultNames" }
+        guard Set(urls.map(\.standardizedFileURL)).count == urls.count else { return "resultUnique" }
+        for destination in urls {
+            guard destination.isFileURL else { return "nonFile" }
+            guard destination.host == nil || destination.host == "" || destination.host == "localhost" else { return "foreignHost" }
+            guard !sourceURLs.contains(destination.standardizedFileURL) else { return "sourceAlias" }
+        }
+        return "unclassified"
     }
 }
 
