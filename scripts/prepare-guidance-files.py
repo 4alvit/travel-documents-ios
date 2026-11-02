@@ -23,15 +23,16 @@ require = process.require
 FILES = "com.apple.DocumentsApp"
 GROUP = "group.com.apple.FileProvider.LocalStorage"
 WORK, STOP, WRITE = 900, 30, 10
+PREPARE_COMMAND_SECONDS = 780
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
 # retains its measured 120s cap; ordinary commands get 30/60s. The one native
 # preparation invocation owns startup of the exact selected device. Every
-# command includes the shared primitive's 8s stop
-# reserve. The existing Recovery preparation case has taken 348-486s including
-# its build; retain that phase's 600s cap. The shared 180s XCTest allowance
-# covers the measured cold UI path and remains inside this independent
-# 900s setup budget and the surrounding CI job.
+# command includes the shared primitive's 8s stop reserve. This phone command
+# includes build and runner startup, measured at about 518s before the case.
+# Its 780s cap fits the unchanged 900s work budget and 180s case allowance.
+# Postprocessing shares the remaining work budget; its completion is not
+# guaranteed. Recovery and release-qualification preparation retain 600s.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 
@@ -214,7 +215,7 @@ class Bootstrap(process.Smoke):
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         failure = None
         try:
-            self.command("prepare-ui", argv, 600)
+            self.command("prepare-ui", argv, PREPARE_COMMAND_SECONDS)
         except BaseException as error:
             failure = error
         finally:

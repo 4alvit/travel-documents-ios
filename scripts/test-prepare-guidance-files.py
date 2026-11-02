@@ -185,7 +185,9 @@ class BootstrapTests(unittest.TestCase):
         runner = self.make(); before_env = runner.ops.env
         self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
         _, argv, cap = next(call for call in runner.calls if call[0] == "prepare-ui")
-        self.assertEqual(cap, 600)
+        self.assertEqual(cap, 780)
+        self.assertEqual((m.WORK, m.STOP, m.WRITE), (900, 30, 10))
+        self.assertEqual(runner.limit - runner.t0, 900)
         self.assertEqual([v for v in argv if v.startswith("-only-testing:")], ["-only-testing:TripfolioUITests/" + m.PREPARE_CASE.removesuffix("()")])
         self.assertEqual(argv[argv.index("-destination") + 1], "platform=iOS Simulator,id=" + s.FIRST)
         self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "180")
@@ -202,6 +204,20 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(runner.report["preparation_result"]["independent_warning_and_pixel_review"], "pending")
         runner = self.make(); before_env = runner.ops.env; runner.fail = "prepare-ui"
         self.assertEqual(self.run_bootstrap(runner), 1); self.assertIs(runner.ops.env, before_env)
+
+    def test_slow_preparation_does_not_extend_postprocessing_work_deadline(self):
+        runner = self.make()
+        def transform(label, value):
+            runner.ops.value += {"prepare-ui": 770, "prepare-summary": 60,
+                                 "prepare-tests": 60, "devices-booted": 11}.get(label, 0)
+            return value
+        runner.transform = transform
+        self.assertEqual(self.run_bootstrap(runner), 1)
+        self.assertEqual(runner.report["status"], "failed")
+        self.assertFalse(runner.report.get("final_inventory_verified", False))
+        self.assertNotIn("files-group", [call[0] for call in runner.calls])
+        self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
+        self.assertEqual(runner.limit - runner.t0, 900)
 
     def test_exact_preparation_case_warnings_and_device_contract(self):
         runner = self.make()

@@ -112,13 +112,20 @@ the safe viewport and hittable before use; the drag count and per-action deadlin
 are unchanged. Each scroll observation reuses its app, navigation, obstruction and selected-container frames. Count rows use one
 fresh snapshot for identity, label and value while retaining the global uniqueness
 and live hit checks; snapshots are never reused after a drag or a new observation.
-Preparation has a 900-second work budget and a 600-second build/test command cap;
-the shared preparation case has a 180-second allowance. A captured cold phone
+Phone preparation has a 900-second work budget and a 780-second build/test command
+cap; the shared preparation case has a 180-second allowance. A captured cold phone
 run reached local Files checks at 132 seconds, after its former 120-second limit.
 That failed run remains failed; no completed preparation is inferred from its
-late observations. The prior recovery runs
-measured 349–486 seconds for this build/test phase. These bounds cover the added
-preparation phase; the guidance test deadlines and 35-minute job cap are unchanged.
+late observations. A later phone run spent about 518 seconds in build and runner
+startup before its case began, including a 280-second runner launch call. Its
+former 600-second command cap expired during the case. The phone command budget
+now accommodates that measured startup and the unchanged case allowance within
+the same total work budget. Result inspection, provider checks and final inventory
+share the remaining budget and still fail if it expires; their completion is not
+guaranteed. The startup delay and the failed run's unconfirmed process-group
+cleanup are not claimed fixed. Recovery and release-qualification preparation
+retain their 600-second command caps. The guidance test deadlines, 30-second
+cleanup budget and 35-minute job cap are unchanged.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
