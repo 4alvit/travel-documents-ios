@@ -765,10 +765,12 @@ class Qualification:
         derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not derived.exists() and not derived.is_symlink(), "Files preparation output already exists")
-        folder = "TripDocket-Recovery-" + str(uuid.uuid4())
+        preparation_token = str(uuid.uuid4())
+        folder = "TripDocket-Batch-Prepare-" + preparation_token
         self.report["files_preparation"] = {"calls": self.preparation_calls, "cases": list(checkpoint.PREPARATION_CASES),
             "hosted_case_seconds": 300,
             "phase_seconds": phase_seconds, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
+            "fixture_token": preparation_token, "ingress": "direct-native-export-no-save",
             "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
@@ -778,8 +780,8 @@ class Qualification:
             "-resultBundlePath", self.out / "files-prepare.xcresult",
             *("-only-testing:" + case for case in checkpoint.PREPARATION_TESTS), "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "test"]
         previous = self.commands.ops.env
-        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
-            "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
+        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_UI": "1",
+            "TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_TOKEN": preparation_token,
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         failure = None
         try:
@@ -911,6 +913,12 @@ class Qualification:
 
     def native_seed_files(self, driver, *, empty=False):
         """Verify the exclusive destination; never create provider file bytes."""
+        preparation = self.report.get("files_preparation", {})
+        token = preparation.get("fixture_token")
+        require(isinstance(token, str) and str(uuid.UUID(token)) == token and token != driver.token
+                and preparation.get("absent_folder_probe") == "TripDocket-Batch-Prepare-" + token
+                and preparation.get("ingress") == "direct-native-export-no-save",
+                "Native seed requires a distinct recorded direct preparation token")
         owned = driver.fixture_directory
         root_mode = getattr(getattr(driver, "args", None), "native_root", False)
         require(owned is not None and str(uuid.UUID(driver.token)) == driver.token

@@ -28,11 +28,22 @@ class SeedGuards(unittest.TestCase):
         folder = Path(cls.scratch.name)
         helper = APP[APP.index("@MainActor\nprivate enum NativeBatchSeedFiles"):
                      APP.index("@MainActor\nprivate struct NativeBatchSeedView")]
+        config = UI[UI.index("    private static func directPreparationToken"):
+                    UI.index("    func testNativeCreateOwnedFilesFolder")]
+        helper += "\n@MainActor private enum Preparation {\n" + \
+            "struct BatchTestFailure: Error { let message: String }\n" + config + \
+            "static func check(_ env: [String: String], _ debug: Bool) throws -> String { " + \
+            "try directPreparationToken(env, debugSimulator: debug) }\n}\n"
         main = r'''
 @main struct Probe {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        if args[0] == "token" {
+        if args[0] == "prepare" {
+            do {
+                let env = try JSONDecoder().decode([String: String].self, from: Data(args[1].utf8))
+                print(try Preparation.check(env, args[2] == "true"))
+            } catch { print("rejected") }
+        } else if args[0] == "token" {
             print(NativeBatchSeedFiles.token(Array(args.dropFirst())) ?? "rejected")
         } else {
             do {
@@ -85,6 +96,42 @@ class SeedGuards(unittest.TestCase):
             with self.subTest(invalid=invalid):self.assertEqual(self.probe("token",*invalid),"rejected")
         self.assertEqual(self.probe("create","../outside",self.root),"rejected")
         self.assertEqual(list(self.root.iterdir()),[])
+
+    def test_actual_direct_preparation_config_rejects_mixed_modes_and_noncanonical_identity(self):
+        env={"TRIPDOCKET_BATCH_PREPARE_UI":"1","TRIPDOCKET_BATCH_PREPARE_TOKEN":TOKEN}
+        self.assertEqual(self.probe("prepare",json.dumps(env),"true"),TOKEN)
+        rejected=[({},"true"),(env,"false"),({**env,"TRIPDOCKET_BATCH_PREPARE_UI":"0"},"true")]
+        rejected += [({**env,"TRIPDOCKET_BATCH_PREPARE_TOKEN":v},"true") for v in ("", "../x", TOKEN.upper())]
+        for key in ("TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                    "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                    "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                    "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                    "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
+                    "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION"):
+            rejected.append(({**env,key:"1"},"true"))
+        for value,debug in rejected:
+            with self.subTest(value=value,debug=debug):
+                self.assertEqual(self.probe("prepare",json.dumps(value),debug),"rejected")
+
+    def test_direct_preparation_opens_only_existing_exporter_and_never_seeds_provider(self):
+        case=UI[UI.index("    func testBatchPrepareFilesProviderDirectly"):
+                UI.index("    private static func directPreparationToken")]
+        self.assertIn('environment["TRIPDOCKET_BATCH_PREPARE_UI"] == "1"',case)
+        self.assertIn("executionTimeAllowance = 180",case)
+        self.assertIn('let absentFolder = "TripDocket-Batch-Prepare-" + token',case)
+        self.assertIn('"--ui-testing-native-batch-token", token',case)
+        self.assertEqual(case.count(".tap()"),1)
+        self.assertIn("source.element.tap()",case)
+        self.assertIn("let picker = try await openNativeFilesRoot(app)",case)
+        self.assertIn("isNativeFilesRoot(app)",case)
+        self.assertIn('picker.cells.matching(identifier: absentFolder + ", Folder").count == 0',case)
+        self.assertIn("saved.count == 0 && !failed.exists",case)
+        self.assertIn("defer { app.terminate() }",case)
+        self.assertIn("app.state == .notRunning",case)
+        for forbidden in ('save.tap()', 'presentRecoverySave(', 'newFolder', 'recordBatchProducer',
+                          'typeText(', 'coordinate(', 'createDirectory', 'write(', 'removeItem'):
+            self.assertNotIn(forbidden,case)
+        self.assertLess(case.index("saved.count == 0"),case.index("app.state == .notRunning"))
 
     def test_gate_and_ui_keep_explicit_export_and_separate_opt_in_case(self):
         self.assertIn("#if DEBUG && targetEnvironment(simulator)\n// Diagnostic branch fixture",APP)

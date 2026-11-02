@@ -54,6 +54,12 @@ class PreparationOrderGuards(unittest.TestCase):
    with self.subTest(value=value),self.assertRaises(RuntimeError):cp.preparation_order(raw(value))
   for data in (b'',b'x'*(cp.MAX_LOG+1),b'x'*(cp.MAX_LINE+1)+b'\n'+raw(good),b'\xff'+raw(good),b'\0'+raw(good)):
    with self.assertRaises((RuntimeError,UnicodeError)):cp.preparation_order(data)
+ def test_old_recovery_preparation_pair_is_not_accepted_as_direct_preparation(self):
+  old=raw(preparation_lines()).replace(b'testBatchPrepareFilesProviderDirectly',b'testRecoveryPrepareFilesProvider')
+  with self.assertRaises(RuntimeError):cp.preparation_order(old)
+  self.assertEqual(cp.PREPARATION_CASES,(
+   'PlatformTests/testVerifiedPurchaseAndRestoreFromLocalHistory()',
+   'BatchImportUITests/testBatchPrepareFilesProviderDirectly()'))
  def test_previous_single_preparation_is_not_accepted(self):
   with self.assertRaises(RuntimeError):cp.preparation_order(raw(preparation_lines()[2:]))
 

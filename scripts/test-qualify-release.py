@@ -906,9 +906,13 @@ class Guards(unittest.TestCase):
         for key,value in [("-default-test-execution-time-allowance","300"),
                           ("-maximum-test-execution-time-allowance","600")]:
             self.assertEqual(argv[argv.index(key)+1],value)
-        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE"],"prepare")
-        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_UI"],"1")
-        self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_UI"],"1")
+        token=env["TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_TOKEN"]
+        self.assertEqual(str(q.uuid.UUID(token)),token)
+        self.assertEqual(run.report["files_preparation"]["fixture_token"],token)
+        self.assertEqual(run.report["files_preparation"]["absent_folder_probe"],"TripDocket-Batch-Prepare-"+token)
+        self.assertEqual(run.report["files_preparation"]["ingress"],"direct-native-export-no-save")
+        self.assertFalse(any("TRIPDOCKET_RECOVERY" in key or "TRIPDOCKET_NATIVE_SEED" in key for key in env))
         with self.assertRaises(RuntimeError):run.prepare_files_ui()
         self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
 
@@ -1396,7 +1400,9 @@ class Guards(unittest.TestCase):
         run.report["files_preparation_verified"]=True
         run.report["native_folder_verified"]=True
         derived=run.root/"build/QualificationPreparationDerivedData-123-1";derived.mkdir()
-        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root))}
+        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root)),
+            "fixture_token":TOKEN,"absent_folder_probe":"TripDocket-Batch-Prepare-"+TOKEN,
+            "ingress":"direct-native-export-no-save"}
         group=self.root/"group";provider=group/"File Provider Storage";provider.mkdir(parents=True)
         token="12345678-1234-4234-8234-123456789abc"
         owned=provider/("TripDocket-Batch-QA-"+token);owned.mkdir()
@@ -1418,6 +1424,22 @@ class Guards(unittest.TestCase):
         run.report["shared_build"]={"observations":{"before_seed":{}}}
         run.observe_shared_build=lambda driver,label:None
         return run,driver
+
+    def test_seed_refuses_missing_reused_or_mutated_preparation_identity_before_reading(self):
+        for fault in ("missing", "same", "upper", "probe", "ingress"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                old=self.root;self.root=Path(root)
+                try:run,driver=self.seed_fixture()
+                finally:self.root=old
+                record=run.report["files_preparation"]
+                if fault=="missing":record.pop("fixture_token")
+                elif fault=="same":record.update(fixture_token=driver.token,
+                    absent_folder_probe="TripDocket-Batch-Prepare-"+driver.token)
+                elif fault=="upper":record["fixture_token"]="12345678-1234-4234-8234-123456789ABC"
+                elif fault=="probe":record["absent_folder_probe"]="other"
+                else:record["ingress"]="share-sheet"
+                with patch.object(q,"bounded_read",side_effect=AssertionError("No file read is authorized")):
+                    with self.assertRaises((RuntimeError,ValueError)):run.native_seed_files(driver,empty=True)
 
     def test_seed_destination_is_empty_then_exact_bytes_with_pinned_identity(self):
         run,driver=self.seed_fixture();run.native_seed_files(driver,empty=True)
