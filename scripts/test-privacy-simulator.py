@@ -189,11 +189,11 @@ class Driver:
         path = self.directory / "summary.json"
         path.write_text(json.dumps(self.summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    def command(self, action, command):
+    def command(self, action, command, *, timeout=30):
         self.record(action + "_started", command=command)
         try:
             result = subprocess.run(command, cwd=self.root, text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, timeout=30, check=False)
+                                    stderr=subprocess.STDOUT, timeout=timeout, check=False)
         except (OSError, subprocess.TimeoutExpired) as error:
             self.record(action, returncode=None, error=str(error))
             raise DriverError(f"{action}: {error}") from error
@@ -210,7 +210,7 @@ class Driver:
         self.summary["source_before"] = self.provenance
         self.record("source_before", provenance=self.provenance)
         self.write_summary()
-        output = self.command("list_devices", ["xcrun", "simctl", "list", "devices", "--json"])
+        output = self.command("list_devices", ["xcrun", "simctl", "list", "devices", "--json"], timeout=120)
         try:
             devices = json.loads(output)["devices"]
             matches = [(runtime, device) for runtime, items in devices.items() for device in items

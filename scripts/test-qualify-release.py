@@ -276,6 +276,27 @@ class Guards(unittest.TestCase):
             self.assertEqual(spawn.call_count,1)
         self.assertEqual(run.driver_calls,1);self.assertFalse(run.xcode.unknown_spawn)
 
+    def test_driver_inventory_budget_is_narrow_and_preserves_caller_and_global_limits(self):
+        run = self.run_object(); facade = run.facade()
+        inventory = ["xcrun", "simctl", "list", "devices", "--json"]
+        limits = (run.work_deadline, run.cleanup_deadline, run.commands.limit)
+        cases = [(inventory, 120, 128), (tuple(inventory), 120, 128),
+                 (inventory, 600, 128), (inventory, 12, 20),
+                 (["xcrun", "simctl", "list", "devices", "available", "--json"], 120, 38),
+                 (["xcrun", "simctl", "list", "runtimes", "--json"], 120, 38),
+                 (["xcrun", "simctl", "shutdown", OWNED], 120, 38)]
+        for argv, requested, expected in cases:
+            with self.subTest(argv=argv, requested=requested), \
+                 patch.object(run.commands, "command", return_value="{}") as command:
+                result = facade.run(argv, cwd=self.root, timeout=requested, text=True)
+                self.assertEqual(result.stdout, "{}")
+                self.assertEqual(command.call_args.args[1:], (list(argv), expected))
+                self.assertEqual((run.work_deadline, run.cleanup_deadline, run.commands.limit), limits)
+        with patch.object(run.commands, "command") as command:
+            with self.assertRaisesRegex(RuntimeError, "working directory"):
+                facade.run(inventory, cwd=self.root / "other", timeout=120)
+            command.assert_not_called()
+
     def test_unknown_spawn_withholds_device_cleanup(self):
         run=self.run_object();run.owned=OWNED;run.baseline={};facade=run.facade()
         with patch.object(q.subprocess,"Popen",side_effect=OSError("unknown acquisition")):

@@ -404,7 +404,11 @@ class Qualification:
         # interpreter's subprocess module. The original driver owns test logic.
         def run(argv, *, cwd, timeout=30, text=False, **kwargs):
             require(Path(cwd).resolve() == self.root, "Driver changed working directory")
-            output = self.command("driver-command-" + str(len(self.commands.report["commands"])), argv, min(timeout, 30))
+            # The first post-boot inventory can outlast 30 seconds. Match the
+            # existing inventory budget only for this exact read-only command;
+            # the caller's shorter timeout and shared work deadline still apply.
+            cap = 120 if tuple(argv) == ("xcrun", "simctl", "list", "devices", "--json") else 30
+            output = self.command("driver-command-" + str(len(self.commands.report["commands"])), argv, min(timeout, cap))
             return subprocess.CompletedProcess(argv, 0, output if text else output.encode(), "" if text else b"")
         def popen(argv, **kwargs):
             require(self.driver_calls == 0 and argv[0] == "xcodebuild"
