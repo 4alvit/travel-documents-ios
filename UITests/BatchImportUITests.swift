@@ -1069,9 +1069,10 @@ final class BatchImportUITests: XCTestCase {
                 && frame.width.isFinite && frame.height.isFinite
         }
         guard finite(navigationFrame), finite(viewport) else { return nil }
-        // A visible native List can report a non-hittable wrapper. Require one
-        // unambiguous aligned container and a live, visible descendant before
-        // using that wrapper's geometry for the existing bounded drag.
+        // A presented native List and its covered parent can both retain
+        // aligned geometry while their wrappers report non-hittable. Require
+        // one container with a live, visible descendant before using its
+        // geometry for the existing bounded drag.
         let wrappers = candidates.compactMap { candidate -> (XCUIElement, CGRect)? in
             guard candidate.exists else { return nil }
             let frame = candidate.frame
@@ -1080,17 +1081,19 @@ final class BatchImportUITests: XCTestCase {
                   frame.intersection(viewport).height > 100 else { return nil }
             return (candidate, frame)
         }
-        guard wrappers.count == 1, let (wrapper, frame) = wrappers.first else { return nil }
-        let descendants = wrapper.buttons.allElementsBoundByIndex + wrapper.staticTexts.allElementsBoundByIndex
-        guard descendants.contains(where: { child in
-            guard child.exists, child.isHittable else { return false }
-            let childFrame = child.frame
-            guard finite(childFrame) else { return false }
-            let visible = childFrame.intersection(frame).intersection(viewport)
-            return !visible.isNull && visible.width >= min(44, childFrame.width)
-                && visible.height >= min(44, childFrame.height)
-        }) else { return nil }
-        return wrapper
+        let active = wrappers.filter { wrapper, frame in
+            let descendants = wrapper.buttons.allElementsBoundByIndex + wrapper.staticTexts.allElementsBoundByIndex
+            return descendants.contains(where: { child in
+                guard child.exists, child.isHittable else { return false }
+                let childFrame = child.frame
+                guard finite(childFrame) else { return false }
+                let visible = childFrame.intersection(frame).intersection(viewport)
+                return !visible.isNull && visible.width >= min(44, childFrame.width)
+                    && visible.height >= min(44, childFrame.height)
+            })
+        }
+        guard active.count == 1 else { return nil }
+        return active[0].0
     }
 
     private func recoveryCountTarget(_ rows: XCUIElementQuery, typed: XCUIElementQuery) -> XCUIElement {

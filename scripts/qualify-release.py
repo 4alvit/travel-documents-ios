@@ -180,12 +180,6 @@ SCHEMA_DOCUMENTS = {
 
 def toolchain_profile(mode):
     require(mode in MODES, "Select exactly batch or biometrics")
-    if mode == "batch":
-        return {"developer_dir": "/Applications/Xcode_16.4.app/Contents/Developer",
-                "xcode_version": "Xcode 16.4\nBuild version 16F6", "sdk_version": "18.5",
-                "runtime_version": "26.2",
-                "xcresulttool_version": "xcresulttool version 23714, format version 3.53 (current)",
-                "schema_documents": None}
     return {"developer_dir": DEVELOPER_DIR, "xcode_version": XCODE_VERSION, "sdk_version": "26.2",
             "runtime_version": "26.2",
             "xcresulttool_version": None, "schema_documents": dict(SCHEMA_DOCUMENTS)}
