@@ -44,7 +44,16 @@ a separate invocation runs the recovery preparation case once through Export and
 Save to Files. It checks an absent synthetic folder without saving a backup.
 This covers a preinitialized provider, not cold first use. Its own result bundle
 must pass the exact one-case, device and runtime checks before the driver starts.
-The preparation keeps a 600-second build/test cap and a 180-second case allowance.
+The preparation has a 780-second build/test cap and an unchanged 180-second case
+allowance. A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
+spent about 531–532 seconds in build and runner startup before its case began; its former 600-second command cap stopped
+active preparation at about 68.5 seconds. That failed run did not reach native
+seeding or the main batch flow. The command cap now accommodates that observed
+startup and the unchanged case allowance within the same 2,400-second work
+budget. Admission still reserves the full 1,200-second driver and 120 seconds
+for postchecks; result inspection shares the remaining budget and may still
+fail. The 180-second cleanup budget and all UI waits remain unchanged. This is
+not a claim that startup delay or native Files behavior has been repaired.
 The qualification driver next verifies the exact local provider root on that
 exclusively owned Simulator. It requires a canonical directory, stable provider
 identity, and no entries of any kind. It retains the two synthetic PDF source
@@ -176,9 +185,9 @@ now accommodates that measured startup and the unchanged case allowance within
 the same total work budget. Result inspection, provider checks and final inventory
 share the remaining budget and still fail if it expires; their completion is not
 guaranteed. The startup delay and the failed run's unconfirmed process-group
-cleanup are not claimed fixed. Recovery and release-qualification preparation
-retain their 600-second command caps. The guidance test deadlines, 30-second
-cleanup budget and 35-minute job cap are unchanged.
+cleanup are not claimed fixed. Recovery retains its 600-second command cap; batch release qualification
+preparation has the separate 780-second cap described above. The guidance test
+deadlines, 30-second cleanup budget and 35-minute job cap are unchanged.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
