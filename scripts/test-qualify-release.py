@@ -162,6 +162,109 @@ class Guards(unittest.TestCase):
         with self.assertRaises(RuntimeError):run.cleanup()
         self.assertEqual(len(calls),2);self.assertFalse(run.report["cleanup_verified"])
 
+    def failed_shutdown(self):
+        run,current,calls=self.prepare_cleanup()
+        observed={**copy.deepcopy(run.baseline),OWNED:{**run.intent,"state":"Shutdown"}}
+        readings=[current,observed,copy.deepcopy(run.baseline)]; labels=[]
+        def inventory(label):
+            labels.append(label)
+            return readings[len(labels)-1]
+        def command(label,argv,seconds=30):
+            calls.append((label,argv,seconds))
+            if label=="shutdown": raise RuntimeError("shutdown RPC timeout")
+            return ""
+        run.inventory=inventory;run.command=command
+        return run,calls,readings,labels
+
+    def test_shutdown_error_uses_fresh_identity_before_deleting_stopped_device(self):
+        run,calls,_,labels=self.failed_shutdown();deadline=run.cleanup_deadline
+        run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown","delete"])
+        self.assertTrue(all(row[1][-1]==OWNED and row[2]==60 for row in calls))
+        self.assertEqual(labels,["before-cleanup","after-shutdown-error","after-cleanup"])
+        self.assertTrue(run.report["cleanup_verified"])
+        self.assertIn("shutdown RPC timeout",run.report["errors"][0])
+        self.assertEqual(run.commands.limit,deadline)
+        self.assertEqual(run.cleanup_deadline,deadline)
+
+    def test_shutdown_error_accepts_already_absent_owned_device_without_delete(self):
+        run,calls,readings,labels=self.failed_shutdown()
+        readings[1]=copy.deepcopy(run.baseline)
+        run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown"])
+        self.assertEqual(labels[-1],"after-cleanup")
+        self.assertTrue(run.report["cleanup_verified"])
+        self.assertTrue(run.report["errors"])
+
+    def test_shutdown_error_does_not_delete_a_still_booted_device(self):
+        run,calls,readings,labels=self.failed_shutdown();readings[1][OWNED]["state"]="Booted"
+        with self.assertRaisesRegex(RuntimeError,"not confirmed shut down"):run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown"])
+        self.assertEqual(labels,["before-cleanup","after-shutdown-error"])
+        self.assertFalse(run.report["cleanup_verified"])
+
+    def test_shutdown_error_does_not_delete_changed_identity(self):
+        run,calls,readings,_=self.failed_shutdown();readings[1][OWNED]["name"]="another task"
+        with self.assertRaisesRegex(RuntimeError,"identity changed"):run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown"])
+        self.assertFalse(run.report["cleanup_verified"])
+
+    def test_shutdown_error_with_unresolved_process_cannot_query_or_delete_device(self):
+        for owner_name,field in [("commands","active"),("commands","unknown_spawn"),
+                                 ("xcode","active"),("xcode","unknown_spawn")]:
+            with self.subTest(owner=owner_name,field=field),tempfile.TemporaryDirectory(dir=self.root) as path:
+                saved=self.root;self.root=Path(path)
+                try:
+                    run,calls,_,labels=self.failed_shutdown();original=run.command
+                    def command(*args):
+                        owner=getattr(run,owner_name)
+                        if field=="active":owner.active[123]=SimpleNamespace(pid=123)
+                        else:owner.unknown_spawn=True
+                        return original(*args)
+                    run.command=command
+                    with self.assertRaisesRegex(RuntimeError,"Unresolved process ownership"):run.cleanup()
+                    self.assertEqual([row[0] for row in calls],["shutdown"])
+                    self.assertEqual(labels,["before-cleanup"])
+                    self.assertFalse(run.report["cleanup_verified"])
+                finally:self.root=saved
+
+    def test_shutdown_error_preserves_expired_cleanup_deadline(self):
+        run,calls,_,labels=self.failed_shutdown();original=run.command
+        def command(*args):
+            run.cleanup_deadline=time.monotonic()-1
+            return original(*args)
+        run.command=command
+        with self.assertRaisesRegex(RuntimeError,"deadline expired"):run.cleanup()
+        self.assertEqual(labels,["before-cleanup"])
+        self.assertEqual([row[0] for row in calls],["shutdown"])
+
+    def test_shutdown_error_missing_device_still_requires_unchanged_baseline(self):
+        run,calls,readings,_=self.failed_shutdown()
+        readings[1]={EXISTING:{**run.baseline[EXISTING],"state":"Shutdown"}}
+        with self.assertRaisesRegex(RuntimeError,"Baseline changed"):run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown"])
+        self.assertFalse(run.report["cleanup_verified"])
+
+    def test_shutdown_error_does_not_hide_later_inventory_drift(self):
+        run,calls,readings,_=self.failed_shutdown()
+        readings[2]={EXISTING:{**run.baseline[EXISTING],"state":"Shutdown"}}
+        with self.assertRaisesRegex(RuntimeError,"Baseline device inventory changed"):run.cleanup()
+        self.assertEqual([row[0] for row in calls],["shutdown","delete"])
+        self.assertFalse(run.report["cleanup_verified"])
+        self.assertIn("shutdown RPC timeout",run.report["errors"][0])
+
+    def test_recovered_shutdown_cleanup_never_turns_execution_into_pass(self):
+        run,_,_,_=self.failed_shutdown()
+        run.before={"head":HEAD};run.prepare=lambda:None
+        run.source=lambda label:run.before;run.run_driver=lambda:None
+        run.report.update(driver_capture_verified=True,products_verified=True,
+                          batch_snapshot={"verified":True})
+        with patch.object(run,"capture_original_result") as capture:
+            self.assertEqual(run.execute(),1)
+            capture.assert_not_called()
+        self.assertTrue(run.report["cleanup_verified"])
+        self.assertEqual(run.report["status"],"failed")
+
     def test_process_injection_is_local_and_registers_exactly_one_owned_xcodebuild(self):
         run=self.run_object();run.owned=OWNED;facade=run.facade();child=SimpleNamespace(pid=123)
         self.assertIsNot(facade,subprocess)

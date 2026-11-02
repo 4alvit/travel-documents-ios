@@ -57,6 +57,17 @@ fallback to another runtime. Its test artifact contains the result bundle plus
 bundle explicitly instead of assuming every archive entry belongs to it.
 The recovery compatibility job retains its separately pinned profile.
 
+The opt-in batch and biometric drivers read the complete Simulator inventory
+and validate the selected UUID's uniqueness, iOS runtime, availability and
+booted state themselves. This avoids the redundant CLI `available` filter;
+it does not relax device validation or the existing command deadlines.
+If owned-device shutdown fails, qualification retains that error and checks
+that all owned command processes have stopped before reading a fresh inventory.
+It may delete only the same owned device now confirmed `Shutdown`; an already
+absent device requires an unchanged baseline. A still-booted or changed device
+is left untouched. Final inventory equality remains mandatory, and recovered
+cleanup never turns the original failed qualification into a successful capture.
+
 These records identify the build/test environments; they do not establish that
 the previous compiler/runtime pairing caused a blank Files sheet or was
 unsupported. Changing the core toolchain changes the Release producer and
