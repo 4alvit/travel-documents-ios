@@ -996,8 +996,10 @@ class Qualification:
         require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
                 "Invalid shared preparation build")
         self.require_no_build_writer()
+        # This query reads target metadata; it does not run tests or need a live device.
+        # Actual preparation and test invocations still target the owned Simulator.
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
-                "-destination", "platform=iOS Simulator,id=" + self.owned, "-derivedDataPath", derived,
+                "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", derived,
                 "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "-showBuildSettings", "-json", "build-for-testing"]
         raw = self.shared_build_command(driver, "shared-build-settings", argv)
         self.shared_products = shared_product_paths(raw, derived, self.build_settings)

@@ -1857,6 +1857,10 @@ class SharedBuildGuards(unittest.TestCase):
         self.assertEqual(len(self.calls),7);self.assertTrue(all(c[2]==30 for c in self.calls))
         self.assertIn("-showBuildSettings",self.calls[0][1])
         self.assertEqual(self.calls[0][1][-1],"build-for-testing")
+        query = self.calls[0][1]
+        self.assertEqual(query[query.index("-destination") + 1], "generic/platform=iOS Simulator")
+        self.assertFalse(any(OWNED in str(arg) for arg in query))
+        self.assertTrue(all(OWNED in call[1] for call in self.calls[1:]))
         for ref in proof["observations"].values():
             raw=(self.run.out/ref["path"]).read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),ref["sha256"])
             value=json.loads(raw);self.assertEqual(set(value["products"]),set(self.paths))

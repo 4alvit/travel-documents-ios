@@ -108,6 +108,16 @@ all four native cases, explicit empty warning/failure arrays, the real log order
 checkpoint evidence, full original-byte comparisons, and visual checks. Prior
 one-plus-three or three-bundle captures cannot be relabeled as this control.
 
+After preparation, the target-metadata query uses `generic/platform=iOS Simulator`
+with the same Debug configuration, derived-data directory, scheme action and
+source-selection settings. `-showBuildSettings` does not build or execute tests;
+its existing 30-second work cap and eight-second stop reserve remain. The
+returned target paths must still resolve inside the owned build and pass the
+same platform, bundle-identity, nesting and product-byte checks. Preparation,
+installed-container observations and native tests retain the exact owned
+Simulator destination. A generic query avoids selecting that live destination;
+it does not guarantee that Xcode performs no Simulator-service work.
+
 The first invocation shares its profile-specific preparation command cap.
 The hosted prerequisite retains its 300-second default allowance and Files
 preparation retains 180 seconds. Startup, seed, host checkpoint, import and
