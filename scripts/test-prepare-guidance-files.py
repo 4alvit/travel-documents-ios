@@ -41,9 +41,12 @@ class Fake(m.Bootstrap):
             self.prep_env = dict(self.ops.env)
             result = self.out / "prepare.xcresult"; result.mkdir(); (result / "Data").mkdir()
             (result / "Info.plist").write_bytes(b"synthetic-result")
+        if label == "post-preparation-bootstatus":
+            self.devices["devices"][s.RUNTIME][0]["state"] = "Booted"
         result = {"xcode": "Xcode 26.2\nBuild version 17C52\n", "sdk": "26.2\n", "architecture": "arm64\n",
                   "runtimes": self.runtimes, "types": self.types, "devices-before": self.devices,
-                  "devices-booted": self.devices, "devices-final": self.devices,
+                  "devices-booted": self.devices, "devices-after-warm-boot": self.devices,
+                  "devices-final": self.devices, "post-preparation-bootstatus": "",
                   "prepare-ui": "",
                   "prepare-summary": self.summary, "prepare-tests": self.tree,
                   "files-group": m.GROUP + "\t" + str(self.group) + "\n"}[label]
@@ -102,6 +105,51 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn("boot", [call[0] for call in runner.calls])
         self.assertNotIn("bootstatus", [call[0] for call in runner.calls])
         self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
+        self.assertFalse(runner.report["post_preparation_warm_boot"])
+        self.assertEqual(runner.report["post_boot_state"], "Booted")
+
+    def test_successful_preparation_returned_to_shutdown_gets_one_exact_warm_boot(self):
+        runner = self.make()
+        def transform(label, value):
+            if label == "devices-booted": value["devices"][s.RUNTIME][0]["state"] = "Shutdown"
+            return value
+        runner.transform = transform
+        self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
+        warm = [call for call in runner.calls if call[0] == "post-preparation-bootstatus"]
+        self.assertEqual(warm, [("post-preparation-bootstatus", ["xcrun", "simctl", "bootstatus", s.FIRST, "-b"], 180)])
+        labels = [call[0] for call in runner.calls]
+        self.assertLess(labels.index("prepare-tests"), labels.index("post-preparation-bootstatus"))
+        self.assertLess(labels.index("post-preparation-bootstatus"), labels.index("devices-after-warm-boot"))
+        self.assertLess(labels.index("devices-after-warm-boot"), labels.index("files-group"))
+        self.assertEqual(runner.report["post_preparation_state"], "Shutdown")
+        self.assertTrue(runner.report["post_preparation_warm_boot"])
+        self.assertEqual(runner.report["post_boot_state"], "Booted")
+        self.assertTrue(runner.report["final_inventory_verified"])
+
+    def test_warm_boot_failures_and_changed_post_boot_identity_stop_before_provider(self):
+        for fault in ("command", "inventory", "shutdown", "booting", "identity", "path", "root"):
+            with self.subTest(fault=fault):
+                runner = self.make()
+                if fault == "command": runner.fail = "post-preparation-bootstatus"
+                if fault == "inventory": runner.fail = "devices-after-warm-boot"
+                def transform(label, value):
+                    if label == "devices-booted": value["devices"][s.RUNTIME][0]["state"] = "Shutdown"
+                    if label == "devices-after-warm-boot":
+                        row = value["devices"][s.RUNTIME][0]
+                        if fault == "shutdown": row["state"] = "Shutdown"
+                        elif fault == "booting": row["state"] = "Booting"
+                        elif fault == "identity": row["name"] = "changed"
+                        elif fault == "path": row["dataPath"] = "/tmp/foreign"
+                        elif fault == "root":
+                            root = Path(row["dataPath"])
+                            root.rename(root.with_name("previous-data")); root.mkdir()
+                    return value
+                runner.transform = transform
+                self.assertEqual(self.run_bootstrap(runner), 1)
+                labels = [call[0] for call in runner.calls]
+                self.assertEqual(labels.count("post-preparation-bootstatus"), 1)
+                self.assertNotIn("files-group", labels)
+                self.assertFalse(runner.report.get("final_inventory_verified", False))
 
     def test_live_identity_state_and_toolchain_changes_fail_before_launch(self):
         variants = [("devices-before", lambda d: d["devices"][s.RUNTIME][0].update(state="Booting")),
@@ -130,7 +178,8 @@ class BootstrapTests(unittest.TestCase):
                 runner = self.make()
                 def transform(label, value):
                     if label == "devices-booted":
-                        if fault == "state": value["devices"][s.RUNTIME][0]["state"] = "Shutdown"
+                        value["devices"][s.RUNTIME][0]["state"] = "Shutdown"
+                        if fault == "state": value["devices"][s.RUNTIME][0]["state"] = "Booting"
                         elif fault == "identity": value["devices"][s.RUNTIME][0]["name"] = "changed"
                         else:
                             root = Path(value["devices"][s.RUNTIME][0]["dataPath"])
@@ -141,6 +190,7 @@ class BootstrapTests(unittest.TestCase):
                 labels = [call[0] for call in runner.calls]
                 self.assertEqual(labels.count("prepare-ui"), 1)
                 self.assertIn("prepare-tests", labels)
+                self.assertNotIn("post-preparation-bootstatus", labels)
                 self.assertNotIn("files-group", labels)
                 self.assertFalse(runner.report.get("final_inventory_verified", False))
 
@@ -166,6 +216,7 @@ class BootstrapTests(unittest.TestCase):
         runner = self.make(); runner.summary["failedTests"] = 1
         self.assertEqual(self.run_bootstrap(runner), 1)
         self.assertNotIn("files-group", [call[0] for call in runner.calls])
+        self.assertNotIn("post-preparation-bootstatus", [call[0] for call in runner.calls])
 
     def test_group_response_has_no_ambiguous_or_foreign_fallback(self):
         for text in ["", m.GROUP + "\t/tmp/foreign\n", m.GROUP + "\tbad\textra\n"]:

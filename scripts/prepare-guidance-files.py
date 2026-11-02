@@ -289,13 +289,24 @@ class Bootstrap(process.Smoke):
         self.report["initial_state"] = row["state"]; self.report["data_root_identity"] = root_pin
         udid = self.selected["udid"]
         # xcodebuild owns startup inside the existing preparation phase budget.
-        # A passing real Files case, followed by this identity check, is the
-        # readiness requirement; there is no separate boot-status prerequisite.
+        # A passing real Files case is required before any post-test warm boot;
+        # there is no separate boot-status prerequisite for the native case.
         self.prepare_ui()
         live = self.json_command("devices-booted", ["list", "devices", "--json"], 120)
         row, same_root = selected_device(self.selected, runtimes, types, live)
-        require(row["state"] == "Booted" and same_root == root and directory_identity(root) == root_pin,
-                "Selected Simulator did not become ready with unchanged data root")
+        require(same_root == root and directory_identity(root) == root_pin,
+                "Selected Simulator data root changed after preparation")
+        self.report["post_preparation_state"] = row["state"]
+        self.report["post_preparation_warm_boot"] = row["state"] == "Shutdown"
+        if row["state"] == "Shutdown":
+            # Xcode can return a device it started to Shutdown after the test.
+            # Container lookup requires Booted; warm only this validated device.
+            self.command("post-preparation-bootstatus", ["xcrun", "simctl", "bootstatus", udid, "-b"], 180)
+            live = self.json_command("devices-after-warm-boot", ["list", "devices", "--json"], 120)
+            row, same_root = selected_device(self.selected, runtimes, types, live)
+            require(row["state"] == "Booted" and same_root == root and directory_identity(root) == root_pin,
+                    "Selected Simulator warm boot did not preserve its ready identity and data root")
+        self.report["post_boot_state"] = row["state"]
         listing = self.command("files-group", ["xcrun", "simctl", "get_app_container", udid, FILES, "groups"], 60)
         self.wait_provider(group_path(listing, root))
         final = self.json_command("devices-final", ["list", "devices", "--json"], 120)
