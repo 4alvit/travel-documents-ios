@@ -73,7 +73,14 @@ The recovery compatibility job retains its separately pinned profile.
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
 booted state themselves. This avoids the redundant CLI `available` filter;
-it does not relax device validation or the existing command deadlines.
+device validation remains strict. Their initial inventory read has a 120-second
+budget, matching the qualifier's existing inventory allowance. A bounded
+[post-boot diagnostic](https://github.com/4alvit/travel-documents-ios/actions/runs/41371185617)
+completed this single read in 77.3 seconds, exceeding the previous driver cap
+of 30 seconds. The hosted adapter grants that allowance only to the exact
+`simctl list devices --json` command; other driver commands retain their
+30-second cap. Shorter caller deadlines, the eight-second stop reserve, and
+the overall work and cleanup deadlines remain in force. No action is retried.
 If owned-device shutdown fails, qualification retains that error and checks
 that all owned command processes have stopped before reading a fresh inventory.
 It may delete only the same owned device now confirmed `Shutdown`; an already

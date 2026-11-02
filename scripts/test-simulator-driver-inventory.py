@@ -37,7 +37,8 @@ def device(**changes):
 
 
 class InventoryTests(unittest.TestCase):
-    def check_inventory(self, inventory, accepted=False, error="available.*booted iOS simulator"):
+    def check_inventory(self, inventory, accepted=False, error="available.*booted iOS simulator",
+                        batch_remaining=1200, batch_timeouts=(120, 30)):
         for kind, module in DRIVERS.items():
             with self.subTest(driver=kind), TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -53,7 +54,7 @@ class InventoryTests(unittest.TestCase):
                 driver.record = Mock()
                 driver.write_summary = Mock()
                 driver.save = Mock()
-                driver.remaining = Mock(return_value=1200)
+                driver.remaining = Mock(return_value=batch_remaining)
                 driver.source_snapshot = Mock(return_value={"synthetic": True})
                 calls = []
                 boundary = (["xcrun", "simctl", "notify_get_state", UUID, module.ENROLLMENT]
@@ -64,7 +65,8 @@ class InventoryTests(unittest.TestCase):
                 def run(argv, **kwargs):
                     calls.append(list(argv))
                     self.assertEqual(kwargs["cwd"], root)
-                    self.assertEqual(kwargs["timeout"], 30)
+                    expected_timeouts = batch_timeouts if kind == "batch" else (120, 30)
+                    self.assertEqual(kwargs["timeout"], expected_timeouts[len(calls) - 1])
                     self.assertIs(kwargs["check"], False)
                     if len(calls) == 1:
                         self.assertEqual(list(argv), ["xcrun", "simctl", "list", "devices", "--json"])
@@ -101,6 +103,14 @@ class InventoryTests(unittest.TestCase):
         self.check_inventory({IOS: [device(udid=OTHER_UUID, isAvailable=False, state="Shutdown"),
                                     device(udid=UUID.lower())],
                               TVOS: [device(udid=OTHER_UUID, isAvailable=False)]}, accepted=True)
+
+    def test_batch_inventory_stays_inside_remaining_driver_budget(self):
+        self.check_inventory({IOS: [device()]}, accepted=True,
+                             batch_remaining=45, batch_timeouts=(45, 30))
+
+    def test_batch_followup_also_stays_inside_remaining_driver_budget(self):
+        self.check_inventory({IOS: [device()]}, accepted=True,
+                             batch_remaining=12, batch_timeouts=(12, 12))
 
     def test_missing_owned_device_is_rejected(self):
         self.check_inventory({IOS: [device(udid=OTHER_UUID)]}, error="one available simulator")

@@ -98,10 +98,10 @@ class Driver:
             raise RuntimeError("The overall driver timeout expired")
         return remaining
 
-    def command(self, *command):
+    def command(self, *command, timeout=30):
         self.record("command", argv=list(command))
         result = subprocess.run(command, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=min(30, self.remaining()), check=False)
+                                timeout=min(timeout, self.remaining()), check=False)
         self.record("command_result", returncode=result.returncode,
                     stdout=result.stdout.decode("utf-8", "replace"), stderr=result.stderr.decode("utf-8", "replace"))
         if result.returncode:
@@ -136,7 +136,7 @@ class Driver:
         return snapshot
 
     def prepare(self):
-        inventory = json.loads(self.command("xcrun", "simctl", "list", "devices", "--json"))
+        inventory = json.loads(self.command("xcrun", "simctl", "list", "devices", "--json", timeout=120))
         matches = [(runtime, device) for runtime, devices in inventory["devices"].items() for device in devices
                    if device.get("udid", "").upper() == self.args.device]
         if len(matches) != 1:
