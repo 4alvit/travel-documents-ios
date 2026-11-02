@@ -1020,6 +1020,25 @@ boundary. The complete test file typechecked against the installed iOS SDK.
 These local checks do not establish a hosted speedup or native acceptance;
 a new complete capture remains required.
 
+The same [`1282c11` CI run](https://github.com/4alvit/travel-documents-ios/actions/runs/41475308705)
+failed the Russian maximum-text-size backup-warning case at its 120-second
+allowance. The independent result contains eight passed phone cases, one failed
+case and twelve intended opt-in skips; the separate Files preparation passed.
+The warning needed 19 text observations and 18 short drags. In the observed
+538-point viewport, a 160-point drag usually advanced the text about 150 points,
+so much of each captured slice repeated earlier text. The retained slice 17
+still clips the final word. Later completion and cancellation appear in the log,
+but their screenshots are absent from the ordinary attachment export and do
+not establish a passing result.
+
+The follow-up gesture uses the measured text viewport with overlapping slices
+and keeps both endpoints inside the current text pane. Actual captured interval
+coverage, reflow and horizontal-clipping checks, every slice screenshot and
+hierarchy, complete Export-action visibility and cancellation remain required.
+The 19-observation bound, 120-second case allowance and outer limits are unchanged.
+Local geometry and counterexample checks passed; fewer native observations and
+a successful native run remain to be demonstrated.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large
