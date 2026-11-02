@@ -2380,12 +2380,12 @@ class BoundaryTests(unittest.TestCase):
             row['work_deadline']=592.;r.limit=4.;r.monitor();r.limit=1380.
             probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[{'id':'normal','work_deadline':3.}]})
             r.monitor(command_owner=probe)
-        self.assertEqual(deadlines,[5.,15.,15.,5.,5.,7.,4.,3.])
-        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']), (5,15))
+        self.assertEqual(deadlines,[5.,30.,30.,5.,5.,7.,4.,3.])
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],hosted.core.CAPS['boot_scan_seconds']), (5,30,15))
         self.assertEqual((r.limit,r.final,hosted.core.CAPS['phase_seconds']), (1380.,1500.,600))
         self.assertEqual(r.ops.processes,[])
 
-    def test_phase_scan_slow_return_completes_uncached_traversal_within_fixed_15(self):
+    def test_phase_scan_slow_return_completes_uncached_traversal_within_fixed_30(self):
         r=self.runner();(r.out/'synthetic.bin').write_bytes(b'complete original')
         r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;delayed=False
@@ -2424,7 +2424,7 @@ class BoundaryTests(unittest.TestCase):
             r.monitor(command_owner=probe)
         self.assertEqual(observed,[(end,False,False) for end in [5.,15.,5.,5.,5.,5.,5.,7.,4.,5.]])
         self.assertEqual((r.limit,r.final,hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']),
-                         (1380.,1500.,5,15))
+                         (1380.,1500.,5,30))
         self.assertEqual(r.ops.processes,[])
 
     def test_boot_scan_completes_full_uncached_traversal_after_six_second_span(self):
@@ -2483,25 +2483,77 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertLess(r.ops.t,120.);self.assertFalse(r.active)
 
+    def test_phase_scan_measured_duration_succeeds_only_under_new_ceiling(self):
+        for ceiling,success in [(15,False),(30,True)]:
+            with self.subTest(ceiling=ceiling):
+                parent=self.root;self.root=parent/str(ceiling);self.root.mkdir()
+                try:r=self.runner()
+                finally:self.root=parent
+                payload=b'exact complete accounting';(r.out/'source.bin').write_bytes(payload)
+                r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+                real=hosted.core.os.scandir;delayed=[False]
+                def scan(fd):
+                    result=real(fd)
+                    if not delayed[0]:delayed[0]=True;r.ops.t+=16.848
+                    return result
+                with patch.dict(hosted.core.CAPS,phase_scan_seconds=ceiling), \
+                        patch.object(hosted.core.os,'scandir',side_effect=scan):
+                    if success:r.monitor()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+                if success:
+                    row=r.report['resources'][-1];metrics=row['scan']
+                    self.assertGreaterEqual(row['logical'],len(payload))
+                    self.assertGreaterEqual(row['entries'],2)
+                    self.assertEqual(metrics['duration_seconds'],16.848)
+                    self.assertEqual(metrics['traversal_duration_seconds'],16.848)
+                    self.assertEqual(metrics['requested_scan_seconds'],30)
+                    self.assertEqual(metrics['deadline_elapsed'],30)
+                    self.assertEqual(metrics['encounter_count'],row['entries'])
+                    self.assertGreater(metrics['operation_count'],metrics['encounter_count'])
+                    self.assertEqual(metrics['traversal_attempts'],1)
+                    self.assertEqual(set(metrics),{'started_elapsed','deadline_elapsed',
+                        'requested_scan_seconds','duration_seconds','traversal_duration_seconds',
+                        'operation_count','encounter_count','traversal_attempts','max_depth'})
+                    self.assertTrue(all(type(v) in (int,float) for v in metrics.values()))
+                    self.assertLess(len(json.dumps(metrics)),512)
+                    self.assertEqual(r.next_scan,17.848)
+                else:
+                    self.assertEqual(r.report['resources'],[])
+                    self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],15)
+                self.assertEqual(r.ops.processes,[])
+
+    def test_phase_scan_exact_new_ceiling_rejects_without_partial_success(self):
+        r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+        real=hosted.core.os.scandir;calls=[]
+        def scan(fd):
+            result=real(fd);calls.append(fd);r.ops.t+=30.;return result
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        self.assertEqual(len(calls),1);self.assertEqual(r.report['resources'],[])
+        self.assertEqual(r.next_scan,0)
+        self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],30.)
+        self.assertTrue(r.report['resource_scan_failure']['partial_counts_are_not_valid_accounting'])
+
     def test_phase_scan_cooperative_overshoot_keeps_failed_totals_and_never_renews(self):
         r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;calls=0
         def scan(fd):
             nonlocal calls
-            calls+=1;value=real(fd);r.ops.t+=15.25;return value
+            calls+=1;value=real(fd);r.ops.t+=30.25;return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
         row=r.report['resource_scan_failure']
         self.assertEqual(calls,1)
-        self.assertEqual((row['started_elapsed'],row['deadline_elapsed'],row['finished_elapsed']),(0.,15.,15.25))
-        self.assertEqual(row['requested_scan_seconds'],15)
+        self.assertEqual((row['started_elapsed'],row['deadline_elapsed'],row['finished_elapsed']),(0.,30.,30.25))
+        self.assertEqual(row['requested_scan_seconds'],30)
         self.assertEqual(row['traversal']['last_operation']['operation'],'scandir_open')
         self.assertEqual(row['traversal']['partial_totals']['entries'],0)
         self.assertTrue(row['partial_counts_are_not_valid_accounting'])
         self.assertEqual((r.report['resources'],r.next_scan),([],0))
         self.assertEqual(r.ops.processes,[])
 
-    def test_phase_scan_actual_command_clips_15_to_original_work_and_stop_reserve(self):
+    def test_phase_scan_actual_command_clips_30_to_original_work_and_stop_reserve(self):
         r=self.runner(Ops({'delay':float('inf')}));real=hosted.core.os.scandir;delayed=False
         r.ops.on_spawn=lambda argv:setattr(r.ops,'t',50.)
         def scan(fd):
@@ -2516,14 +2568,14 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(delayed);self.assertEqual(len(r.ops.processes),1)
         self.assertEqual((row['work_deadline'],row['command_deadline']),(52.,60.))
         self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),(50.,52.,52.25))
-        self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual(failed['requested_scan_seconds'],30)
         self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
         self.assertEqual(row['stop']['signals'],[15])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertLess(r.ops.t,60.);self.assertEqual((r.limit,r.final),(1380.,1500.))
         self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
 
-    def test_combined_phase15_rescan_uses_same_original_command_deadline(self):
+    def test_combined_phase30_rescan_uses_same_original_command_deadline(self):
         for name,work,success,passes in [('phase-export',592.,True,2),
                 ('selected-tests',592.,False,1),('phase-export',10.,False,2)]:
             with self.subTest(name=name,work=work):
@@ -2559,7 +2611,7 @@ class BoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual(r.report['resources'],[]);self.assertEqual(r.next_scan,0)
                     failed=r.report['resource_scan_failure']
-                    self.assertEqual(failed['deadline_elapsed'],min(work,15. if name=='phase-export' else 5.))
+                    self.assertEqual(failed['deadline_elapsed'],min(work,30. if name=='phase-export' else 5.))
                     self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
                 self.assertEqual(r.ops.processes,[])
 
