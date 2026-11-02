@@ -1096,6 +1096,23 @@ all three target paths in 2.552 seconds on Xcode 27.1; that supports the command
 form but does not establish Xcode 26.2 performance or the cause of this timeout.
 A new complete hosted capture remains required before acceptance.
 
+The subsequent [`99a05ef` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41497711833)
+stopped earlier at the 780-second preparation limit. Its hosted prerequisite
+passed in 5.387 seconds, but the direct Files case has no retained terminal
+result. The launch request alone took 327.693 seconds before launch confirmation;
+this interval cannot be attributed to compilation or StoreKit initialization.
+The incomplete result retained neither the logged screenshot nor a standalone
+hierarchy attachment. All 21 owned command groups were reaped, the owned
+Simulator was deleted, and the complete 132-device baseline matched. The generic
+metadata query was not reached, and this run remains failed.
+
+ARM batch now uses the same four complete test source files as the Intel batch
+profile, excluding only the sixteen unrelated test files. Production code,
+resources, selected native cases, full CI and biometric compilation are
+unchanged. This removes unnecessary compilation within the existing preparation
+and overall limits; neither a speedup nor a remedy for the launch delay is
+claimed before a new hosted measurement.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large

@@ -164,7 +164,7 @@ driver limits, the 180-second cleanup budget, runtime matching, source verificat
 and complete device-inventory checks remain unchanged. The 54-minute capture
 and 65-minute job envelopes are unchanged.
 
-The Intel batch build compiles only the complete test source files needed by
+Both ARM and Intel batch builds compile only the complete test source files needed by
 this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
 the package tests. A validated `EXCLUDED_SOURCE_FILE_NAMES` argument excludes
 the other sixteen test files in preparation, build-settings inspection and the
@@ -172,8 +172,9 @@ subsequent invocation. It does not exclude production App or TravelCore code,
 StoreKit resources, or any of the four selected test methods. The exact source
 selection is recorded in the capture receipt. Unexpected test files or an
 excluded filename colliding with another tracked source fail before the build.
-The tracked project and test plan are unchanged; ordinary full CI, Arm batch
-and biometric qualification keep their original compilation scope. This
+The tracked project and test plan are unchanged; ordinary full CI and
+biometric qualification keep their original compilation scope. ARM retains
+its default preparation, work and cleanup budgets. This
 reduces unnecessary compilation, but does not establish a measured speedup or
 a passing native result.
 

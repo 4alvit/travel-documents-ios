@@ -180,7 +180,7 @@ class Guards(unittest.TestCase):
                         run.prepare()
                     self.assertEqual(calls[-2:], [("boot", 60), ("boot-ready", 600 if mode == "batch" and machine == "x86_64" else 180)])
                     self.assertEqual((run.work_deadline, run.commands.limit), (deadline, deadline))
-                    selected = mode == "batch" and machine == "x86_64"
+                    selected = mode == "batch"
                     self.assertEqual(bool(run.build_settings), selected)
                     self.assertEqual(type(run.build_settings), tuple)
                     saved = json.loads((run.out / "receipt.json").read_text())
@@ -1335,7 +1335,8 @@ class Guards(unittest.TestCase):
         for mode in q.MODES:
             directory = self.root / mode; directory.mkdir()
             run = q.Qualification(directory, mode, ENV)
-            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
             profile = q.toolchain_profile(mode); schemas = self.schemas(); calls = []
             outputs = {"xcode": profile["xcode_version"], "developer": profile["developer_dir"],
                        "sdk": profile["sdk_version"], "architecture": "arm64", "generate-project": "",
@@ -1358,7 +1359,8 @@ class Guards(unittest.TestCase):
         for mode in q.MODES:
             directory = self.root / mode; directory.mkdir()
             run = q.Qualification(directory, mode, ENV)
-            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
             run.preflight_schemas = lambda: None
             profile = q.toolchain_profile(mode)
             runtimes = {"runtimes": [{"version": version, "buildversion": build,
@@ -1735,17 +1737,24 @@ class FocusedBuildGuards(unittest.TestCase):
         self.assertNotIn("LocalizationTests.swift", self.setting)
         self.assertEqual((len(self.retained), len(self.excluded)), (4, 16))
 
-    def test_default_arm_and_all_biometrics_do_not_request_exclusions(self):
-        for mode, env, arch in (("batch", ENV, "arm64"), ("biometrics", ENV, "arm64"),
-                                ("biometrics", self.env, "x86_64")):
-            profile = q.execution_profile(mode, env, arch)
-            self.assertIsNone(q.focused_build_selection(mode, profile, None))
+    def test_default_arm_uses_the_same_complete_batch_source_selection(self):
+        profile = q.execution_profile("batch", ENV, "arm64")
+        self.assertEqual(q.focused_build_selection("batch", profile, self.files),
+                         q.focused_build_selection("batch", self.profile, self.files))
+        self.assertEqual((profile["work_seconds"], profile["boot_seconds"]), (2400, 180))
+
+    def test_all_biometrics_keep_full_compilation_scope(self):
+        for env, arch in ((ENV, "arm64"), (self.env, "x86_64")):
+            profile = q.execution_profile("biometrics", env, arch)
+            self.assertIsNone(q.focused_build_selection("biometrics", profile, None))
 
     def test_wrong_mode_or_profile_identity_cannot_enable_focused_build(self):
-        for key, value in (("runner", "macos-15"), ("runner_architecture", "ARM64"), ("architecture", "arm64")):
-            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "verified Intel"):
-                q.focused_build_selection("batch", {**self.profile, key: value}, self.files)
-        with self.assertRaisesRegex(RuntimeError, "verified Intel"):
+        arm = q.execution_profile("batch", ENV, "arm64")
+        for profile, other in ((self.profile, arm), (arm, self.profile)):
+            for key in ("name", "runner", "runner_architecture", "architecture"):
+                with self.subTest(profile=profile, key=key), self.assertRaisesRegex(RuntimeError, "verified batch"):
+                    q.focused_build_selection("batch", {**profile, key: other[key]}, self.files)
+        with self.assertRaisesRegex(RuntimeError, "verified batch"):
             q.focused_build_selection("biometrics", self.profile, self.files)
 
     def test_changed_test_source_set_fails_closed(self):
