@@ -243,6 +243,18 @@ requires fresh full CI, exact-source artifact checks and release qualification.
 Earlier compiler results are not acceptance of the new binary. Local
 `test-simulator.sh` behavior is unchanged unless `--require-sdk-match` is passed.
 
+Manual release qualification defaults to `macos-15`. Its explicit
+`macos-15-intel` choice is a capacity contingency, never an automatic retry or
+fallback. The runner label must match its actual architecture. Both choices
+retain Xcode 26.2/17C52 and SDK 26.2; Intel additionally requires the installed
+26.2 runtime to report build 23C54 before device creation. The official
+[Intel image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)
+lists the toolchain and runtime version, but does not establish a particular
+job's runtime build or successful execution. Acceptance still requires its own
+live preflight, exact source/product evidence, native results, cleanup and
+independent 27.1 review. Existing Arm results do not certify Intel execution;
+the ordinary CI runner and Release producer are unchanged.
+
 Successful hosted capture has status `captured_pending_review`, never `passed`.
 It requires successful native execution, exact case counts and device identity,
 unchanged source, matching built/installed products, the batch original-byte
