@@ -326,7 +326,8 @@ class BoundaryTests(unittest.TestCase):
         parser=driver.split('xcodegen generate',1)[0]
         self.assertIn('if [[ $# -ne 0 ]]; then',parser)
         self.assertIn('if [[ $# -ne 2 || "$1" != "--cohort" ]]; then',parser)
-        self.assertEqual(parser.count('exit 2'),2)
+        self.assertIn('echo "Unknown test cohort: $2" >&2\n      exit 2',parser)
+        self.assertIn('"${2:-}" != "ui-guidance"',parser)
         self.assertEqual(re.findall(r'^    ([a-z-]+)\)$',parser,re.MULTILINE),['core-purchase','ui-guidance'])
         self.assertIn('CODE_SIGNING_ALLOWED=NO "${TEST_ARGUMENTS[@]}"',driver)
         for bound in ['-parallel-testing-enabled NO','-maximum-concurrent-test-simulator-destinations 1',

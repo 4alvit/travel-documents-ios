@@ -39,7 +39,15 @@ old tag or relabel an old binary as fixed.
 The explicit `Release qualification` workflow captures the selected suite once.
 Batch mode pins Xcode 16.4 (16F6), SDK 18.5, runtime 26.2, and xcresulttool 23714
 (format 3.53). The SDK and runtime deliberately differ, as in the core purchase
-compatibility lane. One serial invocation runs the exact hosted purchase/restore
+compatibility lane. Before the functional suite, a separate invocation runs the
+existing recovery preparation case once to initialize Files through Export and
+Save to Files. It checks an absent synthetic folder without saving a backup.
+This covers a preinitialized provider, not cold first use. Its own result bundle
+must pass the exact one-case, device and runtime checks before the driver starts.
+The preparation keeps a 600-second build/test cap and a 120-second case allowance;
+batch work has a 2,400-second budget to include this added phase. The functional
+driver's 1,200-second budget and the 180-second cleanup budget remain unchanged.
+One serial functional invocation runs the exact hosted purchase/restore
 test followed by the exact real Files batch test. The hosted test verifies local
 StoreKit APIs and clears its transactions before the UI test makes its own purchase.
 Both cases must pass with no skips. Four unique XCTest log markers must prove
@@ -53,7 +61,13 @@ claiming verified schema documentation. It never substitutes empty schema or
 runtime-warning arrays. Explicit batch schema-validation requests fail.
 The mandatory independent Xcode 27.1 review below still applies.
 
-Biometric mode pins Xcode 26.2 (17C52), SDK/runtime 26.2. This Xcode rejects an
+Biometric mode pins Xcode 26.2 (17C52), SDK/runtime 26.2. Each real simulated
+Face ID request has a unique acknowledgement bound to its run, request, sequence
+and event. The test waits for the single host event command to complete before
+starting its existing 15-second UI postcondition. The 60-second transport limit
+covers the two existing 30-second command caps; case and suite limits remain
+unchanged. Acknowledgement means command completion, not successful authentication.
+This Xcode rejects an
 explicit schema version 0.4.0, and its default summary-schema documentation contains invalid JSON.
 The preflight recognizes the exact captured documentation by SHA-256, retaining
 the original bytes. It does not repair result JSON or treat a documentation
@@ -76,10 +90,18 @@ fallback to another runtime. Its test artifact contains the result bundle plus
 bundle explicitly instead of assuming every archive entry belongs to it.
 This CI lane explicitly prepares the selected Simulator's local Files provider
 before running the unchanged UI cases. Preparation binds to the recorded
-selection, rechecks the complete inventory, launches Files once, and observes
-its existing local provider directory. It creates no user files and does not
-erase or delete the selected device. Its receipt distinguishes owned host-command
-cleanup from the Simulator services that remain running for the tests.
+selection and rechecks the complete inventory. It runs the existing recovery
+preparation case once: the synthetic app opens Export, Save to Files and the
+local provider, checks that its unique sentinel folder is absent, then stops.
+The preparation creates no backup or Files folder and does not erase or delete
+the selected device. Its separate result bundle records this case; the following
+guidance cohort retains its own result bundle and reuses the same build products.
+The preparation receipt distinguishes owned host-command cleanup from the
+Simulator services that remain running for the tests.
+Preparation has a 900-second work budget and a 600-second build/test command cap;
+the case still has its existing 120-second allowance. The prior recovery runs
+measured 349–486 seconds for this build/test phase. These bounds cover the added
+preparation phase; the guidance test deadlines and 35-minute job cap are unchanged.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
@@ -128,7 +150,10 @@ and output hashes. The reader must report the exact expected two or six passed
 cases, zero failures/skips/expected failures, the captured device, and explicit
 empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
 failure or any warning block acceptance. Inspect the retained screenshots and
-the mode-specific byte/cleanup evidence too. Only this complete review may
+the mode-specific byte/cleanup evidence too. For batch mode, independently inspect
+the separate Files preparation bundle as well: exactly its one preparation case
+must pass on the same device, with no skips, failures or runtime warnings.
+Only this complete review may
 produce the separate operator `passed` receipt described below; never rewrite
 the raw capture report into a pass. These checks cover the retained XCTest
 record, not every application or system-console message.

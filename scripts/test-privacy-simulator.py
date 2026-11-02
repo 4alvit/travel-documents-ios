@@ -2,7 +2,8 @@
 """Drive real simulated Face ID for PrivacyTransitionUITests on one booted UUID.
 
 The tests must wait for the system authentication prompt, then write and flush
-one line: TRIPDOCKET_BIOMETRIC_REQUEST match (or nomatch). No app authentication
+one sequenced TRIPDOCKET_BIOMETRIC_REQUEST line. The test waits for a request-
+specific acknowledgement before starting its existing UI postcondition. No app authentication
 state is injected. This is a test-only use of private Apple simulator events,
 verified in iOS 27.0 (24A434); other runtimes require separate verification.
 Run xcodegen generate first so the shared project includes the current tests.
@@ -31,7 +32,9 @@ EVENTS = {
     "nomatch": "com.apple.BiometricKit_Sim.pearl.nomatch",
 }
 MARKER = "TRIPDOCKET_BIOMETRIC_REQUEST"
-MARKER_PATTERN = re.compile(r"(?:^|\s)TRIPDOCKET_BIOMETRIC_REQUEST (match|nomatch)\s*$")
+MARKER_PATTERN = re.compile(r"(?:^|\s)TRIPDOCKET_BIOMETRIC_REQUEST (match|nomatch) ([1-9][0-9]?) ([0-9A-F-]{36})\s*$")
+ACK_PREFIX = "com.4alvit.tripfolio.biometric-ack"
+MAX_REQUESTS = 64
 EXPECTED_METHODS = (
     "testFailedAndCancelledAuthenticationKeepDocumentsPrivate",
     "testOriginalPreviewIsPrivateAcrossBackgroundAndReturn",
@@ -165,6 +168,8 @@ class Driver:
         self.actions = (self.directory / "actions.jsonl").open("w", encoding="utf-8", buffering=1)
         self.process = None
         self.requests = {"match": 0, "nomatch": 0}
+        self.ack_session = str(uuid.uuid4()).upper()
+        self.request_nonces = set()
         self.original_enrollment = None
         self.enrollment_changed = False
         self.provenance = None
@@ -174,6 +179,8 @@ class Driver:
             "status": "running", "started_at": timestamp(), "device": args.device,
             "directory": str(self.directory), "result_bundle": str(self.directory / "Tests.xcresult"),
             "requests": self.requests,
+            "acknowledgement": {"protocol": 1, "session": self.ack_session,
+                                "semantics": "single_notify_post_returned_zero_not_authentication_success"},
             "selected_test_class": "TripfolioUITests/PrivacyTransitionUITests",
             "selected_method": args.only_test,
             "expected_test_cases": self.expected_cases,
@@ -202,8 +209,40 @@ class Driver:
             raise DriverError(f"{action} failed ({result.returncode}): {result.stdout.strip()}")
         return result.stdout
 
-    def simctl(self, action, verb, *values):
-        return self.command(action, ["xcrun", "simctl", verb, self.args.device, *values])
+    def simctl(self, action, verb, *values, timeout=30):
+        return self.command(action, ["xcrun", "simctl", verb, self.args.device, *values], timeout=timeout)
+
+    def handle_biometric_request(self, line, deadline):
+        match = MARKER_PATTERN.search(line)
+        if match is None or line.count(MARKER) != 1:
+            raise DriverError(f"Malformed biometric request: {line.strip()}")
+        event, raw_ordinal, nonce = match.groups()
+        ordinal = int(raw_ordinal)
+        try:
+            parsed = uuid.UUID(nonce)
+        except ValueError as error:
+            raise DriverError("Invalid biometric request nonce") from error
+        if (str(parsed).upper() != nonce or parsed.version != 4
+                or nonce in self.request_nonces or ordinal > MAX_REQUESTS
+                or ordinal != sum(self.requests.values()) + 1):
+            raise DriverError("Biometric request is duplicated, out of order, or outside its bound")
+        self.request_nonces.add(nonce)
+        self.requests[event] += 1
+        ack_name = f"{ACK_PREFIX}.{self.ack_session}.{nonce}"
+        state = ordinal * 2 + (1 if event == "match" else 0)
+        self.record("biometric_request", event=event, ordinal=ordinal, nonce=nonce)
+        for action, verb, values in [
+            ("biometric_" + event, "notify_post", [EVENTS[event]]),
+            ("biometric_acknowledgement", "notify_set_state", [ack_name, str(state)]),
+        ]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DriverError("Biometric delivery exceeded the xcodebuild deadline")
+            # Never retry a possibly delivered event. An ACK means only that
+            # this one notify_post returned zero; the UI must still prove its
+            # real authentication result under its unchanged 15-second wait.
+            self.simctl(action, verb, *values, timeout=min(30, remaining))
+        self.record("biometric_acknowledged", event=event, ordinal=ordinal, nonce=nonce, state=state)
 
     def prepare(self):
         self.provenance = source_provenance(self.root)
@@ -254,6 +293,7 @@ class Driver:
         ]
         environment = os.environ.copy()
         environment.update({"TEST_RUNNER_TRIPDOCKET_BIOMETRIC_DRIVER": "1", "NSUnbufferedIO": "YES",
+                            "TEST_RUNNER_TRIPDOCKET_BIOMETRIC_ACK_SESSION": self.ack_session,
                             "TEST_RUNNER_NSUnbufferedIO": "YES"})
         self.record("xcodebuild_started", command=command)
         self.process = subprocess.Popen(command, cwd=self.root, env=environment, stdout=subprocess.PIPE,
@@ -283,15 +323,7 @@ class Driver:
             sys.stdout.write(line)
             sys.stdout.flush()
             if MARKER in line:
-                match = MARKER_PATTERN.search(line)
-                if match is None or line.count(MARKER) != 1:
-                    raise DriverError(f"Malformed biometric request: {line.strip()}")
-                event = match.group(1)
-                self.requests[event] += 1
-                self.record("biometric_request", event=event, ordinal=sum(self.requests.values()))
-                # One command for this one marker. Never retry a potentially
-                # delivered match: a retry could authenticate a later prompt.
-                self.simctl("biometric_" + event, "notify_post", EVENTS[event])
+                self.handle_biometric_request(line, deadline)
         remaining = max(0.01, deadline - time.monotonic())
         try:
             returncode = self.process.wait(timeout=remaining)

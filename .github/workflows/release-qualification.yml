@@ -33,6 +33,7 @@ jobs:
           python3 -B scripts/test-batch-driver.py
           python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-simulator-driver-inventory.py
+          python3 -B scripts/test-biometric-handshake.py
       - name: Capture selected suite for review
         timeout-minutes: 44
         env:
