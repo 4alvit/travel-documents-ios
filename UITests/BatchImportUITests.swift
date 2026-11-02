@@ -401,6 +401,14 @@ final class BatchImportUITests: XCTestCase {
             throw BatchTestFailure(message: "Native seed requires its exact canonical owned folder token")
         }
         let nativeRoot = try nativeRootMode("seed")
+        let reopenValue = environment["TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
+        guard reopenValue == nil || reopenValue == "" || reopenValue == "1" else {
+            throw BatchTestFailure(message: "Invalid native reopen control")
+        }
+        let reopenControl = reopenValue == "1"
+        guard !reopenControl || (nativeRoot && checkpoint != nil) else {
+            throw BatchTestFailure(message: "Native reopen control requires the owned combined root")
+        }
         executionTimeAllowance = 180
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -408,6 +416,9 @@ final class BatchImportUITests: XCTestCase {
         defer { app.terminate() }
         app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
                                                    "--ui-testing-native-batch-token", token]
+        if reopenControl {
+            app.launchArguments += ["--ui-testing-native-reopen", "--ui-testing-batch-diagnostics"]
+        }
         app.launch()
         for filename in filenames {
             let seed = app.buttons["nativeSeed." + filename]
@@ -441,6 +452,31 @@ final class BatchImportUITests: XCTestCase {
             try check(!failed.exists && verified.exists, app: app,
                       "Native seed export destination was not verified")
             capture(app, "Native seed returned after Save — " + filename)
+        }
+        if reopenControl {
+            // Diagnostic only: keep this AUT process alive after both exports.
+            // The ordinary main case still runs after its normal termination.
+            let reopen = app.buttons["nativeSeed.reopen"]
+            try await wait("Same-process reopen control is unavailable", app: app) {
+                reopen.exists && reopen.isEnabled && reopen.isHittable
+            }
+            capture(app, "Same-process native reopen before selection")
+            reopen.tap()
+            do {
+                try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)
+                let verified = app.staticTexts["nativeSeed.reopenVerified"]
+                let failed = app.staticTexts["nativeSeed.reopenFailure"]
+                try await wait("Same-process reopen did not verify both originals", app: app) {
+                    verified.exists || failed.exists
+                }
+                try check(verified.exists && !failed.exists, app: app,
+                          "Same-process reopen rejected the returned original bytes")
+                capture(app, "Same-process native reopen verified both originals")
+                print("BATCH_NATIVE_REOPEN result=verified")
+            } catch {
+                capture(app, "Same-process native reopen failed")
+                throw error
+            }
         }
         // Host compares both exact destination bytes; completion alone is not proof.
         if let checkpoint { try Self.recordBatchProducer(checkpoint) }
@@ -1405,7 +1441,8 @@ final class BatchImportUITests: XCTestCase {
         return picker
     }
 
-    private func selectRealFiles(_ app: XCUIApplication, nativeRoot: Bool) async throws {
+    private func selectRealFiles(_ app: XCUIApplication, nativeRoot: Bool,
+                                 observeLateFailure: Bool = true) async throws {
         let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
         let picker: XCUIElement
         if nativeRoot {
@@ -1434,14 +1471,19 @@ final class BatchImportUITests: XCTestCase {
                       app: app, "Batch selection left its verified local root or unique Open action")
         }
         open.tap()
-        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now)
+        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now,
+                                        observeLateFailure: observeLateFailure)
     }
 
     private func requireFilesDismissal(_ app: XCUIApplication, navigation: XCUIElement,
-                                      openedAt: ContinuousClock.Instant) async throws {
+                                      openedAt: ContinuousClock.Instant,
+                                      observeLateFailure: Bool = true) async throws {
         do {
             try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
         } catch let originalFailure as BatchTestFailure {
+            // The seed control keeps its original 180-second allowance. Its
+            // failed 15-second criterion already retained the current PNG/AX.
+            guard observeLateFailure else { throw originalFailure }
             // Diagnostic branch only: the original 15-second criterion already
             // failed and captured its PNG/AX. Observe once, with no further action.
             // The 30-second request cannot cap an in-flight XCTest RPC; the

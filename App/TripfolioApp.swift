@@ -135,9 +135,20 @@ private struct NativeBatchSeedView: View {
     @State private var failed = false
     @State private var exports: [String: NativeSeedExportSession] = [:]
     @State private var presentedExport: NativeSeedExportSession?
+    @State private var reopen: NativeSeedReopenSession?
+    @State private var presentedReopen: BatchDocumentPicker.Session?
+
+    private let reopenEnabled = ProcessInfo.processInfo.arguments.filter {
+        $0 == "--ui-testing-native-reopen"
+    }.count == 1
 
     private var unavailable: Bool { failed || exports.values.contains { $0.phase == .failed } }
     private var pending: Bool { exports.values.contains { $0.phase == .waiting || $0.phase == .verifying } }
+    private var bothExportsVerified: Bool {
+        exports.count == 2 && NativeBatchSeedFiles.fixtures.allSatisfy {
+            exports[$0.0]?.phase == .verified
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -156,15 +167,37 @@ private struct NativeBatchSeedView: View {
                             .accessibilityIdentifier("nativeSeed.saved." + file.lastPathComponent)
                     }
                 }
+                if reopenEnabled && bothExportsVerified {
+                    Button("Reopen exported files") { beginReopen() }
+                        .accessibilityIdentifier("nativeSeed.reopen")
+                        .disabled(unavailable || pending || presentedExport != nil || reopen != nil)
+                    if reopen?.phase == .verified {
+                        Text("Reopen verified")
+                            .accessibilityIdentifier("nativeSeed.reopenVerified")
+                    } else if reopen?.phase == .failed {
+                        Text("Reopen failed")
+                            .accessibilityIdentifier("nativeSeed.reopenFailure")
+                    }
+                }
             }
             .navigationTitle("Native fixture seed")
             .sheet(item: $presentedExport) { request in
                 NativeSeedExportPicker(request: request)
             }
+            .sheet(item: $presentedReopen) { session in
+                if let request = reopen, request.pickerSession.id == session.id {
+                    BatchDocumentPicker(session: session) { result in
+                        request.receive(result)
+                    }
+                }
+            }
         }
         .onChange(of: pending) { _, isPending in
             // Clear only presentation after the retained request is terminal.
             if !isPending { presentedExport = nil }
+        }
+        .onChange(of: reopen?.phase) { _, phase in
+            if phase == .verified || phase == .failed { presentedReopen = nil }
         }
         .task {
             guard !attempted else { return }
@@ -183,6 +216,16 @@ private struct NativeBatchSeedView: View {
         // There is no destination deletion; this Simulator is qualifier-owned.
         exports[file.lastPathComponent] = request
         presentedExport = request
+    }
+
+    private func beginReopen() {
+        guard reopenEnabled, bothExportsVerified, !unavailable, !pending,
+              presentedExport == nil, reopen == nil else { return }
+        let request = NativeSeedReopenSession()
+        // Keep semantic ownership after UIKit clears the sheet binding.
+        // This diagnostic reuses the actual opening picker in the same AUT.
+        reopen = request
+        presentedReopen = request.pickerSession
     }
 }
 
@@ -264,6 +307,79 @@ private struct NativeSeedExportPicker: UIViewControllerRepresentable {
         }
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             request.cancel()
+        }
+    }
+}
+
+@MainActor
+@Observable
+private final class NativeSeedReopenSession {
+    enum Phase: Equatable { case waiting, verifying, verified, failed }
+    let pickerSession = BatchDocumentPicker.Session(draftID: UUID())
+    private let read: @Sendable (URL, Int) async throws -> Data
+    private var readingSelection: BatchPickerSelection?
+    private(set) var phase: Phase = .waiting
+
+    init(read: @escaping @Sendable (URL, Int) async throws -> Data = AppModel.readExternal) {
+        self.read = read
+    }
+
+    func receive(_ result: Result<BatchPickerSelection, Error>?) {
+        guard phase == .waiting else {
+            if case .success(let selection)? = result {
+                // A duplicate must not dispose a lease while its read is active.
+                if case .copied(let active)? = readingSelection,
+                   case .copied(let duplicate) = selection, active === duplicate { return }
+                selection.dispose()
+            }
+            return
+        }
+        // The real picker invalidates Session.active before delivering its
+        // terminal callback. Eligibility is this retained request's phase.
+        guard case .success(let selection)? = result else {
+            phase = .failed
+            return
+        }
+        let urls = selection.urls
+        var expected: [String: Data] = [:]
+        for (name, encoded) in NativeBatchSeedFiles.fixtures {
+            guard expected[name] == nil, let bytes = Data(base64Encoded: encoded),
+                  !bytes.isEmpty, bytes.count <= 1024 else {
+                selection.dispose()
+                phase = .failed
+                return
+            }
+            expected[name] = bytes
+        }
+        guard expected.count == 2, urls.count == 2, Set(urls).count == 2,
+              Set(urls.map(\.lastPathComponent)) == Set(expected.keys) else {
+            selection.dispose()
+            phase = .failed
+            return
+        }
+        phase = .verifying
+        readingSelection = selection
+        let read = self.read
+        Task { [self, selection] in
+            let verified: Bool
+            do {
+                for url in urls {
+                    // Use each original granted URL, never a reconstructed path.
+                    let bytes = try await read(url, 1024)
+                    try Task.checkCancellation()
+                    guard bytes == expected[url.lastPathComponent] else {
+                        throw NativeBatchSeedFiles.Failure.invalid
+                    }
+                }
+                verified = true
+            } catch {
+                verified = false
+            }
+            // Keep the lease and Session alive until all asynchronous reads
+            // have settled. Release before exposing the one terminal marker.
+            selection.dispose()
+            readingSelection = nil
+            phase = verified ? .verified : .failed
         }
     }
 }

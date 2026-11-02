@@ -64,6 +64,8 @@ jobs:
           QUALIFICATION_MODE: ${{ inputs.mode }}
           QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}
           QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}
+          # This branch is an explicit diagnostic control, never release acceptance.
+          TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL: ${{ inputs.mode == 'batch' && '1' || '' }}
         run: python3 -B scripts/qualify-release.py --mode "$QUALIFICATION_MODE"
       - name: Qualification evidence
         if: always()

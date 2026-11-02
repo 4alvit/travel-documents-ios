@@ -87,8 +87,9 @@ final class DismissalHarness {
     }
     func capture(_ app: XCUIApplication, _ name: String, batchDiagnostic: Bool) { captures.append(name) }
     func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
-    func run(_ navigation: XCUIElement) async throws {
-        try await requireFilesDismissal(XCUIApplication(), navigation: navigation, openedAt: .now)
+    func run(_ navigation: XCUIElement, observeLateFailure: Bool = true) async throws {
+        try await requireFilesDismissal(XCUIApplication(), navigation: navigation, openedAt: .now,
+                                       observeLateFailure: observeLateFailure)
     }
     // ACTUAL_DISMISSAL
 }
@@ -152,7 +153,7 @@ struct Main {
             expect(reader.read(valid) == initial, "1024 total nodes must be admitted")
             let excessive = Node(identifier: "root", type: .other, children: [Node(initial)] + Array(repeating: leaf, count: 1023))
             expect(reader.read(excessive) == "unavailable", "Excessive tree must fail")
-        case "dismissal-success", "dismissal-late", "dismissal-still-present", "dismissal-cancelled":
+        case "dismissal-success", "dismissal-late", "dismissal-still-present", "dismissal-cancelled", "dismissal-no-late":
             let harness = DismissalHarness()
             let navigation = XCUIElement()
             navigation.exists = name != "dismissal-success"
@@ -162,7 +163,7 @@ struct Main {
             var originalRethrown = false
             var cancellationRethrown = false
             do {
-                try await harness.run(navigation)
+                try await harness.run(navigation, observeLateFailure: name != "dismissal-no-late")
                 returned = true
             } catch let error as BatchTestFailure {
                 originalRethrown = error === harness.original
@@ -174,6 +175,10 @@ struct Main {
                 expect(cancellationRethrown == (name == "dismissal-cancelled"), "Cancellation must propagate")
                 expect(navigation.requests.isEmpty && harness.captures.isEmpty && harness.attachments.isEmpty,
                        "No passive diagnostic outside the original dismissal failure")
+            } else if name == "dismissal-no-late" {
+                expect(!returned && originalRethrown, "Seed control must retain the exact original failure")
+                expect(navigation.requests.isEmpty && harness.attachments.isEmpty, "Seed control omits only passive observation")
+                expect(harness.captures == ["Files remained after opening the selection"], "Original failure capture retained")
             } else {
                 expect(!returned && originalRethrown, "Late disappearance must still throw exact original failure")
                 expect(navigation.requests == [30], "Exactly one passive request")
@@ -248,18 +253,35 @@ class BatchImportDiagnosticTests(unittest.TestCase):
     def test_cancellation_is_not_observed_or_replaced(self):
         self.run_case("dismissal-cancelled")
 
+    def test_seed_control_omits_only_late_observation(self):
+        self.run_case("dismissal-no-late")
+
     def test_late_observation_has_no_actions_or_polling_loop(self):
         ui = UI.read_text()
         dismissal = section(ui, "    private func requireFilesDismissal(", "\n    private func reviewRows(")
         self.assertEqual(dismissal.count("waitForNonExistence(timeout: 30)"), 1)
         self.assertEqual(dismissal.count('try await wait("Files remained after opening the selection", app: app) { !navigation.exists }'), 1)
         self.assertIn("catch let originalFailure as BatchTestFailure", dismissal)
-        self.assertIn("throw originalFailure", dismissal)
+        self.assertIn("observeLateFailure: Bool = true", dismissal)
+        early = "guard observeLateFailure else { throw originalFailure }"
+        self.assertEqual(dismissal.count(early), 1)
+        self.assertEqual(dismissal.count("throw originalFailure"), 2)
+        self.assertLess(dismissal.index(early), dismissal.index("let observationStarted"))
         self.assertNotIn("timeout:", dismissal.split("catch let")[0])
         for forbidden in [".tap(", ".swipe", ".launch(", ".terminate(", "Task.sleep", "while ", "repeat {", "try?"]:
             self.assertNotIn(forbidden, dismissal)
         self.assertLess(dismissal.index("add(timing)"), dismissal.index("capture(app,"))
-        self.assertLess(dismissal.index("capture(app,"), dismissal.index("throw originalFailure"))
+        passive = dismissal[dismissal.index("let observationStarted"):]
+        self.assertLess(passive.index("capture(app,"), passive.index("throw originalFailure"))
+        selection = section(ui, "    private func selectRealFiles(", "\n    private func requireFilesDismissal(")
+        self.assertIn("observeLateFailure: Bool = true", selection)
+        self.assertIn("observeLateFailure: observeLateFailure", selection)
+        self.assertEqual(ui.count("observeLateFailure: false"), 1)
+        seed = section(ui, "    func testNativeSaveSeedsBothSyntheticOriginals()", "\n    // Combined qualification preserves")
+        self.assertIn("try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)", seed)
+        main = section(ui, "    func testRealFilesBatchRequiresEveryReviewAndPreservesOriginals()", "\n    // Opt-in prepare/export/restore phases.")
+        self.assertIn("try await selectRealFiles(app, nativeRoot: nativeRoot)", main)
+        self.assertNotIn("observeLateFailure:", main)
 
     def test_all_app_diagnostics_are_debug_simulator_only(self):
         stack = []
