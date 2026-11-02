@@ -17,7 +17,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      # Diagnostic: keep the Release producer and core tests on matched 26.2.
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,7 +29,7 @@ jobs:
           set -euo pipefail
           mkdir -p build/ci-toolchain
           xcodebuild -version | tee build/ci-toolchain/xcode.txt
-          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 16.4\nBuild version 16F6'
+          test "$(cat build/ci-toolchain/xcode.txt)" = $'Xcode 26.2\nBuild version 17C52'
           swift --version | tee build/ci-toolchain/swift.txt
           brew install xcodegen
           # Recognize exact producer documentation; runtime acceptance is separate.
@@ -63,7 +64,7 @@ jobs:
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
-        run: bash scripts/test-simulator.sh --cohort core-purchase
+        run: bash scripts/test-simulator.sh --require-sdk-match --cohort core-purchase
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -91,6 +92,7 @@ jobs:
           name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
           if-no-files-found: warn
           retention-days: 7
       - name: Simulator artifact
