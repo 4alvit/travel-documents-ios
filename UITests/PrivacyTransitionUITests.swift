@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import notify
 import XCTest
 
 /// Requires the host biometric bridge and an enrolled, dedicated simulator.
@@ -11,6 +12,7 @@ import XCTest
 final class PrivacyTransitionUITests: XCTestCase {
     private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
     private let draftSuffix = " PRIVACY DRAFT"
+    private static var biometricSequence: UInt64 = 0
 
     func testFailedAndCancelledAuthenticationKeepDocumentsPrivate() async throws {
         let app = try await launchLocked()
@@ -346,8 +348,38 @@ final class PrivacyTransitionUITests: XCTestCase {
     private func requestBiometric(_ result: String, in app: XCUIApplication) async throws {
         try await waitForAuthenticationUI(app)
         try assertPrivate(app, checkpoint: "Before requesting Face ID \(result)")
-        print("TRIPDOCKET_BIOMETRIC_REQUEST \(result)")
+        let session = ProcessInfo.processInfo.environment["TRIPDOCKET_BIOMETRIC_ACK_SESSION"] ?? ""
+        try check(UUID(uuidString: session)?.uuidString == session, app: app, "Missing or invalid biometric ACK session")
+        try check(["match", "nomatch"].contains(result) && Self.biometricSequence < 64,
+                  app: app, "Invalid or excessive biometric request")
+        Self.biometricSequence += 1
+        let ordinal = Self.biometricSequence
+        let nonce = UUID().uuidString
+        let name = "com.4alvit.tripfolio.biometric-ack.\(session).\(nonce)"
+        var token: Int32 = 0
+        try check(notify_register_check(name, &token) == NOTIFY_STATUS_OK,
+                  app: app, "Cannot register biometric delivery acknowledgement")
+        defer { _ = notify_cancel(token) }
+        var state: UInt64 = 0
+        try check(notify_get_state(token, &state) == NOTIFY_STATUS_OK && state == 0,
+                  app: app, "Biometric acknowledgement was not initially empty")
+        let expected = ordinal * 2 + (result == "match" ? 1 : 0)
+        let clock = ContinuousClock()
+        // Transport has two existing 30-second host command caps: one real
+        // event and one ACK. Per-case/suite limits and the subsequent 15-second
+        // UI postcondition remain unchanged. ACK is not authentication success.
+        let deadline = clock.now.advanced(by: .seconds(60))
+        print("TRIPDOCKET_BIOMETRIC_REQUEST \(result) \(ordinal) \(nonce)")
         fflush(nil)
+        repeat {
+            try check(notify_get_state(token, &state) == NOTIFY_STATUS_OK,
+                      app: app, "Cannot read biometric delivery acknowledgement")
+            if clock.now >= deadline { break }
+            if state == expected { return }
+            try check(state == 0, app: app, "Unexpected biometric delivery acknowledgement")
+            try await Task.sleep(for: .milliseconds(100))
+        } while clock.now < deadline
+        try check(false, app: app, "Host did not acknowledge the single biometric event within its transport deadline")
     }
 
     private func hasAuthenticationFailure(in app: XCUIApplication) -> Bool {

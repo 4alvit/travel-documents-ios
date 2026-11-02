@@ -433,7 +433,137 @@ class Guards(unittest.TestCase):
         run.run_driver=lambda:run.report.update(driver_capture_verified=True,products_verified=True,
                                               batch_snapshot={"verified":True})
         run.cleanup=lambda:run.report.update(cleanup_verified=True)
+        if mode == "batch":
+            self.preparation_fixture(run)
+            run.inspect_files_preparation()
+            run.report["files_preparation_verified"] = True
         return run,result
+
+    def preparation_fixture(self, run):
+        run.owned=OWNED;run.baseline={};run.intent={"name":"owned","runtime":"iOS-26-2","type":"iPhone"}
+        run.report["runtime_selection"]={"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+            "version":"26.2","build":"23C54","architecture":"arm64","sdk_version":"18.5","sdk_matched":False}
+        original=run.out/"files-prepare.xcresult"
+        (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
+        (original/"Info.plist").write_bytes(b"preparation metadata")
+        _,summary,tree,_=self.fixture()
+        summary.update(totalTestCount=1,passedTests=1)
+        summary["devicesAndConfigurations"][0]["device"]["platform"]="iOS Simulator"
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":q.PREPARE_CASE,"result":"Passed"}]
+        def command(label, argv, seconds=30):
+            kind=label.removeprefix("files-prepare-")
+            self.assertIn(kind,("summary","tests"));self.assertEqual(seconds,60)
+            self.assertIn(str(run.out/"files-prepare-inspection.xcresult"),[str(a) for a in argv])
+            path=run.commands.out/(kind+".json")
+            path.write_text(json.dumps(summary if kind=="summary" else tree))
+            run.commands.report["commands"].append({"logs":{"stdout":str(path)}})
+            return "this returned string is deliberately not the raw JSON"
+        run.command=command
+        return original,summary,tree
+
+    def test_files_preparation_reads_copy_preserves_original_and_requires_exact_case_runtime(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run)
+        before=run.preparation_manifest(original)
+        run.inspect_files_preparation()
+        self.assertEqual(before,run.preparation_manifest(original))
+        self.assertEqual(before,run.preparation_manifest(run.out/"files-prepare-inspection.xcresult"))
+        self.assertTrue(run.report["files_preparation_original"]["unchanged_after_reader"])
+        self.assertEqual(run.report["files_preparation_result"]["cases"],[q.PREPARE_CASE])
+        for mutate in [lambda s,t:s.update(skippedTests=1),lambda s,t:s.pop("testFailures"),
+                lambda s,t:s.update(runtimeWarnings=[{}]),lambda s,t:s.update(runtimeWarnings=None),
+                lambda s,t:t["testNodes"].append({"nodeType":"Runtime Warning"}),
+                lambda s,t:t["testNodes"][0].update(nodeIdentifier="Wrong/case()"),
+                lambda s,t:t["testNodes"].append(t["testNodes"][0]),
+                lambda s,t:t["devices"][0].update(deviceId=EXISTING),
+                lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osBuildNumber="wrong"),
+                lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osVersion="18.5"),
+                lambda s,t:s["devicesAndConfigurations"][0]["device"].update(architecture="x86_64")]:
+            s,t=copy.deepcopy(summary),copy.deepcopy(tree);mutate(s,t)
+            with self.assertRaises(RuntimeError):q.validate_files_preparation(s,t,OWNED,run.report["runtime_selection"])
+
+    def test_files_preparation_absent_warnings_are_pending_not_an_empty_array(self):
+        run=self.run_object();_,summary,_=self.preparation_fixture(run);summary.pop("runtimeWarnings")
+        run.inspect_files_preparation();r=run.report["files_preparation_result"]
+        self.assertEqual(r["runtimeWarnings"],"not_reported");self.assertFalse(r["runtimeWarnings_reported"])
+        self.assertEqual(r["independent_warning_and_pixel_review"],"pending")
+
+    def test_files_preparation_rejects_original_mutation_and_invalid_raw_json(self):
+        for fault in ("mutation","json","utf8"):
+            with tempfile.TemporaryDirectory(dir=self.root) as directory:
+                run=q.Qualification(directory,"batch",ENV);original,_,_=self.preparation_fixture(run)
+                command=run.command
+                def broken(label,argv,seconds=30):
+                    result=command(label,argv,seconds)
+                    if fault=="mutation":(original/"Data/result").write_bytes(b"mutated")
+                    else:Path(run.commands.report["commands"][-1]["logs"]["stdout"]).write_bytes(
+                        b'{"broken":}' if fault=="json" else b'\xff')
+                    return result
+                run.command=broken
+                with self.assertRaises((RuntimeError,ValueError)):run.inspect_files_preparation()
+                self.assertNotIn("files_preparation_verified",run.report)
+
+    def test_files_preparation_manifest_rejects_links_and_oversize(self):
+        run=self.run_object();original,_,_=self.preparation_fixture(run)
+        target=original/"Data/result";target.unlink();target.symlink_to(run.out/"outside")
+        with self.assertRaises(RuntimeError):run.preparation_manifest(original)
+        target.unlink()
+        with target.open("wb") as stream:stream.truncate(256*q.MIB+1)
+        with self.assertRaises(RuntimeError):run.preparation_manifest(original)
+
+    def test_files_preparation_once_owned_exact_command_and_scoped_environment(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        original_env=run.commands.ops.env;calls=[]
+        def command(label,argv,seconds=30):
+            calls.append((label,[str(v) for v in argv],seconds,dict(run.commands.ops.env)))
+        run.command=command;run.inspect_files_preparation=lambda:None
+        run.prepare_files_ui()
+        self.assertIs(run.commands.ops.env,original_env);self.assertTrue(run.report["files_preparation_verified"])
+        self.assertEqual(len(calls),1);label,argv,seconds,env=calls[0]
+        self.assertEqual((label,seconds),("files-prepare-ui",600));self.assertEqual(argv[-1],"test")
+        self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
+        self.assertEqual(argv[argv.index("-derivedDataPath")+1],
+                         str(run.root/"build/QualificationPreparationDerivedData-123-1"))
+        self.assertFalse(Path(argv[argv.index("-derivedDataPath")+1]).is_relative_to(run.out))
+        self.assertEqual([v for v in argv if v.startswith("-only-testing:")],
+                         ["-only-testing:TripfolioUITests/"+q.PREPARE_CASE.removesuffix("()")])
+        for key in ["-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"]:
+            self.assertEqual(argv[argv.index(key)+1],"120")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE"],"prepare")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_UI"],"1")
+        self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
+        with self.assertRaises(RuntimeError):run.prepare_files_ui()
+        self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
+
+    def test_files_preparation_failure_remains_primary_and_restores_environment(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        previous=run.commands.ops.env
+        run.command=lambda *a,**k:(_ for _ in ()).throw(RuntimeError("native failed"))
+        run.inspect_files_preparation=lambda:(_ for _ in ()).throw(RuntimeError("inspection also failed"))
+        with self.assertRaisesRegex(RuntimeError,"native failed"):run.prepare_files_ui()
+        self.assertIs(run.commands.ops.env,previous)
+        self.assertIn("inspection also failed",run.report["files_preparation_inspection_error"])
+        self.assertNotIn("files_preparation_verified",run.report)
+
+    def test_files_preparation_refuses_existing_device_expired_budget_and_unresolved_writer(self):
+        for fault in ("existing","budget","writer","mode"):
+            with tempfile.TemporaryDirectory(dir=self.root) as directory:
+                run=q.Qualification(directory,"biometrics" if fault=="mode" else "batch",ENV)
+                run.owned=OWNED;run.baseline={};run.intent={"name":"owned"};calls=[]
+                run.command=lambda *a,**k:calls.append(a)
+                run.inspect_files_preparation=lambda:self.fail("Inspection must not run")
+                if fault=="existing":run.baseline[OWNED]={}
+                if fault=="budget":run.work_deadline=time.monotonic()+q.PREPARE_SECONDS+q.MODES["batch"][1]
+                if fault=="writer":run.commands.unknown_spawn=True
+                with self.assertRaises(RuntimeError):run.prepare_files_ui()
+                if fault!="writer":self.assertFalse(calls)
+                self.assertNotIn("files_preparation_verified",run.report)
+
+    def test_final_capture_requires_preparation_and_rechecks_its_original_after_cleanup(self):
+        run,_=self.prepared_capture();run.report.pop("files_preparation_verified")
+        self.assertEqual(run.execute(),1);self.assertEqual(run.report["status"],"failed")
+        run.report["files_preparation_verified"]=True
+        (run.out/"files-prepare.xcresult/Data/result").write_bytes(b"late mutation")
+        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
 
     def test_successful_capture_is_pending_review_and_binds_unchanged_original_bytes(self):
         for mode in q.MODES:

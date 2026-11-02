@@ -19,8 +19,10 @@ import uuid
 HERE = Path(__file__).resolve().parent
 MODES = {"batch": ("test-batch-simulator.py", 1200),
          "biometrics": ("test-privacy-simulator.py", 1200)}
-WORK_SECONDS = {"batch": 1800, "biometrics": 2400}
+WORK_SECONDS = {"batch": 2400, "biometrics": 2400}
 CLEANUP_SECONDS = 180
+PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
+PREPARE_SECONDS = 600
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
@@ -41,6 +43,7 @@ def load_module(path, name):
 
 
 processes = load_module(HERE / "recovery_process.py", "qualification_processes")
+recovery = load_module(HERE / "recovery_core.py", "qualification_recovery_validation")
 
 
 def context(mode, env):
@@ -262,6 +265,28 @@ def validate_batch_order(raw, recorded):
     return observed
 
 
+def validate_files_preparation(summary, tree, owned, selection):
+    require(isinstance(summary, dict) and isinstance(tree, dict), "Invalid Files preparation result")
+    nodes = tree.get("testNodes")
+    require(isinstance(nodes, list), "Missing Files preparation cases")
+    pending, count = [(node, 0) for node in nodes], 0
+    while pending:
+        node, depth = pending.pop(); count += 1
+        require(isinstance(node, dict) and count <= 10000 and depth <= 100,
+                "Files preparation tree bounds exceeded")
+        require(node.get("nodeType") != "Runtime Warning", "Files preparation runtime warning")
+        children = node.get("children", [])
+        require(isinstance(children, list), "Invalid Files preparation children")
+        pending.extend((child, depth + 1) for child in children)
+    recovery.validate_result(summary, tree, PREPARE_CASE, owned)
+    require(summary.get("testFailures") == [], "Files preparation failures missing or nonempty")
+    require("runtimeWarnings" not in summary or summary["runtimeWarnings"] == [],
+            "Files preparation runtime warnings")
+    validate_runtime_result("batch", selection, summary)
+    require(summary["devicesAndConfigurations"][0]["device"].get("platform") == "iOS Simulator",
+            "Files preparation requires Simulator result")
+
+
 class Commands(processes.Smoke):
     def __init__(self, owner, name):
         self.owner = owner
@@ -284,7 +309,7 @@ class Qualification:
         self.started = time.monotonic(); self.work_deadline = self.started + WORK_SECONDS[mode]
         self.cleanup_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = self.interrupted = self.acquiring = self.finalizing_driver = False
-        self.owned = self.intent = self.baseline = None; self.driver_calls = 0
+        self.owned = self.intent = self.baseline = None; self.driver_calls = self.preparation_calls = 0
         self.out = self.root / "build" / ("ReleaseQualification-" + mode + "-" + self.job["GITHUB_RUN_ID"]
                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not self.out.parent.is_symlink() and (not self.out.parent.exists()
@@ -407,8 +432,9 @@ class Qualification:
         self.command("boot", ["xcrun", "simctl", "boot", self.owned], 60)
         self.command("boot-ready", ["xcrun", "simctl", "bootstatus", self.owned, "-b"], 180)
         if self.mode == "batch":
-            self.command("files-launch", ["xcrun", "simctl", "launch", self.owned, "com.apple.DocumentsApp"], 120)
-            # One launch only; readiness observation never replays an action.
+            self.prepare_files_ui()
+            # The separate real UI case initializes the provider. These reads
+            # neither replay its actions nor create a provider directory.
             listing = self.command("files-group", ["xcrun", "simctl", "get_app_container", self.owned,
                                                     "com.apple.DocumentsApp", "groups"], 60)
             groups = [line.split("\t")[1] for line in listing.splitlines()
@@ -419,6 +445,112 @@ class Qualification:
             while not provider.exists():
                 self.check(); require(time.monotonic() < end, "Files provider not ready"); time.sleep(0.1)
             require(provider.is_dir() and not provider.is_symlink(), "Invalid Files provider")
+
+    def preparation_manifest(self, path):
+        manifest = recovery.tree_manifest(path, self.check, max_bytes=256 * MIB)
+        require(len(manifest) <= 10000 and manifest.get("Info.plist", {}).get("kind") == "file"
+                and manifest.get("Data", {}).get("kind") == "directory",
+                "Incomplete or oversized Files preparation result")
+        return manifest
+
+    def inspect_files_preparation(self):
+        original = self.out / "files-prepare.xcresult"
+        manifest = self.preparation_manifest(original)
+        raw = recovery.encoded(manifest)
+        (self.out / "files-prepare-original-manifest.json").write_bytes(raw)
+        self.report["files_preparation_original"] = {
+            "path": "files-prepare.xcresult", "manifest": "files-prepare-original-manifest.json",
+            "sha256": hashlib.sha256(raw).hexdigest(), "entries": len(manifest),
+        }
+        self.save()
+        copy = self.out / "files-prepare-inspection.xcresult"; copy.mkdir()
+        for relative, item in manifest.items():
+            self.check(); target = copy / relative
+            if item["kind"] == "directory": target.mkdir()
+            else:
+                fd = os.open(original / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as source, target.open("xb") as destination:
+                    count = 0
+                    while chunk := source.read(MIB):
+                        self.check(); count += len(chunk)
+                        require(count <= item["bytes"], "Files preparation result grew during copy")
+                        destination.write(chunk)
+                target.chmod(item["mode"])
+        for relative, item in reversed(list(manifest.items())):
+            if item["kind"] == "directory": (copy / relative).chmod(item["mode"])
+        require(self.preparation_manifest(copy) == manifest and self.preparation_manifest(original) == manifest,
+                "Files preparation result changed while copying")
+        try:
+            parsed = {}
+            for kind in ("summary", "tests"):
+                self.command("files-prepare-" + kind,
+                    ["xcrun", "xcresulttool", "get", "test-results", kind, "--path", copy, "--compact"], 60)
+                name = Path(self.commands.report["commands"][-1]["logs"]["stdout"]).name
+                raw = bounded_read(self.commands.out, name, 16 * MIB, self.check)
+                (self.out / ("files-prepare-" + kind + ".json")).write_bytes(raw)
+                parsed[kind] = json.loads(raw)
+            validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
+                                       self.report.get("runtime_selection"))
+            self.report["files_preparation_result"] = {
+                "functional_status": "passed", "cases": [PREPARE_CASE],
+                "runtimeWarnings": parsed["summary"].get("runtimeWarnings", "not_reported"),
+                "runtimeWarnings_reported": "runtimeWarnings" in parsed["summary"],
+                "independent_warning_and_pixel_review": "pending",
+            }
+        finally:
+            require(self.preparation_manifest(original) == manifest,
+                    "Original Files preparation result mutated during reading")
+            self.report["files_preparation_original"]["unchanged_after_reader"] = True
+
+    def prepare_files_ui(self):
+        require(self.mode == "batch" and self.preparation_calls == 0, "Files preparation may run once in batch mode")
+        require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline
+                and self.intent is not None, "Files preparation requires an owned device")
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn,
+                "Files preparation writer ownership unresolved")
+        require(time.monotonic() + PREPARE_SECONDS + MODES["batch"][1] + 120 < self.work_deadline,
+                "Insufficient Files preparation and full driver budget")
+        self.preparation_calls += 1
+        # A separate owned build keeps the original driver and its DerivedData
+        # contract unchanged; the 2400s batch budget includes both builds.
+        # Keep compiler intermediates outside the evidence upload glob.
+        derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
+                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
+        require(not derived.exists() and not derived.is_symlink(), "Files preparation output already exists")
+        folder = "TripDocket-Recovery-" + str(uuid.uuid4())
+        self.report["files_preparation"] = {"calls": self.preparation_calls, "case": PREPARE_CASE,
+            "phase_seconds": PREPARE_SECONDS, "case_seconds": 120, "absent_folder_probe": folder,
+            "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
+        argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
+            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "120",
+            "-maximum-test-execution-time-allowance", "120", "-derivedDataPath", derived,
+            "-resultBundlePath", self.out / "files-prepare.xcresult",
+            "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+        previous = self.commands.ops.env
+        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
+            "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
+            "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        failure = None
+        try:
+            self.command("files-prepare-ui", argv, PREPARE_SECONDS)
+        except BaseException as error:
+            failure = error
+        finally:
+            self.commands.ops.env = previous
+        try:
+            require(not self.commands.active and not self.commands.unknown_spawn
+                    and not self.xcode.active and not self.xcode.unknown_spawn,
+                    "Files preparation writer ownership unresolved")
+            self.inspect_files_preparation()
+        except BaseException as error:
+            self.report["files_preparation_inspection_error"] = repr(error)
+            if failure is None: failure = error
+        if failure is not None: raise failure
+        self.report["files_preparation_verified"] = True
+        self.save()
 
     def verify_owned(self, devices):
         require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
@@ -676,6 +808,18 @@ class Qualification:
         require(self.report["cleanup_verified"] and not self.xcode.active and not self.xcode.unknown_spawn
                 and not self.commands.active and not self.commands.unknown_spawn,
                 "Original result capture requires complete owned cleanup")
+        if self.mode == "batch":
+            proof = self.report.get("files_preparation_original", {})
+            require(self.report.get("files_preparation_verified") is True
+                    and proof.get("path") == "files-prepare.xcresult"
+                    and proof.get("manifest") == "files-prepare-original-manifest.json"
+                    and proof.get("unchanged_after_reader") is True,
+                    "Missing verified Files preparation")
+            raw = bounded_read(self.out, proof["manifest"], 16 * MIB, self.check)
+            require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
+                    and self.preparation_manifest(self.out / proof["path"]) == json.loads(raw),
+                    "Original Files preparation result changed before final capture")
+            proof["unchanged_after_cleanup"] = True
         result = self.root / self.report["driver_directory"] / "Tests.xcresult"
         require(result.is_relative_to(self.root / "build") and result.resolve(strict=True) == result,
                 "Invalid original result path")
@@ -707,7 +851,8 @@ class Qualification:
             except BaseException as error: self.report["errors"].append("Cleanup: " + repr(error))
             capture_ready = (not self.report["errors"] and self.report.get("driver_capture_verified")
                              and self.report.get("products_verified") and self.report["cleanup_verified"]
-                             and (self.mode != "batch" or self.report.get("batch_snapshot", {}).get("verified")))
+                             and (self.mode != "batch" or (self.report.get("batch_snapshot", {}).get("verified")
+                                  and self.report.get("files_preparation_verified") is True)))
             if capture_ready:
                 try: self.capture_original_result()
                 except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))
