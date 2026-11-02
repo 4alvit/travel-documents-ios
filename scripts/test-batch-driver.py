@@ -305,5 +305,56 @@ class BatchDriverTests(unittest.TestCase):
             with patch.object(driver.subprocess,"Popen") as call,self.assertRaises(RuntimeError):run.run_test()
             call.assert_not_called()
 
+    def focused_fixture(self):
+        run, _, _ = self.fixture(); run.root = self.root.resolve()
+        run.args.native_root = run.args.native_seed = run.args.combined_batch = True
+        run.qualified_build = run.root / "build/qualified"; run.qualified_build.mkdir(parents=True, exist_ok=True)
+        run.qualified_build_settings = ("EXCLUDED_SOURCE_FILE_NAMES=First.swift Second.swift",)
+        run.checkpoint_session = run.token = OWNED; run.checkpoint_callback = Mock()
+        run.deadline = 1200; run.native_root_identity = Mock(); run.validate_result = Mock()
+        run.combined_protocol = SimpleNamespace(upper_uuid=Mock(), TESTS=("TripfolioUITests/BatchImportUITests/seed",
+            "TripfolioUITests/BatchImportUITests/main"), CASES=("seed()", "main()"),
+            monitor=Mock(return_value={"returncode": 0}))
+        return run
+
+    def test_focused_build_argv_is_recorded_and_passed_once_without_changing_limits(self):
+        run = self.focused_fixture()
+        with patch.object(driver.subprocess, "Popen") as spawn, patch("builtins.print"):
+            run.run_test()
+        argv = spawn.call_args.args[0]
+        setting = run.qualified_build_settings[0]
+        self.assertEqual(argv.count(setting), 1)
+        self.assertEqual(argv[-3:], ["CODE_SIGNING_ALLOWED=NO", setting, "test-without-building"])
+        self.assertEqual(run.summary["command"], argv)
+        self.assertEqual(run.record.call_args.kwargs["argv"], argv)
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:" + x for x in run.combined_protocol.TESTS])
+        self.assertEqual(argv[argv.index("-default-test-execution-time-allowance")+1], "300")
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1], "600")
+        self.assertEqual(run.combined_protocol.monitor.call_args.args[2], 1200)
+        run.native_root_identity.assert_called_once(); run.validate_result.assert_called_once()
+
+    def test_focused_build_requires_qualified_combined_native_root(self):
+        for fault in ("ordinary", "not_combined", "no_build", "no_native_root", "no_checkpoint"):
+            run = self.focused_fixture()
+            if fault == "ordinary": run.args = SimpleNamespace(device=OWNED)
+            elif fault == "not_combined": run.args.combined_batch = False
+            elif fault == "no_build": del run.qualified_build
+            elif fault == "no_native_root": run.args.native_root = False
+            else: run.checkpoint_callback = None
+            with self.subTest(fault=fault), patch.object(driver.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+                run.run_test()
+            spawn.assert_not_called(); run.native_root_identity.assert_not_called()
+
+    def test_focused_build_setting_is_immutable_single_literal_and_unique(self):
+        for settings in ([], ["EXCLUDED_SOURCE_FILE_NAMES=First.swift"], ("OTHER=First.swift",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=*.swift",), ("EXCLUDED_SOURCE_FILE_NAMES=First.swift First.swift",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=../First.swift",), ("EXCLUDED_SOURCE_FILE_NAMES=First.swift\n",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=First.swift", "OTHER=NO")):
+            run = self.focused_fixture(); run.qualified_build_settings = settings
+            with self.subTest(settings=settings), patch.object(driver.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+                run.run_test()
+            spawn.assert_not_called(); run.native_root_identity.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
