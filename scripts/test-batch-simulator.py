@@ -206,6 +206,7 @@ class Driver:
                    "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "300",
                    "-derivedDataPath", str(self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"], "-only-testing:" + TEST,
+                   "-only-testing:TripfolioTests/AppLaunchTests/testRunningHostUsesTheDeclaredStoreKitBootstrap",
                    "CODE_SIGNING_ALLOWED=NO", "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,

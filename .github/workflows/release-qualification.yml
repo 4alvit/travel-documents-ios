@@ -1,4 +1,5 @@
 name: Release qualification
+run-name: Diagnostic hosted bootstrap before batch; no release acceptance
 on:
   workflow_dispatch:
     inputs:
