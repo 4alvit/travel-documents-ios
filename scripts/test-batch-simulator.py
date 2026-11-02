@@ -260,8 +260,11 @@ class Driver:
                             ("synthetic-insurance.pdf", "SYNTHETIC INSURANCE")]:
             data = pdf(title)
             (copies / name).write_bytes(data)
-            with (owned / name).open("xb") as destination:
-                destination.write(data)
+            # Diagnostic qualification may create the same destination bytes
+            # through native Save to Files; the ordinary driver keeps its path.
+            if not getattr(self.args, "native_seed", False):
+                with (owned / name).open("xb") as destination:
+                    destination.write(data)
             fixtures.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                              "retained_copy": str(copies / name)})
         self.summary.update({"fixture_directory": str(owned), "group_identifier": GROUP, "fixtures": fixtures})
@@ -269,7 +272,8 @@ class Driver:
             "device": self.args.device, "folder": self.folder_name, "directory": str(owned),
             "group_identifier": GROUP, "fixtures": fixtures,
         }, indent=2) + "\n", encoding="utf-8")
-        self.record("seeded_owned_folder", path=str(owned), fixtures=fixtures)
+        self.record("prepared_empty_owned_folder" if getattr(self.args, "native_seed", False)
+                    else "seeded_owned_folder", path=str(owned), fixtures=fixtures)
         self.save()
 
     def run_test(self):

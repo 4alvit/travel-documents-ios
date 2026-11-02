@@ -23,6 +23,9 @@ WORK_SECONDS = {"batch": 2400, "biometrics": 2400}
 CLEANUP_SECONDS = 180
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 PREPARE_SECONDS = 600
+SEED_CASE = "BatchImportUITests/testNativeSaveSeedsBothSyntheticOriginals()"
+SEED_SECONDS = 300
+SEED_CASE_SECONDS = 180
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
@@ -265,7 +268,8 @@ def validate_batch_order(raw, recorded):
     return observed
 
 
-def validate_files_preparation(summary, tree, owned, selection):
+def validate_files_preparation(summary, tree, owned, selection, expected_case=PREPARE_CASE):
+    require(expected_case in (PREPARE_CASE, SEED_CASE), "Unexpected preparation case")
     require(isinstance(summary, dict) and isinstance(tree, dict), "Invalid Files preparation result")
     nodes = tree.get("testNodes")
     require(isinstance(nodes, list), "Missing Files preparation cases")
@@ -278,7 +282,7 @@ def validate_files_preparation(summary, tree, owned, selection):
         children = node.get("children", [])
         require(isinstance(children, list), "Invalid Files preparation children")
         pending.extend((child, depth + 1) for child in children)
-    recovery.validate_result(summary, tree, PREPARE_CASE, owned)
+    recovery.validate_result(summary, tree, expected_case, owned)
     require(summary.get("testFailures") == [], "Files preparation failures missing or nonempty")
     require("runtimeWarnings" not in summary or summary["runtimeWarnings"] == [],
             "Files preparation runtime warnings")
@@ -453,17 +457,20 @@ class Qualification:
                 "Incomplete or oversized Files preparation result")
         return manifest
 
-    def inspect_files_preparation(self):
-        original = self.out / "files-prepare.xcresult"
+    def inspect_files_preparation(self, native_seed=False):
+        prefix = "native-seed" if native_seed else "files-prepare"
+        key = "native_seed" if native_seed else "files_preparation"
+        expected_case = SEED_CASE if native_seed else PREPARE_CASE
+        original = self.out / (prefix + ".xcresult")
         manifest = self.preparation_manifest(original)
         raw = recovery.encoded(manifest)
-        (self.out / "files-prepare-original-manifest.json").write_bytes(raw)
-        self.report["files_preparation_original"] = {
-            "path": "files-prepare.xcresult", "manifest": "files-prepare-original-manifest.json",
+        (self.out / (prefix + "-original-manifest.json")).write_bytes(raw)
+        self.report[key + "_original"] = {
+            "path": prefix + ".xcresult", "manifest": prefix + "-original-manifest.json",
             "sha256": hashlib.sha256(raw).hexdigest(), "entries": len(manifest),
         }
         self.save()
-        copy = self.out / "files-prepare-inspection.xcresult"; copy.mkdir()
+        copy = self.out / (prefix + "-inspection.xcresult"); copy.mkdir()
         for relative, item in manifest.items():
             self.check(); target = copy / relative
             if item["kind"] == "directory": target.mkdir()
@@ -483,16 +490,16 @@ class Qualification:
         try:
             parsed = {}
             for kind in ("summary", "tests"):
-                self.command("files-prepare-" + kind,
+                self.command(prefix + "-" + kind,
                     ["xcrun", "xcresulttool", "get", "test-results", kind, "--path", copy, "--compact"], 60)
                 name = Path(self.commands.report["commands"][-1]["logs"]["stdout"]).name
                 raw = bounded_read(self.commands.out, name, 16 * MIB, self.check)
-                (self.out / ("files-prepare-" + kind + ".json")).write_bytes(raw)
+                (self.out / (prefix + "-" + kind + ".json")).write_bytes(raw)
                 parsed[kind] = json.loads(raw)
             validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
-                                       self.report.get("runtime_selection"))
-            self.report["files_preparation_result"] = {
-                "functional_status": "passed", "cases": [PREPARE_CASE],
+                                       self.report.get("runtime_selection"), expected_case)
+            self.report[key + "_result"] = {
+                "functional_status": "passed", "cases": [expected_case],
                 "runtimeWarnings": parsed["summary"].get("runtimeWarnings", "not_reported"),
                 "runtimeWarnings_reported": "runtimeWarnings" in parsed["summary"],
                 "independent_warning_and_pixel_review": "pending",
@@ -500,7 +507,7 @@ class Qualification:
         finally:
             require(self.preparation_manifest(original) == manifest,
                     "Original Files preparation result mutated during reading")
-            self.report["files_preparation_original"]["unchanged_after_reader"] = True
+            self.report[key + "_original"]["unchanged_after_reader"] = True
 
     def prepare_files_ui(self):
         require(self.mode == "batch" and self.preparation_calls == 0, "Files preparation may run once in batch mode")
@@ -558,6 +565,101 @@ class Qualification:
         require(self.owned in devices and all(devices[self.owned][key] == self.intent[key]
                 for key in ("runtime", "name", "type")), "Owned device identity changed")
 
+    def native_seed_files(self, driver, *, empty=False):
+        """Verify the exclusive destination; never create provider file bytes."""
+        owned = driver.fixture_directory
+        require(owned is not None and str(uuid.UUID(driver.token)) == driver.token
+                and owned.name == "TripDocket-Batch-QA-" + driver.token,
+                "Invalid native seed folder")
+        provider = owned.parent
+        self.container_path(str(provider.parent), "Shared", "AppGroup")
+        def identity(path):
+            value = path.lstat()
+            require(stat.S_ISDIR(value.st_mode), "Native seed parent is not a regular directory")
+            return value.st_dev, value.st_ino
+        require(provider.name == "File Provider Storage"
+                and identity(provider) == driver.provider_identity
+                and identity(owned) == driver.fixture_identity,
+                "Native seed directory identity changed")
+        names = []
+        with os.scandir(owned) as entries:
+            for entry in entries:
+                self.check(); names.append(entry.name)
+                require(len(names) <= 2, "Unexpected native seed destination entries")
+        fixtures = driver.summary["fixtures"]
+        require(len(fixtures) == 2 and {entry["name"] for entry in fixtures}
+                == {"synthetic-ticket.pdf", "synthetic-insurance.pdf"}, "Unexpected native seed fixtures")
+        require(set(names) == (set() if empty else {entry["name"] for entry in fixtures}),
+                "Native seed destination must contain the exact expected files")
+        for entry in fixtures:
+            source = bounded_read(driver.directory, "fixtures/" + entry["name"], 1024, self.check)
+            require(len(source) == entry["bytes"] and hashlib.sha256(source).hexdigest() == entry["sha256"],
+                    "Native seed retained source changed")
+            if not empty:
+                require(bounded_read(owned, entry["name"], 1024, self.check) == source,
+                        "Native Save to Files changed original bytes")
+        require(identity(provider) == driver.provider_identity and identity(owned) == driver.fixture_identity,
+                "Native seed directory changed during verification")
+
+    def prepare_native_seed(self, driver):
+        require(self.mode == "batch" and "native_seed" not in self.report
+                and self.report.get("files_preparation_verified") is True,
+                "Native seed requires one verified Files preparation")
+        require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
+                "Native seed requires exclusive device ownership")
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Native seed writer unresolved")
+        # Driver.__init__ already started its 1200s clock. The seed consumes it;
+        # no fresh deadline is granted to either phase or to the main UI case.
+        require(driver.remaining() > SEED_SECONDS + 600 + 8
+                and time.monotonic() + SEED_SECONDS + 600 + 120 < self.work_deadline,
+                "Insufficient native seed and main driver budget")
+        self.native_seed_files(driver, empty=True)
+        derived = self.root / self.report["files_preparation"]["derived_data"]
+        expected = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
+                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
+        require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
+                "Invalid shared preparation build")
+        self.report["native_seed"] = {"calls": 1, "case": SEED_CASE, "phase_seconds": SEED_SECONDS,
+            "case_seconds": SEED_CASE_SECONDS, "token": driver.token, "ingress": "native Save to Files",
+            "driver_deadline": driver.deadline - self.started, "driver_remaining_before": driver.remaining(),
+            "shared_derived_data": str(derived.relative_to(self.root)),
+            "source_retention": "Exclusive synthetic app temporary directory removed with owned Simulator"}
+        argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
+            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(SEED_CASE_SECONDS),
+            "-maximum-test-execution-time-allowance", str(SEED_CASE_SECONDS), "-derivedDataPath", derived,
+            "-resultBundlePath", self.out / "native-seed.xcresult",
+            "-only-testing:TripfolioUITests/" + SEED_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+        previous = self.commands.ops.env
+        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI": "1",
+            "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": driver.token,
+            "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
+            "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        failure = None
+        try:
+            self.command("native-seed-ui", argv, min(SEED_SECONDS, driver.remaining()))
+        except BaseException as error:
+            failure = error
+        finally:
+            self.commands.ops.env = previous
+            self.report["native_seed"]["driver_remaining_after"] = max(0, driver.deadline - time.monotonic())
+        try:
+            require(not self.commands.active and not self.commands.unknown_spawn
+                    and not self.xcode.active and not self.xcode.unknown_spawn, "Native seed writer unresolved")
+            self.inspect_files_preparation(native_seed=True)
+            self.native_seed_files(driver)
+        except BaseException as error:
+            self.report["native_seed_inspection_error"] = repr(error)
+            if failure is None: failure = error
+        if failure is not None: raise failure
+        self.report["native_seed_verified"] = True
+        self.report["native_seed"]["destination_fixtures"] = [
+            {key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]]
+        driver.record("native_saved_owned_folder", fixtures=driver.summary["fixtures"])
+        self.save()
+
     def container_path(self, value, *kind):
         path = Path(value)
         prefix = Path.home() / "Library/Developer/CoreSimulator/Devices" / self.owned / "data/Containers"
@@ -609,12 +711,14 @@ class Qualification:
         require(time.monotonic() + timeout + 120 < self.work_deadline, "Insufficient full driver/postcheck budget")
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
-        args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None)
+        args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None, native_seed=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
             driver.prepare()
-            require(time.monotonic() + timeout + 8 < self.work_deadline,
+            if self.mode == "batch": self.prepare_native_seed(driver)
+            remaining = driver.remaining() if self.mode == "batch" else timeout
+            require(time.monotonic() + remaining + 8 < self.work_deadline,
                     "Insufficient full test and owned-stop budget after driver preparation")
             driver.run_test() if self.mode == "batch" else driver.run_tests()
         except BaseException as error:
@@ -809,17 +913,18 @@ class Qualification:
                 and not self.commands.active and not self.commands.unknown_spawn,
                 "Original result capture requires complete owned cleanup")
         if self.mode == "batch":
-            proof = self.report.get("files_preparation_original", {})
-            require(self.report.get("files_preparation_verified") is True
-                    and proof.get("path") == "files-prepare.xcresult"
-                    and proof.get("manifest") == "files-prepare-original-manifest.json"
-                    and proof.get("unchanged_after_reader") is True,
-                    "Missing verified Files preparation")
-            raw = bounded_read(self.out, proof["manifest"], 16 * MIB, self.check)
-            require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
-                    and self.preparation_manifest(self.out / proof["path"]) == json.loads(raw),
-                    "Original Files preparation result changed before final capture")
-            proof["unchanged_after_cleanup"] = True
+            for key, prefix in (("files_preparation", "files-prepare"), ("native_seed", "native-seed")):
+                proof = self.report.get(key + "_original", {})
+                require(self.report.get(key + "_verified") is True
+                        and proof.get("path") == prefix + ".xcresult"
+                        and proof.get("manifest") == prefix + "-original-manifest.json"
+                        and proof.get("unchanged_after_reader") is True,
+                        "Missing verified Files preparation or native seed")
+                raw = bounded_read(self.out, proof["manifest"], 16 * MIB, self.check)
+                require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
+                        and self.preparation_manifest(self.out / proof["path"]) == json.loads(raw),
+                        "Original Files preparation or seed result changed before final capture")
+                proof["unchanged_after_cleanup"] = True
         result = self.root / self.report["driver_directory"] / "Tests.xcresult"
         require(result.is_relative_to(self.root / "build") and result.resolve(strict=True) == result,
                 "Invalid original result path")

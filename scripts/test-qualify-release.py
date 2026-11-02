@@ -361,6 +361,7 @@ class Guards(unittest.TestCase):
                 self.summary=copy.deepcopy(summary);self.actions=(self.directory/"actions.jsonl").open("w")
                 (self.directory/"xcodebuild.log").write_bytes(BATCH_LOG)
             def prepare(self):events.append("prepare")
+            def remaining(self):return 100
             def run_test(self):
                 events.append("test")
                 module.subprocess.Popen(["xcodebuild","-destination","platform=iOS Simulator,id="+OWNED],
@@ -376,6 +377,7 @@ class Guards(unittest.TestCase):
                                      send=lambda *_:self.fail("Completed process needs no signal"))
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
+        run.prepare_native_seed=lambda driver:events.append("native-seed")
         with patch.object(q,"load_module",return_value=module),patch.object(q.subprocess,"Popen",return_value=child):
             if skipped or runtime_warning:
                 with self.assertRaises(RuntimeError):run.run_driver()
@@ -388,7 +390,7 @@ class Guards(unittest.TestCase):
 
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-seed","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
 
     def test_skipped_driver_result_never_reaches_product_acceptance(self):
@@ -437,23 +439,27 @@ class Guards(unittest.TestCase):
             self.preparation_fixture(run)
             run.inspect_files_preparation()
             run.report["files_preparation_verified"] = True
+            self.preparation_fixture(run, native_seed=True)
+            run.inspect_files_preparation(native_seed=True)
+            run.report["native_seed_verified"] = True
         return run,result
 
-    def preparation_fixture(self, run):
+    def preparation_fixture(self, run, native_seed=False):
+        prefix = "native-seed" if native_seed else "files-prepare"
         run.owned=OWNED;run.baseline={};run.intent={"name":"owned","runtime":"iOS-26-2","type":"iPhone"}
         run.report["runtime_selection"]={"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version":"26.2","build":"23C54","architecture":"arm64","sdk_version":"18.5","sdk_matched":False}
-        original=run.out/"files-prepare.xcresult"
+        original=run.out/(prefix+".xcresult")
         (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
         (original/"Info.plist").write_bytes(b"preparation metadata")
         _,summary,tree,_=self.fixture()
         summary.update(totalTestCount=1,passedTests=1)
         summary["devicesAndConfigurations"][0]["device"]["platform"]="iOS Simulator"
-        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":q.PREPARE_CASE,"result":"Passed"}]
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":q.SEED_CASE if native_seed else q.PREPARE_CASE,"result":"Passed"}]
         def command(label, argv, seconds=30):
-            kind=label.removeprefix("files-prepare-")
+            kind=label.removeprefix(prefix+"-")
             self.assertIn(kind,("summary","tests"));self.assertEqual(seconds,60)
-            self.assertIn(str(run.out/"files-prepare-inspection.xcresult"),[str(a) for a in argv])
+            self.assertIn(str(run.out/(prefix+"-inspection.xcresult")),[str(a) for a in argv])
             path=run.commands.out/(kind+".json")
             path.write_text(json.dumps(summary if kind=="summary" else tree))
             run.commands.report["commands"].append({"logs":{"stdout":str(path)}})
@@ -880,6 +886,124 @@ class Guards(unittest.TestCase):
         link = self.root / "link"; link.symlink_to(paths[0])
         with patch.object(q.sys, "argv", ["qualify-release.py", "--validate-schemas", str(link), paths[1]]):
             with self.assertRaises(RuntimeError): q.main()
+
+    def seed_fixture(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        run.report["files_preparation_verified"]=True
+        derived=run.root/"build/QualificationPreparationDerivedData-123-1";derived.mkdir()
+        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root))}
+        group=self.root/"group";provider=group/"File Provider Storage";provider.mkdir(parents=True)
+        token="12345678-1234-4234-8234-123456789abc"
+        owned=provider/("TripDocket-Batch-QA-"+token);owned.mkdir()
+        directory=run.root/"build/driver";copies=directory/"fixtures";copies.mkdir(parents=True)
+        fixtures=[]
+        for name,title in [("synthetic-ticket.pdf","SYNTHETIC TICKET"),("synthetic-insurance.pdf","SYNTHETIC INSURANCE")]:
+            data=batch.pdf(title);(copies/name).write_bytes(data)
+            fixtures.append({"name":name,"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest()})
+        driver=SimpleNamespace(token=token,folder_name=owned.name,fixture_directory=owned,directory=directory,
+            provider_identity=(provider.stat().st_dev,provider.stat().st_ino),
+            fixture_identity=(owned.stat().st_dev,owned.stat().st_ino),summary={"fixtures":fixtures},
+            deadline=time.monotonic()+1200,record=lambda *a,**k:None)
+        driver.remaining=lambda:driver.deadline-time.monotonic()
+        def container(value,*kind):
+            self.assertEqual((value,kind),(str(group),("Shared","AppGroup")))
+            return group
+        run.container_path=container
+        return run,driver
+
+    def test_seed_destination_is_empty_then_exact_bytes_with_pinned_identity(self):
+        run,driver=self.seed_fixture();run.native_seed_files(driver,empty=True)
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+        for item in driver.summary["fixtures"]:
+            (driver.fixture_directory/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        run.native_seed_files(driver)
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver,empty=True)
+        driver.fixture_identity=(0,0)
+        with self.assertRaisesRegex(RuntimeError,"identity changed"):run.native_seed_files(driver)
+
+    def test_seed_destination_rejects_hash_link_extra_file_and_bad_token(self):
+        run,driver=self.seed_fixture();owned=driver.fixture_directory
+        for item in driver.summary["fixtures"]:
+            (owned/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        target=owned/"synthetic-ticket.pdf";original=target.read_bytes()
+        target.write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError,"original bytes"):run.native_seed_files(driver)
+        target.unlink();target.symlink_to(driver.directory/"fixtures/synthetic-ticket.pdf")
+        with self.assertRaises((RuntimeError,OSError)):run.native_seed_files(driver)
+        target.unlink();target.write_bytes(original);(owned/"extra").write_bytes(b"")
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+        (owned/"extra").unlink();driver.token=driver.token.upper()
+        with self.assertRaises(RuntimeError):run.native_seed_files(driver)
+
+    def test_seed_one_owned_invocation_consumes_existing_clock_and_restores_environment(self):
+        run,driver=self.seed_fixture();deadline=driver.deadline;previous=run.commands.ops.env;calls=[]
+        def command(label,argv,seconds):
+            calls.append((label,[str(x) for x in argv],seconds,dict(run.commands.ops.env)))
+            for item in driver.summary["fixtures"]:
+                (driver.fixture_directory/item["name"]).write_bytes((driver.directory/"fixtures"/item["name"]).read_bytes())
+        run.command=command;run.inspect_files_preparation=lambda native_seed=False:self.assertTrue(native_seed)
+        run.prepare_native_seed(driver)
+        self.assertEqual(driver.deadline,deadline);self.assertIs(run.commands.ops.env,previous)
+        self.assertTrue(run.report["native_seed_verified"]);self.assertEqual(len(calls),1)
+        label,argv,seconds,env=calls[0]
+        self.assertEqual((label,seconds),("native-seed-ui",300))
+        self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:TripfolioUITests/"+q.SEED_CASE.removesuffix("()")])
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1],"180")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN"],driver.token)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER"],driver.folder_name)
+        self.assertNotIn("TEST_RUNNER_TRIPDOCKET_RECOVERY_UI",env)
+        with self.assertRaises(RuntimeError):run.prepare_native_seed(driver)
+        self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
+
+    def test_seed_native_failure_is_primary_even_with_invalid_inspection(self):
+        run,driver=self.seed_fixture();previous=run.commands.ops.env
+        def fail(*a,**k):raise RuntimeError("native seed failed")
+        def bad(*a,**k):raise RuntimeError("inspection failed")
+        run.command=fail;run.inspect_files_preparation=bad
+        with self.assertRaisesRegex(RuntimeError,"native seed failed"):run.prepare_native_seed(driver)
+        self.assertIs(run.commands.ops.env,previous)
+        self.assertIn("inspection failed",run.report["native_seed_inspection_error"])
+        self.assertNotIn("native_seed_verified",run.report)
+
+    def test_seed_rejects_wrong_owner_exhausted_shared_deadline_and_unresolved_writer(self):
+        for fault in ("owner","driver-deadline","outer-deadline","writer","mode","prep"):
+            with tempfile.TemporaryDirectory() as temporary:
+                saved=self.root;self.root=Path(temporary).resolve()
+                try:run,driver=self.seed_fixture()
+                finally:self.root=saved
+                if fault=="owner":run.baseline[OWNED]={}
+                elif fault=="driver-deadline":driver.deadline=time.monotonic()+900
+                elif fault=="outer-deadline":run.work_deadline=time.monotonic()+900
+                elif fault=="writer":run.commands.unknown_spawn=True
+                elif fault=="mode":run.mode="biometrics"
+                else:run.report["files_preparation_verified"]=False
+                run.command=lambda *a,**k:self.fail("Native command must not start")
+                with self.subTest(fault=fault),self.assertRaises(RuntimeError):run.prepare_native_seed(driver)
+
+    def test_seed_result_requires_its_own_exact_case_and_preserves_original(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run,native_seed=True)
+        before=run.preparation_manifest(original);run.inspect_files_preparation(native_seed=True)
+        self.assertEqual(run.preparation_manifest(original),before)
+        self.assertEqual(run.report["native_seed_result"]["cases"],[q.SEED_CASE])
+        for fault in ("case","skip","warnings","missing-failures","runtime"):
+            result=copy.deepcopy(summary);nodes=copy.deepcopy(tree)
+            if fault=="case":nodes["testNodes"][0]["nodeIdentifier"]=q.PREPARE_CASE
+            elif fault=="skip":result.update(skippedTests=1,passedTests=0)
+            elif fault=="warnings":result["runtimeWarnings"]=[{"message":"warning"}]
+            elif fault=="missing-failures":result.pop("testFailures")
+            else:result["devicesAndConfigurations"][0]["device"]["osVersion"]="18.5"
+            with self.subTest(fault=fault),self.assertRaises(RuntimeError):
+                q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.SEED_CASE)
+
+    def test_final_capture_requires_native_seed_and_rechecks_seed_bytes_after_cleanup(self):
+        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run.report.pop("native_seed_verified")
+        with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
+        run.report["native_seed_verified"]=True
+        (run.out/"native-seed.xcresult/Data/result").write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
 
     def test_workflow_is_explicit_read_only_and_uses_original_drivers(self):
         workflow=(Path(__file__).parent.parent/".github/workflows/release-qualification.yml").read_text()

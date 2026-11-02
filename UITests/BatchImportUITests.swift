@@ -201,6 +201,50 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
+    func testNativeSaveSeedsBothSyntheticOriginals() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
+                          "Opt in only for the owned native-Save fixture diagnostic")
+        let token = environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] ?? ""
+        guard UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
+            throw BatchTestFailure(message: "Native seed requires its exact canonical owned folder token")
+        }
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
+                                                   "--ui-testing-native-batch-token", token]
+        app.launch()
+        for filename in filenames {
+            let seed = app.buttons["nativeSeed." + filename]
+            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isHittable }
+            seed.tap()
+            let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
+                format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
+                NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
+                NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
+            ))
+            try await waitForStableShareAction(saveToFiles, app: app)
+            saveToFiles.element.tap()
+            let picker = try await openLocalFilesFolder(folder, app: app)
+            let navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            let save = navigation.buttons["Save"]
+            try await wait("Native seed destination Save is unavailable", app: app) {
+                save.exists && save.isEnabled && save.isHittable
+            }
+            capture(app, "Native seed exact destination before Save — " + filename)
+            save.tap()
+            try await wait("Native seed Save did not finish", app: app) {
+                !navigation.exists && seed.exists && seed.isHittable
+            }
+            capture(app, "Native seed returned after Save — " + filename)
+        }
+        // Host compares both exact destination bytes; completion alone is not proof.
+    }
+
     private func presentRecoverySave(_ app: XCUIApplication) async throws {
         let export = app.buttons["Export full backup"]
         try await reveal(export, app: app, navigation: "Settings")
