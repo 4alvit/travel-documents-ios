@@ -25,8 +25,9 @@ GROUP = "group.com.apple.FileProvider.LocalStorage"
 WORK, STOP, WRITE = 900, 30, 10
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
-# retains its measured 120s cap. Boot readiness gets at most 180s; ordinary
-# commands get 30/60s. Every command includes the shared primitive's 8s stop
+# retains its measured 120s cap; ordinary commands get 30/60s. The one native
+# preparation invocation owns startup of the exact selected device. Every
+# command includes the shared primitive's 8s stop
 # reserve. The existing Recovery preparation case has taken 348-486s including
 # its build; retain that phase's 600s cap and 120s XCTest allowance. Their sum
 # cannot extend this independent 900s setup budget or the surrounding CI job.
@@ -285,14 +286,14 @@ class Bootstrap(process.Smoke):
         root_pin = directory_identity(root)
         self.report["initial_state"] = row["state"]; self.report["data_root_identity"] = root_pin
         udid = self.selected["udid"]
-        if row["state"] == "Shutdown":
-            self.command("boot", ["xcrun", "simctl", "boot", udid], 60)
-        self.command("bootstatus", ["xcrun", "simctl", "bootstatus", udid, "-b"], 180)
+        # xcodebuild owns startup inside the existing preparation phase budget.
+        # A passing real Files case, followed by this identity check, is the
+        # readiness requirement; there is no separate boot-status prerequisite.
+        self.prepare_ui()
         live = self.json_command("devices-booted", ["list", "devices", "--json"], 120)
         row, same_root = selected_device(self.selected, runtimes, types, live)
         require(row["state"] == "Booted" and same_root == root and directory_identity(root) == root_pin,
                 "Selected Simulator did not become ready with unchanged data root")
-        self.prepare_ui()
         listing = self.command("files-group", ["xcrun", "simctl", "get_app_container", udid, FILES, "groups"], 60)
         self.wait_provider(group_path(listing, root))
         final = self.json_command("devices-final", ["list", "devices", "--json"], 120)

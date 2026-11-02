@@ -93,6 +93,9 @@ before running the unchanged UI cases. Preparation binds to the recorded
 selection and rechecks the complete inventory. It runs the existing recovery
 preparation case once: the synthetic app opens Export, Save to Files and the
 local provider, checks that its unique sentinel folder is absent, then stops.
+The same `xcodebuild` invocation starts the selected device within its existing
+phase budget. A separate `simctl bootstatus` call is not a prerequisite. The
+exact native case must pass before the post-preparation Booted and identity checks.
 The preparation creates no backup or Files folder and does not erase or delete
 the selected device. Its separate result bundle records this case; the following
 guidance cohort retains its own result bundle and reuses the same build products.

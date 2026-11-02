@@ -36,16 +36,15 @@ class Fake(m.Bootstrap):
     def command(self, label, argv, cap):
         self.checkpoint(); self.calls.append((label, argv, cap))
         if label == self.fail: raise RuntimeError("Injected command failure")
-        if label == "boot":
-            self.devices["devices"][s.RUNTIME][0]["state"] = "Booted"
         if label == "prepare-ui":
+            self.devices["devices"][s.RUNTIME][0]["state"] = "Booted"
             self.prep_env = dict(self.ops.env)
             result = self.out / "prepare.xcresult"; result.mkdir(); (result / "Data").mkdir()
             (result / "Info.plist").write_bytes(b"synthetic-result")
         result = {"xcode": "Xcode 26.2\nBuild version 17C52\n", "sdk": "26.2\n", "architecture": "arm64\n",
                   "runtimes": self.runtimes, "types": self.types, "devices-before": self.devices,
                   "devices-booted": self.devices, "devices-final": self.devices,
-                  "boot": "", "bootstatus": "", "prepare-ui": "",
+                  "prepare-ui": "",
                   "prepare-summary": self.summary, "prepare-tests": self.tree,
                   "files-group": m.GROUP + "\t" + str(self.group) + "\n"}[label]
         result = self.transform(label, copy.deepcopy(result))
@@ -84,15 +83,15 @@ class BootstrapTests(unittest.TestCase):
     def run_bootstrap(self, runner):
         with patch.object(Path, "home", return_value=runner.home): return runner.execute()
 
-    def test_actual_prepare_boots_only_selected_once_and_preserves_provider(self):
+    def test_actual_prepare_owns_selected_startup_once_and_preserves_provider(self):
         runner = self.make(); (runner.group / "File Provider Storage/sentinel").write_text("unchanged")
         self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
         labels = [call[0] for call in runner.calls]
         self.assertEqual(labels, ["xcode", "sdk", "architecture", "runtimes", "types", "devices-before",
-                                 "boot", "bootstatus", "devices-booted", "prepare-ui", "prepare-summary", "prepare-tests", "files-group", "devices-final"])
+                                 "prepare-ui", "prepare-summary", "prepare-tests", "devices-booted", "files-group", "devices-final"])
         for label, argv, _ in runner.calls:
-            if label in {"boot", "bootstatus", "files-group"}: self.assertEqual(argv[3], s.FIRST)
-            self.assertFalse(set(argv) & {"delete", "erase", "shutdown", "terminate", "spawn"})
+            if label == "files-group": self.assertEqual(argv[3], s.FIRST)
+            self.assertFalse(set(argv) & {"boot", "bootstatus", "delete", "erase", "shutdown", "terminate", "spawn"})
         self.assertEqual((runner.group / "File Provider Storage/sentinel").read_text(), "unchanged")
         self.assertTrue(runner.report["final_inventory_verified"])
         self.assertEqual(runner.report["status"], "provider_ready")
@@ -101,6 +100,7 @@ class BootstrapTests(unittest.TestCase):
     def test_already_booted_is_not_booted_again(self):
         runner = self.make("Booted"); self.assertEqual(self.run_bootstrap(runner), 0)
         self.assertNotIn("boot", [call[0] for call in runner.calls])
+        self.assertNotIn("bootstatus", [call[0] for call in runner.calls])
         self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
 
     def test_live_identity_state_and_toolchain_changes_fail_before_launch(self):
@@ -110,8 +110,7 @@ class BootstrapTests(unittest.TestCase):
                     ("devices-before", lambda d: d["devices"].pop(s.RUNTIME)),
                     ("devices-before", lambda d: d["devices"][s.RUNTIME][0].update(dataPath="/tmp/another-device")),
                     ("runtimes", lambda d: d["runtimes"][0].update(buildversion="changed")),
-                    ("runtimes", lambda d: d["runtimes"][0].update(supportedArchitectures=["x86_64"])),
-                    ("devices-booted", lambda d: d["devices"][s.RUNTIME][0].update(state="Shutdown"))]
+                    ("runtimes", lambda d: d["runtimes"][0].update(supportedArchitectures=["x86_64"]))]
         for label, mutation in variants:
             with self.subTest(label=label, mutation=mutation):
                 runner = self.make()
@@ -125,6 +124,26 @@ class BootstrapTests(unittest.TestCase):
             runner = self.make(); runner.transform = lambda current, value: "wrong" if current == label else value
             self.assertEqual(self.run_bootstrap(runner), 1)
 
+    def test_post_preparation_identity_state_and_data_root_still_gate_provider(self):
+        for fault in ("state", "identity", "root"):
+            with self.subTest(fault=fault):
+                runner = self.make()
+                def transform(label, value):
+                    if label == "devices-booted":
+                        if fault == "state": value["devices"][s.RUNTIME][0]["state"] = "Shutdown"
+                        elif fault == "identity": value["devices"][s.RUNTIME][0]["name"] = "changed"
+                        else:
+                            root = Path(value["devices"][s.RUNTIME][0]["dataPath"])
+                            root.rename(root.with_name("previous-data")); root.mkdir()
+                    return value
+                runner.transform = transform
+                self.assertEqual(self.run_bootstrap(runner), 1)
+                labels = [call[0] for call in runner.calls]
+                self.assertEqual(labels.count("prepare-ui"), 1)
+                self.assertIn("prepare-tests", labels)
+                self.assertNotIn("files-group", labels)
+                self.assertFalse(runner.report.get("final_inventory_verified", False))
+
     def test_final_other_device_or_target_change_rejects_readiness(self):
         for runtime, field, value in [(s.NEWER, "state", "Booted"), (s.RUNTIME, "state", "Shutdown"),
                                       (s.RUNTIME, "name", "renamed")]:
@@ -137,7 +156,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(runner.report["status"], "failed")
 
     def test_failed_command_is_not_retried_and_receipt_survives(self):
-        for label in ["bootstatus", "prepare-ui", "files-group", "devices-final"]:
+        for label in ["prepare-ui", "devices-booted", "files-group", "devices-final"]:
             runner = self.make(); runner.fail = label
             self.assertEqual(self.run_bootstrap(runner), 1)
             self.assertEqual(sum(call[0] == label for call in runner.calls), 1)
@@ -260,7 +279,7 @@ class BootstrapTests(unittest.TestCase):
             return result
         runner.transform = transform
         self.assertEqual(self.run_bootstrap(runner), 1)
-        self.assertNotIn("boot", [call[0] for call in runner.calls])
+        self.assertNotIn("prepare-ui", [call[0] for call in runner.calls])
 
 
 class ShellBoundary(s.ShellTests):
