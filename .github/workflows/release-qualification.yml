@@ -35,6 +35,7 @@ jobs:
           python3 -B scripts/test-batch-scroll-container.py
           python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-native-batch-seed.py
+          python3 -B scripts/test-native-folder-geometry.py
           python3 -B scripts/test-simulator-driver-inventory.py
           python3 -B scripts/test-biometric-handshake.py
       - name: Capture selected suite for review

@@ -18,10 +18,21 @@ final class TripfolioUITests: XCTestCase {
         attach(app, name: "Free limit explains Pro")
     }
 
-    func testOriginalReadinessAndExplicitPacketWarning() {
+    func testOriginalReadinessAndExplicitPacketWarning() async throws {
         let app = launch(demo: true)
-        let trip = app.staticTexts["Coast weekend"]
-        XCTAssertTrue(trip.waitForExistence(timeout: 15))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        var trip: XCUIElement?
+        while ContinuousClock.now < deadline {
+            if let candidate = tripButtonIfReady(in: app) {
+                if ContinuousClock.now < deadline { trip = candidate }
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let trip else {
+            XCTFail("Expected one enabled, hittable Coast weekend trip button")
+            return
+        }
         trip.tap()
         let check = app.buttons["Check original"]
         XCTAssertTrue(check.waitForExistence(timeout: 10))
@@ -57,6 +68,14 @@ final class TripfolioUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Settings"].firstMatch.exists)
         XCTAssertFalse(app.buttons["Trips"].firstMatch.exists)
         attach(app, name: "Locked interface")
+    }
+
+    private func tripButtonIfReady(in app: XCUIApplication) -> XCUIElement? {
+        let matches = app.buttons.containing(.staticText, identifier: "Coast weekend")
+        guard matches.count == 1 else { return nil }
+        let trip = matches.element
+        guard trip.exists && trip.isEnabled && trip.isHittable else { return nil }
+        return trip
     }
 
     private func launch(demo: Bool = false) -> XCUIApplication {
