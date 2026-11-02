@@ -47,11 +47,12 @@ class Guards(unittest.TestCase):
                    "source_originals_unchanged": True, "fixture_cleanup": "removed only the uniquely created fixture folder",
                    "selected_method": None, "requests": {"match": 4, "nomatch": 1}}
         if mode == "batch": summary["execution_order"] = batch.execution_order(BATCH_LOG)
+        version, build = ("18.5", "22F77") if mode == "batch" else ("26.2", "23C54")
         result = {"result": "Passed", "totalTestCount": len(cases), "passedTests": len(cases),
                   "failedTests": 0, "skippedTests": 0, "expectedFailures": 0,
                   "runtimeWarnings": [], "testFailures": [],
-                  "devicesAndConfigurations": [{"device": {"deviceId": OWNED, "osVersion": "26.2",
-                                                            "osBuildNumber": "23C54", "architecture": "arm64"}}]}
+                  "devicesAndConfigurations": [{"device": {"deviceId": OWNED, "osVersion": version,
+                                                            "osBuildNumber": build, "architecture": "arm64"}}]}
         tree = {"testNodes": [{"nodeType": "Test Case", "nodeIdentifier": name, "result": "Passed"} for name in cases],
                 "devices": [{"deviceId": OWNED, "platform": "iOS Simulator"}]}
         return summary, result, tree, cases
@@ -93,13 +94,14 @@ class Guards(unittest.TestCase):
     def test_runtime_evidence_distinguishes_sdk_and_checks_native_result(self):
         for mode in q.MODES:
             profile = q.toolchain_profile(mode)
-            selection = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2",
-                         "build": "23C54", "architecture": "arm64", "sdk_version": profile["sdk_version"],
-                         "sdk_matched": mode == "biometrics"}
+            version, build = ("18.5", "22F77") if mode == "batch" else ("26.2", "23C54")
+            selection = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-" + version.replace(".", "-"), "version": version,
+                         "build": build, "architecture": "arm64", "sdk_version": profile["sdk_version"],
+                         "sdk_matched": True}
             result = self.fixture(mode)[1]
             q.validate_runtime_result(mode, selection, result)
-            for key, value in [("version", "18.5"), ("sdk_version", "unknown"),
-                               ("sdk_matched", 1), ("build", "wrong"), ("architecture", "x86_64")]:
+            for key, value in [("version", "26.2" if mode == "batch" else "18.5"), ("sdk_version", "unknown"),
+                               ("sdk_matched", 1), ("sdk_matched", False), ("build", "wrong"), ("architecture", "x86_64")]:
                 with self.subTest(mode=mode, key=key), self.assertRaises(RuntimeError):
                     q.validate_runtime_result(mode, {**selection, key: value}, result)
 
@@ -345,8 +347,8 @@ class Guards(unittest.TestCase):
 
     def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False):
         run=self.run_object();run.owned=OWNED
-        run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
-            "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "18.5", "sdk_matched": False}
+        run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-18-5",
+            "version": "18.5", "build": "22F77", "architecture": "arm64", "sdk_version": "18.5", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
@@ -440,9 +442,9 @@ class Guards(unittest.TestCase):
         return run,result
 
     def preparation_fixture(self, run):
-        run.owned=OWNED;run.baseline={};run.intent={"name":"owned","runtime":"iOS-26-2","type":"iPhone"}
-        run.report["runtime_selection"]={"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
-            "version":"26.2","build":"23C54","architecture":"arm64","sdk_version":"18.5","sdk_matched":False}
+        run.owned=OWNED;run.baseline={};run.intent={"name":"owned","runtime":"iOS-18-5","type":"iPhone"}
+        run.report["runtime_selection"]={"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-5",
+            "version":"18.5","build":"22F77","architecture":"arm64","sdk_version":"18.5","sdk_matched":True}
         original=run.out/"files-prepare.xcresult"
         (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
         (original/"Info.plist").write_bytes(b"preparation metadata")
@@ -476,7 +478,7 @@ class Guards(unittest.TestCase):
                 lambda s,t:t["testNodes"].append(t["testNodes"][0]),
                 lambda s,t:t["devices"][0].update(deviceId=EXISTING),
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osBuildNumber="wrong"),
-                lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osVersion="18.5"),
+                lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osVersion="26.2"),
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(architecture="x86_64")]:
             s,t=copy.deepcopy(summary),copy.deepcopy(tree);mutate(s,t)
             with self.assertRaises(RuntimeError):q.validate_files_preparation(s,t,OWNED,run.report["runtime_selection"])
@@ -811,7 +813,7 @@ class Guards(unittest.TestCase):
     def test_mode_profiles_keep_default_26_2_schema_contract(self):
         batch, bio = q.toolchain_profile("batch"), q.toolchain_profile("biometrics")
         self.assertEqual((batch["xcode_version"], batch["sdk_version"]), ("Xcode 16.4\nBuild version 16F6", "18.5"))
-        self.assertEqual(batch["runtime_version"], "26.2")
+        self.assertEqual(batch["runtime_version"], "18.5")
         self.assertIsNone(batch["schema_documents"])
         self.assertEqual((bio["xcode_version"], bio["developer_dir"]), (q.XCODE_VERSION, q.DEVELOPER_DIR))
         self.assertEqual(bio["runtime_version"], bio["sdk_version"])
@@ -859,9 +861,10 @@ class Guards(unittest.TestCase):
             run.inventory = lambda label: (_ for _ in ()).throw(RuntimeError("Before any device mutation"))
             with patch.dict(q.os.environ, {"DEVELOPER_DIR": profile["developer_dir"]}):
                 with self.assertRaisesRegex(RuntimeError, "Before any device mutation"): run.prepare()
+            version, build = ("18.5", "22F77") if mode == "batch" else ("26.2", "23C54")
             self.assertEqual(run.report["runtime_selection"], {
-                "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2", "build": "23C54",
-                "architecture": "arm64", "sdk_version": profile["sdk_version"], "sdk_matched": mode == "biometrics"})
+                "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-" + version.replace(".", "-"), "version": version, "build": build,
+                "architecture": "arm64", "sdk_version": profile["sdk_version"], "sdk_matched": True})
             self.assertIsNone(run.owned)
 
     def test_schema_cli_uses_only_files_and_rejects_mixed_execution_mode(self):
