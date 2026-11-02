@@ -1,22 +1,13 @@
 name: Release qualification
+run-name: Bounded post-boot inventory diagnostic, no test acceptance
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Capture one opt-in suite for independent release review
-        type: choice
-        required: true
-        options: [batch, biometrics]
 permissions:
   contents: read
-concurrency:
-  group: release-qualification-${{ github.ref }}-${{ inputs.mode }}
-  cancel-in-progress: false
 jobs:
   qualify:
     runs-on: macos-15
-    timeout-minutes: 55
-    # A successful capture still requires independent xcresult and visual review.
+    timeout-minutes: 22
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
@@ -24,37 +15,47 @@ jobs:
         with:
           persist-credentials: false
       - name: Prepare XcodeGen
-        timeout-minutes: 3
-        run: brew install xcodegen
-      - name: Verify qualification guards
         timeout-minutes: 2
+        run: brew install xcodegen
+      - name: Observe one post-boot inventory with bounded cleanup
+        timeout-minutes: 20
         run: |
-          python3 -B scripts/test-qualify-release.py
-          python3 -B scripts/test-simulator-driver-inventory.py
-      - name: Capture selected suite for review
-        timeout-minutes: 44
-        env:
-          QUALIFICATION_MODE: ${{ inputs.mode }}
-        run: python3 -B scripts/qualify-release.py --mode "$QUALIFICATION_MODE"
-      - name: Qualification evidence
+          python3 -B - <<'PYTHON'
+          import importlib.util, json, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('q', 'scripts/qualify-release.py')
+          q = importlib.util.module_from_spec(spec); spec.loader.exec_module(q)
+          run = q.Qualification(Path.cwd(), 'biometrics', os.environ)
+          run.work_deadline = run.started + 900
+          run.cleanup_deadline = run.work_deadline + 180
+          run.commands.limit = run.xcode.limit = run.work_deadline
+          run.report['limits'] = {'work_seconds': 900, 'cleanup_seconds': 180}
+          run.report['diagnostic'] = 'One post-boot inventory, 120s work allowance; no build/tests or acceptance'
+          completed = False
+          try:
+              run.prepare()
+              output = run.command('post-boot-inventory-control', ['xcrun', 'simctl', 'list', 'devices', '--json'], 120)
+              current = q.device_map(json.loads(output))
+              run.verify_owned(current)
+              q.require(current[run.owned]['state'] == 'Booted', 'Owned device is not booted')
+              run.report['observed_inventory'] = current
+              q.require(run.source('source-after') == run.before, 'Source changed')
+              completed = True
+          except BaseException as error:
+              run.report['errors'].append(repr(error))
+          finally:
+              try: run.cleanup()
+              except BaseException as error: run.report['errors'].append('Cleanup: ' + repr(error))
+              run.report['status'] = 'diagnostic_complete' if completed and not run.report['errors'] and run.report['cleanup_verified'] else 'diagnostic_failed'
+              run.report['release_accepted'] = False
+              run.save()
+          sys.exit(0 if run.report['status'] == 'diagnostic_complete' else 1)
+          PYTHON
+      - name: Diagnostic evidence only
         if: always()
-        timeout-minutes: 4
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: TripDocket-qualification-${{ inputs.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/ReleaseQualification-*/
-            build/BatchSimulator-*/summary.json
-            build/BatchSimulator-*/actions.jsonl
-            build/BatchSimulator-*/fixtures/
-            build/BatchSimulator-*/fixture-manifest.json
-            build/BatchSimulator-*/xcresult-*.json
-            build/BatchSimulator-*/xcodebuild.log
-            build/BatchSimulator-*/Tests.xcresult/
-            build/PrivacySimulator-*/summary.json
-            build/PrivacySimulator-*/actions.jsonl
-            build/PrivacySimulator-*/xcresult-*.json
-            build/PrivacySimulator-*/xcodebuild.log
-            build/PrivacySimulator-*/Tests.xcresult/
+          name: TripDocket-postboot-probe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ReleaseQualification-*/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
