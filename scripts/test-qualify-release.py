@@ -571,7 +571,7 @@ class Guards(unittest.TestCase):
         run.prepare_files_ui()
         self.assertIs(run.commands.ops.env,original_env);self.assertTrue(run.report["files_preparation_verified"])
         self.assertEqual(len(calls),1);label,argv,seconds,env=calls[0]
-        self.assertEqual((label,seconds),("files-prepare-ui",600));self.assertEqual(argv[-1],"test")
+        self.assertEqual((label,seconds),("files-prepare-ui",780));self.assertEqual(argv[-1],"test")
         self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
         self.assertEqual(argv[argv.index("-derivedDataPath")+1],
                          str(run.root/"build/QualificationPreparationDerivedData-123-1"))
@@ -585,6 +585,49 @@ class Guards(unittest.TestCase):
         self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
         with self.assertRaises(RuntimeError):run.prepare_files_ui()
         self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
+
+    def test_files_preparation_780_cap_preserves_original_deadlines_and_case(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        run.started=100.0;run.work_deadline=2500.0;run.cleanup_deadline=2680.0
+        run.commands.t0=100.0;run.commands.limit=run.work_deadline
+        run.inspect_files_preparation=lambda:None
+        with patch.object(q.time,"monotonic",return_value=100.0), \
+             patch.object(run.commands.ops,"now",return_value=100.0), \
+             patch.object(run.commands.ops,"spawn",side_effect=RuntimeError("stopped before process creation")) as spawn:
+            with self.assertRaisesRegex(RuntimeError,"files-prepare-ui failed"):
+                run.prepare_files_ui()
+        spawn.assert_called_once()
+        record=run.commands.report["commands"][0]
+        self.assertEqual(record["requested_cap_seconds"],788)
+        self.assertEqual(record["stop_reserve_seconds"],8)
+        self.assertEqual(record["work_deadline"],780)
+        self.assertEqual(record["command_deadline"],788)
+        self.assertEqual((run.work_deadline,run.cleanup_deadline),(2500.0,2680.0))
+        self.assertEqual(q.MODES["batch"][1],1200)
+        self.assertEqual(q.CLEANUP_SECONDS,180)
+        self.assertEqual(q.WORK_SECONDS["batch"],2400)
+        self.assertEqual(run.report["files_preparation"]["case_seconds"],180)
+        for flag in ("-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"):
+            self.assertEqual(record["argv"][record["argv"].index(flag)+1],"180")
+        self.assertNotIn("files_preparation_verified",run.report)
+
+    def test_files_preparation_admission_reserves_780_plus_full_driver_and_postchecks(self):
+        for spare in (-0.01,0.0,0.01):
+            with self.subTest(spare=spare), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                run=q.Qualification(directory,"batch",ENV)
+                run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+                run.work_deadline=100.0+780+1200+120+spare
+                run.command=lambda *a,**k:None
+                run.inspect_files_preparation=lambda:None
+                with patch.object(q.time,"monotonic",return_value=100.0):
+                    if spare<=0:
+                        with self.assertRaisesRegex(RuntimeError,"Insufficient Files preparation"):
+                            run.prepare_files_ui()
+                        self.assertEqual(run.preparation_calls,0)
+                    else:
+                        run.prepare_files_ui()
+                        self.assertEqual(run.preparation_calls,1)
+                self.assertEqual(run.work_deadline,2200.0+spare)
 
     def test_files_preparation_failure_remains_primary_and_restores_environment(self):
         run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}

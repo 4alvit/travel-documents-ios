@@ -32,7 +32,7 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # includes build and runner startup, measured at about 518s before the case.
 # Its 780s cap fits the unchanged 900s work budget and 180s case allowance.
 # Postprocessing shares the remaining work budget; its completion is not
-# guaranteed. Recovery and release-qualification preparation retain 600s.
+# guaranteed. Recovery retains 600s; batch qualification separately allows 780s.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 

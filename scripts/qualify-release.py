@@ -22,7 +22,9 @@ MODES = {"batch": ("test-batch-simulator.py", 1200),
 WORK_SECONDS = {"batch": 2400, "biometrics": 2400}
 CLEANUP_SECONDS = 180
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
-PREPARE_SECONDS = 600
+# Includes build and runner startup; a retained run spent about 532s before
+# its unchanged 180s case started. The original outer/driver budgets still apply.
+PREPARE_SECONDS = 780
 SEED_CASE = "BatchImportUITests/testNativeSaveSeedsBothSyntheticOriginals()"
 SEED_SECONDS = 300
 SEED_CASE_SECONDS = 180
@@ -590,8 +592,8 @@ class Qualification:
         require(time.monotonic() + PREPARE_SECONDS + MODES["batch"][1] + 120 < self.work_deadline,
                 "Insufficient Files preparation and full driver budget")
         self.preparation_calls += 1
-        # A separate owned build keeps the original driver and its DerivedData
-        # contract unchanged; the 2400s batch budget includes both builds.
+        # This owned preparation build supplies the verified seed/main products.
+        # Startup and this case share one cap inside the unchanged 2400s budget.
         # Keep compiler intermediates outside the evidence upload glob.
         derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
