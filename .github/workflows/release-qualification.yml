@@ -21,7 +21,7 @@ jobs:
         timeout-minutes: 20
         run: |
           python3 -B - <<'PYTHON'
-          import importlib.util, json, os, sys
+          import importlib.util, json, os, signal, sys
           from pathlib import Path
           spec = importlib.util.spec_from_file_location('q', 'scripts/qualify-release.py')
           q = importlib.util.module_from_spec(spec); spec.loader.exec_module(q)
@@ -29,6 +29,12 @@ jobs:
           run.work_deadline = run.started + 900
           run.cleanup_deadline = run.work_deadline + 180
           run.commands.limit = run.xcode.limit = run.work_deadline
+          run.commands.write_deadline = run.xcode.write_deadline = run.cleanup_deadline + 10
+          def interrupt(_signal, _frame):
+              run.interrupted = True
+              if not (run.acquiring or run.finalizing_driver or run.cleaning): raise KeyboardInterrupt
+          signal.signal(signal.SIGTERM, interrupt)
+          signal.signal(signal.SIGINT, interrupt)
           run.report['limits'] = {'work_seconds': 900, 'cleanup_seconds': 180}
           run.report['diagnostic'] = 'One post-boot inventory, 120s work allowance; no build/tests or acceptance'
           completed = False
