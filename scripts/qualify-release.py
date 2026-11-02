@@ -367,6 +367,36 @@ def validate_files_preparation(summary, tree, owned, selection, expected_case=PR
             "Files preparation requires Simulator result")
 
 
+def validate_preparation_pair(summary, tree, owned, selection):
+    """Require both real first-invocation cases, retaining explicit issue evidence."""
+    require(isinstance(summary, dict) and isinstance(tree, dict), "Invalid hosted/Files preparation result")
+    expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0,
+                "skippedTests": 0, "expectedFailures": 0}
+    require(summary.get("result") == "Passed" and all(type(summary.get(key)) is int
+            and summary[key] == value for key, value in expected.items()), "Unexpected preparation pair counts")
+    pending = [(node, 0) for node in tree.get("testNodes", [])]; cases = []; count = 0
+    while pending:
+        node, depth = pending.pop(); count += 1
+        require(isinstance(node, dict) and count <= 10000 and depth <= 100,
+                "Preparation pair tree bounds exceeded")
+        require(node.get("nodeType") != "Runtime Warning", "Preparation pair runtime warning")
+        children = node.get("children", [])
+        require(isinstance(children, list), "Invalid preparation pair children")
+        pending.extend((child, depth + 1) for child in children)
+        if node.get("nodeType") == "Test Case": cases.append((node.get("nodeIdentifier"), node.get("result")))
+    require(sorted(cases) == sorted((case, "Passed") for case in checkpoint.PREPARATION_CASES),
+            "Wrong, duplicated, failed or missing preparation pair case")
+    require([(d.get("deviceId", "").upper(), d.get("platform")) for d in tree.get("devices", [])]
+            == [(owned, "iOS Simulator")], "Preparation pair device mismatch")
+    require(summary.get("testFailures") == [], "Preparation pair failures missing or nonempty")
+    require("runtimeWarnings" not in summary or summary["runtimeWarnings"] == [],
+            "Preparation pair runtime warnings")
+    validate_runtime_result("batch", selection, summary)
+    device = summary["devicesAndConfigurations"][0]["device"]
+    require(device.get("deviceId", "").upper() == owned and device.get("platform") == "iOS Simulator",
+            "Preparation pair configuration mismatch")
+
+
 class Commands(processes.Smoke):
     def __init__(self, owner, name):
         self.owner = owner
@@ -529,8 +559,11 @@ class Qualification:
                 self.check(); require(time.monotonic() < end, "Files provider not ready"); time.sleep(0.1)
             require(provider.is_dir() and not provider.is_symlink(), "Invalid Files provider")
 
-    def preparation_manifest(self, path):
-        manifest = recovery.tree_manifest(path, self.check, max_bytes=256 * MIB)
+    def preparation_manifest(self, path, check=None):
+        check = self.check if check is None else check
+        check()
+        manifest = recovery.tree_manifest(path, check, max_bytes=256 * MIB)
+        check()
         require(len(manifest) <= 10000 and manifest.get("Info.plist", {}).get("kind") == "file"
                 and manifest.get("Data", {}).get("kind") == "directory",
                 "Incomplete or oversized Files preparation result")
@@ -576,10 +609,17 @@ class Qualification:
                 raw = bounded_read(self.commands.out, name, 16 * MIB, self.check)
                 (self.out / (prefix + "-" + kind + ".json")).write_bytes(raw)
                 parsed[kind] = json.loads(raw)
-            validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
-                                       self.report.get("runtime_selection"), expected_case)
+            if native_seed or native_folder:
+                validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
+                                           self.report.get("runtime_selection"), expected_case)
+                cases = [expected_case]
+            else:
+                validate_preparation_pair(parsed["summary"], parsed["tests"], self.owned,
+                                          self.report.get("runtime_selection"))
+                cases = list(checkpoint.PREPARATION_CASES)
+                self.report["files_preparation_order"] = checkpoint.preparation_order(self.preparation_log())
             self.report[key + "_result"] = {
-                "functional_status": "passed", "cases": [expected_case],
+                "functional_status": "passed", "cases": cases,
                 "runtimeWarnings": parsed["summary"].get("runtimeWarnings", "not_reported"),
                 "runtimeWarnings_reported": "runtimeWarnings" in parsed["summary"],
                 "independent_warning_and_pixel_review": "pending",
@@ -588,6 +628,58 @@ class Qualification:
             require(self.preparation_manifest(original) == manifest,
                     "Original Files preparation result mutated during reading")
             self.report[key + "_original"]["unchanged_after_reader"] = True
+
+    def preparation_log(self, check=None):
+        check = self.check if check is None else check
+        check()
+        rows = [row for row in self.commands.report["commands"] if row.get("id") == "files-prepare-ui"]
+        require(len(rows) == 1 and rows[0].get("returncode") == 0, "First preparation command did not pass exactly once")
+        row = rows[0]; argv = row.get("argv", [])
+        require([arg for arg in argv if arg.startswith("-only-testing:")]
+                == ["-only-testing:" + case for case in checkpoint.PREPARATION_TESTS],
+                "Wrong first preparation selectors")
+        for flag, value in (("-default-test-execution-time-allowance", "300"),
+                            ("-maximum-test-execution-time-allowance", "600"),
+                            ("-destination", "platform=iOS Simulator,id=" + self.owned)):
+            require(argv.count(flag) == 1 and argv.index(flag) + 1 < len(argv)
+                    and argv[argv.index(flag) + 1] == value, "Wrong first preparation bounds or destination")
+        path = Path(row.get("logs", {}).get("stdout", ""))
+        require(path.parent == self.commands.out and re.fullmatch(r"[1-9][0-9]*-stdout\.log", path.name),
+                "Invalid first preparation log reference")
+        return bounded_read(self.commands.out, path.name, 16 * MIB, check)
+
+    def verify_preparation_prerequisite(self, check=None):
+        """Recheck durable first-bundle evidence before UI launch, ACK and capture."""
+        check = self.check if check is None else check
+        check()
+        require(self.report.get("files_preparation_verified") is True
+                and self.report.get("files_preparation_result", {}).get("functional_status") == "passed"
+                and self.report.get("files_preparation_result", {}).get("cases") == list(checkpoint.PREPARATION_CASES),
+                "Missing verified hosted/Files preparation pair")
+        proof = self.report.get("files_preparation_original", {})
+        require(proof.get("path") == "files-prepare.xcresult"
+                and proof.get("manifest") == "files-prepare-original-manifest.json"
+                and proof.get("unchanged_after_reader") is True, "Missing original preparation pair proof")
+        raw = bounded_read(self.out, proof["manifest"], 16 * MIB, check)
+        require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
+                and self.preparation_manifest(self.out / proof["path"], check=check) == json.loads(raw),
+                "Original preparation pair changed")
+        check()
+        parsed = {}; hashes = {}
+        for kind in ("summary", "tests"):
+            raw = bounded_read(self.out, "files-prepare-" + kind + ".json", 16 * MIB, check)
+            check()
+            parsed[kind] = json.loads(raw); hashes[kind + "_sha256"] = hashlib.sha256(raw).hexdigest()
+            check()
+        validate_preparation_pair(parsed["summary"], parsed["tests"], self.owned,
+                                  self.report.get("runtime_selection"))
+        check()
+        raw_log = self.preparation_log(check=check)
+        check()
+        order = checkpoint.preparation_order(raw_log)
+        check()
+        require(order == self.report.get("files_preparation_order"), "First preparation order or bytes changed")
+        return {"order": order, "original_manifest_sha256": proof["sha256"], **hashes}
 
     def prepare_files_ui(self):
         require(self.mode == "batch" and self.preparation_calls == 0, "Files preparation may run once in batch mode")
@@ -600,22 +692,23 @@ class Qualification:
                 "Insufficient Files preparation and full driver budget")
         self.preparation_calls += 1
         # This owned preparation build supplies the verified seed/main products.
-        # Startup and this case share one cap inside the unchanged 2400s budget.
+        # Startup and both selected cases share the unchanged 780s phase cap.
         # Keep compiler intermediates outside the evidence upload glob.
         derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not derived.exists() and not derived.is_symlink(), "Files preparation output already exists")
         folder = "TripDocket-Recovery-" + str(uuid.uuid4())
-        self.report["files_preparation"] = {"calls": self.preparation_calls, "case": PREPARE_CASE,
+        self.report["files_preparation"] = {"calls": self.preparation_calls, "cases": list(checkpoint.PREPARATION_CASES),
+            "hosted_case_seconds": 300,
             "phase_seconds": PREPARE_SECONDS, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
             "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS),
-            "-maximum-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS), "-derivedDataPath", derived,
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "300",
+            "-maximum-test-execution-time-allowance", "600", "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "files-prepare.xcresult",
-            "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+            *("-only-testing:" + case for case in checkpoint.PREPARATION_TESTS), "CODE_SIGNING_ALLOWED=NO", "test"]
         previous = self.commands.ops.env
         self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
             "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
@@ -904,15 +997,20 @@ class Qualification:
                 "Combined batch lacks verified shared products")
         require(driver.remaining() > SEED_SECONDS + 600 + 8,
                 "Insufficient combined seed and main budget")
+        def check():
+            self.check()
+            require(driver.remaining() > 0, "Original driver deadline expired during preparation verification")
+        prerequisite = self.verify_preparation_prerequisite(check=check)
         self.native_seed_files(driver, empty=True)
         driver.combined_protocol = checkpoint
         driver.checkpoint_session = str(uuid.uuid4()).upper()
         driver.checkpoint_callback = lambda request, deadline: self.acknowledge_batch_seed(driver, request, deadline)
         self.report["combined_batch"] = {"session": driver.checkpoint_session, "token": driver.token,
-            "cases": list(checkpoint.CASES), "result_bundles": 2,
+            "cases": list(checkpoint.CASES), "preparation_cases": list(checkpoint.PREPARATION_CASES),
+            "preparation_prerequisite": prerequisite, "result_bundles": 2,
             "driver_deadline": driver.deadline - self.started, "driver_seconds": 1200,
             "seed_case_seconds": 180, "seed_observed_envelope_seconds": 300,
-            "seed_envelope_boundary": "Observed hosted PASS through observed seed PASS, including UI runner startup; initial startup and hosted case use original driver clock",
+            "seed_envelope_boundary": "second invocation start to observed seed PASS",
             "main_case_seconds": 600, "checkpoint_seconds": 60,
             "checkpoint_position": "main entry after observed seed PASS and deferred AUT termination"}
         self.save()
@@ -945,7 +1043,11 @@ class Qualification:
             raw = self.command(label, argv, seconds)
             idle(); return raw
         idle()
+        prerequisite = self.verify_preparation_prerequisite(check=active)
+        require(prerequisite == self.report.get("combined_batch", {}).get("preparation_prerequisite"),
+                "Preparation prerequisite changed before checkpoint")
         self.report["batch_checkpoint"] = {"request": request, "status": "verifying",
+            "preparation_prerequisite": prerequisite,
             "start": time.monotonic() - self.started, "deadline": end - self.started}
         self.commands.limit = min(previous_limit, end)
         try:
@@ -1216,14 +1318,15 @@ class Qualification:
             elapsed = monitor.get("seed_observed_seconds")
             require(monitor.get("returncode") == 0 and type(elapsed) in (int, float)
                     and 0 <= elapsed <= 300 and monitor.get("seed_envelope_seconds") == 300
-                    and monitor.get("seed_envelope_boundary") == "observed hosted PASS to observed seed PASS",
+                    and monitor.get("seed_envelope_boundary") == "second invocation start to observed seed PASS",
                     "Missing combined seed-envelope evidence")
             self.report["batch_execution_order"] = order
             self.report["combined_monitor"] = monitor
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
         self.report["driver_capture_verified"] = True
-        self.report["selected_cases"] = expected
+        self.report["selected_cases"] = ([checkpoint.PREPARATION_CASES[0], *expected]
+                                         if self.mode == "batch" else expected)
 
     def products(self, driver):
         if self.mode == "batch" and hasattr(self, "shared_products"):
@@ -1368,12 +1471,18 @@ class Qualification:
                         and self.report.get("final_inventory") == self.baseline,
                         "Native root lacks original-byte or owned-device cleanup proof")
                 if "combined_batch" in self.report:
+                    prerequisite = self.verify_preparation_prerequisite()
+                    require(prerequisite == self.report["combined_batch"].get("preparation_prerequisite")
+                            == self.report.get("batch_checkpoint", {}).get("preparation_prerequisite"),
+                            "Preparation prerequisite changed before final capture")
+                    require(self.report["combined_batch"].get("preparation_cases") == list(checkpoint.PREPARATION_CASES),
+                            "Combined capture lacks first preparation pair")
                     require(self.report.get("batch_checkpoint_verified") is True
                             and self.report["combined_batch"].get("result_bundles") == 2
                             and self.report["combined_batch"].get("cases") == list(checkpoint.CASES)
                             and self.report.get("batch_execution_order", {}).get("request")
                                 == self.report.get("batch_checkpoint", {}).get("request"),
-                            "Combined capture lacks verified checkpoint and exact three cases")
+                            "Combined capture lacks verified checkpoint and exact two UI cases")
                     require(not any(key.startswith("native_seed") or key.startswith("native_folder")
                                     for key in self.report)
                             and not (self.out / "native-seed.xcresult").exists()

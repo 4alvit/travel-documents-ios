@@ -31,7 +31,7 @@ def combined_log():
     for n,test in enumerate(q.checkpoint.TESTS):
         target,cls,method=test.split("/");prefix=f"Test Case '-[{target}.{cls} {method}]' "
         lines.append(prefix+"started.")
-        if n==2:lines.append(f"{q.checkpoint.PREFIX} {SESSION} {TOKEN} {NONCE}")
+        if n==1:lines.append(f"{q.checkpoint.PREFIX} {SESSION} {TOKEN} {NONCE}")
         lines.append(prefix+"passed (1.000 seconds).")
     return ("\n".join(lines)+"\n").encode()
 COMBINED_LOG = combined_log()
@@ -424,10 +424,10 @@ class Guards(unittest.TestCase):
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
-        cases=list(q.checkpoint.CASES);result.update(totalTestCount=3,passedTests=3)
+        cases=list(q.checkpoint.CASES);result.update(totalTestCount=2,passedTests=2)
         tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
         summary["execution_order"]=copy.deepcopy(COMBINED_ORDER)
-        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"observed hosted PASS to observed seed PASS"}
+        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"second invocation start to observed seed PASS"}
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
         if missing_warnings:result.pop("runtimeWarnings")
@@ -506,6 +506,8 @@ class Guards(unittest.TestCase):
         run,events=self.exercise_driver()
         self.assertEqual(events,["prepare","native-root","shared-build","combined-checkpoint-setup","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
+        self.assertEqual(run.report["selected_cases"],
+                         [q.checkpoint.PREPARATION_CASES[0], *q.checkpoint.CASES])
 
     def test_post_main_extra_root_entry_prevents_capture_after_owned_process_stop(self):
         run,events=self.exercise_driver(root_extra=True)
@@ -568,8 +570,11 @@ class Guards(unittest.TestCase):
                 run.report.update(native_root={"verified_empty_before_seed":True,"verified_after_main":True,"device":OWNED},
                     final_inventory={},batch_checkpoint_verified=True,
                     batch_checkpoint={"request":copy.deepcopy(COMBINED_ORDER["request"])},
-                    combined_batch={"result_bundles":2,"cases":list(q.checkpoint.CASES)},
+                    combined_batch={"result_bundles":2,"cases":list(q.checkpoint.CASES),
+                                    "preparation_cases":list(q.checkpoint.PREPARATION_CASES),
+                                    "preparation_prerequisite":run.verify_preparation_prerequisite()},
                     batch_execution_order=copy.deepcopy(COMBINED_ORDER))
+                run.report["batch_checkpoint"]["preparation_prerequisite"]=run.verify_preparation_prerequisite()
             else:
                 self.preparation_fixture(run, native_folder=True)
                 run.inspect_files_preparation(native_folder=True)
@@ -588,10 +593,24 @@ class Guards(unittest.TestCase):
         (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
         (original/"Info.plist").write_bytes(b"preparation metadata")
         _,summary,tree,_=self.fixture()
-        summary.update(totalTestCount=1,passedTests=1)
+        cases=([q.FOLDER_CASE] if native_folder else [q.SEED_CASE] if native_seed
+               else list(q.checkpoint.PREPARATION_CASES))
+        summary.update(totalTestCount=len(cases),passedTests=len(cases))
         summary["devicesAndConfigurations"][0]["device"]["platform"]="iOS Simulator"
-        case=q.FOLDER_CASE if native_folder else q.SEED_CASE if native_seed else q.PREPARE_CASE
-        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"}]
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
+        if not (native_seed or native_folder):
+            log=run.commands.out/"1-stdout.log"
+            lines=[]
+            for test in q.checkpoint.PREPARATION_TESTS:
+                target,cls,method=test.split("/");prefix_line=f"Test Case '-[{target}.{cls} {method}]' "
+                lines.extend([prefix_line+"started.",prefix_line+"passed (1.000 seconds)."])
+            log.write_text("\n".join(lines)+"\n")
+            run.commands.report["commands"].append({"id":"files-prepare-ui","returncode":0,
+                "argv":["xcodebuild","-default-test-execution-time-allowance","300",
+                        "-maximum-test-execution-time-allowance","600",
+                        "-destination","platform=iOS Simulator,id="+OWNED,
+                        *["-only-testing:"+case for case in q.checkpoint.PREPARATION_TESTS]],
+                "logs":{"stdout":str(log)}})
         def command(label, argv, seconds=30):
             kind=label.removeprefix(prefix+"-")
             self.assertIn(kind,("summary","tests"));self.assertEqual(seconds,60)
@@ -610,7 +629,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(before,run.preparation_manifest(original))
         self.assertEqual(before,run.preparation_manifest(run.out/"files-prepare-inspection.xcresult"))
         self.assertTrue(run.report["files_preparation_original"]["unchanged_after_reader"])
-        self.assertEqual(run.report["files_preparation_result"]["cases"],[q.PREPARE_CASE])
+        self.assertEqual(run.report["files_preparation_result"]["cases"],list(q.checkpoint.PREPARATION_CASES))
         for mutate in [lambda s,t:s.update(skippedTests=1),lambda s,t:s.pop("testFailures"),
                 lambda s,t:s.update(runtimeWarnings=[{}]),lambda s,t:s.update(runtimeWarnings=None),
                 lambda s,t:t["testNodes"].append({"nodeType":"Runtime Warning"}),
@@ -621,7 +640,94 @@ class Guards(unittest.TestCase):
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osVersion="18.5"),
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(architecture="x86_64")]:
             s,t=copy.deepcopy(summary),copy.deepcopy(tree);mutate(s,t)
-            with self.assertRaises(RuntimeError):q.validate_files_preparation(s,t,OWNED,run.report["runtime_selection"])
+            with self.assertRaises(RuntimeError):q.validate_preparation_pair(s,t,OWNED,run.report["runtime_selection"])
+
+    def test_preparation_prerequisite_rechecks_original_result_and_order(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run)
+        run.inspect_files_preparation();run.report["files_preparation_verified"]=True
+        expected=run.verify_preparation_prerequisite()
+        self.assertEqual(expected["order"]["schema_version"],2)
+        self.assertEqual(len(expected["order"]["events"]),4)
+        self.assertEqual(len(expected["summary_sha256"]),64)
+        self.assertEqual(expected,run.verify_preparation_prerequisite())
+        (original/"Data/result").write_bytes(b"mutated")
+        with self.assertRaisesRegex(RuntimeError,"Original preparation pair changed"):
+            run.verify_preparation_prerequisite()
+
+    def test_preparation_prerequisite_honors_checkpoint_expiry_inside_actual_manifest(self):
+        run=self.run_object();self.preparation_fixture(run)
+        run.inspect_files_preparation();run.report["files_preparation_verified"]=True
+        clock=[0.0];checks=[];original=q.recovery.tree_manifest
+        def budget():
+            checks.append(clock[0])
+            if clock[0]>=60:raise RuntimeError("checkpoint expired")
+        def traversing(path,check,**kwargs):
+            count=[0]
+            def at_entry():
+                count[0]+=1
+                if count[0]==2:clock[0]=60.0
+                check()
+            return original(path,at_entry,**kwargs)
+        with patch.object(q.recovery,"tree_manifest",side_effect=traversing), \
+             patch.object(run,"preparation_log",side_effect=AssertionError("must stop before log parse")):
+            with self.assertRaisesRegex(RuntimeError,"checkpoint expired"):
+                run.verify_preparation_prerequisite(check=budget)
+        self.assertIn(60.0,checks)
+        self.assertNotIn("batch_checkpoint_verified",run.report)
+
+    def test_combined_setup_stops_at_driver_deadline_inside_preparation_manifest(self):
+        run=self.run_object();self.preparation_fixture(run);run.inspect_files_preparation()
+        run.report["files_preparation_verified"]=True
+        run.report["files_preparation"]={"derived_data":"build/shared"}
+        run.report["native_root"]={"verified_empty_before_seed":True}
+        run.report["shared_build"]={"observations":{"before_seed":{}}}
+        remaining=[1200.0]
+        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True),
+            qualified_build=run.root/"build/shared",remaining=lambda:remaining[0])
+        original=q.recovery.tree_manifest
+        def traversing(path,check,**kwargs):
+            count=[0]
+            def at_entry():
+                count[0]+=1
+                if count[0]==2:remaining[0]=0.0
+                check()
+            return original(path,at_entry,**kwargs)
+        with patch.object(q.recovery,"tree_manifest",side_effect=traversing), \
+             patch.object(run,"native_seed_files",side_effect=AssertionError("must stop before seed setup")):
+            with self.assertRaisesRegex(RuntimeError,"Original driver deadline expired"):
+                run.prepare_combined_batch(driver)
+        self.assertNotIn("combined_batch",run.report)
+
+    def test_preparation_prerequisite_rejects_stale_flags_order_log_and_saved_cases(self):
+        for fault in ("flag","selector","log","order","summary","tree","one_case","source_record"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(dir=self.root) as folder:
+                run=q.Qualification(folder,"batch",ENV)
+                self.preparation_fixture(run);run.inspect_files_preparation()
+                run.report["files_preparation_verified"]=True
+                if fault=="flag":run.report["files_preparation_verified"]=False
+                elif fault=="selector":run.commands.report["commands"][0]["argv"][-1]="-only-testing:Wrong/case"
+                elif fault=="log":(run.commands.out/"1-stdout.log").write_bytes(BATCH_LOG)
+                elif fault=="order":run.report["files_preparation_order"]["events"][0]["case"]="Wrong/case()"
+                elif fault=="source_record":run.report["files_preparation_result"]["cases"]=[q.PREPARE_CASE]
+                else:
+                    path=run.out/("files-prepare-tests.json" if fault=="tree" else "files-prepare-summary.json")
+                    saved=json.loads(path.read_text())
+                    if fault=="tree":saved["testNodes"][0]["nodeIdentifier"]="Wrong/case()"
+                    elif fault=="one_case":saved.update(totalTestCount=1,passedTests=1)
+                    else:saved["testFailures"]=[{"message":"failure"}]
+                    path.write_text(json.dumps(saved))
+                with self.assertRaises(RuntimeError):run.verify_preparation_prerequisite()
+
+    def test_final_capture_rejects_forged_or_changed_first_bundle_proof(self):
+        for fault in ("combined","checkpoint","case_set"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(dir=self.root) as directory:
+                old=self.root;self.root=Path(directory)
+                try:
+                    run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+                    if fault=="case_set":run.report["combined_batch"]["preparation_cases"]=[q.PREPARE_CASE]
+                    else:run.report["combined_batch" if fault=="combined" else "batch_checkpoint"]["preparation_prerequisite"]={}
+                    with self.assertRaises(RuntimeError):run.capture_original_result()
+                finally:self.root=old
 
     def test_files_preparation_absent_warnings_are_pending_not_an_empty_array(self):
         run=self.run_object();_,summary,_=self.preparation_fixture(run);summary.pop("runtimeWarnings")
@@ -667,9 +773,10 @@ class Guards(unittest.TestCase):
                          str(run.root/"build/QualificationPreparationDerivedData-123-1"))
         self.assertFalse(Path(argv[argv.index("-derivedDataPath")+1]).is_relative_to(run.out))
         self.assertEqual([v for v in argv if v.startswith("-only-testing:")],
-                         ["-only-testing:TripfolioUITests/"+q.PREPARE_CASE.removesuffix("()")])
-        for key in ["-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"]:
-            self.assertEqual(argv[argv.index(key)+1],"180")
+                         ["-only-testing:"+case for case in q.checkpoint.PREPARATION_TESTS])
+        for key,value in [("-default-test-execution-time-allowance","300"),
+                          ("-maximum-test-execution-time-allowance","600")]:
+            self.assertEqual(argv[argv.index(key)+1],value)
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE"],"prepare")
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_UI"],"1")
         self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
@@ -697,8 +804,9 @@ class Guards(unittest.TestCase):
         self.assertEqual(q.CLEANUP_SECONDS,180)
         self.assertEqual(q.WORK_SECONDS["batch"],2400)
         self.assertEqual(run.report["files_preparation"]["case_seconds"],180)
-        for flag in ("-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"):
-            self.assertEqual(record["argv"][record["argv"].index(flag)+1],"180")
+        for flag,value in (("-default-test-execution-time-allowance","300"),
+                           ("-maximum-test-execution-time-allowance","600")):
+            self.assertEqual(record["argv"][record["argv"].index(flag)+1],value)
         self.assertNotIn("files_preparation_verified",run.report)
 
     def test_files_preparation_admission_reserves_780_plus_full_driver_and_postchecks(self):
@@ -748,7 +856,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(run.execute(),1);self.assertEqual(run.report["status"],"failed")
         run.report["files_preparation_verified"]=True
         (run.out/"files-prepare.xcresult/Data/result").write_bytes(b"late mutation")
-        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
+        with self.assertRaisesRegex(RuntimeError,"Original preparation pair changed"):run.capture_original_result()
 
     def test_successful_capture_is_pending_review_and_binds_unchanged_original_bytes(self):
         for mode in q.MODES:
@@ -774,7 +882,7 @@ class Guards(unittest.TestCase):
         self.assertNotIn("original_xcresult",run.report)
         run.report["batch_checkpoint_verified"]=True
         run.report["combined_batch"]["cases"]=list(batch.CASES)
-        with self.assertRaisesRegex(RuntimeError,"exact three cases"):run.capture_original_result()
+        with self.assertRaisesRegex(RuntimeError,"exact two UI cases"):run.capture_original_result()
 
     def test_combined_capture_rejects_fabricated_separate_seed_result(self):
         run,result=self.prepared_capture();run.report["cleanup_verified"]=True
