@@ -533,7 +533,7 @@ class Driver:
                       "-testPlan", "Tripfolio-iPad",
                       "-configuration", "Debug", "-derivedDataPath", self.derived,
                       "-only-testing:TripfolioUITests/PrivacySupportUITests/" + self.case[1],
-                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=360, stream=True)
+                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=480, stream=True)
         self.discover_products()
         self.built = self.product_snapshot("products-after-build")
 
