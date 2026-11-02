@@ -212,18 +212,18 @@ final class PrivacySupportUITests: XCTestCase {
             let firstFrame = slice == 0 ? text.frame : nil
             if let firstFrame, firstFrame == accepted.targetFrame {
                 containerFrame = accepted.containerFrame
-                viewport = accepted.visibleBounds.insetBy(dx: 1, dy: 1)
+                viewport = textReadingViewport(accepted.visibleBounds)
                 frame = firstFrame
             } else if let observation = snapshotGeometry(
                 in: app, navigationTitle: title, target: snapshotMatch, container: container.match
             ), let targetFrame = observation.targetFrame, let observedContainer = observation.containerFrame {
                 containerFrame = observedContainer
-                viewport = observation.viewport.bounds.intersection(observedContainer).insetBy(dx: 1, dy: 1)
+                viewport = textReadingViewport(observation.viewport.bounds.intersection(observedContainer))
                 frame = targetFrame
             } else {
                 containerFrame = container.element.frame
-                viewport = legacyViewportObservation(in: app, navigationTitle: title).bounds
-                    .intersection(containerFrame).insetBy(dx: 1, dy: 1)
+                viewport = textReadingViewport(legacyViewportObservation(in: app, navigationTitle: title).bounds
+                    .intersection(containerFrame))
                 frame = text.frame
             }
             try require(text.exists && abs(frame.width - size.width) <= 1 && abs(frame.height - size.height) <= 1,
@@ -400,14 +400,14 @@ final class PrivacySupportUITests: XCTestCase {
                 visibleBounds = legacyViewportObservation(in: app, navigationTitle: navigationTitle).bounds
                     .intersection(containerFrame)
             }
-            let tallReadingText = readingPrefix && frame.height > visibleBounds.height
-            // Start tall text near the top with its whole prefix visible, not a
-            // 44 pt sliver at the bottom. Short text keeps full-frame acceptance.
-            let prefixAligned = frame.minY >= visibleBounds.minY + 1
-                && frame.minY <= visibleBounds.minY + 48
+            let tallReadingText = readingPrefix && frame.height > textReadingViewport(visibleBounds).height
+            // Use the reader's exact inset for short text as well as tall-text
+            // prefixes. An expanded hit-test tolerance can leave a short final
+            // strip unreadable without enough height for an overlapping step.
+            let readingStartVisible = readingStartIsVisible(of: frame, in: visibleBounds)
             if exists && target.isHittable && visiblePortion(
                 of: frame, in: visibleBounds, preferWholeFrame: preferWholeFrame
-            ) && (!tallReadingText || prefixAligned) {
+            ) && (!readingPrefix || readingStartVisible) {
                 return ScrollObservation(targetFrame: frame, containerFrame: containerFrame,
                                          visibleBounds: visibleBounds)
             }
@@ -421,7 +421,7 @@ final class PrivacySupportUITests: XCTestCase {
             }
             let hasFrame = !frame.isNull && !frame.isEmpty
                 && frame.minY.isFinite && frame.maxY.isFinite
-            if tallReadingText && hasFrame && !prefixAligned {
+            if tallReadingText && hasFrame && !readingStartVisible {
                 let correction = visibleBounds.minY + 24 - frame.minY
                 let distance = max(24, abs(correction))
                 try await dragWithinViewport(correction > 0 ? distance : -distance,
@@ -660,6 +660,20 @@ final class PrivacySupportUITests: XCTestCase {
             }
         }
         return ViewportObservation(bounds: viewport, navigationFrame: navigationFrame)
+    }
+
+    private func textReadingViewport(_ visibleBounds: CGRect) -> CGRect {
+        visibleBounds.insetBy(dx: 1, dy: 1)
+    }
+
+    private func readingStartIsVisible(of frame: CGRect, in visibleBounds: CGRect) -> Bool {
+        let viewport = textReadingViewport(visibleBounds)
+        guard !frame.isEmpty, !viewport.isEmpty else { return false }
+        if frame.height <= viewport.height {
+            return viewport.contains(frame)
+        }
+        // Same 1...48 pt prefix alignment relative to the original bounds.
+        return frame.minY >= viewport.minY && frame.minY <= viewport.minY + 47
     }
 
     private func visiblePortion(
