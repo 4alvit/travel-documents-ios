@@ -845,7 +845,38 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Files did not expose Open after selecting both originals", app: app) { open.exists && open.isEnabled && open.isHittable }
         capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)
         open.tap()
-        try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
+        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now)
+    }
+
+    private func requireFilesDismissal(_ app: XCUIApplication, navigation: XCUIElement,
+                                      openedAt: ContinuousClock.Instant) async throws {
+        do {
+            try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
+        } catch let originalFailure as BatchTestFailure {
+            // Diagnostic branch only: the original 15-second criterion already
+            // failed and captured its PNG/AX. Observe once, with no further action.
+            // The 30-second request cannot cap an in-flight XCTest RPC; the
+            // unchanged 600/1200/2400-second case/driver/outer limits still apply.
+            let observationStarted = ContinuousClock.now
+            let disappeared = navigation.waitForNonExistence(timeout: 30)
+            let observationFinished = ContinuousClock.now
+            let timing = XCTAttachment(string: """
+                originalDismissalCriterion=failed
+                requestedObservationSeconds=30
+                observationStartedSinceOpenReturned=\(openedAt.duration(to: observationStarted))
+                observationFinishedSinceOpenReturned=\(openedAt.duration(to: observationFinished))
+                observedElapsed=\(observationStarted.duration(to: observationFinished))
+                navigationDisappeared=\(disappeared)
+                acceptance=failed
+                """)
+            timing.name = "Files passive late observation — original failure retained"
+            timing.lifetime = .keepAlways
+            add(timing)
+            capture(app, "Files after passive late observation — original failure retained", batchDiagnostic: true)
+            // Neither a late disappearance nor unavailable diagnostic state
+            // converts this run into a pass. Cancellation is not intercepted.
+            throw originalFailure
+        }
     }
 
     private func reviewRows(in app: XCUIApplication) -> XCUIElementQuery {
