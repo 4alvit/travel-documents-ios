@@ -1113,6 +1113,27 @@ unchanged. This removes unnecessary compilation within the existing preparation
 and overall limits; neither a speedup nor a remedy for the launch delay is
 claimed before a new hosted measurement.
 
+## Observing the remaining purchase presentation failure
+
+The [`7939931` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41501749080)
+passed the hosted prerequisite, direct Files preparation and both native PDF
+exports. The byte checkpoint and cleanup checks passed. The main case failed
+after its single Unlock tap: the local Xcode service returned payment
+presentation errors before test teardown, and the screenshot shows the app's
+purchase-failure alert. No import or batch-review acceptance follows from this
+run. The retained response identifies the expected local product and price;
+it does not identify a faulty view controller or prove a timing remedy.
+
+The next capture enables existing purchase diagnostics and records the session's
+three presentation-related Boolean settings and allowlisted app state before
+the tap and after a missing-sheet failure. Opt-in Debug Simulator logs also
+record bounded controller ancestry, window/scene attachment and transition
+flags at purchase entry and return. They contain no object identifiers, class
+names, URLs, document contents or StoreKit response payloads. The purchase API,
+single-attempt rule, positive Xcode marker, transaction checks and deadlines are
+unchanged. These observations help diagnose a failure; they cannot satisfy a failed
+purchase assertion.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large

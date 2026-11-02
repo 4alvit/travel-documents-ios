@@ -45,6 +45,7 @@ final class BatchImportUITests: XCTestCase {
             session.resetToDefaultState()
         }
         app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-batch-diagnostics",
+                               "--ui-testing-purchase-diagnostics",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         try await openTrip(app)
@@ -1150,9 +1151,15 @@ final class BatchImportUITests: XCTestCase {
         let buy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Unlock Pro ·")).firstMatch
         try await wait("The local product did not load; no purchase retry is allowed", app: app) { buy.exists && buy.isEnabled }
         try await reveal(buy, app: app, navigation: "TripDocket Pro")
+        recordPurchaseObservation(app, session: session, point: .beforeTap)
         buy.tap()
-        try await wait("No positively identified Xcode payment sheet appeared", app: app, springboard: springboard) {
-            self.xcodeMarker(app).exists || self.xcodeMarker(springboard).exists
+        do {
+            try await wait("No positively identified Xcode payment sheet appeared", app: app, springboard: springboard) {
+                self.xcodeMarker(app).exists || self.xcodeMarker(springboard).exists
+            }
+        } catch {
+            recordPurchaseObservation(app, session: session, point: .missingSheet)
+            throw error
         }
         let surface = xcodeMarker(app).exists ? app : springboard
         // The saved iOS 27 Xcode sheet labels its confirmation "Purchase".
@@ -1192,6 +1199,28 @@ final class BatchImportUITests: XCTestCase {
         try check(session.allTransactions().filter { $0.productIdentifier == productID }.count == 1,
                   app: app, "The app purchase did not produce exactly one expected local transaction")
         capture(app, "Actual local StoreKit Pro entitlement")
+    }
+
+    private enum PurchaseObservationPoint: String { case beforeTap, missingSheet }
+
+    private func recordPurchaseObservation(_ app: XCUIApplication, session: SKTestSession,
+                                           point: PurchaseObservationPoint) {
+        let elements = app.buttons.matching(identifier: "purchase.state")
+        var state = "unknown-missing-or-unrecognized"
+        if elements.count == 1, let value = elements.element(boundBy: 0).value as? String,
+           value.utf8.count <= 192 {
+            let stage = "(?:notStarted|entitlements|catalog|purchase|finish|sync|returned)"
+            let pattern = "^purchase-state isPro=(?:true|false) isBusy=(?:true|false) load=" + stage
+                + " purchase=" + stage + " restore=" + stage + "\\z"
+            if value.range(of: pattern, options: .regularExpression) != nil { state = value }
+        }
+        let text = "purchase-observation observationOnly=true point=\(point.rawValue)\n"
+            + "disableDialogs=\(session.disableDialogs) askToBuyEnabled=\(session.askToBuyEnabled) interruptedPurchasesEnabled=\(session.interruptedPurchasesEnabled)\n"
+            + state
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "Batch purchase state \(point.rawValue)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func xcodeMarker(_ app: XCUIApplication) -> XCUIElement {
