@@ -298,6 +298,20 @@ class BoundaryTests(unittest.TestCase):
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
 
+    def test_recovery_workflow_pins_matched_toolchain_and_keeps_existing_budgets(self):
+        workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
+        recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
+        environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
+        self.assertEqual(environment.splitlines(),[
+            '      TRIPDOCKET_RUNNER_LABEL: macos-15',
+            '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
+        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 35\n',recovery)
+        attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 27\n',attempt)
+        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
+        evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
+        self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
+
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
         driver=(HERE/'test-simulator.sh').read_text()
         plan=json.loads((HERE.parent/'Tripfolio.xctestplan').read_text())
@@ -828,6 +842,29 @@ class BoundaryTests(unittest.TestCase):
         # parsing and selection use the actual candidate implementation.
         with patch.object(hosted,'toolchain_paths'),patch.object(hosted.core,'file_digest',return_value='a'*64):
             runner.discover_profile()
+
+    def test_matched_262_discovery_freezes_toolchain_and_rejects_older_runtime_fallback(self):
+        developer=self.root/'Xcode_26.2.app/Contents/Developer'
+        sdk_path=developer/'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator26.2.sdk'
+        sdk_path.mkdir(parents=True)
+        selected={**self.runtime('26.2'),'buildversion':'23C54'}
+        older=self.runtime('18.5')
+        texts=[str(developer),'Xcode 26.2\nBuild version 17C52','26.2',str(sdk_path),
+               json.dumps({'runtimes':[older,self.runtime('27.0'),selected]})]
+        r=self.runner(Ops(*[{'output':[('stdout',text.encode())]} for text in texts]))
+        self.discover(r)
+        resolved=json.loads((r.out/'resolved-profile.json').read_text())
+        self.assertEqual(resolved['runtime'],selected)
+        self.assertEqual(resolved['host']['xcode_version'],'Xcode 26.2\nBuild version 17C52')
+        self.assertEqual(resolved['host']['sdk_version'],'26.2')
+        self.assertEqual(r.ops.env['DEVELOPER_DIR'],str(developer))
+        self.assertEqual(r.plan['runtime'],selected['identifier'])
+        self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],
+                         [20,20,20,20,300])
+        self.assertEqual((r.t0,r.limit,r.final),(0,300,1500))
+        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected]]:
+            with self.subTest(runtimes=runtimes),self.assertRaises(RuntimeError):
+                hosted.select_runtime('26.2',{'runtimes':runtimes},PROFILE)
 
     def test_first_runtime_query_allows_150_seconds_inside_shared_300_budget(self):
         r=self.discovery_runner(delay=150)
