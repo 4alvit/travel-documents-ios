@@ -262,6 +262,23 @@ final class BatchImportUITests: XCTestCase {
         inlineNames.element.typeText(ownedFolder)
         try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
                   app: app, "Native folder name differs from the exact owned UUID name")
+        let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        if keyboardIntroduction.count != 0 {
+            let explanation = keyboardIntroduction.element.staticTexts.matching(NSPredicate(
+                format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
+            ))
+            let acknowledge = keyboardIntroduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+            try check(keyboardIntroduction.count == 1 && explanation.count == 1 && explanation.element.isHittable
+                      && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable,
+                      app: app, "Native keyboard introduction is not uniquely identifiable and reachable")
+            capture(app, "Native keyboard introduction before the single Continue")
+            acknowledge.element.tap()
+            try await wait("Native keyboard introduction did not dismiss back to the exact folder editor", app: app) {
+                keyboardIntroduction.count == 0 && files.count == 1 && inlineNames.count == 1
+                    && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                    && inlineNames.element.value as? String == ownedFolder
+            }
+        }
         let create = app.keyboards.buttons.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "Done", "done"
         ))
