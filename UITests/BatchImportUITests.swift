@@ -608,27 +608,61 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func waitForStableShareAction(_ actions: XCUIElementQuery, app: XCUIApplication) async throws {
-        let header = app.navigationBars.matching(identifier: "UIActivityContentView")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
         var previousFrames: [CGRect]?
         var previousIdentity: String?
         var stableObservations = 0
-        // Remote share actions become hittable before the presentation finishes.
-        // Require the same action and native header geometry on successive polls;
-        // any unavailable, invalid, or changing state restarts convergence.
+        // A single snapshot supplies a coherent action/header observation without
+        // repeating remote attribute queries. Hittability still uses the live
+        // query, constrained to that snapshot's exact action identity.
         try await wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40)) {
             var frames: [CGRect]?
             var identity: String?
-            if actions.count == 1, header.count == 1 {
-                let action = actions.element
-                if action.isEnabled, action.isHittable {
-                    let bounds = app.frame
-                    let candidate = [action.frame, header.element.frame]
-                    if candidate.allSatisfy({ frame in
+            if ContinuousClock.now < deadline, let snapshot = try? app.snapshot(),
+               ContinuousClock.now < deadline {
+                var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
+                var visited = 0
+                var complete = true
+                var matchingActions: [XCUIElementSnapshot] = []
+                var matchingHeaders: [XCUIElementSnapshot] = []
+                while let (node, depth) = pending.popLast() {
+                    guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else {
+                        complete = false
+                        break
+                    }
+                    visited += 1
+                    if node.label == "Save to Files",
+                       node.elementType == .button
+                        || (node.elementType == .cell && node.identifier == "actionGroupCell") {
+                        matchingActions.append(node)
+                    }
+                    if node.elementType == .navigationBar, node.identifier == "UIActivityContentView" {
+                        matchingHeaders.append(node)
+                    }
+                    let children = node.children
+                    // Never accept a truncated tree: a later node may be a duplicate.
+                    guard children.count <= 4_096 - visited - pending.count else {
+                        complete = false
+                        break
+                    }
+                    pending.append(contentsOf: children.map { ($0, depth + 1) })
+                }
+                if complete, matchingActions.count == 1, matchingHeaders.count == 1 {
+                    let action = matchingActions[0]
+                    let bounds = snapshot.frame
+                    let candidate = [action.frame, matchingHeaders[0].frame]
+                    if action.isEnabled, ([bounds] + candidate).allSatisfy({ frame in
                         frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite
                             && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
                     }) {
-                        frames = candidate
-                        identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                        let liveAction = actions.matching(NSPredicate(
+                            format: "elementType == %@ AND identifier == %@ AND label == %@",
+                            NSNumber(value: action.elementType.rawValue), action.identifier, action.label
+                        )).element
+                        if ContinuousClock.now < deadline, liveAction.isHittable, ContinuousClock.now < deadline {
+                            frames = candidate
+                            identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                        }
                     }
                 }
             }

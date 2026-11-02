@@ -984,6 +984,42 @@ would pass. Admission also reserves the full driver and postcheck budgets;
 no retry, case limit, cleanup limit or workflow timeout is changed. This failed
 capture remains failed, and complete native qualification is still required.
 
+The [`1282c11` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41475328888)
+completed the hosted prerequisite in 3.696 seconds, then failed the native
+Files-preparation case after 170.818 seconds with “Share sheet action did not
+stabilize.” The enclosing command returned exit 65 after 1,022.058 seconds,
+with about 177.942 seconds of its 1,200-second budget remaining. Neither the
+command envelope nor the 180-second native allowance caused this failure.
+No Save to Files tap, native seeding, checkpoint or main import occurred.
+
+The final original screenshot and accessibility tree show the populated share
+sheet and its uniquely named Save to Files action within the app bounds. The
+log reaches the complete attribute-reading path only twice near the end of the
+40-second readiness window; each observation issues several separate remote
+queries. Two observations cannot satisfy the required three confirmations,
+even if their geometry agrees. The final screenshot alone cannot establish
+that the action had stable geometry throughout that earlier window.
+
+All 215 extracted artifact files matched the archive, the 176-file source
+snapshot matched the candidate, and all 24 owned process groups were reaped.
+The owned Simulator was deleted and the full 127-device baseline matched.
+Source-after, compiled-product and fixture-byte evidence was not produced;
+this failed capture remains unqualified.
+
+The follow-up share-readiness helper obtains action and header geometry from one
+complete application snapshot per observation. It rejects missing or duplicate
+targets, invalid geometry, incomplete traversal (more than 4,096 nodes or depth
+64), and results arriving after the existing 40-second deadline. It then checks
+live hittability using the exact snapshot type, identifier and label. Three
+consecutive matching observations with the existing 0.5-point tolerance remain
+required. Native case, preparation, global-work and cleanup limits are unchanged.
+
+The revised helper passed 44 extracted-code scenarios, including traversal,
+identity changes and late results; an independent review also checked the depth
+boundary. The complete test file typechecked against the installed iOS SDK.
+These local checks do not establish a hosted speedup or native acceptance;
+a new complete capture remains required.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large
