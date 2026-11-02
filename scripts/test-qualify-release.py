@@ -956,6 +956,77 @@ class Guards(unittest.TestCase):
                         self.assertEqual(run.preparation_calls,1)
                 self.assertEqual(run.work_deadline,2200.0+spare)
 
+    def test_intel_preparation_1200_cap_preserves_original_global_and_native_allowances(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+            run = q.Qualification(self.root, "batch", env)
+        run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+        run.started = 100.0; run.work_deadline = 3100.0; run.cleanup_deadline = 3280.0
+        run.commands.t0 = 100.0; run.commands.limit = run.work_deadline
+        run.inspect_files_preparation = lambda: None
+        with patch.object(q.time, "monotonic", return_value=400.0), \
+             patch.object(run.commands.ops, "now", return_value=400.0), \
+             patch.object(run.commands.ops, "spawn", side_effect=RuntimeError("before process creation")) as spawn:
+            with self.assertRaisesRegex(RuntimeError, "files-prepare-ui failed"):
+                run.prepare_files_ui()
+        spawn.assert_called_once()
+        record = run.commands.report["commands"][0]
+        self.assertEqual((record["start"], record["work_deadline"], record["command_deadline"]), (300, 1500, 1508))
+        self.assertEqual((record["requested_cap_seconds"], record["stop_reserve_seconds"]), (1208, 8))
+        self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline, run.commands.limit),
+                         (100.0, 3100.0, 3280.0, 3100.0))
+        phase = run.report["files_preparation"]
+        self.assertEqual((phase["phase_seconds"], phase["hosted_case_seconds"], phase["case_seconds"]), (1200, 300, 180))
+        self.assertEqual(phase["cases"], list(q.checkpoint.PREPARATION_CASES))
+        self.assertEqual(q.MODES["batch"][1], 1200)
+        self.assertEqual((q.PREPARE_SECONDS, q.SEED_CASE_SECONDS, q.CLEANUP_SECONDS), (780, 180, 180))
+        for flag, value in (("-default-test-execution-time-allowance", "300"),
+                            ("-maximum-test-execution-time-allowance", "600")):
+            self.assertEqual(record["argv"][record["argv"].index(flag)+1], value)
+        self.assertNotIn("files_preparation_verified", run.report)
+
+    def test_intel_preparation_strict_2520_admission_before_command_or_output(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        for spare in (-0.01, 0.0, 0.01):
+            with self.subTest(spare=spare), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                    run = q.Qualification(directory, "batch", env)
+                run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+                run.started = 100.0; run.work_deadline = 3100.0; run.cleanup_deadline = 3280.0
+                run.inspect_files_preparation = lambda: None
+                with patch.object(q.time, "monotonic", return_value=580.0-spare), \
+                     patch.object(run, "command") as command, patch.object(run.commands.ops, "spawn") as spawn:
+                    if spare <= 0:
+                        with self.assertRaisesRegex(RuntimeError, "Insufficient Files preparation"):
+                            run.prepare_files_ui()
+                        command.assert_not_called(); spawn.assert_not_called()
+                        self.assertEqual(run.preparation_calls, 0)
+                        self.assertNotIn("files_preparation", run.report)
+                    else:
+                        run.prepare_files_ui()
+                        command.assert_called_once()
+                        self.assertEqual(command.call_args.args[2], 1200)
+                        self.assertEqual(run.report["files_preparation"]["phase_seconds"], 1200)
+                        self.assertEqual(run.preparation_calls, 1)
+                        saved = json.loads((run.out/"receipt.json").read_text())
+                        self.assertEqual(saved["files_preparation"]["phase_seconds"], 1200)
+                    self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline), (100.0, 3100.0, 3280.0))
+
+    def test_intel_preparation_primary_error_and_environment_remain_preserved(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+            run = q.Qualification(self.root, "batch", env)
+        run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+        previous = run.commands.ops.env
+        run.inspect_files_preparation = lambda: (_ for _ in ()).throw(RuntimeError("inspection also failed"))
+        with patch.object(run, "command", side_effect=RuntimeError("native failed")) as command:
+            with self.assertRaisesRegex(RuntimeError, "native failed"):
+                run.prepare_files_ui()
+        command.assert_called_once(); self.assertEqual(command.call_args.args[2], 1200)
+        self.assertIs(run.commands.ops.env, previous)
+        self.assertIn("inspection also failed", run.report["files_preparation_inspection_error"])
+        self.assertNotIn("files_preparation_verified", run.report)
+
     def test_files_preparation_failure_remains_primary_and_restores_environment(self):
         run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
         previous=run.commands.ops.env
@@ -1684,7 +1755,7 @@ class FocusedBuildGuards(unittest.TestCase):
         run.prepare_files_ui()
         self.assertEqual(len(calls), 1)
         label, argv, cap = calls[0]
-        self.assertEqual((label, cap), ("files-prepare-ui", 780))
+        self.assertEqual((label, cap), ("files-prepare-ui", 1200))
         self.assertEqual(argv.count(self.setting), 1)
         self.assertEqual(argv[-3:], ["CODE_SIGNING_ALLOWED=NO", self.setting, "test"])
         self.assertEqual([s for s in argv if s.startswith("-only-testing:")],

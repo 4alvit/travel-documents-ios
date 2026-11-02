@@ -955,12 +955,34 @@ unavailable. This failure establishes neither a FileProvider failure nor
 successful import. Individual compiler tasks have no retained timestamps, so
 the elapsed time cannot be attributed to a particular source file.
 
-The following Intel-only compilation selection keeps the complete test source
+The subsequent Intel-only compilation selection kept the complete test source
 files containing the same four required methods and their StoreKit bootstrap,
-while excluding unrelated test files with a validated build argument. It
-preserves production code, resources, the test plan and all existing deadlines.
+while excluding unrelated test files with a validated build argument. That change
+preserved production code, resources, the test plan and the existing deadlines.
 Full ordinary CI remains required. A successful compilation alone does not
 qualify this change; the full native capture still requires independent review.
+
+The [`9d8766d` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41470558345)
+completed boot readiness in 227.038 seconds and compiled the four retained test
+files. The hosted prerequisite passed in 8.419 seconds. Files preparation then
+reached the local provider and its final absent-folder query, but the enclosing
+780-second command limit expired at about 148.5 seconds of that case, before its
+180-second allowance. No preparation pass or native assertion failure was
+recorded; seed, checkpoint and import were not reached. The partial result has
+no complete summary or retained standalone PNG. All 22 owned process groups
+were stopped and reaped, the owned Simulator was deleted, and all 127 other
+device records matched. One post-TERM EPERM observation was followed by confirmed
+absence and reaping. Source-before matched; source-after, compiled-product and
+fixture-byte proofs were unavailable.
+
+The follow-up Intel-only preparation envelope is 1,200 seconds within the same
+3,000-second work deadline: 720 seconds for build/install/startup/finalization,
+plus the unchanged 300-second hosted and 180-second Files allowances. The
+approximately 624 seconds of observed non-case overhead supports this bounded
+allocation; it does not isolate compiler time or prove that the remaining test
+would pass. Admission also reserves the full driver and postcheck budgets;
+no retry, case limit, cleanup limit or workflow timeout is changed. This failed
+capture remains failed, and complete native qualification is still required.
 
 ## Distribution and physical-device limits
 
