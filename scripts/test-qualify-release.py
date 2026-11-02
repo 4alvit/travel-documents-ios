@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -343,7 +344,7 @@ class Guards(unittest.TestCase):
         (app/"payload").write_bytes(b"changed")
         self.assertNotEqual(q.tree_manifest(app,lambda:None),manifest)
 
-    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False, root_extra=False):
+    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False, root_extra=False, shared_failure=False):
         run=self.run_object();run.owned=OWNED;run.baseline={}
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
@@ -370,6 +371,7 @@ class Guards(unittest.TestCase):
                                         cwd=run.root,start_new_session=True)
                 (self.directory/"xcresult-summary.json").write_text(json.dumps(result))
                 (self.directory/"xcresult-tests.json").write_text(json.dumps(tree))
+                if shared_failure: raise RuntimeError("original native failure")
             def verify_fixtures(self):events.append("verify-fixtures")
             def remove_fixtures(self):
                 events.append("defer-root-cleanup")
@@ -383,6 +385,11 @@ class Guards(unittest.TestCase):
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
         run.prepare_native_seed=lambda driver:events.append("native-seed")
+        run.prepare_shared_build=lambda driver:events.append("shared-build")
+        if shared_failure:
+            run.shared_products={}
+            def changed(*args):raise RuntimeError("shared product changed")
+            run.observe_shared_build=changed
         def prepare_root(driver):
             self.assertTrue(driver.args.native_root)
             self.assertTrue(driver.args.native_seed)
@@ -396,8 +403,8 @@ class Guards(unittest.TestCase):
         run.native_seed_files=verify_root
         run.prepare_native_folder=lambda driver:self.fail("Native root must not create a folder")
         with patch.object(q,"load_module",return_value=module),patch.object(q.subprocess,"Popen",return_value=child):
-            if skipped or runtime_warning or root_extra:
-                with self.assertRaises(RuntimeError):run.run_driver()
+            if skipped or runtime_warning or root_extra or shared_failure:
+                with self.assertRaisesRegex(RuntimeError,"original native failure" if shared_failure else ".*"):run.run_driver()
             else:run.run_driver()
         self.assertFalse(run.xcode.active)
         stop=run.xcode.report["commands"][0]["stop"]
@@ -405,9 +412,16 @@ class Guards(unittest.TestCase):
         self.assertEqual(events.count("test"),1)
         return run,events
 
+    def test_shared_postcheck_cannot_mask_native_failure_or_skip_fixture_cleanup(self):
+        run,events=self.exercise_driver(shared_failure=True)
+        self.assertEqual(run.report["shared_build_errors"],["RuntimeError('shared product changed')"])
+        self.assertIn("verify-complete-root",events)
+        self.assertIn("defer-root-cleanup",events)
+        self.assertNotIn("products",events)
+
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","native-root","native-seed","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-root","shared-build","native-seed","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
 
     def test_post_main_extra_root_entry_prevents_capture_after_owned_process_stop(self):
@@ -943,6 +957,9 @@ class Guards(unittest.TestCase):
             self.assertEqual((value,kind),(str(group),("Shared","AppGroup")))
             return group
         run.container_path=container
+        driver.qualified_build=derived
+        run.report["shared_build"]={"observations":{"before_seed":{}}}
+        run.observe_shared_build=lambda driver,label:None
         return run,driver
 
     def test_seed_destination_is_empty_then_exact_bytes_with_pinned_identity(self):
@@ -981,6 +998,7 @@ class Guards(unittest.TestCase):
         self.assertTrue(run.report["native_seed_verified"]);self.assertEqual(len(calls),1)
         label,argv,seconds,env=calls[0]
         self.assertEqual((label,seconds),("native-seed-ui",300))
+        self.assertEqual(argv[-1], "test-without-building")
         self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
         self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
                          ["-only-testing:TripfolioUITests/"+q.SEED_CASE.removesuffix("()")])
@@ -1212,6 +1230,136 @@ class Guards(unittest.TestCase):
         self.assertNotIn('--schema-version', ci)
         self.assertNotIn('export DEVELOPER_DIR=', ci)
 
+
+
+class SharedBuildGuards(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve();self.run=q.Qualification(self.root,"batch",ENV)
+        self.run.owned=OWNED;self.run.baseline={}
+        self.derived=self.root/"build/QualificationPreparationDerivedData-123-1"
+        products=self.derived/"Build/Products/Debug-iphonesimulator";products.mkdir(parents=True)
+        app=products/"Tripfolio.app";host=app/"PlugIns/TripfolioTests.xctest"
+        ui=products/"TripfolioUITests-Runner.app/PlugIns/TripfolioUITests.xctest"
+        self.paths={"Tripfolio":app,"TripfolioTests":host,"TripfolioUITests":ui}
+        ids={"Tripfolio":q.APP_ID,"TripfolioTests":q.APP_ID+".tests","TripfolioUITests":q.APP_ID+".uitests"}
+        self.settings=[]
+        for target,path in self.paths.items():
+            path.mkdir(parents=True,exist_ok=True)
+            (path/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":ids[target]}))
+            (path/target).write_bytes(target.encode())
+            self.settings.append({"target":target,"buildSettings":{"CONFIGURATION":"Debug",
+                "PLATFORM_NAME":"iphonesimulator","PRODUCT_BUNDLE_IDENTIFIER":ids[target],
+                "SYMROOT":str(products.parent),"BUILT_PRODUCTS_DIR":str(products),
+                "TARGET_BUILD_DIR":str(path.parent),"FULL_PRODUCT_NAME":path.name}})
+        runner=ui.parent.parent
+        (runner/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":q.RUNNER_ID}))
+        frameworks=runner/"Frameworks";frameworks.mkdir()
+        (frameworks/"runtime.dylib").write_bytes(b"runtime")
+        self.paths["TripfolioUITestsRunner"]=runner
+        self.run.report.update(files_preparation_verified=True,
+            files_preparation={"derived_data":str(self.derived.relative_to(self.root))})
+        self.driver=SimpleNamespace(args=SimpleNamespace(native_root=True),remaining=lambda:1200,summary={})
+        self.calls=[]
+        data=self.root/"data";data.mkdir()
+        def command(label,argv,seconds=30):
+            self.calls.append((label,argv,seconds))
+            if label=="shared-build-settings":return json.dumps(self.settings)
+            return str(data if argv[-1]=="data" else app)
+        self.run.command=command
+        self.run.container_path=lambda value,*kind:Path(value)
+
+    def test_actual_paths_and_three_observations_keep_products_bytes_modes_and_clock(self):
+        self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.run.shared_products,self.paths)
+        self.assertEqual(self.driver.qualified_build,self.derived)
+        self.run.observe_shared_build(self.driver,"after_seed")
+        self.run.observe_shared_build(self.driver,"after_main")
+        proof=self.run.report["shared_build"]
+        self.assertEqual(set(proof["observations"]),{"before_seed","after_seed","after_main"})
+        self.assertEqual(len(self.calls),7);self.assertTrue(all(c[2]==30 for c in self.calls))
+        self.assertIn("-showBuildSettings",self.calls[0][1])
+        self.assertEqual(self.calls[0][1][-1],"build-for-testing")
+        for ref in proof["observations"].values():
+            raw=(self.run.out/ref["path"]).read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),ref["sha256"])
+            value=json.loads(raw);self.assertEqual(set(value["products"]),set(self.paths))
+            self.assertIn("modes",value["products"]["Tripfolio"])
+            self.assertIn("identity",value["installed"]["data"])
+        with self.assertRaises(RuntimeError):self.run.observe_shared_build(self.driver,"after_main")
+
+    def test_missing_duplicate_wrong_platform_identity_or_escaped_target_fails(self):
+        variants=[self.settings[:-1],self.settings+[self.settings[0]]]
+        for key,value in [("CONFIGURATION","Release"),("PLATFORM_NAME","iphoneos"),
+                          ("PRODUCT_BUNDLE_IDENTIFIER","wrong"),("TARGET_BUILD_DIR",str(self.root)),
+                          ("FULL_PRODUCT_NAME","../outside")]:
+            variant=copy.deepcopy(self.settings);variant[0]["buildSettings"][key]=value;variants.append(variant)
+        for value in variants:
+            with self.subTest(value=value),self.assertRaises(RuntimeError):
+                q.shared_product_paths(json.dumps(value),self.derived)
+        with self.assertRaises(RuntimeError):q.shared_product_paths(" "*(q.MIB+1),self.derived)
+        (self.paths["TripfolioTests"]/"Info.plist").unlink()
+        with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
+
+    def test_changed_bytes_or_modes_and_replaced_derived_directory_rejected(self):
+        self.run.prepare_shared_build(self.driver)
+        p=self.paths["Tripfolio"]/"Tripfolio";original=p.read_bytes();mode=p.stat().st_mode
+        p.write_bytes(b"different")
+        with self.assertRaisesRegex(RuntimeError,"products changed"):self.run.observe_shared_build(self.driver,"after_seed")
+        p.write_bytes(original);p.chmod(0o700)
+        with self.assertRaisesRegex(RuntimeError,"products changed"):self.run.observe_shared_build(self.driver,"after_seed")
+        p.chmod(mode)
+        self.run.shared_derived_identity=(0,0)
+        with self.assertRaisesRegex(RuntimeError,"identity changed"):self.run.observe_shared_build(self.driver,"after_seed")
+
+    def test_symlink_product_or_inactive_budget_never_starts_seed(self):
+        p=self.paths["TripfolioTests"];moved=p.with_name("Original.xctest");p.rename(moved);p.symlink_to(moved)
+        with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
+        self.driver.remaining=lambda:1174
+        with self.assertRaisesRegex(RuntimeError,"budget"):self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls,[])
+        self.driver.remaining=lambda:1200;self.run.commands.active[999]=object()
+        with self.assertRaisesRegex(RuntimeError,"writer"):self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls,[])
+
+    def test_installed_bytes_mismatch_and_expired_postcheck_fail(self):
+        self.run.prepare_shared_build(self.driver)
+        other=self.root/"different-app";other.mkdir();(other/"Info.plist").write_bytes(b"bad")
+        self.run.command=lambda *args:str(other)
+        with self.assertRaisesRegex(RuntimeError,"Installed app differs"):self.run.observe_shared_build(self.driver,"after_seed")
+        self.driver.remaining=lambda:0
+        with self.assertRaisesRegex(RuntimeError,"deadline"):self.run.observe_shared_build(self.driver,"after_seed")
+
+    def test_shared_command_preserves_stop_reserve_inside_driver_deadline(self):
+        self.driver.remaining=lambda:19
+        self.run.shared_build_command(self.driver,"observation",["query"])
+        self.assertEqual(self.calls[-1][2],11)
+        self.driver.remaining=lambda:8
+        with self.assertRaisesRegex(RuntimeError,"budget"):
+            self.run.shared_build_command(self.driver,"observation",["query"])
+
+    def test_shared_settings_require_same_symroot_and_real_bundle_identifier(self):
+        different=self.derived/"other";different.mkdir()
+        bad=copy.deepcopy(self.settings);bad[1]["buildSettings"]["SYMROOT"]=str(different)
+        with self.assertRaisesRegex(RuntimeError,"SYMROOT"):
+            q.shared_product_paths(json.dumps(bad),self.derived)
+        (self.paths["Tripfolio"]/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":"other"}))
+        with self.assertRaisesRegex(RuntimeError,"plist identity"):
+            q.shared_product_paths(json.dumps(self.settings),self.derived)
+
+    def test_products_uses_shared_built_paths_instead_of_driver_default(self):
+        self.run.prepare_shared_build(self.driver)
+        runner=self.paths["TripfolioUITests"].parent.parent
+        (runner/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":q.RUNNER_ID}))
+        self.run.command=lambda label,argv,seconds:str(runner if argv[-2]==q.RUNNER_ID else self.paths["Tripfolio"])
+        self.driver.directory=self.root/"nonexistent-default"
+        self.run.products(self.driver)
+        self.assertTrue(self.run.report["products_verified"])
+
+    def test_runner_frameworks_are_included_in_compiled_product_identity(self):
+        self.run.prepare_shared_build(self.driver)
+        (self.paths["TripfolioUITestsRunner"]/"Frameworks/runtime.dylib").write_bytes(b"changed runtime")
+        with self.assertRaisesRegex(RuntimeError,"products changed"):
+            self.run.observe_shared_build(self.driver,"after_seed")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

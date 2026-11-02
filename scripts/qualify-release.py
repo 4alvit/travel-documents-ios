@@ -128,6 +128,73 @@ def tree_manifest(root, check):
     return result
 
 
+def compiled_identity(path, check):
+    """Bounded bytes plus modes, with no traversal through product symlinks."""
+    content = tree_manifest(path, check)
+    modes = {}
+    for relative, entry in content.items():
+        check()
+        require(len(Path(relative).parts) <= 32, "Compiled product depth exceeded")
+        value = (path / relative).lstat()
+        modes[relative] = stat.S_IMODE(value.st_mode)
+        require((entry["kind"] == "directory" and stat.S_ISDIR(value.st_mode))
+                or (entry["kind"] == "file" and stat.S_ISREG(value.st_mode))
+                or (entry["kind"] == "link" and stat.S_ISLNK(value.st_mode)),
+                "Compiled product kind changed")
+    require(tree_manifest(path, check) == content, "Compiled product changed during mode capture")
+    return {"content": content, "modes": modes}
+
+
+def shared_product_paths(raw, derived):
+    """Use the producer's actual target paths; never select a guessed output."""
+    require(len(raw.encode()) <= MIB, "Build settings output too large")
+    values = json.loads(raw)
+    require(isinstance(values, list) and len(values) <= 16, "Invalid build settings targets")
+    expected = {"Tripfolio": APP_ID, "TripfolioTests": APP_ID + ".tests",
+                "TripfolioUITests": APP_ID + ".uitests"}
+    result = {}; symroot = None
+    for target, identifier in expected.items():
+        matches = [item for item in values if isinstance(item, dict) and item.get("target") == target]
+        require(len(matches) == 1, "Missing or ambiguous compiled target: " + target)
+        settings = matches[0].get("buildSettings")
+        require(isinstance(settings, dict) and settings.get("CONFIGURATION") == "Debug"
+                and settings.get("PLATFORM_NAME") == "iphonesimulator"
+                and settings.get("PRODUCT_BUNDLE_IDENTIFIER") == identifier,
+                "Unexpected compiled target identity")
+        paths = {}
+        for key in ("SYMROOT", "BUILT_PRODUCTS_DIR", "TARGET_BUILD_DIR"):
+            value = settings.get(key)
+            require(isinstance(value, str), "Missing compiled target path")
+            path = Path(value)
+            require(path.is_absolute() and path.is_dir() and path.resolve(strict=True) == path,
+                    "Invalid compiled target path")
+            require(path.is_relative_to(derived) and path != derived, "Compiled target escaped owned build")
+            paths[key] = path
+        require(symroot is None or symroot == paths["SYMROOT"], "Compiled targets have different SYMROOTs")
+        symroot = paths["SYMROOT"]
+        require(paths["TARGET_BUILD_DIR"].is_relative_to(symroot)
+                and paths["BUILT_PRODUCTS_DIR"].is_relative_to(symroot), "Target is outside compiled SYMROOT")
+        name = settings.get("FULL_PRODUCT_NAME")
+        require(isinstance(name, str) and name and Path(name).name == name and name not in (".", ".."),
+                "Invalid compiled target name")
+        path = paths["TARGET_BUILD_DIR"] / name
+        require(path.is_dir() and not path.is_symlink() and path.resolve(strict=True) == path,
+                "Compiled target is missing or indirect")
+        require(plistlib.loads(bounded_read(path, "Info.plist", MIB, lambda: None)).get("CFBundleIdentifier") == identifier,
+                "Compiled target plist identity differs")
+        result[target] = path
+    require(len(set(result.values())) == 3, "Compiled targets alias each other")
+    require(result["TripfolioTests"].is_relative_to(result["Tripfolio"]), "Hosted test is outside its app")
+    runners = [p for p in result["TripfolioUITests"].parents if p.suffix == ".app"]
+    require(len(runners) == 1 and runners[0].is_relative_to(derived)
+            and runners[0].resolve(strict=True) == runners[0], "Ambiguous shared UI runner")
+    require(plistlib.loads(bounded_read(runners[0], "Info.plist", MIB, lambda: None)).get("CFBundleIdentifier") == RUNNER_ID,
+            "Wrong shared runner identity")
+    # The enclosing runner owns XCTest runtime frameworks outside its .xctest.
+    result["TripfolioUITestsRunner"] = runners[0]
+    return result
+
+
 def bounded_read(root, relative, maximum, check):
     """Read one pinned regular file; never follow a library path component."""
     parts = relative.split("/")
@@ -735,6 +802,83 @@ class Qualification:
             "cleanup": "deferred to exclusive owned Simulator teardown"}
         self.save()
 
+    def prepare_shared_build(self, driver):
+        require(self.mode == "batch" and getattr(driver.args, "native_root", False)
+                and self.report.get("files_preparation_verified") is True
+                and not hasattr(self, "shared_products"), "Shared build requires one owned preparation")
+        require(driver.remaining() > SEED_SECONDS + 600 + 7 * 38 + 8,
+                "Insufficient shared-build observation and native budget")
+        derived = self.root / self.report["files_preparation"]["derived_data"]
+        expected = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
+                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
+        require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
+                "Invalid shared preparation build")
+        self.require_no_build_writer()
+        argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
+                "-destination", "platform=iOS Simulator,id=" + self.owned, "-derivedDataPath", derived,
+                "CODE_SIGNING_ALLOWED=NO", "-showBuildSettings", "-json", "build-for-testing"]
+        raw = self.shared_build_command(driver, "shared-build-settings", argv)
+        self.shared_products = shared_product_paths(raw, derived)
+        (self.out / "shared-build-settings.json").write_text(raw)
+        self.report["shared_build"] = {"derived_data": str(derived.relative_to(self.root)),
+            "action": "test-without-building", "settings_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "products": {key: str(path.relative_to(self.root)) for key, path in self.shared_products.items()},
+            "observations": {}}
+        self.shared_derived_identity = (derived.stat().st_dev, derived.stat().st_ino)
+        driver.qualified_build = derived
+        driver.summary["qualified_build"] = self.report["shared_build"]["derived_data"]
+        self.observe_shared_build(driver, "before_seed")
+
+    def shared_build_command(self, driver, label, argv):
+        seconds = min(30, driver.remaining() - 8)
+        require(seconds > 0, "No bounded shared-build command budget")
+        return self.command(label, argv, seconds)
+
+    def require_no_build_writer(self):
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Shared build writer unresolved")
+
+    def observe_shared_build(self, driver, label):
+        require(label in ("before_seed", "after_seed", "after_main", "final_after_failure")
+                and label not in self.report["shared_build"]["observations"], "Invalid shared build observation")
+        self.require_no_build_writer()
+        def check():
+            self.check()
+            require(driver.remaining() > 0, "Shared build observation exceeded driver deadline")
+        check()
+        derived = driver.qualified_build
+        require(derived.resolve(strict=True) == derived
+                and (derived.stat().st_dev, derived.stat().st_ino) == self.shared_derived_identity,
+                "Shared derived data identity changed")
+        for path in self.shared_products.values():
+            require(path.resolve(strict=True) == path and path.is_relative_to(derived), "Shared product path changed")
+        products = {key: compiled_identity(path, check) for key, path in self.shared_products.items()}
+        if hasattr(self, "shared_product_identity"):
+            require(products == self.shared_product_identity, "Compiled products changed between phases")
+        else:
+            self.shared_product_identity = products
+        installed = {}
+        for kind in ("app", "data"):
+            value = self.shared_build_command(driver, "shared-" + label + "-" + kind,
+                ["xcrun", "simctl", "get_app_container", self.owned, APP_ID, kind]).strip()
+            path = self.container_path(value, "Bundle" if kind == "app" else "Data", "Application")
+            check(); info = path.lstat()
+            installed[kind] = {"path": str(path), "identity": [info.st_dev, info.st_ino],
+                               "mode": stat.S_IMODE(info.st_mode)}
+            if kind == "app":
+                identity = compiled_identity(path, check)
+                require(identity["content"] == products["Tripfolio"]["content"],
+                        "Installed app differs from shared compiled bytes")
+                installed[kind]["manifest"] = identity
+        record = {"products": products, "installed": installed,
+                  "data_note": "Location only; synthetic library content intentionally changes during tests."}
+        name = "shared-build-" + label + ".json"
+        raw = json.dumps(record, sort_keys=True, indent=2) + "\n"
+        (self.out / name).write_text(raw)
+        self.report["shared_build"]["observations"][label] = {"path": name,
+            "sha256": hashlib.sha256(raw.encode()).hexdigest()}
+        self.save()
+
     def prepare_native_seed(self, driver):
         require(self.mode == "batch" and "native_seed" not in self.report
                 and self.report.get("files_preparation_verified") is True
@@ -758,6 +902,9 @@ class Qualification:
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
                 "Invalid shared preparation build")
+        require(getattr(driver, "qualified_build", None) == derived
+                and "before_seed" in self.report.get("shared_build", {}).get("observations", {}),
+                "Native seed lacks verified shared products")
         self.report["native_seed"] = {"calls": 1, "case": SEED_CASE, "phase_seconds": SEED_SECONDS,
             "case_seconds": SEED_CASE_SECONDS, "token": driver.token, "ingress": "native Save to Files",
             "driver_deadline": driver.deadline - self.started, "driver_remaining_before": driver.remaining(),
@@ -769,7 +916,7 @@ class Qualification:
             "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(SEED_CASE_SECONDS),
             "-maximum-test-execution-time-allowance", str(SEED_CASE_SECONDS), "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "native-seed.xcresult",
-            "-only-testing:TripfolioUITests/" + SEED_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+            "-only-testing:TripfolioUITests/" + SEED_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test-without-building"]
         previous = self.commands.ops.env
         self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI": "1",
             "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": driver.token,
@@ -795,6 +942,7 @@ class Qualification:
             self.report["native_seed_inspection_error"] = repr(error)
             if failure is None: failure = error
         if failure is not None: raise failure
+        self.observe_shared_build(driver, "after_seed")
         self.report["native_seed_verified"] = True
         self.report["native_seed"]["destination_fixtures"] = [
             {key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]]
@@ -862,6 +1010,7 @@ class Qualification:
             driver.prepare()
             if self.mode == "batch":
                 self.prepare_native_root(driver)
+                self.prepare_shared_build(driver)
                 self.prepare_native_seed(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
             require(time.monotonic() + remaining + 8 < self.work_deadline,
@@ -886,6 +1035,13 @@ class Qualification:
                     record.update(error=repr(error), outcome="failed")
                     failure = failure or error
             if not self.xcode.active and not self.xcode.unknown_spawn:
+                if self.mode == "batch" and hasattr(self, "shared_products"):
+                    try:
+                        label = "after_main" if self.xcode.report["commands"] else "final_after_failure"
+                        self.observe_shared_build(driver, label)
+                    except BaseException as error:
+                        self.report.setdefault("shared_build_errors", []).append(repr(error))
+                        failure = failure or error
                 try:
                     if self.mode == "batch":
                         if driver.fixture_directory is not None:
@@ -941,11 +1097,16 @@ class Qualification:
         self.report["selected_cases"] = expected
 
     def products(self, driver):
-        derived = driver.directory / "DerivedData" if self.mode == "batch" else self.root / "build/DerivedData"
-        directory = derived / "Build/Products/Debug-iphonesimulator"
-        runners = list(directory.glob("*-Runner.app")); require(len(runners) == 1, "Ambiguous built test runner")
+        if self.mode == "batch" and hasattr(self, "shared_products"):
+            app = self.shared_products["Tripfolio"]
+            runner = self.shared_products["TripfolioUITestsRunner"]
+        else:
+            derived = driver.directory / "DerivedData" if self.mode == "batch" else self.root / "build/DerivedData"
+            directory = derived / "Build/Products/Debug-iphonesimulator"
+            runners = list(directory.glob("*-Runner.app")); require(len(runners) == 1, "Ambiguous built test runner")
+            app, runner = directory / "Tripfolio.app", runners[0]
         manifests = {}
-        for identifier, built in ((APP_ID, directory / "Tripfolio.app"), (RUNNER_ID, runners[0])):
+        for identifier, built in ((APP_ID, app), (RUNNER_ID, runner)):
             built_manifest = tree_manifest(built, self.check)
             require(plistlib.loads((built / "Info.plist").read_bytes()).get("CFBundleIdentifier") == identifier,
                     "Wrong built bundle identifier")

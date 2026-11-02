@@ -53,6 +53,9 @@ class RootGuards(unittest.TestCase):
         run.report["files_preparation_verified"] = True
         derived = root / "build/QualificationPreparationDerivedData-123-1"; derived.mkdir()
         run.report["files_preparation"] = {"derived_data": str(derived.relative_to(root))}
+        driver.qualified_build = derived
+        run.report["shared_build"] = {"observations": {"before_seed": {}}}
+        run.observe_shared_build = Mock()
         return run, driver, provider
 
     def save_files(self, driver):
@@ -169,6 +172,8 @@ class RootGuards(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         label, argv, seconds, env = calls[0]
         self.assertEqual((label, seconds), ("native-seed-ui", 300))
+        self.assertEqual(argv[-1], "test-without-building")
+        run.observe_shared_build.assert_called_once_with(driver, "after_seed")
         self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "180")
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI"], "1")
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN"], TOKEN)
