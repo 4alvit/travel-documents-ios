@@ -152,6 +152,7 @@ class Driver:
         self.actions = (self.directory / "actions.jsonl").open("w", encoding="utf-8", buffering=1)
         self.process = None
         self.fixture_directory = None
+        self.native_folder_destination = None
         self.fixture_identity = None
         self.provider_identity = None
         self.summary = {"status": "running", "started_at": timestamp(), "device": args.device,
@@ -250,9 +251,23 @@ class Driver:
             raise RuntimeError("The exact Files group has no existing File Provider Storage directory")
         self.provider_identity = (provider.stat().st_dev, provider.stat().st_ino)
         owned = provider / self.folder_name
-        owned.mkdir(mode=0o700)  # No exist_ok: an existing folder is never adopted.
-        self.fixture_directory = owned
-        self.fixture_identity = (owned.stat().st_dev, owned.stat().st_ino)
+        native_folder = getattr(self.args, "native_folder", False)
+        if native_folder:
+            if not getattr(self.args, "native_seed", False):
+                raise RuntimeError("Native folder creation requires native file seeding")
+            try:
+                owned.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise RuntimeError("Native folder destination must not already exist")
+            # An absent path is an intent, not ownership of an existing leaf.
+            # Qualification adopts only the verified empty native-created leaf.
+            self.native_folder_destination = owned
+        else:
+            owned.mkdir(mode=0o700)  # No exist_ok: an existing folder is never adopted.
+            self.fixture_directory = owned
+            self.fixture_identity = (owned.stat().st_dev, owned.stat().st_ino)
         copies = self.directory / "fixtures"
         copies.mkdir(mode=0o700)
         fixtures = []
@@ -260,8 +275,11 @@ class Driver:
                             ("synthetic-insurance.pdf", "SYNTHETIC INSURANCE")]:
             data = pdf(title)
             (copies / name).write_bytes(data)
-            with (owned / name).open("xb") as destination:
-                destination.write(data)
+            # Diagnostic qualification may create the same destination bytes
+            # through native Save to Files; the ordinary driver keeps its path.
+            if not getattr(self.args, "native_seed", False):
+                with (owned / name).open("xb") as destination:
+                    destination.write(data)
             fixtures.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                              "retained_copy": str(copies / name)})
         self.summary.update({"fixture_directory": str(owned), "group_identifier": GROUP, "fixtures": fixtures})
@@ -269,7 +287,9 @@ class Driver:
             "device": self.args.device, "folder": self.folder_name, "directory": str(owned),
             "group_identifier": GROUP, "fixtures": fixtures,
         }, indent=2) + "\n", encoding="utf-8")
-        self.record("seeded_owned_folder", path=str(owned), fixtures=fixtures)
+        self.record("native_folder_absence_verified" if native_folder else
+                    "prepared_empty_owned_folder" if getattr(self.args, "native_seed", False)
+                    else "seeded_owned_folder", path=str(owned), fixtures=fixtures)
         self.save()
 
     def run_test(self):

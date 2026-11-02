@@ -75,8 +75,34 @@ CASES = r'''
         check(select([direct, good, wrapper()]) === direct, "direct path precedes ambiguous wrappers")
         let secondDirect = XCUIElement(full, hittable: true)
         check(select([direct, secondDirect]) === secondDirect, "original reverse direct order")
-        check(select([wrapper(), wrapper()]) == nil, "two geometric wrappers rejected")
-        check(select([wrapper(), XCUIElement(full)]) == nil, "ambiguous wrapper rejected before child selection")
+        check(select([wrapper(), wrapper()]) == nil, "two live geometric wrappers rejected")
+        let covered = wrapper(); covered.buttons.allElementsBoundByIndex[0].isHittable = false
+        let foreground = wrapper()
+        check(select([foreground, covered]) === foreground, "one live wrapper survives a covered geometric match")
+        check(select([covered, foreground]) === foreground, "covered match does not make selection order-dependent")
+        check(select([foreground, XCUIElement(full)]) === foreground, "empty geometric match does not hide the live wrapper")
+        let coveredToo = wrapper(); coveredToo.buttons.allElementsBoundByIndex[0].isHittable = false
+        check(select([covered, coveredToo]) == nil, "two covered wrappers are not active")
+        let offscreen = wrapper(); offscreen.buttons.allElementsBoundByIndex[0].frame.origin.y = 900
+        check(select([offscreen, foreground]) === foreground, "offscreen live child does not create active ambiguity")
+        let absentChild = wrapper(); absentChild.buttons.allElementsBoundByIndex[0].exists = false
+        check(select([absentChild, foreground]) === foreground, "missing child does not create active ambiguity")
+        covered.buttons.allElementsBoundByIndex[0].isHittable = true
+        check(select([covered, foreground]) == nil, "newly active second wrapper rejects on fresh observation")
+        // Recorded matched-26.2 Pro/underlying-trip geometry; live traits are
+        // controlled because debugDescription does not serialize isHittable.
+        let oldTrip = XCUIElement(full)
+        oldTrip.buttons.allElementsBoundByIndex = [
+            XCUIElement(CGRect(x: 16, y: 452.7, width: 370, height: 125), hittable: false)
+        ]
+        let pro = XCUIElement(CGRect(x: 0, y: 62, width: 402, height: 812))
+        pro.staticTexts.allElementsBoundByIndex = [
+            XCUIElement(CGRect(x: 32, y: 261.5, width: 278, height: 81.7), hittable: true)
+        ]
+        check(h.revealContainer([oldTrip, pro],
+              navigationFrame: CGRect(x: 0, y: 78, width: 402, height: 54),
+              viewport: CGRect(x: 6, y: 140, width: 390, height: 726)) === pro,
+              "recorded modal geometry uses only the live foreground witness")
         check(select([]) == nil, "missing container rejected")
         let absent = wrapper(); absent.exists = false
         check(select([absent]) == nil, "absent wrapper rejected")
@@ -176,7 +202,7 @@ def main() -> None:
         checked(["xcrun", "swiftc", "-swift-version", "6", "-strict-concurrency=complete",
                  "-parse-as-library", str(source), "-o", str(executable)], timeout=60)
         output = checked([str(executable)], timeout=30)
-        if output.strip() != "PASS 38 actual List/count guards; native UI calls=0":
+        if output.strip() != "PASS 45 actual List/count guards; native UI calls=0":
             raise RuntimeError("Unexpected guard count or output: " + output)
         print(output, end="")
 
