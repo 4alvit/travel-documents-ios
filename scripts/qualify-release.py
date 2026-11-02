@@ -103,12 +103,14 @@ def execution_profile(mode, env, architecture):
             "boot_seconds": 600 if intel_batch else 180}
 
 def focused_build_selection(mode, profile, files):
-    """Bind the Intel-only literal exclusion setting to the captured source set."""
-    if profile["name"] != "intel-batch":
+    """Bind batch-only literal exclusions to the verified runner and source set."""
+    if mode == "biometrics" and profile["name"] == "default":
         return None
-    require(mode == "batch" and profile["runner"] == "macos-15-intel"
-            and profile["runner_architecture"] == "X64" and profile["architecture"] == "x86_64",
-            "Focused build requires the verified Intel batch profile")
+    identity = tuple(profile.get(key) for key in ("name", "runner", "runner_architecture", "architecture"))
+    require(mode == "batch" and identity in (
+        ("default", "macos-15", "ARM64", "arm64"),
+        ("intel-batch", "macos-15-intel", "X64", "x86_64")),
+        "Focused build requires a verified batch profile")
     require(isinstance(files, dict), "Focused build requires captured source files")
     expected = set(BATCH_BUILD_RETAINED + BATCH_BUILD_EXCLUDED)
     actual = {name for name in files if name.startswith(("AppTests/", "UITests/"))}
