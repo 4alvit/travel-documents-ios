@@ -350,7 +350,7 @@ class Qualification:
         self.commands.limit = min(original, time.monotonic() + 300)
         try:
             runtimes = json.loads(self.command("runtimes", ["xcrun", "simctl", "list", "runtimes", "--json"], 150))
-            runtime, dtype = choose_runtime(runtimes, toolchain["sdk"], toolchain["architecture"])
+            runtime, dtype = choose_runtime(runtimes, "26.2" if self.mode == "batch" else toolchain["sdk"], toolchain["architecture"])
             self.baseline = self.inventory("baseline")
             self.intent = {"name": "TripDocket-Qualification-" + str(uuid.uuid4()), "runtime": runtime, "type": dtype}
             require(all(d["name"] != self.intent["name"] for d in self.baseline.values()), "Device name collision")
