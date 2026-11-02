@@ -107,6 +107,9 @@ jobs:
           retention-days: 7
   ui_guidance:
     name: Accessibility, localization and guidance UI
+    # Limit this workflow to two eligible macOS jobs during hosted capacity shortages.
+    needs: validate
+    if: ${{ !cancelled() }}
     runs-on: macos-15
     # Run 41440392190 completed all phone cases in 37m56s but exceeded the old 35m job cap.
     # 60m = checkout2 + toolchain3 + integration40 + cancellation5
@@ -167,6 +170,9 @@ jobs:
           retention-days: 7
   privacy_ipad:
     name: iPad privacy and support (${{ matrix.locale }})
+    # Keep iPad diagnostics eligible after ordinary Recovery failures.
+    needs: recovery
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       max-parallel: 1
