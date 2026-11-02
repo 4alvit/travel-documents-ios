@@ -186,7 +186,11 @@ using the same complete-original parser.
 
 The MainActor model owns one bounded, nonpersisted `BatchImportDraft` and its
 preparation task. File-picker, cancel and commit entry points carry the draft ID,
-so a late callback from an old picker cannot change a newer draft. Each item
+so a late callback from an old picker cannot change a newer draft. The draft
+also owns the current picker request: presentation dismissal does not cancel
+that request. A matching result can finish while the interface is covered;
+replaced requests and discarded drafts reject late results and dispose owned
+copies. Picker errors belong to the draft so they survive view replacement. Each item
 stores a confirmation snapshot; changing metadata removes its confirmation.
 The batch picker requests temporary copies through UIKit. A selection lease
 accepts only regular files inside the app's temporary directory and retains
