@@ -42,10 +42,14 @@ The default Arm profile uses the budgets below; the Intel batch contingency
 is described separately.
 Batch qualification checks the complete path from selecting existing files to
 reviewing, saving and reopening their originals. Before that functional suite,
-a separate invocation runs the hosted purchase prerequisite, then the recovery
-preparation case once through Export and Save to Files. Preparation checks an
-absent synthetic folder without saving a backup. This covers a preinitialized
-provider, not cold first use. The first result bundle must contain both exact
+a separate invocation runs the hosted purchase prerequisite, then the batch-only
+`testBatchPrepareFilesProviderDirectly` case. This case opens the existing Debug
+Simulator synthetic-PDF exporter, verifies the exact local Files root and an
+absent probe folder, and terminates before Save. Its recorded preparation UUID
+must be canonical and distinct from the later native-seed UUID. The independent
+Recovery and phone preparation paths still exercise backup export through the
+share sheet. Batch qualification covers a preinitialized provider, not cold
+first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
 Default Arm preparation has a 780-second build/test cap and an unchanged
@@ -340,7 +344,7 @@ Inspect the retained screenshots and the mode-specific byte/cleanup evidence
 too. Batch mode requires two distinct result-bundle reviews, in execution order:
 
 1. `files-prepare.xcresult`: `testVerifiedPurchaseAndRestoreFromLocalHistory`,
-   then `testRecoveryPrepareFilesProvider`, exactly two passed cases.
+   then `testBatchPrepareFilesProviderDirectly`, exactly two passed cases.
 2. `Tests.xcresult`: `testNativeSaveSeedsBothSyntheticOriginals`, then
    `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`, exactly two
    passed cases.

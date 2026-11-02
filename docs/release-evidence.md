@@ -1039,6 +1039,45 @@ The 19-observation bound, 120-second case allowance and outer limits are unchang
 Local geometry and counterexample checks passed; fewer native observations and
 a successful native run remain to be demonstrated.
 
+
+The [`e385cd5` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41481366981)
+passed the hosted prerequisite in 6.000 seconds. The revised share helper
+completed three live readiness observations and tapped Save to Files at
+152.72 seconds, but the preparation case exhausted its unchanged 180-second
+allowance while entering Files. The enclosing command finished after
+1,163.664 seconds, within its 1,200-second limit. Later root queries and
+attachment log events do not establish timely completion: the ordinary
+attachment export contains only the earlier disclosure screenshot and its
+hierarchy, with no final-root screenshot or hierarchy. No native seed,
+checkpoint or main import ran.
+
+All 219 extracted files matched the artifact, source-before matched all 176
+candidate files, and the original result remained unchanged. All 24 owned
+process groups were reaped, the owned Simulator was deleted, and the complete
+127-device baseline matched. Source-after, product and fixture-byte evidence
+was not produced. The failed capture remains unqualified.
+
+The next batch-only preparation case opens the existing Debug Simulator
+synthetic-PDF exporter directly. It verifies the native local Files root and
+an absent probe folder, then terminates before tapping Save. Its preparation
+UUID is recorded and must differ from the subsequent native-seed UUID. This
+removes the backup-disclosure and share-sheet detour from batch initialization;
+the separate Recovery and phone preparation path is unchanged. The two
+required preparation cases (hosted prerequisite and direct Files preparation)
+and two driver cases (native seed and full import) remain mandatory. The
+180-second native case, 1,200-second Intel preparation, 3,000-second global work
+and 180-second cleanup limits are unchanged. This source change still requires
+a complete native capture before acceptance.
+
+A supporting local run at `e0a4d92` passed the revised Russian maximum-type
+backup-warning case in 55.381 seconds. Seven actual overlapping captures
+covered the full text, the Export action remained visible before and after,
+and dismissing the warning returned to Settings. All ten screenshots and
+paired hierarchies were reviewed. Source and original result bytes remained
+unchanged, the owned Simulator was deleted and the complete local device
+baseline matched. This used Xcode/SDK 27.1 with iOS Simulator 27.0; it validates
+the gesture locally and does not substitute for the hosted qualification.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large

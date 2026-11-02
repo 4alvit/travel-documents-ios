@@ -209,6 +209,65 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
+    // Batch-only provider initialization. The temporary source UUID is not
+    // the later seed UUID; no destination Save or producer marker occurs here.
+    func testBatchPrepareFilesProviderDirectly() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_BATCH_PREPARE_UI"] == "1",
+                          "Opt in only for the owned direct batch preparation")
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        let token = try Self.directPreparationToken(environment, debugSimulator: debugSimulator)
+        let absentFolder = "TripDocket-Batch-Prepare-" + token
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
+                                                   "--ui-testing-native-batch-token", token]
+        app.launch()
+        let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+        let failed = app.staticTexts["nativeSeed.failure"]
+        try await wait("Direct preparation source is unavailable", app: app) {
+            failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
+        }
+        try check(!failed.exists && source.count == 1 && source.element.isEnabled && source.element.isHittable,
+                  app: app, "Direct preparation has no unique live native export source")
+        capture(app, "Batch preparation — native exporter before opening Files; no Save performed")
+        source.element.tap()
+        let picker = try await openNativeFilesRoot(app)
+        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+        try check(isNativeFilesRoot(app) && picker.cells.matching(identifier: absentFolder + ", Folder").count == 0
+                  && saved.count == 0 && !failed.exists,
+                  app: app, "Direct preparation lost its empty probe or exported a destination")
+        capture(app, "Batch preparation — exact local Files root; no Save performed")
+        app.terminate()
+        try await wait("Direct preparation fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
+    private static func directPreparationToken(_ environment: [String: String],
+                                               debugSimulator: Bool) throws -> String {
+        let token = environment["TRIPDOCKET_BATCH_PREPARE_TOKEN"] ?? ""
+        let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                           "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                           "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
+                           "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION"]
+        guard debugSimulator, environment["TRIPDOCKET_BATCH_PREPARE_UI"] == "1",
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              conflicting.allSatisfy({ environment[$0] == nil }) else {
+            throw BatchTestFailure(message: "Direct preparation requires its isolated Debug Simulator token")
+        }
+        return token
+    }
+
     func testNativeCreateOwnedFilesFolder() async throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",

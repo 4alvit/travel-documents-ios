@@ -15,7 +15,7 @@ MAX_LOG = 16 * 1024 * 1024
 MAX_LINE = 256 * 1024
 PREPARATION_TESTS = (
     'TripfolioTests/PlatformTests/testVerifiedPurchaseAndRestoreFromLocalHistory',
-    'TripfolioUITests/BatchImportUITests/testRecoveryPrepareFilesProvider',
+    'TripfolioUITests/BatchImportUITests/testBatchPrepareFilesProviderDirectly',
 )
 PREPARATION_CASES = tuple(test.split('/', 1)[1] + '()' for test in PREPARATION_TESTS)
 TESTS = (
