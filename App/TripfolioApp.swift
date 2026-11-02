@@ -405,6 +405,7 @@ private struct NativeSeedExportPicker: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: request.sources, asCopy: true)
+        picker.allowsMultipleSelection = request.sources.count > 1
         picker.delegate = context.coordinator
         return picker
     }
