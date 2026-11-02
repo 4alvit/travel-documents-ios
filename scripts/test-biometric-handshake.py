@@ -128,7 +128,38 @@ import Foundation
 import notify
 
 struct Failure: Error {}
-struct XCUIApplication {}
+@MainActor
+enum UI {
+    static var visible: Set<String> = []
+    static var covered: Set<String> = []
+    static var authentication = false
+    static var shareSheet = false
+    static var hittabilityReads: [String] = []
+}
+@MainActor
+struct Element {
+    let name: String
+    var exists: Bool { UI.visible.contains(name) }
+    var isHittable: Bool {
+        precondition(exists, "Must not read missing element hittability")
+        UI.hittabilityReads.append(name)
+        return !UI.covered.contains(name)
+    }
+    var buttons: Query { Query(prefix: name + "/") }
+    var firstMatch: Element { self }
+}
+@MainActor
+struct Query {
+    let prefix: String
+    subscript(_ name: String) -> Element { Element(name: prefix + name) }
+}
+@MainActor
+struct XCUIApplication {
+    var staticTexts: Query { Query(prefix: "text/") }
+    var navigationBars: Query { Query(prefix: "nav/") }
+    var textFields: Query { Query(prefix: "field/") }
+    var buttons: Query { Query(prefix: "button/") }
+}
 
 @MainActor
 enum Fake {
@@ -199,7 +230,14 @@ final class Harness {
     func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
         if !condition { throw Failure() }
     }
+    func require(_ message: String, app: XCUIApplication, condition: @MainActor () -> Bool) async throws {
+        if !condition() { throw Failure() }
+    }
+    func lockTitle(in app: XCUIApplication) -> Element { Element(name: "lock") }
+    func hasAuthenticationUI(in app: XCUIApplication) -> Bool { UI.authentication }
+    func hasShareSheet(in app: XCUIApplication) -> Bool { UI.shareSheet }
     // ACTUAL_REQUEST
+    // ACTUAL_UNLOCKED
 }
 
 @main
@@ -207,6 +245,24 @@ struct Main {
     @MainActor
     static func main() async {
         let harness = Harness()
+        if Fake.mode.hasPrefix("ui-") {
+            switch Fake.mode {
+            case "ui-editor": UI.visible = ["field/Document title"]
+            case "ui-covered": UI.visible = ["field/Document title"]; UI.covered = UI.visible
+            case "ui-locked": UI.visible = ["lock", "field/Document title"]
+            case "ui-authentication": UI.visible = ["field/Document title"]; UI.authentication = true
+            case "ui-share": UI.shareSheet = true
+            case "ui-missing": break
+            default: preconditionFailure("Unknown UI fixture")
+            }
+            var accepted = false
+            do { try await harness.requireUnlocked(XCUIApplication()); accepted = true } catch {}
+            precondition(accepted == ["ui-editor", "ui-share"].contains(Fake.mode))
+            let expectedReads = ["ui-editor", "ui-covered"].contains(Fake.mode) ? ["field/Document title"] : []
+            precondition(UI.hittabilityReads == expectedReads)
+            Swift.print("PASS \(Fake.mode)")
+            return
+        }
         if Fake.mode == "maximum" { Harness.biometricSequence = 64 }
         var completed = 0
         do {
@@ -252,10 +308,16 @@ class SwiftTests(unittest.TestCase):
                          "Task.sleep": "Fake.sleep"}
         for old, new in substitutions.items():
             method = method.replace(old, new)
+        unlocked_start = "    private func requireUnlocked("
+        unlocked_end = "\n    private func startAuthentication("
+        if text.count(unlocked_start) != 1 or text.count(unlocked_end) != 1:
+            raise AssertionError("Cannot identify the unique actual unlocked predicate")
+        unlocked = text[text.index(unlocked_start):text.index(unlocked_end, text.index(unlocked_start))]
+        unlocked = unlocked.replace("private func requireUnlocked", "func requireUnlocked")
         cls.directory = tempfile.TemporaryDirectory(prefix="tripdocket-biometric-handshake-")
         cls.addClassCleanup(cls.directory.cleanup)
         source = Path(cls.directory.name) / "main.swift"
-        source.write_text(SWIFT.replace("    // ACTUAL_REQUEST", method))
+        source.write_text(SWIFT.replace("    // ACTUAL_REQUEST", method).replace("    // ACTUAL_UNLOCKED", unlocked))
         cls.executable = Path(cls.directory.name) / "handshake"
         result = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
                                  str(source), "-o", str(cls.executable)],
@@ -280,6 +342,11 @@ class SwiftTests(unittest.TestCase):
     def test_non_success_paths_never_start_the_ui_postcondition(self):
         for mode in ("register-failure", "initial-stale", "wrong-event", "wrong-sequence",
                      "read-failure", "timeout", "at-deadline", "cancelled", "maximum", "bad-session"):
+            with self.subTest(mode=mode):
+                self.run_case(mode)
+
+    def test_unlocked_predicate_skips_missing_but_requires_live_hittability(self):
+        for mode in ("ui-editor", "ui-covered", "ui-locked", "ui-authentication", "ui-share", "ui-missing"):
             with self.subTest(mode=mode):
                 self.run_case(mode)
 
