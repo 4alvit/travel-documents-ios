@@ -52,7 +52,12 @@ class RootGuards(unittest.TestCase):
         driver.prepare()
         run.report["files_preparation_verified"] = True
         derived = root / "build/QualificationPreparationDerivedData-123-1"; derived.mkdir()
-        run.report["files_preparation"] = {"derived_data": str(derived.relative_to(root))}
+        run.report["files_preparation"] = {
+            "derived_data": str(derived.relative_to(root)),
+            "fixture_token": base.TOKEN,
+            "absent_folder_probe": "TripDocket-Batch-Prepare-" + base.TOKEN,
+            "ingress": "direct-native-export-no-save",
+        }
         driver.qualified_build = derived
         run.report["shared_build"] = {"observations": {"before_seed": {}}}
         run.observe_shared_build = Mock()
