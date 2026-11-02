@@ -10,6 +10,9 @@ struct BatchImportView: View {
     @Bindable var draft: BatchImportDraft
     @State private var showsFiles = false
     @State private var pickerError: String?
+    #if DEBUG && targetEnvironment(simulator)
+    @State private var importerDiagnostics = BatchImporterDiagnostics()
+    #endif
 
     private var isCommitting: Bool {
         if case .committing = draft.phase { return true }
@@ -115,6 +118,11 @@ struct BatchImportView: View {
                 } header: { Text(L10n.ui("batch.beforeSave", defaultValue: "Before you save")) }
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            #if DEBUG && targetEnvironment(simulator)
+            .modifier(BatchImporterDiagnosticValue(value: importerDiagnostics.value(
+                showsFiles: showsFiles, phase: draft.phase
+            )))
+            #endif
             .navigationTitle(L10n.ui("batch.navigationTitle", defaultValue: "Import files"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -129,6 +137,9 @@ struct BatchImportView: View {
             .interactiveDismissDisabled(true)
             .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.pdf, .jpeg, .png],
                           allowsMultipleSelection: true) { [draftID = draft.id] result in
+                #if DEBUG && targetEnvironment(simulator)
+                importerDiagnostics.record(result)
+                #endif
                 guard model.batchImportDraft?.id == draftID else { return }
                 switch result {
                 case .success(let urls):
@@ -149,6 +160,58 @@ struct BatchImportView: View {
         }
     }
 }
+
+#if DEBUG && targetEnvironment(simulator)
+/// Opt-in observations only. Counts saturate; no URL, filename or error payload
+/// is retained. This state never controls presentation or draft transitions.
+@MainActor
+private struct BatchImporterDiagnostics {
+    private let enabled = ProcessInfo.processInfo.arguments.contains("--ui-testing-batch-diagnostics")
+    private enum ResultKind: String { case none, success, failure }
+    private var callbackCount = 0
+    private var resultKind: ResultKind = .none
+    private var urlCount = 0
+
+    mutating func record(_ result: Result<[URL], Error>) {
+        guard enabled else { return }
+        callbackCount = min(callbackCount + 1, 99)
+        switch result {
+        case .success(let urls):
+            resultKind = .success
+            urlCount = min(urls.count, 11) // 11 means eleven or more, above the import limit.
+        case .failure:
+            resultKind = .failure
+            urlCount = 0
+        }
+    }
+
+    func value(showsFiles: Bool, phase: BatchImportDraft.Phase) -> String? {
+        guard enabled else { return nil }
+        let draftPhase: String
+        switch phase {
+        case .choosing: draftPhase = "choosing"
+        case .preparing: draftPhase = "preparing"
+        case .reviewing: draftPhase = "reviewing"
+        case .committing: draftPhase = "committing"
+        }
+        return "batch-importer showsFiles=\(showsFiles ? 1 : 0) callbackCount=\(callbackCount) resultKind=\(resultKind.rawValue) urlCount=\(urlCount) draftPhase=\(draftPhase)"
+    }
+}
+
+private struct BatchImporterDiagnosticValue: ViewModifier {
+    let value: String?
+
+    func body(content: Content) -> some View {
+        if let value {
+            content
+                .accessibilityIdentifier("batch.importer")
+                .accessibilityValue(Text(verbatim: value))
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 private struct BatchItemReviewView: View {
     @Environment(AppModel.self) private var model

@@ -106,6 +106,9 @@ Own App/PurchaseManager.swift, App/PrivacyLock.swift, App/ReminderService.swift,
 App/Tripfolio.storekit. `@MainActor @Observable final class PurchaseManager`
 exposes `isPro: Bool`, `displayPrice: String?`, `statusMessage: String?`,
 `isBusy: Bool`, async `load()`, `purchase()`, `restore()`.
+An idle `load()` reserves `isBusy` before awaiting entitlement or catalog reads.
+A load arriving during another operation may refresh entitlements, but returns
+without later acquiring the catalog or clearing that operation's busy state.
 SKU `com.4alvit.tripfolio.pro`, non-consumable, config price $24.99.
 `PrivacyLockView<Content: View>` initializer `init(@ViewBuilder content: () -> Content)`
 wraps root, device authentication at launch/resume; inactive snapshot cover.

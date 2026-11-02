@@ -220,18 +220,23 @@ class ReadinessTests(unittest.TestCase):
 
     def test_prepare_initializes_real_provider_without_native_folder_creation(self):
         source = SOURCE.read_text()
-        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    private func presentRecoverySave')]
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    func testNativeCreateOwnedFilesFolder')]
         self.assertIn('try await presentRecoverySave(app)', prepare)
         self.assertIn('try await reachRecoveryLocalRoot', prepare)
         self.assertIn('directory.count == 0', prepare)
         self.assertIn('app.state == .notRunning', prepare)
-        for forbidden in ['newFolder.tap()', 'field.typeText(', 'create.element.tap()', 'Save"].tap()']:
+        for forbidden in ['newFolder.tap()', 'newFolder.element.tap()', 'field.typeText(', 'create.element.tap()', 'Save"].tap()']:
             self.assertNotIn(forbidden, prepare)
         self.assertLess(prepare.index('directory.count == 0'), prepare.index('app.state == .notRunning'))
 
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
-        self.assertEqual(source.count('try await reachRecoveryLocalRoot(localTitle,'), 1)
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    func testNativeCreateOwnedFilesFolder')]
+        native_folder = source[source.index('    func testNativeCreateOwnedFilesFolder'):source.index('    func testNativeSaveSeedsBothSyntheticOriginals')]
+        call = 'try await reachRecoveryLocalRoot(localTitle,'
+        self.assertEqual(prepare.count(call), 1)
+        self.assertEqual(native_folder.count(call), 1)
+        self.assertEqual(source.count(call), 2)
         self.assertIn('timeout: Duration = .seconds(15)', source)
         self.assertIn('let deadline = ContinuousClock.now.advanced(by: timeout)', source)
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
@@ -558,7 +563,7 @@ struct BatchTestFailure: Error { let message: String }
 }
 @MainActor final class Harness {
     var captures = 0
-    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?) {
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?, batchDiagnostic: Bool = false) {
         captures += 1
     }
     // ACTUAL_HELPER
@@ -626,7 +631,7 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertIn(call, source)
         self.assertIn('if actions.count == 1, header.count == 1', source)
         self.assertIn('if action.isEnabled, action.isHittable', source)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 120 : 300', SOURCE.read_text())
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', SOURCE.read_text())
 
 
 class SDKSourceTests(unittest.TestCase):

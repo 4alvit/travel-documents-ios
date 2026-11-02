@@ -218,20 +218,27 @@ final class LocalizationUITests: XCTestCase {
         var previousFrame: CGRect?
         var usedFallback = false
         var lastDragWasFallback = false
+        // One call stays in the same navigation context. Retain only the
+        // chosen element; observe its geometry again after every gesture.
+        var selectedContainer: XCUIElement?
         for attempt in 0...10 {
             if target.exists && target.isHittable && visiblePortion(
                 of: target, in: app, navigationTitle: navigationTitle,
                 preferWholeFrame: preferWholeFrame
             ) { return }
             guard attempt < 10 else { break }
-            guard let container = activeScrollContainer(in: app, navigationTitle: navigationTitle) else {
+            if selectedContainer == nil {
+                selectedContainer = activeScrollContainer(in: app, navigationTitle: navigationTitle)
+            }
+            guard let container = selectedContainer else {
                 attach(app, name: "No active scroll container — \(description)")
                 throw LocalizationFailure(message: "No hittable app scrollView/collectionView for \(description)")
             }
             // Keep both endpoints inside the visible List/Form. Full swipes
             // overshot partly visible rows and oscillated across the viewport.
-            let viewport = visibleViewport(in: app, navigationTitle: navigationTitle)
-                .intersection(container.frame).insetBy(dx: 12, dy: 12)
+            let visibleBounds = visibleViewport(in: app, navigationTitle: navigationTitle)
+            let containerFrame = container.frame
+            let viewport = visibleBounds.intersection(containerFrame).insetBy(dx: 12, dy: 12)
             guard !viewport.isNull, viewport.width > 24, viewport.height > 80 else {
                 attach(app, name: "No safe drag viewport — \(description)")
                 throw LocalizationFailure(message: "No safe scroll viewport for \(description)")
@@ -265,8 +272,8 @@ final class LocalizationUITests: XCTestCase {
             var translation = correction > 0 ? distance : -distance
             let origin = container.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
             var start = origin.withOffset(CGVector(
-                dx: viewport.midX - container.frame.minX,
-                dy: viewport.midY - container.frame.minY
+                dx: viewport.midX - containerFrame.minX,
+                dy: viewport.midY - containerFrame.minY
             ))
             if let fallbackAnchor, unchanged, !usedFallback {
                 // The iPad wrapper can miss a pan begun on the interactive trip
@@ -332,23 +339,58 @@ final class LocalizationUITests: XCTestCase {
         }
     }
 
+    private func snapshotViewport(in app: XCUIApplication, navigationTitle: String?) -> CGRect? {
+        if let root = try? app.snapshot(), let nodes = snapshotNodes(root) {
+            let windows = nodes.filter { $0.elementType == .window }
+            let navigation = navigationTitle.map { title in
+                nodes.filter { $0.elementType == .navigationBar && ($0.identifier == title || $0.label == title) }
+            } ?? []
+            let bars = nodes.filter { $0.elementType == .tabBar }
+            // Equal window frames preserve the first-window geometry without
+            // assuming that query order and snapshot traversal order agree.
+            if let window = windows.first, finiteFrame(window.frame),
+               windows.allSatisfy({ $0.frame == window.frame }), bars.count <= 1,
+               navigationTitle == nil || navigation.count == 1,
+               (navigation + bars).allSatisfy({ finiteFrame($0.frame) }) {
+                var viewport = window.frame.insetBy(dx: 2, dy: 2)
+                if let title = navigationTitle, let frame = navigation.first?.frame,
+                   app.navigationBars[title].isHittable {
+                    let top = max(viewport.minY, frame.maxY)
+                    viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
+                                      width: min(viewport.width, frame.width),
+                                      height: max(0, viewport.maxY - top))
+                }
+                if let frame = bars.first?.frame, app.tabBars.element.isHittable,
+                   frame.minY > viewport.midY {
+                    viewport.size.height = max(0, min(viewport.maxY, frame.minY) - viewport.minY)
+                }
+                return viewport
+            }
+        }
+        return nil
+    }
+
     private func visibleViewport(in app: XCUIApplication, navigationTitle: String?) -> CGRect {
+        if let viewport = snapshotViewport(in: app, navigationTitle: navigationTitle) { return viewport }
+        // Unexpected or ambiguous snapshot shapes retain the live-query path.
         var viewport = app.windows.firstMatch.exists ? app.windows.firstMatch.frame : app.frame
         viewport = viewport.insetBy(dx: 2, dy: 2)
         if let navigationTitle {
             let navigation = app.navigationBars[navigationTitle]
             if navigation.exists, navigation.isHittable {
-                let top = max(viewport.minY, navigation.frame.maxY)
-                viewport = CGRect(x: max(viewport.minX, navigation.frame.minX), y: top,
-                                  width: min(viewport.width, navigation.frame.width),
+                let frame = navigation.frame
+                let top = max(viewport.minY, frame.maxY)
+                viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
+                                  width: min(viewport.width, frame.width),
                                   height: max(0, viewport.maxY - top))
             }
         }
         // Floating bottom tabs can overlap a List row that still reports exists.
         // Top-mounted iPad tabs should not remove the bottom half of the viewport.
         for bar in app.tabBars.allElementsBoundByIndex where bar.exists && bar.isHittable {
-            if bar.frame.minY > viewport.midY {
-                viewport.size.height = max(0, min(viewport.maxY, bar.frame.minY) - viewport.minY)
+            let frame = bar.frame
+            if frame.minY > viewport.midY {
+                viewport.size.height = max(0, min(viewport.maxY, frame.minY) - viewport.minY)
             }
         }
         return viewport
@@ -372,27 +414,41 @@ final class LocalizationUITests: XCTestCase {
 
     private func verifyCompleteBackupExportAction(in app: XCUIApplication, checkpoint: String) throws {
         let dialog = app.sheets[backupWarningTitle].firstMatch
-        try require(dialog.exists, app: app, "Backup warning is missing \(checkpoint)")
         let exportPredicate = NSPredicate(format: "label == %@", exportActionTitle)
-        let warningPredicate = NSPredicate(format: "label == %@", backupWarningText)
-        let panes = dialog.scrollViews
-        var candidates: [XCUIElement] = []
-        for index in 0..<panes.count {
-            let pane = panes.element(boundBy: index)
-            if pane.buttons.matching(exportPredicate).count == 1
-                && pane.staticTexts.matching(warningPredicate).count == 0 {
-                candidates.append(pane)
+        let button: XCUIElement
+        let viewport: CGRect
+        let frame: CGRect
+        if let observation = backupWarningObservation(in: app) {
+            // The snapshot proves a unique exact-label button in a unique
+            // action-only pane. Resolve that same button for live hit testing.
+            button = dialog.buttons.matching(exportPredicate).firstMatch
+            try require(button.exists && button.isEnabled && button.isHittable,
+                        app: app, "Backup export action is unavailable \(checkpoint)")
+            viewport = observation.actionFrame.intersection(observation.dialogFrame)
+                .intersection(observation.windowFrame)
+            frame = observation.buttonFrame
+        } else {
+            try require(dialog.exists, app: app, "Backup warning is missing \(checkpoint)")
+            let warningPredicate = NSPredicate(format: "label == %@", backupWarningText)
+            let panes = dialog.scrollViews
+            var candidates: [XCUIElement] = []
+            for index in 0..<panes.count {
+                let pane = panes.element(boundBy: index)
+                if pane.buttons.matching(exportPredicate).count == 1
+                    && pane.staticTexts.matching(warningPredicate).count == 0 {
+                    candidates.append(pane)
+                }
             }
+            try require(candidates.count == 1, app: app,
+                        "Backup export action pane is missing or ambiguous \(checkpoint)")
+            let actions = candidates[0]
+            button = actions.buttons.matching(exportPredicate).firstMatch
+            try require(button.exists && button.isEnabled && button.isHittable,
+                        app: app, "Backup export action is unavailable \(checkpoint)")
+            let window = app.windows.firstMatch.exists ? app.windows.firstMatch.frame : app.frame
+            viewport = actions.frame.intersection(dialog.frame).intersection(window)
+            frame = button.frame
         }
-        try require(candidates.count == 1, app: app,
-                    "Backup export action pane is missing or ambiguous \(checkpoint)")
-        let actions = candidates[0]
-        let button = actions.buttons.matching(exportPredicate).firstMatch
-        try require(button.exists && button.isEnabled && button.isHittable,
-                    app: app, "Backup export action is unavailable \(checkpoint)")
-        let window = app.windows.firstMatch.exists ? app.windows.firstMatch.frame : app.frame
-        let viewport = actions.frame.intersection(dialog.frame).intersection(window)
-        let frame = button.frame
         try require(!viewport.isNull && !viewport.isEmpty && !frame.isEmpty
                     && frame.minX.isFinite && frame.minY.isFinite
                     && frame.width.isFinite && frame.height.isFinite,
@@ -434,11 +490,22 @@ final class LocalizationUITests: XCTestCase {
         var slices: [ClosedRange<CGFloat>] = []
 
         for attempt in 0...18 {
-            try require(dialog.exists && body.exists && warning.exists,
-                        app: app, "Backup warning disappeared while reading")
-            let window = app.windows.firstMatch.exists ? app.windows.firstMatch.frame : app.frame
-            let viewport = body.frame.intersection(dialog.frame).intersection(window).insetBy(dx: 2, dy: 2)
-            let frame = warning.frame
+            let viewport: CGRect
+            let frame: CGRect
+            if let observation = backupWarningObservation(in: app) {
+                // Bind the unique snapshot warning to the retained body query
+                // used below for dragging; a reordered pane must not pass.
+                try require(warning.exists, app: app, "Backup warning disappeared while reading")
+                viewport = observation.bodyFrame.intersection(observation.dialogFrame)
+                    .intersection(observation.windowFrame).insetBy(dx: 2, dy: 2)
+                frame = observation.warningFrame
+            } else {
+                try require(dialog.exists && body.exists && warning.exists,
+                            app: app, "Backup warning disappeared while reading")
+                let window = app.windows.firstMatch.exists ? app.windows.firstMatch.frame : app.frame
+                viewport = body.frame.intersection(dialog.frame).intersection(window).insetBy(dx: 2, dy: 2)
+                frame = warning.frame
+            }
             try require(!viewport.isNull && viewport.width > 44 && viewport.height > 80
                         && !frame.isEmpty && frame.minX.isFinite && frame.minY.isFinite
                         && frame.width.isFinite && frame.height.isFinite,
@@ -479,9 +546,11 @@ final class LocalizationUITests: XCTestCase {
             let correction = viewport.minY + overlap - (frame.minY + coveredThrough)
             let distance = min(160, min(viewport.height * 0.4, max(24, abs(correction))))
             let translation = correction > 0 ? distance : -distance
+            // Capture may take time, so read this frame after the attachment.
+            let bodyFrame = body.frame
             let start = body.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-                .withOffset(CGVector(dx: viewport.midX - body.frame.minX,
-                                     dy: viewport.midY - body.frame.minY))
+                .withOffset(CGVector(dx: viewport.midX - bodyFrame.minX,
+                                     dy: viewport.midY - bodyFrame.minY))
             let end = start.withOffset(CGVector(dx: 0, dy: translation))
             print("WARNING_DRAG attempt=\(attempt) dy=\(translation)")
             start.press(forDuration: 0.05, thenDragTo: end,
@@ -489,6 +558,62 @@ final class LocalizationUITests: XCTestCase {
             try await Task.sleep(for: .milliseconds(150))
         }
         throw LocalizationFailure(message: "Complete backup warning text was not reachable after bounded in-pane scrolling")
+    }
+
+    private struct BackupWarningObservation {
+        let windowFrame: CGRect
+        let dialogFrame: CGRect
+        let bodyFrame: CGRect
+        let warningFrame: CGRect
+        let actionFrame: CGRect
+        let buttonFrame: CGRect
+    }
+
+    private func backupWarningObservation(in app: XCUIApplication) -> BackupWarningObservation? {
+        guard let root = try? app.snapshot(), let nodes = snapshotNodes(root) else { return nil }
+        let windows = nodes.filter { $0.elementType == .window }
+        let dialogs = nodes.filter {
+            $0.elementType == .sheet && ($0.identifier == backupWarningTitle || $0.label == backupWarningTitle)
+        }
+        guard let window = windows.first, finiteFrame(window.frame),
+              windows.allSatisfy({ $0.frame == window.frame }), dialogs.count == 1,
+              let descendants = snapshotNodes(dialogs[0]) else { return nil }
+        let warnings = descendants.filter { $0.elementType == .staticText && $0.label == backupWarningText }
+        let buttons = descendants.filter { $0.elementType == .button && $0.label == exportActionTitle }
+        guard warnings.count == 1, buttons.count == 1 else { return nil }
+        var bodies: [XCUIElementSnapshot] = []
+        var actions: [XCUIElementSnapshot] = []
+        for pane in descendants where pane.elementType == .scrollView {
+            guard let children = snapshotNodes(pane) else { return nil }
+            let warningCount = children.filter { $0.elementType == .staticText && $0.label == backupWarningText }.count
+            let buttonCount = children.filter { $0.elementType == .button && $0.label == exportActionTitle }.count
+            if warningCount == 1 && buttonCount == 0 { bodies.append(pane) }
+            if warningCount == 0 && buttonCount == 1 { actions.append(pane) }
+        }
+        guard bodies.count == 1, actions.count == 1,
+              (dialogs + warnings + buttons + bodies + actions).allSatisfy({ finiteFrame($0.frame) }) else {
+            return nil
+        }
+        // These facts come from one fresh snapshot per observation, never from
+        // an earlier slice or capture. No tree index is used as a query index.
+        return BackupWarningObservation(windowFrame: window.frame, dialogFrame: dialogs[0].frame,
+                                        bodyFrame: bodies[0].frame, warningFrame: warnings[0].frame,
+                                        actionFrame: actions[0].frame, buttonFrame: buttons[0].frame)
+    }
+
+    private func snapshotNodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+        var nodes: [XCUIElementSnapshot] = []
+        @MainActor func visit(_ node: XCUIElementSnapshot, depth: Int) -> Bool {
+            guard depth <= 60, nodes.count < 2_000 else { return false }
+            nodes.append(node)
+            return node.children.allSatisfy { visit($0, depth: depth + 1) }
+        }
+        return visit(root, depth: 0) ? nodes : nil
+    }
+
+    private func finiteFrame(_ frame: CGRect) -> Bool {
+        !frame.isNull && !frame.isInfinite && !frame.isEmpty
+            && frame.minX.isFinite && frame.minY.isFinite && frame.width.isFinite && frame.height.isFinite
     }
 
     private func dismissConfirmation(in app: XCUIApplication) throws {
