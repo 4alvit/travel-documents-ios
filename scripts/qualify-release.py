@@ -497,6 +497,7 @@ class Qualification:
             self.report["diagnostic_native_reopen"] = {
                 "enabled": True, "release_acceptance": False,
                 "transport": "copy",
+                "seed_export": "single-presentation-two-files",
                 "scope": "Same AUT process exports and reopens both originals before the unchanged main relaunch"}
         self.commands = Commands(self, "commands"); self.xcode = Commands(self, "xcode-process")
         self.save()
