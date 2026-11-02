@@ -1,87 +1,47 @@
+# Temporary diagnostic/intel-boot branch only; do not promote this workflow.
+# The original name/job preserve Qualification's real GitHub context checks.
 name: Release qualification
-run-name: "Release qualification: ${{ inputs.mode }} / ${{ inputs.runner || 'macos-15' }}"
+run-name: "Intel first-boot measurement (no application qualification)"
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Capture one opt-in suite for independent release review
-        type: choice
-        required: true
-        options: [batch, biometrics]
-      runner:
-        description: Hosted runner architecture (Intel is an explicit contingency)
-        type: choice
-        required: true
-        default: macos-15
-        options: [macos-15, macos-15-intel]
 permissions:
   contents: read
 concurrency:
-  group: release-qualification-${{ github.ref }}-${{ inputs.mode }}
+  group: intel-boot-diagnostic-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   qualify:
-    runs-on: ${{ fromJSON('{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"}')[inputs.runner || 'macos-15'] }}
+    runs-on: macos-15-intel
     timeout-minutes: 55
-    # A successful capture still requires independent xcresult and visual review.
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Verify selected runner architecture
+      - name: Verify branch and Intel runner
         timeout-minutes: 1
         env:
-          QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}
-          QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}
+          DIAGNOSTIC_ARCH: ${{ runner.arch }}
         run: |
-          case "$QUALIFICATION_RUNNER:$QUALIFICATION_RUNNER_ARCH:$(uname -m)" in
-            macos-15:ARM64:arm64|macos-15-intel:X64:x86_64) ;;
-            *) echo 'Unexpected qualification runner label or architecture' >&2; exit 1 ;;
-          esac
+          test "$GITHUB_REF" = refs/heads/diagnostic/intel-boot
+          test "$DIAGNOSTIC_ARCH" = X64
+          test "$(uname -m)" = x86_64
       - name: Prepare XcodeGen
         timeout-minutes: 3
         run: brew install xcodegen
-      - name: Verify qualification guards
+      - name: Verify diagnostic boundaries
         timeout-minutes: 2
-        run: |
-          python3 -B scripts/test-qualify-release.py
-          python3 -B scripts/test-batch-driver.py
-          python3 -B scripts/test-batch-checkpoint.py
-          python3 -B scripts/test-batch-checkpoint-host.py
-          python3 -B scripts/test-batch-scroll-container.py
-          python3 -B scripts/test-batch-import-diagnostics.py
-          python3 -B scripts/test-native-batch-seed.py
-          python3 -B scripts/test-native-root-fixture.py
-          python3 -B scripts/test-native-root-ui.py
-          python3 -B scripts/test-native-folder-geometry.py
-          python3 -B scripts/test-simulator-driver-inventory.py
-          python3 -B scripts/test-biometric-handshake.py
-      - name: Capture selected suite for review
+        run: python3 -B scripts/test-intel-boot-diagnostic.py
+      - name: Observe first boot only
         timeout-minutes: 44
-        env:
-          QUALIFICATION_MODE: ${{ inputs.mode }}
-        run: python3 -B scripts/qualify-release.py --mode "$QUALIFICATION_MODE"
-      - name: Qualification evidence
+        run: python3 -B scripts/intel-boot-diagnostic.py
+      - name: Boot diagnostic evidence
         if: always()
         timeout-minutes: 4
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: TripDocket-qualification-${{ inputs.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/ReleaseQualification-*/
-            build/BatchSimulator-*/summary.json
-            build/BatchSimulator-*/actions.jsonl
-            build/BatchSimulator-*/fixtures/
-            build/BatchSimulator-*/fixture-manifest.json
-            build/BatchSimulator-*/xcresult-*.json
-            build/BatchSimulator-*/xcodebuild.log
-            build/BatchSimulator-*/Tests.xcresult/
-            build/PrivacySimulator-*/summary.json
-            build/PrivacySimulator-*/actions.jsonl
-            build/PrivacySimulator-*/xcresult-*.json
-            build/PrivacySimulator-*/xcodebuild.log
-            build/PrivacySimulator-*/Tests.xcresult/
+          name: TripDocket-intel-boot-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ReleaseQualification-*/
           if-no-files-found: error
           retention-days: 14
