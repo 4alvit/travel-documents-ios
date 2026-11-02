@@ -596,7 +596,7 @@ final class BatchImportUITests: XCTestCase {
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
             throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
         }
-        executionTimeAllowance = phase == "prepare" ? 120 : 300
+        executionTimeAllowance = phase == "prepare" ? 180 : 300
         continueAfterFailure = false
         return value
     }
@@ -639,11 +639,10 @@ final class BatchImportUITests: XCTestCase {
             ("settings.count.documents", "Documents", documents)
         ] {
             let rows = app.descendants(matching: .any).matching(identifier: identifier)
-            let row = rows.firstMatch
+            let row = recoveryCountTarget(rows, typed: app.otherElements.matching(identifier: identifier))
             try await reveal(row, app: app, navigation: "Settings")
             try await wait("Incorrect or ambiguous Settings count for \(label); expected \(count)", app: app) {
-                rows.count == 1 && row.isHittable && row.label == label
-                    && (row.value as? String) == String(count)
+                self.recoveryCountMatches(rows, row: row, identifier: identifier, label: label, count: count)
             }
         }
     }
@@ -949,23 +948,30 @@ final class BatchImportUITests: XCTestCase {
         for _ in 0..<10 {
             let bar = app.navigationBars[navigation]
             try check(bar.exists, app: app, "Expected navigation is missing: \(navigation)")
-            var viewport = app.frame.intersection(CGRect(x: bar.frame.minX, y: bar.frame.maxY,
-                width: bar.frame.width, height: max(0, app.frame.maxY - bar.frame.maxY))).insetBy(dx: 6, dy: 8)
+            let appFrame = app.frame
+            let navigationFrame = bar.frame
+            var viewport = appFrame.intersection(CGRect(x: navigationFrame.minX, y: navigationFrame.maxY,
+                width: navigationFrame.width, height: max(0, appFrame.maxY - navigationFrame.maxY))).insetBy(dx: 6, dy: 8)
             for obstruction in app.tabBars.allElementsBoundByIndex + app.keyboards.allElementsBoundByIndex
-                where obstruction.exists && obstruction.isHittable && obstruction.frame.minY > viewport.minY {
-                viewport.size.height = max(0, min(viewport.maxY, obstruction.frame.minY - 8) - viewport.minY)
+                where obstruction.exists && obstruction.isHittable {
+                let obstructionFrame = obstruction.frame
+                if obstructionFrame.minY > viewport.minY {
+                    viewport.size.height = max(0, min(viewport.maxY, obstructionFrame.minY - 8) - viewport.minY)
+                }
             }
-            let frame = element.exists ? element.frame : .null
-            if element.exists && element.isHittable && !frame.isEmpty && viewport.contains(frame) { return }
+            let targetExists = element.exists
+            let frame = targetExists ? element.frame : .null
+            if targetExists && element.isHittable && !frame.isEmpty && viewport.contains(frame) { return }
             let candidates = app.collectionViews.allElementsBoundByIndex + app.scrollViews.allElementsBoundByIndex
-            let container = revealContainer(candidates, navigationFrame: bar.frame, viewport: viewport)
+            let container = revealContainer(candidates, navigationFrame: navigationFrame, viewport: viewport)
             guard let container else { throw failure("No active scroll container for \(navigation)", app: app) }
-            viewport = viewport.intersection(container.frame).insetBy(dx: 8, dy: 8)
+            let containerFrame = container.frame
+            viewport = viewport.intersection(containerFrame).insetBy(dx: 8, dy: 8)
             try check(viewport.height > 80, app: app, "No safe scroll viewport for \(navigation)")
             let upwards = frame.isNull || frame.midY > viewport.midY
             let distance = min(140, viewport.height * 0.45)
             let start = container.coordinate(withNormalizedOffset: .zero).withOffset(
-                CGVector(dx: viewport.midX - container.frame.minX, dy: viewport.midY - container.frame.minY))
+                CGVector(dx: viewport.midX - containerFrame.minX, dy: viewport.midY - containerFrame.minY))
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: upwards ? -distance : distance)),
                         withVelocity: .slow, thenHoldForDuration: 0.2)
             try await Task.sleep(for: .milliseconds(100))
@@ -1009,6 +1015,22 @@ final class BatchImportUITests: XCTestCase {
                 && visible.height >= min(44, childFrame.height)
         }) else { return nil }
         return wrapper
+    }
+
+    private func recoveryCountTarget(_ rows: XCUIElementQuery, typed: XCUIElementQuery) -> XCUIElement {
+        // Settings currently exposes count rows as Other. Keep the generic
+        // query for another representation and for the global uniqueness gate.
+        typed.count == 1 ? typed.element(boundBy: 0) : rows.firstMatch
+    }
+
+    private func recoveryCountMatches(_ rows: XCUIElementQuery, row: XCUIElement,
+                                      identifier: String, label: String, count: Int) -> Bool {
+        // A typed handle must not hide a duplicate identifier on another type.
+        // Read label and value together from one current snapshot, never from
+        // the preceding reveal observation or a previous wait iteration.
+        guard rows.count == 1, row.isHittable, let snapshot = try? row.snapshot() else { return false }
+        return snapshot.identifier == identifier && snapshot.label == label
+            && (snapshot.value as? String) == String(count)
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,

@@ -44,7 +44,7 @@ existing recovery preparation case once to initialize Files through Export and
 Save to Files. It checks an absent synthetic folder without saving a backup.
 This covers a preinitialized provider, not cold first use. Its own result bundle
 must pass the exact one-case, device and runtime checks before the driver starts.
-The preparation keeps a 600-second build/test cap and a 120-second case allowance;
+The preparation keeps a 600-second build/test cap and a 180-second case allowance;
 batch work has a 2,400-second budget to include this added phase. The functional
 driver's 1,200-second budget and the 180-second cleanup budget remain unchanged.
 One serial functional invocation runs the exact hosted purchase/restore
@@ -108,9 +108,15 @@ Simulator services that remain running for the tests.
 When the native Settings list reports a non-hittable wrapper, its scroll helper
 requires one geometrically aligned container with a live, visible descendant.
 Ambiguous containers are rejected. The target control must still be fully inside
-the safe viewport and hittable before use; the drag count and deadlines are unchanged.
+the safe viewport and hittable before use; the drag count and per-action deadlines
+are unchanged. Each scroll observation reuses its app, navigation, obstruction and selected-container frames. Count rows use one
+fresh snapshot for identity, label and value while retaining the global uniqueness
+and live hit checks; snapshots are never reused after a drag or a new observation.
 Preparation has a 900-second work budget and a 600-second build/test command cap;
-the case still has its existing 120-second allowance. The prior recovery runs
+the shared preparation case has a 180-second allowance. A captured cold phone
+run reached local Files checks at 132 seconds, after its former 120-second limit.
+That failed run remains failed; no completed preparation is inferred from its
+late observations. The prior recovery runs
 measured 349–486 seconds for this build/test phase. These bounds cover the added
 preparation phase; the guidance test deadlines and 35-minute job cap are unchanged.
 The original navigation-readiness, single Cancel action, and dismissal checks

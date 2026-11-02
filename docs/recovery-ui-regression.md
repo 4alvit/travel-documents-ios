@@ -66,7 +66,8 @@ adopt an existing UUID, booted device, folder, result bundle or baseline. No
 purchase tests may run in this attempt. Do not share the simulator with CI.
 
 The driver records original command deadlines, output and disk caps, ownership,
-reaping and cleanup. The prepare case uses a 120-second XCTest maximum;
+reaping and cleanup. The prepare case uses a 180-second XCTest maximum, covering measured cold
+preparation that reached local Files checks at 132 seconds;
 export/restore retain 300 seconds each. Every xcodebuild invocation retains a
 600-second ceiling, clipped to the original remaining work deadline with an
 8-second owned stop reserve. Total time remains 1,500 seconds: 1,380 seconds of

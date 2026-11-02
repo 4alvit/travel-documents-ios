@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the actual List-wrapper selection helper without native UI calls."""
+"""Exercise actual List-wrapper and count-row helpers without native UI calls."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,15 +11,32 @@ SOURCE = ROOT / "UITests/BatchImportUITests.swift"
 MODEL = r'''
 import Foundation
 import CoreGraphics
-@MainActor final class Query {
+@MainActor final class XCUIElementQuery {
     var allElementsBoundByIndex: [XCUIElement] = []
+    var count: Int { allElementsBoundByIndex.count }
+    var firstMatch: XCUIElement { allElementsBoundByIndex[0] }
+    func element(boundBy index: Int) -> XCUIElement { allElementsBoundByIndex[index] }
+}
+@MainActor struct RowSnapshot {
+    let identifier: String
+    let label: String
+    let value: Any?
 }
 @MainActor final class XCUIElement {
     var exists = true
     var isHittable = false
     var frame: CGRect
-    let buttons = Query()
-    let staticTexts = Query()
+    var identifier = "settings.count.trips"
+    var label = "Trips"
+    var value: Any? = "1"
+    var snapshotFails = false
+    let buttons = XCUIElementQuery()
+    let staticTexts = XCUIElementQuery()
+    func snapshot() throws -> RowSnapshot {
+        if snapshotFails { throw SnapshotFailure() }
+        return RowSnapshot(identifier: identifier, label: label, value: value)
+    }
+    struct SnapshotFailure: Error {}
     init(_ frame: CGRect, hittable: Bool = false) {
         self.frame = frame; self.isHittable = hittable
     }
@@ -98,7 +115,39 @@ CASES = r'''
         let moving = wrapper(); check(select([moving]) === moving, "initial live geometry")
         moving.buttons.allElementsBoundByIndex[0].frame = CGRect(x: 16, y: 900, width: 370, height: 52)
         check(select([moving]) == nil, "next observation rechecks current child geometry")
-        print("PASS \(passed) actual List-wrapper guards; native UI calls=0")
+        let row = XCUIElement(full, hittable: true)
+        let generic = XCUIElementQuery(); generic.allElementsBoundByIndex = [row]
+        let typed = XCUIElementQuery(); typed.allElementsBoundByIndex = [row]
+        check(h.recoveryCountTarget(generic, typed: typed) === row, "unique typed row selected")
+        let alternativeType = XCUIElement(full, hittable: true)
+        generic.allElementsBoundByIndex = [alternativeType]; typed.allElementsBoundByIndex = []
+        check(h.recoveryCountTarget(generic, typed: typed) === alternativeType, "other representation keeps generic fallback")
+        typed.allElementsBoundByIndex = [row, row]
+        check(h.recoveryCountTarget(generic, typed: typed) === alternativeType, "ambiguous typed lookup keeps generic gate")
+        generic.allElementsBoundByIndex = [row]; typed.allElementsBoundByIndex = [row]
+        func matches() -> Bool {
+            h.recoveryCountMatches(generic, row: row, identifier: "settings.count.trips", label: "Trips", count: 1)
+        }
+        check(matches(), "exact current count accepts")
+        generic.allElementsBoundByIndex = [row, alternativeType]
+        check(typed.count == 1 && !matches(), "duplicate identifier on another type rejected globally")
+        generic.allElementsBoundByIndex = []
+        check(!matches(), "missing global row rejected")
+        generic.allElementsBoundByIndex = [row]; row.isHittable = false
+        check(!matches(), "covered count row rejected")
+        row.isHittable = true; row.value = "2"
+        check(!matches(), "changed value is read fresh and rejected")
+        row.value = 1
+        check(!matches(), "non-string value rejected")
+        row.value = "1"; row.label = "People"
+        check(!matches(), "wrong exact label rejected")
+        row.label = "Trips"; row.identifier = "settings.count.people"
+        check(!matches(), "rebound snapshot identity rejected")
+        row.identifier = "settings.count.trips"; row.snapshotFails = true
+        check(!matches(), "snapshot failure rejects observation")
+        row.snapshotFails = false
+        check(matches(), "fresh restored state observed without cached value")
+        print("PASS \(passed) actual List/count guards; native UI calls=0")
     }
 }
 '''
@@ -107,7 +156,7 @@ CASES = r'''
 def fixture(source: str) -> str:
     start = source.index("    private func revealContainer(")
     end = source.index("\n    private func wait(", start)
-    helper = source[start:end].replace("private func revealContainer", "func revealContainer", 1)
+    helper = source[start:end].replace("private func ", "func ")
     return MODEL + "\n@MainActor struct Harness {\n" + helper + "\n}\n" + CASES
 
 
@@ -127,7 +176,7 @@ def main() -> None:
         checked(["xcrun", "swiftc", "-swift-version", "6", "-strict-concurrency=complete",
                  "-parse-as-library", str(source), "-o", str(executable)], timeout=60)
         output = checked([str(executable)], timeout=30)
-        if output.strip() != "PASS 25 actual List-wrapper guards; native UI calls=0":
+        if output.strip() != "PASS 38 actual List/count guards; native UI calls=0":
             raise RuntimeError("Unexpected guard count or output: " + output)
         print(output, end="")
 

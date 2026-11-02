@@ -527,7 +527,7 @@ class Guards(unittest.TestCase):
         self.assertEqual([v for v in argv if v.startswith("-only-testing:")],
                          ["-only-testing:TripfolioUITests/"+q.PREPARE_CASE.removesuffix("()")])
         for key in ["-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"]:
-            self.assertEqual(argv[argv.index(key)+1],"120")
+            self.assertEqual(argv[argv.index(key)+1],"180")
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE"],"prepare")
         self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_UI"],"1")
         self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
