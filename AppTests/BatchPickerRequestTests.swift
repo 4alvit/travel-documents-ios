@@ -142,7 +142,7 @@ final class BatchPickerRequestTests: XCTestCase {
         var presentation: BatchDocumentPicker.Session?
         var accepted = 0
         var resultCount = 0
-        lazy var coordinator = BatchDocumentPicker.Coordinator(session: session) { [unowned self] result in
+        lazy var coordinator = BatchDocumentPicker.Coordinator(session: session, capture: { .copied(try BatchDocumentSelection.capture($0)) }) { [unowned self] result in
             guard session.consumeRequest(from: model.batchImportDraft, clearing: &presentation) else {
                 if case .success(let selection) = result { selection.dispose() }
                 return

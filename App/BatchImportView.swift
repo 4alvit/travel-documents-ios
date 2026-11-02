@@ -145,7 +145,7 @@ struct BatchImportView: View {
         }
     }
 
-    private func receivedPickerResult(_ result: Result<BatchDocumentSelection, Error>?,
+    private func receivedPickerResult(_ result: Result<BatchPickerSelection, Error>?,
                                       from session: BatchDocumentPicker.Session) {
         guard session.consumeRequest(from: model.batchImportDraft, clearing: &pickerSession) else {
             if case .success(let selection) = result { selection.dispose() }

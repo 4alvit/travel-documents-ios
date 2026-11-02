@@ -10,7 +10,7 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testRejectedSelectionsFinishImmediatelyWithoutReading() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let reader = makeReader()
         let entitlement = CopiedSelectionEntitlement()
         let (model, repository, trip) = try await fixture(root, reader, entitlement)
         let before = try await repository.load()
@@ -36,7 +36,8 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testSuccessFinishesAfterAllReadsAndKeepsPreparedBytes() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let bytes = pdf()
+        let reader = makeReader()
         let (model, repository, trip) = try await fixture(root, reader)
         let before = try await repository.load()
         let completion = CopiedSelectionCompletion()
@@ -47,11 +48,10 @@ final class BatchCopiedSelectionTests: XCTestCase {
         }
         try await reader.waitForRequests(1)
         XCTAssertEqual(completion.count, 0)
-        let bytes = pdf()
-        await reader.release(0, result: .success(bytes))
+        try await reader.release(0, result: .success(bytes))
         try await reader.waitForRequests(2)
         XCTAssertEqual(completion.count, 0)
-        await reader.release(1, result: .success(bytes))
+        try await reader.release(1, result: .success(bytes))
         try await waitUntil { completion.count == 1 }
         XCTAssertEqual(draft.phase, .reviewing)
         XCTAssertEqual(draft.items.map(\.originalData), [bytes, bytes])
@@ -66,7 +66,8 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testReadFailureFinishesOnceAndRejectsPreparedPrefix() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let bytes = pdf()
+        let reader = makeReader()
         let (model, _, trip) = try await fixture(root, reader)
         let completion = CopiedSelectionCompletion()
         model.beginBatchImport(tripID: trip.id)
@@ -75,10 +76,10 @@ final class BatchCopiedSelectionTests: XCTestCase {
             completion.count += 1
         }
         try await reader.waitForRequests(1)
-        await reader.release(0, result: .success(pdf()))
+        try await reader.release(0, result: .success(bytes))
         try await reader.waitForRequests(2)
         XCTAssertEqual(completion.count, 0)
-        await reader.release(1, result: .failure(CopiedSelectionFailure.read))
+        try await reader.release(1, result: .failure(CopiedSelectionFailure.read))
         try await waitUntil { completion.count == 1 }
         XCTAssertEqual(draft.phase, .choosing)
         XCTAssertTrue(draft.items.isEmpty)
@@ -90,14 +91,14 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testInvalidReturnedDataFinishesOnceWithoutReview() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let reader = makeReader()
         let (model, _, trip) = try await fixture(root, reader)
         let completion = CopiedSelectionCompletion()
         model.beginBatchImport(tripID: trip.id)
         let draft = try XCTUnwrap(model.batchImportDraft)
         model.prepareBatchImport(urls: [url("invalid.pdf")], draftID: draft.id) { completion.count += 1 }
         try await reader.waitForRequests(1)
-        await reader.release(0, result: .success(Data("not a document".utf8)))
+        try await reader.release(0, result: .success(Data("not a document".utf8)))
         try await waitUntil { completion.count == 1 }
         XCTAssertEqual(draft.phase, .choosing)
         XCTAssertTrue(draft.items.isEmpty)
@@ -107,7 +108,8 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testCancellationWaitsForOldReadAndDoesNotReleaseNewSelection() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let bytes = pdf()
+        let reader = makeReader()
         let (model, _, trip) = try await fixture(root, reader)
         let oldCompletion = CopiedSelectionCompletion()
         let newCompletion = CopiedSelectionCompletion()
@@ -121,13 +123,13 @@ final class BatchCopiedSelectionTests: XCTestCase {
         let current = try XCTUnwrap(model.batchImportDraft)
         model.prepareBatchImport(urls: [url("new.pdf")], draftID: current.id) { newCompletion.count += 1 }
         try await reader.waitForRequests(2)
-        await reader.release(0, result: .success(pdf()))
+        try await reader.release(0, result: .success(bytes))
         try await waitUntil { oldCompletion.count == 1 }
         XCTAssertEqual(newCompletion.count, 0)
         XCTAssertTrue(model.batchImportDraft === current)
         XCTAssertTrue(model.isBusy)
         XCTAssertTrue(current.items.isEmpty)
-        await reader.release(1, result: .success(pdf()))
+        try await reader.release(1, result: .success(bytes))
         try await waitUntil { newCompletion.count == 1 }
         XCTAssertEqual(oldCompletion.count, 1)
         XCTAssertEqual(current.items.map(\.filename), ["new.pdf"])
@@ -136,7 +138,8 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testLibraryInvalidationWaitsForOutstandingRead() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let bytes = pdf()
+        let reader = makeReader()
         let (model, _, trip) = try await fixture(root, reader)
         let completion = CopiedSelectionCompletion()
         model.beginBatchImport(tripID: trip.id)
@@ -146,7 +149,7 @@ final class BatchCopiedSelectionTests: XCTestCase {
         model.library = .empty
         XCTAssertNil(model.batchImportDraft)
         XCTAssertEqual(completion.count, 0)
-        await reader.release(0, result: .success(pdf()))
+        try await reader.release(0, result: .success(bytes))
         try await waitUntil { completion.count == 1 }
         XCTAssertNil(model.batchImportDraft)
         XCTAssertFalse(model.isBusy)
@@ -155,7 +158,7 @@ final class BatchCopiedSelectionTests: XCTestCase {
     func testModelReleasedBeforeTaskStartsStillFinishesSelection() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let reader = CopiedSelectionReader()
+        let reader = makeReader()
         let repository = try DocumentRepository(rootURL: root)
         let trip = try await repository.createTrip(title: "Synthetic copy lifetime", departureDate: nil)
         var model: AppModel? = AppModel(rootURL: root, temporaryRootURL: root.appendingPathComponent("exports"),
@@ -195,48 +198,87 @@ final class BatchCopiedSelectionTests: XCTestCase {
             NSString(string: "SYNTHETIC COPY").draw(at: CGPoint(x: 20, y: 20))
         }
     }
+    // Share the longest previous wait budget (3 + 3 + 5 + 5 seconds).
+    // All waits use this absolute work deadline. The reserve exists only to drain
+    // an abandoned fixture; it cannot complete a controlled read during work.
+    private var workDeadline: ContinuousClock.Instant?
+    private func makeReader() -> CopiedSelectionReader {
+        let deadline = workDeadline ?? ContinuousClock.now.advanced(by: .seconds(16))
+        workDeadline = deadline
+        let reader = CopiedSelectionReader(workDeadline: deadline,
+                                           cleanupDeadline: deadline.advanced(by: .seconds(5)))
+        addTeardownBlock { await reader.finish() }
+        return reader
+    }
     private func waitUntil(_ predicate: @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while ContinuousClock.now < deadline {
+        guard let deadline = workDeadline else { throw CopiedSelectionFailure.fixtureClosed }
+        while true {
+            guard ContinuousClock.now < deadline else { throw CopiedSelectionFailure.workDeadlineExceeded }
             if predicate() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw CopiedSelectionFailure.timedOut
     }
 }
 
 @MainActor private final class CopiedSelectionCompletion { var count = 0 }
 @MainActor private final class CopiedSelectionEntitlement { var isPro = true }
-private enum CopiedSelectionFailure: Error { case read, timedOut }
+private enum CopiedSelectionFailure: Error {
+    case read, workDeadlineExceeded, cleanupDeadlineExceeded, fixtureClosed, unknownRequest
+}
 
-/// Deliberately ignores caller cancellation until released: cleanup must wait
-/// for that read, not merely for the visible draft to disappear.
+/// Deliberately ignores caller cancellation until explicitly released. Its
+/// watchdog runs only after the shared work deadline and cleanup reserve.
 private actor CopiedSelectionReader {
     private(set) var requestCount = 0
+    private let workDeadline: ContinuousClock.Instant
+    private let cleanupDeadline: ContinuousClock.Instant
     private var continuations: [Int: CheckedContinuation<Data, any Error>] = [:]
-    private var timeouts: [Int: Task<Void, Never>] = [:]
+    private var watchdog: Task<Void, Never>?
+    private var closed = false
+
+    init(workDeadline: ContinuousClock.Instant, cleanupDeadline: ContinuousClock.Instant) {
+        self.workDeadline = workDeadline
+        self.cleanupDeadline = cleanupDeadline
+    }
+    private func checkWorkDeadline() throws {
+        guard ContinuousClock.now < workDeadline else { throw CopiedSelectionFailure.workDeadlineExceeded }
+        guard !closed else { throw CopiedSelectionFailure.fixtureClosed }
+    }
     func read(_ url: URL, maximum: Int) async throws -> Data {
+        try checkWorkDeadline()
         let index = requestCount
         requestCount += 1
         return try await withCheckedThrowingContinuation { continuation in
             continuations[index] = continuation
-            timeouts[index] = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                await self?.release(index, result: .failure(CopiedSelectionFailure.timedOut))
+            if watchdog == nil {
+                let deadline = cleanupDeadline
+                watchdog = Task { [weak self] in
+                    do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+                    await self?.finish(error: .cleanupDeadlineExceeded)
+                }
             }
         }
     }
     func waitForRequests(_ count: Int) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        while ContinuousClock.now < deadline {
+        while true {
+            try checkWorkDeadline()
             if requestCount >= count { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw CopiedSelectionFailure.timedOut
     }
-    func release(_ index: Int, result: Result<Data, any Error>) {
-        guard let continuation = continuations.removeValue(forKey: index) else { return }
-        timeouts.removeValue(forKey: index)?.cancel()
+    func release(_ index: Int, result: Result<Data, any Error>) throws {
+        try checkWorkDeadline()
+        guard let continuation = continuations.removeValue(forKey: index) else {
+            throw CopiedSelectionFailure.unknownRequest
+        }
         continuation.resume(with: result)
+    }
+    func finish(error: CopiedSelectionFailure = .fixtureClosed) {
+        closed = true
+        watchdog?.cancel()
+        watchdog = nil
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending.values { continuation.resume(throwing: error) }
     }
 }
