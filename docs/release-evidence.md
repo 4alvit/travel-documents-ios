@@ -1,8 +1,98 @@
 # Release evidence
 
-Current stage: development preview in a public draft PR. No GitHub or App Store
-release has been verified. Live Apple distribution and physical-device gates
-remain open. Historical failures below remain attached to their original runs.
+Current stage: development preview merged into `main` through
+[PR #1](https://github.com/4alvit/travel-documents-ios/pull/1).
+[GitHub releases](https://github.com/4alvit/travel-documents-ios/releases) carry
+their own exact-source acceptance records under the
+[source/Simulator channel policy](github-releases.md). Live Apple distribution
+and physical-device gates remain open. Historical failures below remain
+attached to their original runs.
+
+## Release preparation — 1 November 2026
+
+The reviewed PR head `45521e62198e113820a54af1bb84f6bf97b51337` passed all six
+jobs in [CI 41333949690](https://github.com/4alvit/travel-documents-ios/actions/runs/41333949690).
+Independent source and security reviews found no confirmed actionable findings.
+The merge commit `3b223e483879df48fd9c12000ba532700e83eba1` has the same source tree,
+`931c603dd8d128153cbd110a9e01220ec4c1f035`.
+
+The subsequent [main CI 41346633231](https://github.com/4alvit/travel-documents-ios/actions/runs/41346633231)
+failed recovery, English iPad guidance and the phone Files import layout case.
+These newer failures block promotion;
+the prior successful run does not replace them. Recovery's resource traversal
+encountered a disappearing regular file inside an actively rebuilt test product
+and stopped the export command before XCTest. The English guidance case retained
+its website confirmation after one Cancel tap. Its screenshots and event record
+do not distinguish an undelivered action from failed presentation dismissal.
+Neither result establishes an application data-loss defect or a private Apple
+framework cause. Fixes and diagnostic additions require fresh exact-source CI.
+
+The phone failure was an early 30-second navigation wait inside a helper with
+an existing 40-second total readiness budget. The retained video shows a blank
+Files sheet through that early cutoff, followed by the real navigation and
+Cancel before the total budget expired. The helper now observes both required
+elements within one monotonic 40-second deadline, rejecting observations that
+finish after it. It retains the unique enabled/hittable typed Cancel, one tap,
+navigation dismissal and return-to-presenter checks.
+
+The two affected Import/Restore layout cases then passed locally on one fresh
+iOS 27.0 (24A434) Simulator using Xcode 27.1 (27A9275), SDK 27.1. Files was not
+prewarmed. Readiness took 5.385 and 5.057 seconds respectively; the complete
+XCTest result contains two passes, no failures/skips and no runtime warnings.
+Source hashes were unchanged, the owned device was removed, and the full final
+device inventory matched its baseline. This is Debug fixture-based layout
+validation of the follow-up change, not release or authentication acceptance.
+
+The recovery monitor now permits one complete rescan after a confirmed missing
+regular build-product leaf while its owned writer is active; all time, byte and
+entry limits still apply. Opt-in Debug Simulator guidance values distinguish
+received Cancel actions, cleared selection and completed dismissal. Localization
+attachments log the screenshot request and return boundaries, without dropping
+an attachment, assertion or timeout. These observations are not substitutes for
+successful native tests, and do not claim a root cause for the historical
+Files inline-editor or screenshot-service failures in issues #3 and #4.
+
+The guidance test now attaches the complete bounded diagnostic values separately:
+XCTest's hierarchy description truncates them. A local English iPad execution
+passed its existing assertions in 178.215 seconds and recorded all four Cancel
+actions, cleared selections and completed dismissals. The post-cancel images
+show the guidance page with the confirmation closed. Its owned device was
+removed and the full final inventory matched the baseline. This focused local
+Debug run does not replace final-candidate hosted or Release qualification.
+
+Hosted preflight established two Xcode 26.2 (17C52) compatibility problems:
+an explicit schema 0.4.0 request is unsupported, and the default summary-schema
+documentation is malformed. The latter was captured in
+[CI 41352317506](https://github.com/4alvit/travel-documents-ios/actions/runs/41352317506),
+artifact `13100939614`. Its schema also omits the documented warning field;
+that omission alone does not establish what an actual result contains.
+
+The revised preflight recognizes the exact producer documentation without
+loosening result JSON parsing. Hosted qualification captures native results,
+source/product identities and cleanup evidence with status
+`captured_pending_review`. It never claims release acceptance. An independent
+Xcode 27.1 reader must verify the same retained result bundle, all expected
+cases and explicit empty warning/failure arrays, followed by visual and
+original-byte review, before the separate operator receipt may pass. The
+[channel policy](github-releases.md) specifies this boundary. No pending or
+failed run is promoted by this compatibility change.
+
+Subsequent hosted guidance runs exposed additional failures. The `334d993`
+English iPad run completed all four Cancel transitions but exceeded its
+six-minute XCTest allowance; its finalized result is failed. The `8b3e5ec`
+English iPad run failed earlier: a correctly targeted Settings entry tap did
+not open guidance, with no delayed transition in the retained video. Neither
+result is accepted, and the evidence does not establish a private framework
+root cause.
+
+The next iPad candidate pins Xcode 26.2 (17C52) and selects only an available
+runtime matching its Simulator SDK. This keeps iPadOS 26.2 coverage while
+changing the compiler, linked SDK and XCTest framework from the previous
+Xcode 16.4 runs. It is a controlled environment change requiring fresh native
+and visual validation; it does not prove the older pairing was unsupported.
+All case assertions and time allowances remain in place. CI concurrency is
+scoped by commit so a new candidate can start while older owned cleanup
+finishes, without cancelling active work.
 
 ## Accepted executable baseline and ordinary Release launch — 25 October 2026
 

@@ -218,12 +218,14 @@ return still requires the original result/provenance validation before a case
 can pass; partial testcase progress is not acceptance.
 
 One complete resource sample normally has a fixed five-second cooperative
-allowance. During an unfinished `phase-export` or `phase-restore` command,
+allowance. During an unfinished `phase-prepare`, `phase-export` or `phase-restore` command,
 including its admission and finalization, the explicit ceiling is fifteen
-seconds. Every sample is clipped to the overall work limit, the actual command
+seconds. The same ceiling applies while an active owned `boot-ready` process is
+waiting for `simctl bootstatus <owned UUID> -b`; its admission and post-process
+samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
 owner's limit and its original work deadline, preserving the stop reserve. The
 one fixed deadline covers both free-space reads and the full uncached output
-traversal; its deadline is never renewed within a sample. Capability, preparation and
+traversal; its deadline is never renewed within a sample. Capability, other preparation and
 evidence commands retain five seconds; a finished phase grants no later sample
 an extended allowance. The next ordinary sample remains due one
 second after a completed sample. The ordinary five-second allowance replaced an earlier two-second limit,
@@ -259,6 +261,16 @@ bypasses sampled scans and is unchanged: the retained shutdown/delete/final
 inventory timeouts are separate failures, and that run's device cleanup remains
 unverified. All whole, phase, command, stop, cleanup and byte/entry/depth limits
 remain unchanged; a timeout never causes an automatic sample retry or workflow rerun.
+
+A retained boot-wait failure traversed 221 entries (about 8 MiB of logical
+output, with no result bundles) before the final root-identity check crossed
+the five-second ceiling at 5.195 seconds. The longest `scandir_next` span was
+1.105 seconds; the final root-identity span was 0.575 seconds. This traversal
+reads metadata, not those payload bytes. Its elapsed spans include scheduling
+and do not establish filesystem latency or another physical cause. The active
+owned boot wait now uses the existing finite fifteen-second native ceiling;
+it gains no missing-entry rescan permission. Complete accounting, root/link
+checks, command deadlines and cleanup bounds remain required.
 
 Capability commands keep their own pending-command context when delegating a
 resource checkpoint to the parent output scanner. Their admission, execution
@@ -463,6 +475,20 @@ not permit this restart. This responds to an actual entry-stat ENOENT in
 `Tests.xcresult/Data/_tmp.IJNVOw` after 0.0258 seconds; it does not change any
 scan allowance, native attempt count or test assertion, and does not establish
 that another run will pass.
+
+The same complete-scan restart applies to a confirmed missing known regular
+file or directory in the top-level result bundle's `Staging` directory. During
+an active owned test command, a confirmed missing known regular file below
+`DerivedData/Build/Products` may also request this restart. Xcode rebuilds those
+products between recovery phases: main run `41346633231` removed a test bundle's
+`TravelCore_TravelCore.bundle/Info.plist` during the export build, and the former
+strict absence rule stopped the build before XCTest began. The product case
+does not permit missing directories, symlinks, unknown kinds or nested result
+bundles. Products and result bundles share one restart, the original deadline
+and cumulative encounter budget; a second disappearance still fails. The
+replacement sample must traverse the entire output and charge all current
+bytes. Immutable product manifests, permission errors, identity checks and
+native phase/test counts remain unchanged.
 
 A biometric bridge checkpoint retains the parent's active owned
 `selected-tests` writer identity when the bridge is explicitly linked to that

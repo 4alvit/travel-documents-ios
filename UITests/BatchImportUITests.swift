@@ -525,8 +525,18 @@ final class BatchImportUITests: XCTestCase {
                                         location: XCUIElementQuery, browse: XCUIElementQuery,
                                         app: XCUIApplication) async throws {
         let atRoot = { self.isRecoveryFolder(localTitle, navigation: navigation.element) }
-        let locationReady = { location.count == 1 && location.element.isEnabled && location.element.isHittable }
-        let browseReady = { browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        let enabledLocation = location.matching(NSPredicate(format: "enabled == true"))
+        let enabledBrowse = browse.matching(NSPredicate(format: "enabled == true"))
+        // Files may remove a route while automatically reaching its remembered
+        // root. Query eligibility without reading attributes of a vanished row;
+        // isHittable returns false for a missing element. Keep raw uniqueness so
+        // a disabled duplicate cannot authorize an otherwise ambiguous route.
+        let locationReady = {
+            location.count == 1 && enabledLocation.count == 1 && enabledLocation.element.isHittable
+        }
+        let browseReady = {
+            browse.count == 1 && enabledBrowse.count == 1 && enabledBrowse.element.isHittable
+        }
         if !atRoot() {
             // The picker can reach its remembered local root while appearing.
             // Reconsider that verified destination during the same bounded wait.
@@ -534,16 +544,16 @@ final class BatchImportUITests: XCTestCase {
                 atRoot() || locationReady() || browseReady()
             }
             if !atRoot() && !locationReady() {
-                try check(browseReady(), app: app, "Files preparation Browse action changed")
-                if !atRoot() { browse.element.tap() }
+                try check(browseReady() || atRoot(), app: app, "Files preparation Browse action changed")
+                if !atRoot() { enabledBrowse.element.tap() }
             }
             if !atRoot() {
                 try await wait("Files preparation local location is unavailable", app: app) {
                     atRoot() || locationReady()
                 }
                 if !atRoot() {
-                    try check(locationReady(), app: app, "Files preparation local location changed")
-                    if !atRoot() { location.element.tap() }
+                    try check(locationReady() || atRoot(), app: app, "Files preparation local location changed")
+                    if !atRoot() { enabledLocation.element.tap() }
                 }
             }
         }

@@ -19,6 +19,7 @@ struct Control {
     var count = 0
     var enabled = true
     var hittable = true
+    var disabledDuplicates = 0
 }
 struct Snapshot {
     var root = false
@@ -30,9 +31,19 @@ final class World {
     var index = 0
     var taps: [String] = []
     var rootAtActionCheck = false
+    var transitionRead: String?
+    var transitionOccurrence = 1
+    var transitionReachesRoot = true
+    var reads: [String: Int] = [:]
     init(_ frames: [Snapshot]) { self.frames = frames }
     var current: Snapshot { frames[index] }
     func advance() { index = min(index + 1, frames.count - 1) }
+    func didRead(_ name: String) {
+        reads[name, default: 0] += 1
+        if name == transitionRead && reads[name] == transitionOccurrence {
+            frames = [Snapshot(root: transitionReachesRoot)]; index = 0
+        }
+    }
     func tap(_ kind: String) {
         taps.append(kind)
         if kind == "browse" {
@@ -47,16 +58,44 @@ final class XCUIApplication {}
 final class XCUIElement {
     let world: World
     let kind: String
-    init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
+    let enabledOnly: Bool
+    init(_ world: World, _ kind: String, enabledOnly: Bool = false) {
+        self.world = world; self.kind = kind; self.enabledOnly = enabledOnly
+    }
     var control: Control { kind == "location" ? world.current.location : world.current.browse }
-    var isEnabled: Bool { control.enabled }
-    var isHittable: Bool { control.hittable }
-    func tap() { world.tap(kind) }
+    var eligibleCount: Int {
+        enabledOnly ? (control.enabled ? control.count - control.disabledDuplicates : 0) : control.count
+    }
+    var isEnabled: Bool {
+        // Unlike isHittable, an ordinary attribute of a missing row is an XCTest failure.
+        precondition(eligibleCount == 1, "Missing element attribute read")
+        return control.enabled
+    }
+    var isHittable: Bool {
+        world.didRead(kind + ".hittable")
+        return eligibleCount == 1 && control.hittable
+    }
+    func tap() {
+        precondition(eligibleCount == 1 && control.enabled && control.hittable)
+        world.tap(kind)
+    }
 }
 final class XCUIElementQuery {
     let element: XCUIElement
-    init(_ world: World, _ kind: String) { element = XCUIElement(world, kind) }
-    var count: Int { element.control.count }
+    init(_ world: World, _ kind: String, enabledOnly: Bool = false) {
+        element = XCUIElement(world, kind, enabledOnly: enabledOnly)
+    }
+    var count: Int {
+        let result = element.eligibleCount
+        element.world.didRead(element.kind + (element.enabledOnly ? ".enabled-count" : ".raw-count"))
+        return result
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        // Evaluate the real Foundation predicate/key, not a string-shaped fake.
+        precondition(predicate.evaluate(with: ["enabled": true]))
+        precondition(!predicate.evaluate(with: ["enabled": false]))
+        return XCUIElementQuery(element.world, element.kind, enabledOnly: true)
+    }
 }
 struct FixtureFailure: Error {}
 final class Harness {
@@ -103,9 +142,26 @@ final class Harness {
             world = World([Snapshot(browse: Control(count: 1))]); expected = ["browse", "location"]
         case "root-before-action":
             world = World([Snapshot(location: Control(count: 1))]); world.rootAtActionCheck = true
+        case "location-vanishes-after-count", "location-vanishes-after-enabled-count",
+             "location-vanishes-at-hittability", "location-vanishes-before-action",
+             "location-vanishes-without-root":
+            world = World([Snapshot(location: Control(count: 1))])
+            world.transitionRead = name == "location-vanishes-after-enabled-count" ? "location.enabled-count"
+                : name == "location-vanishes-at-hittability" ? "location.hittable" : "location.raw-count"
+            if name == "location-vanishes-before-action" { world.transitionOccurrence = 4 }
+            if name == "location-vanishes-without-root" { world.transitionReachesRoot = false; mustFail = true }
+        case "browse-vanishes-after-count", "browse-vanishes-after-enabled-count",
+             "browse-vanishes-at-hittability", "browse-vanishes-before-action":
+            world = World([Snapshot(browse: Control(count: 1))])
+            world.transitionRead = name == "browse-vanishes-after-enabled-count" ? "browse.enabled-count"
+                : name == "browse-vanishes-at-hittability" ? "browse.hittable" : "browse.raw-count"
+            if name == "browse-vanishes-before-action" { world.transitionOccurrence = 2 }
         case "absent": world = World([Snapshot()]); mustFail = true
         case "ambiguous":
             world = World([Snapshot(location: Control(count: 2), browse: Control(count: 2))]); mustFail = true
+        case "disabled-duplicates":
+            world = World([Snapshot(location: Control(count: 2, disabledDuplicates: 1),
+                                    browse: Control(count: 2, disabledDuplicates: 1))]); mustFail = true
         case "disabled":
             world = World([Snapshot(location: Control(count: 1, enabled: false),
                                     browse: Control(count: 1, enabled: false))]); mustFail = true
@@ -149,8 +205,16 @@ class ReadinessTests(unittest.TestCase):
     def test_existing_location_route_taps_once(self): self.run_case('location')
     def test_existing_browse_route_remains_bounded(self): self.run_case('browse')
     def test_verified_root_before_action_prevents_redundant_tap(self): self.run_case('root-before-action')
+    def test_route_can_disappear_between_query_and_read_without_spurious_failure(self):
+        for route in ('location', 'browse'):
+            for boundary in ('after-count', 'after-enabled-count', 'at-hittability', 'before-action'):
+                with self.subTest(route=route, boundary=boundary):
+                    self.run_case(f'{route}-vanishes-{boundary}')
+    def test_disappearing_route_without_verified_root_still_fails(self):
+        self.run_case('location-vanishes-without-root')
     def test_absent_controls_fail_without_taps(self): self.run_case('absent')
     def test_ambiguous_controls_fail_without_taps(self): self.run_case('ambiguous')
+    def test_disabled_duplicate_does_not_make_raw_route_unique(self): self.run_case('disabled-duplicates')
     def test_disabled_controls_fail_without_taps(self): self.run_case('disabled')
     def test_hidden_controls_fail_without_taps(self): self.run_case('hidden')
 
