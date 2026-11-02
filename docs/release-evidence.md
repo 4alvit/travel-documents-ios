@@ -67,7 +67,7 @@ repeat](https://github.com/4alvit/travel-documents-ios/actions/runs/41405086602)
 failed earlier, with the export share sheet still visible after Save to Files.
 Neither run reached the new end-editing action, native seed or main import.
 
-The current control removes that extra fixture-folder creation. After real
+A later control removed that extra fixture-folder creation. After real
 Files preparation, native Save places two synthetic PDFs directly in the
 verified empty provider root of an exclusively owned Simulator. It requires
 three distinct bundles: one preparation case, one native-seed case, and the
@@ -134,6 +134,25 @@ No unsafe Sendable conformance or concurrency-check suppression is added.
 The earlier payment-service error did not establish a missing scene as its
 precise cause. This correction still requires fresh native validation; it adds
 no automatic purchase retry and does not relax payment or Files assertions.
+
+The [following batch run](https://github.com/4alvit/travel-documents-ios/actions/runs/41416599960)
+at `afd2dc1` passed preparation, native seeding and the hosted purchase prerequisite.
+The UI completed the local Xcode purchase and reached Files with both PDFs
+selected. After the single Open action, FileProvider again reported code -1005
+with resolver code -1012, then attempted an empty selected-URL callback. The
+app's retained importer state still recorded no callback. All source PDFs and
+compiled-product bytes remained unchanged; installed container paths changed
+between the separate invocations. This establishes the observed failure boundary,
+not a causal proof about installation or the opaque provider item identifier.
+
+The next control keeps the hosted prerequisite, native seed and real import as
+three separate XCTest cases in one invocation. A checkpoint at import entry
+requires the seed's actual pass marker, a record from the same UI test process,
+and a host comparison of both complete destination files before import actions
+begin. Its evidence is one preparation bundle plus one three-case bundle; no
+separate seed result is fabricated. Existing native assertions, case allowances,
+process ownership and original work/cleanup budgets remain required. A new
+successful capture and independent review are still needed before acceptance.
 
 An earlier main-branch CI stopped in its subprocess capability probe before
 creating a Simulator or running recovery tests. The command woke after its work

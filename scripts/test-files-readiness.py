@@ -1270,6 +1270,10 @@ enum ElementType { case other, button, navigationBar }
     var taps = 0
     var snapshots = 0
     var navigationQueries = 0
+    var liveRoot: XCUIElementSnapshot?
+    var identifierChanged = false
+    var rejectedTapResolutions = 0
+    var title: String { name.hasPrefix("russian-") ? "Настройки" : "Settings" }
     var failures = 0
     var tappedAt: Duration = .zero
     init(_ name: String) { self.name = name }
@@ -1280,16 +1284,17 @@ enum ElementType { case other, button, navigationBar }
         let bounds = CGRect(x: 0, y: 0, width: 1032, height: 1376)
         let root = XCUIElementSnapshot(.other, "", "", bounds)
         let frame = CGRect(x: 545, y: 41, width: 97, height: 32.5)
-        let leaf = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+        let initialIdentifier = name.contains("empty-id") && name != "nonempty-id-changed" && taps == 0 ? "" : "gearshape"
+        let leaf = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
         leaf.isSelected = taps > 0 && name != "unselected"
-        if name == "single-button" { root.storedChildren = [leaf] }
+        if name == "single-button" || (name.contains("empty-id") && !name.contains("pair")) || name == "nonempty-id-changed" { root.storedChildren = [leaf] }
         else {
-            let parent = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+            let parent = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
             parent.storedChildren = [leaf]; root.storedChildren = [parent]
         }
         if name == "ambiguous-tab" { root.storedChildren.append(XCUIElementSnapshot(.button, "Settings", "gearshape", frame)) }
         if taps > 0 {
-            let nav = XCUIElementSnapshot(.navigationBar, "", name == "wrong-navigation" ? "Trips" : "Settings",
+            let nav = XCUIElementSnapshot(.navigationBar, "", name == "wrong-navigation" ? "Trips" : title,
                                          CGRect(x: 0, y: 32, width: 1032, height: 116))
             if name == "label-navigation" { nav.identifier = ""; nav.label = "Settings" }
             if name == "offscreen-navigation" { nav.frame.origin.x = -20 }
@@ -1309,30 +1314,66 @@ enum ElementType { case other, button, navigationBar }
                 root.storedChildren += (0..<1000).map { _ in XCUIElementSnapshot(.other, "", "", .zero) }
             }
         }
+        liveRoot = root
         return root
+    }
+    func liveButtons() -> [XCUIElementSnapshot] {
+        func flatten(_ node: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+            (node.elementType == .button ? [node] : []) + node.storedChildren.flatMap(flatten)
+        }
+        var nodes = liveRoot.map(flatten) ?? []
+        if name == "empty-id-live-duplicate", let first = nodes.first {
+            nodes.append(XCUIElementSnapshot(.button, title, "another-action", first.frame))
+        }
+        return nodes
+    }
+    func identifier(_ node: XCUIElementSnapshot) -> String {
+        if name == "nonempty-id-changed" { return "another-identifier" }
+        if name == "empty-id-before-hit" || (name.contains("before-tap") && identifierChanged) {
+            return "gearshape"
+        }
+        return node.identifier
     }
 }
 @MainActor final class XCUIElement {
-    let world: World
-    init(_ world: World) { self.world = world }
-    var isEnabled: Bool { true }
-    var isHittable: Bool { world.name != "unhittable-tab" }
-    // The old second remote navbar query consumed 8.2s after a ready snapshot.
-    // Keep it available so this fixture fails if that query is reintroduced.
+    let query: XCUIElementQuery
+    var world: World { query.world }
+    init(_ query: XCUIElementQuery) { self.query = query }
+    var isEnabled: Bool { query.nodes().count == 1 && query.nodes()[0].isEnabled }
+    var isHittable: Bool {
+        guard query.nodes().count == 1, world.name != "unhittable-tab" else { return false }
+        if world.name.contains("before-tap") { world.identifierChanged = true }
+        return true
+    }
+    // A repeated live navigation query must still be caught by the fixture.
     var exists: Bool {
         world.navigationQueries += 1
         ContinuousClock.elapsed += .milliseconds(8200)
         return true
     }
-    func tap() { world.taps += 1; world.tappedAt = ContinuousClock.elapsed }
+    func tap() {
+        // Model .element's unique live resolution: no action is delivered
+        // if the query has become empty or ambiguous after readiness.
+        guard query.nodes().count == 1 else { world.rejectedTapResolutions += 1; return }
+        world.taps += 1; world.tappedAt = ContinuousClock.elapsed
+    }
 }
 @MainActor final class XCUIElementQuery {
     let world: World
-    init(_ world: World) { self.world = world }
-    func matching(_ predicate: NSPredicate) -> XCUIElementQuery { self }
-    func children(matching type: ElementType) -> XCUIElementQuery { self }
-    var element: XCUIElement { XCUIElement(world) }
-    subscript(_ identifier: String) -> XCUIElement { XCUIElement(world) }
+    let nodes: () -> [XCUIElementSnapshot]
+    init(_ world: World, nodes: (() -> [XCUIElementSnapshot])? = nil) {
+        self.world = world; self.nodes = nodes ?? { world.liveButtons() }
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        XCUIElementQuery(world) {
+            self.nodes().filter { predicate.evaluate(with: ["label": $0.label, "identifier": self.world.identifier($0)]) }
+        }
+    }
+    func children(matching type: ElementType) -> XCUIElementQuery {
+        XCUIElementQuery(world) { self.nodes().flatMap(\.storedChildren).filter { $0.elementType == type } }
+    }
+    var element: XCUIElement { XCUIElement(self) }
+    subscript(_ identifier: String) -> XCUIElement { XCUIElement(self) }
 }
 @MainActor final class XCUIApplication {
     let world: World
@@ -1348,19 +1389,20 @@ struct FixtureFailure: Error {}
     }
     // ACTUAL_HELPER
     func run(_ app: XCUIApplication) async throws {
-        try await selectTab("Settings", navigationTitle: "Settings", failure: "Settings did not open", in: app)
+        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app)
     }
 }
 @main struct Main {
     @MainActor static func main() async {
         let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
-        let success = ["ready", "single-button", "label-navigation"].contains(name)
-        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab"].contains(name)
+        let success = ["ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
+        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
         var failed = false
         do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
         precondition(failed != success)
         precondition(world.taps == (beforeTapFailure ? 0 : 1))
         precondition(world.navigationQueries == 0)
+        precondition(world.rejectedTapResolutions == 0)
         precondition(world.failures == (success ? 0 : 1))
         if success { precondition(world.snapshots == 2 && ContinuousClock.elapsed < .seconds(5)) }
         if name == "late-snapshot" || name == "late-traversal" { precondition(world.snapshots == 2) }
@@ -1391,6 +1433,16 @@ class TabNavigationTests(unittest.TestCase):
                      'wrong-navigation', 'ambiguous-navigation', 'offscreen-navigation', 'empty-navigation',
                      'infinite-navigation', 'late-snapshot', 'late-traversal', 'too-deep', 'too-many-nodes',
                      'ambiguous-tab', 'unhittable-tab']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
+    def test_live_query_keeps_unique_tab_when_initial_identifier_is_empty(self):
+        for name in ['empty-id-stable', 'empty-id-before-hit', 'empty-id-before-tap',
+                     'empty-id-pair-before-tap', 'russian-empty-id-before-tap',
+                     'empty-id-live-duplicate', 'nonempty-id-changed']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)

@@ -1,3 +1,5 @@
+import Darwin
+import notify
 import Foundation
 import StoreKit
 import StoreKitTest
@@ -20,6 +22,8 @@ final class BatchImportUITests: XCTestCase {
     private let filenames = ["synthetic-ticket.pdf", "synthetic-insurance.pdf"]
 
     func testRealFilesBatchRequiresEveryReviewAndPreservesOriginals() async throws {
+        let caseStart = ContinuousClock().now
+        let checkpoint = try combinedBatchMode(ProcessInfo.processInfo.environment)
         try XCTSkipUnless(ProcessInfo.processInfo.environment["TRIPDOCKET_BATCH_UI"] == "1",
                           "Opt in with TRIPDOCKET_BATCH_UI=1 on the dedicated, fixture-seeded simulator")
         guard !folder.isEmpty, !folder.contains("/"), !folder.contains("\\") else {
@@ -28,6 +32,9 @@ final class BatchImportUITests: XCTestCase {
         let nativeRoot = try nativeRootMode("batch")
         executionTimeAllowance = 600
         continueAfterFailure = false
+        if let checkpoint {
+            try await awaitBatchCheckpoint(checkpoint, until: caseStart.advanced(by: .seconds(600)))
+        }
         let app = XCUIApplication()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.terminate()
@@ -325,6 +332,7 @@ final class BatchImportUITests: XCTestCase {
 
     func testNativeSaveSeedsBothSyntheticOriginals() async throws {
         let environment = ProcessInfo.processInfo.environment
+        let checkpoint = try combinedBatchMode(environment)
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
                           "Opt in only for the owned native-Save fixture diagnostic")
         let token = environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] ?? ""
@@ -378,6 +386,109 @@ final class BatchImportUITests: XCTestCase {
             capture(app, "Native seed returned after Save — " + filename)
         }
         // Host compares both exact destination bytes; completion alone is not proof.
+        if let checkpoint { try Self.recordBatchProducer(checkpoint) }
+    }
+
+    // Combined qualification preserves separate seed/main XCTest cases. This
+    // process-local record is never a substitute for the host's real seed PASS.
+    private struct BatchCheckpointIdentity: Equatable {
+        let session: String
+        let token: String
+    }
+
+    private enum BatchCheckpointState {
+        case empty
+        case produced(BatchCheckpointIdentity)
+        case consumed
+    }
+
+    private static var batchCheckpointState: BatchCheckpointState = .empty
+
+    private func combinedBatchMode(_ environment: [String: String]) throws -> BatchCheckpointIdentity? {
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        return try Self.combinedBatchConfiguration(environment, debugSimulator: debugSimulator)
+    }
+
+    private static func combinedBatchConfiguration(
+        _ environment: [String: String], debugSimulator: Bool
+    ) throws -> BatchCheckpointIdentity? {
+        guard environment["TRIPDOCKET_COMBINED_BATCH_UI"] != nil
+                || environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] != nil else { return nil }
+        let session = environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] ?? ""
+        let token = environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] ?? ""
+        guard debugSimulator, environment["TRIPDOCKET_COMBINED_BATCH_UI"] == "1",
+              let sessionID = UUID(uuidString: session), sessionID.uuidString == session,
+              sessionID.uuid.6 & 0xf0 == 0x40, sessionID.uuid.8 & 0xc0 == 0x80,
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_NATIVE_ROOT_UI"] == "1",
+              environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
+              environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] == token,
+              environment["TRIPDOCKET_BATCH_UI"] == "1",
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
+            throw BatchTestFailure(message: "Combined batch requires its exact Debug Simulator session and owned fixture")
+        }
+        return BatchCheckpointIdentity(session: session, token: token)
+    }
+
+    private static func recordBatchProducer(_ identity: BatchCheckpointIdentity) throws {
+        guard case .empty = batchCheckpointState else {
+            throw BatchTestFailure(message: "Combined batch producer was already recorded or consumed")
+        }
+        batchCheckpointState = .produced(identity)
+    }
+
+    private static func consumeBatchProducer(_ identity: BatchCheckpointIdentity) throws {
+        guard case .produced(let actual) = batchCheckpointState, actual == identity else {
+            throw BatchTestFailure(message: "Combined batch requires its matching producer in this test process")
+        }
+        batchCheckpointState = .consumed
+    }
+
+    private func awaitBatchCheckpoint(
+        _ identity: BatchCheckpointIdentity, until caseDeadline: ContinuousClock.Instant
+    ) async throws {
+        try Task.checkCancellation()
+        try Self.consumeBatchProducer(identity)
+        let clock = ContinuousClock()
+        let deadline = min(caseDeadline, clock.now.advanced(by: .seconds(60)))
+        guard clock.now < deadline else {
+            throw BatchTestFailure(message: "Combined batch checkpoint has no remaining case budget")
+        }
+        let nonce = UUID().uuidString
+        let name = "com.4alvit.tripfolio.batch-checkpoint.\(identity.session).\(nonce)"
+        var notificationToken: Int32 = 0
+        guard notify_register_check(name, &notificationToken) == NOTIFY_STATUS_OK else {
+            throw BatchTestFailure(message: "Cannot register combined batch checkpoint acknowledgement")
+        }
+        defer { _ = notify_cancel(notificationToken) }
+        var state: UInt64 = 0
+        guard notify_get_state(notificationToken, &state) == NOTIFY_STATUS_OK, state == 0 else {
+            throw BatchTestFailure(message: "Combined batch checkpoint acknowledgement was not initially empty")
+        }
+        try Task.checkCancellation()
+        guard clock.now < deadline else {
+            throw BatchTestFailure(message: "Combined batch checkpoint setup exhausted its deadline")
+        }
+        print("TRIPDOCKET_BATCH_CHECKPOINT \(identity.session) \(identity.token) \(nonce)")
+        fflush(nil)
+        repeat {
+            guard notify_get_state(notificationToken, &state) == NOTIFY_STATUS_OK else {
+                throw BatchTestFailure(message: "Cannot read combined batch checkpoint acknowledgement")
+            }
+            try Task.checkCancellation()
+            if clock.now >= deadline { break }
+            if state == 1 { return }
+            guard state == 0 else {
+                throw BatchTestFailure(message: "Unexpected combined batch checkpoint acknowledgement")
+            }
+            let remaining = clock.now.duration(to: deadline)
+            if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
+        } while clock.now < deadline
+        throw BatchTestFailure(message: "Host did not acknowledge the combined batch checkpoint within its deadline")
     }
 
     @MainActor

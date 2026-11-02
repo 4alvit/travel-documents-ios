@@ -308,7 +308,12 @@ final class PrivacySupportUITests: XCTestCase {
             let frame = leaf.node.frame
             guard !frame.isNull, !frame.isInfinite, frame.width > 0, frame.height > 0,
                   root.frame.contains(frame), leaf.node.isEnabled else { return nil }
-            let exactAction = NSPredicate(format: "label == %@ AND identifier == %@", title, leaf.node.identifier)
+            // Native tabs can acquire their symbol identifier after the
+            // readiness snapshot. An empty identifier is not stable identity;
+            // the exact label and .element still require a unique live action.
+            let exactAction = leaf.node.identifier.isEmpty
+                ? NSPredicate(format: "label == %@", title)
+                : NSPredicate(format: "label == %@ AND identifier == %@", title, leaf.node.identifier)
             let buttons = app.buttons.matching(exactAction)
             let action: XCUIElementQuery
             if matches == 1 {

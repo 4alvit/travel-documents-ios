@@ -91,12 +91,14 @@ Those channels do not qualify physical-device behavior, live purchases,
 TestFlight or App Store distribution.
 Hosted qualification captures require an independent result-bundle and visual
 review before their operator receipts can authorize a release promotion.
-Batch qualification retains three distinct result bundles: Files preparation,
-native saving of two synthetic PDF fixtures into the verified empty local
-provider root of an exclusively owned Simulator, and the two main purchase/import
-tests. Seeding and the main suite reuse the same prepared Debug products, whose
-identities are checked across phase boundaries. Each phase must pass its own checks;
-fixture preparation does not establish successful import or original-byte preservation.
+Batch qualification retains two distinct result bundles: one Files preparation
+case, then one serial invocation containing the hosted purchase prerequisite,
+native saving of two synthetic PDFs, and the real batch-import case. Before
+import begins, the test waits for the host to verify both complete files in the
+owned Simulator's provider root. The same prepared Debug products are checked
+before and after the invocation. All four cases and the host checkpoint must
+pass; fixture preparation does not establish successful import or preservation
+of the imported originals.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.
