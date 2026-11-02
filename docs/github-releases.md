@@ -99,7 +99,15 @@ preparation case once: the synthetic app opens Export, Save to Files and the
 local provider, checks that its unique sentinel folder is absent, then stops.
 The same `xcodebuild` invocation starts the selected device within its existing
 phase budget. A separate `simctl bootstatus` call is not a prerequisite. The
-exact native case must pass before the post-preparation Booted and identity checks.
+exact native case and result validation must pass before post-preparation
+identity checks. Xcode may leave a device it started in `Shutdown` after testing.
+If the same selected device and data-root inode are unchanged, preparation then
+runs one `simctl bootstatus <UUID> -b` command with a 180-second cap and verifies
+a fresh complete inventory, Booted state and unchanged root before container
+lookup. An already-Booted device receives no additional boot command. These
+steps share the existing 900-second work budget; failures are not retried.
+The receipt records the observed post-test state, whether a warm boot was needed,
+and the resulting state. Final checks still reject changes to any other device.
 The preparation creates no backup or Files folder and does not erase or delete
 the selected device. Its separate result bundle records this case; the following
 guidance cohort retains its own result bundle and reuses the same build products.
