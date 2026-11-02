@@ -4,14 +4,23 @@ cd "$(dirname "$0")/.."
 # No arguments preserves the complete local test run. CI uses two disjoint
 # cohorts so long guidance tests and purchase tests have separate job budgets.
 TRIPFOLIO_REQUIRE_SDK_MATCH=0
+TRIPFOLIO_PREPARE_FILES=0
 if [[ "${1:-}" == "--require-sdk-match" ]]; then
   TRIPFOLIO_REQUIRE_SDK_MATCH=1
   shift
 fi
+if [[ "${1:-}" == "--prepare-files" ]]; then
+  TRIPFOLIO_PREPARE_FILES=1
+  shift
+fi
+if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && ( "$TRIPFOLIO_REQUIRE_SDK_MATCH" != 1 || $# -ne 2 || "${1:-}" != "--cohort" || "${2:-}" != "ui-guidance" || "${GITHUB_ACTIONS:-}" != true ) ]]; then
+  echo "Files preparation requires CI --require-sdk-match --cohort ui-guidance" >&2
+  exit 2
+fi
 TEST_ARGUMENTS=(test)
 if [[ $# -ne 0 ]]; then
   if [[ $# -ne 2 || "$1" != "--cohort" ]]; then
-    echo "Usage: $0 [--require-sdk-match] [--cohort core-purchase|ui-guidance]" >&2
+    echo "Usage: $0 [--require-sdk-match [--prepare-files]] [--cohort core-purchase|ui-guidance]" >&2
     exit 2
   fi
   case "$2" in
@@ -47,6 +56,10 @@ if [[ "$TRIPFOLIO_REQUIRE_SDK_MATCH" == 1 ]]; then
     TRIPFOLIO_SELECTION_ARGS+=(--requested-udid "$TRIPFOLIO_SIMULATOR_ID")
   fi
   TRIPFOLIO_SIMULATOR_ID=$(python3 -B scripts/select-simulator.py "${TRIPFOLIO_SELECTION_ARGS[@]}")
+  if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 ]]; then
+    # Explicit preinitialized-provider coverage; not cold first-use acceptance.
+    python3 -B scripts/prepare-guidance-files.py --selection-directory "$TRIPFOLIO_SELECTION_DIR"
+  fi
 elif [[ -z "${TRIPFOLIO_SIMULATOR_ID:-}" ]]; then
   TRIPFOLIO_SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys

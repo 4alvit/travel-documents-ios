@@ -326,7 +326,8 @@ class BoundaryTests(unittest.TestCase):
         parser=driver.split('xcodegen generate',1)[0]
         self.assertIn('if [[ $# -ne 0 ]]; then',parser)
         self.assertIn('if [[ $# -ne 2 || "$1" != "--cohort" ]]; then',parser)
-        self.assertEqual(parser.count('exit 2'),2)
+        self.assertIn('echo "Unknown test cohort: $2" >&2\n      exit 2',parser)
+        self.assertIn('"${2:-}" != "ui-guidance"',parser)
         self.assertEqual(re.findall(r'^    ([a-z-]+)\)$',parser,re.MULTILINE),['core-purchase','ui-guidance'])
         self.assertIn('CODE_SIGNING_ALLOWED=NO "${TEST_ARGUMENTS[@]}"',driver)
         for bound in ['-parallel-testing-enabled NO','-maximum-concurrent-test-simulator-destinations 1',
@@ -362,9 +363,12 @@ class BoundaryTests(unittest.TestCase):
             self.assertIn(f'("settings.count.{key}", "{label}", {count})',helper)
         self.assertIn('app.descendants(matching: .any).matching(identifier: identifier)',helper)
         self.assertIn('try await reveal(row, app: app, navigation: "Settings")',helper)
-        self.assertIn('rows.count == 1 && row.isHittable && row.label == label',helper)
-        self.assertIn('(row.value as? String) == String(count)',helper)
-        self.assertNotIn('||',helper);self.assertNotIn('row.staticTexts',helper)
+        self.assertIn('self.recoveryCountMatches(rows, row: row, identifier: identifier, label: label, count: count)',helper)
+        predicate=source.split('private func recoveryCountMatches(',1)[1].split('private func wait(',1)[0]
+        self.assertIn('guard rows.count == 1, row.isHittable, let snapshot = try? row.snapshot()',predicate)
+        self.assertIn('snapshot.identifier == identifier && snapshot.label == label',predicate)
+        self.assertIn('(snapshot.value as? String) == String(count)',predicate)
+        self.assertNotIn('||',helper+predicate);self.assertNotIn('row.staticTexts',helper+predicate)
         for expected in ['recoveryCounts(trips: 1, people: 1, documents: 1, app: app)',
                          'recoveryCounts(trips: 1, people: 2, documents: 1, app: app)',
                          'recoveryCounts(trips: 0, people: 0, documents: 0, app: app)']:
@@ -459,8 +463,8 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual(argv[argv.index('-resultBundlePath')+1],str(r.out/(phase+'.xcresult')))
                 self.assertEqual(argv[argv.index('-parallel-testing-enabled')+1],'NO')
                 self.assertEqual(argv[argv.index('-maximum-concurrent-test-simulator-destinations')+1],'1')
-                self.assertEqual(argv[argv.index('-default-test-execution-time-allowance')+1],'120' if phase=='prepare' else '300')
-                self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance')+1],'120' if phase=='prepare' else '300')
+                self.assertEqual(argv[argv.index('-default-test-execution-time-allowance')+1],'180' if phase=='prepare' else '300')
+                self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance')+1],'180' if phase=='prepare' else '300')
                 self.assertEqual(argv[-2:],['CODE_SIGNING_ALLOWED=NO','test'])
         self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_seconds'],r.limit,r.final),(5,600,1380,1500))
 
@@ -1593,7 +1597,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertAlmostEqual(row['work_deadline'],747.9)
         self.assertEqual(row['stop_reserve_seconds'],8)
         self.assertEqual(budget['original_work_deadline_elapsed'],1380)
-        self.assertEqual(budget['selected_case_max_seconds'],120)
+        self.assertEqual(budget['selected_case_max_seconds'],180)
         self.assertAlmostEqual(budget['remaining_work_before_seconds'],1224.1)
         self.assertLess(budget['remaining_work_after_command_seconds'],1190)
         self.assertEqual((r.limit,r.final),(1380,1500))

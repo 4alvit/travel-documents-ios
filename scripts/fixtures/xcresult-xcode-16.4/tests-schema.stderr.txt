@@ -1,0 +1,4 @@
+Error: Missing expected argument '--path <path>'
+Help:  --path <path>  The result bundle path.
+Usage: xcresulttool get test-results tests --path <path> [--compact]
+  See 'xcresulttool get test-results tests --help' for more information.

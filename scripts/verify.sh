@@ -2,6 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/check-localizations.py
+python3 -B scripts/test-purchase-load.py
+python3 -B scripts/test-batch-import-diagnostics.py
+python3 -B scripts/test-batch-scroll-container.py
+python3 -B scripts/test-localization-snapshots.py
 swift test
 xcodegen generate
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \

@@ -69,13 +69,15 @@ device. The result bundle is written under `build/`.
 Pass `--require-sdk-match` before any `--cohort` option to require an available
 iPhone in the selected Xcode's exact Simulator SDK runtime; a supplied device
 UUID is checked against the same requirements. Ordinary local use keeps its
-existing selection behavior. The guidance CI job enables this check and pins
-Xcode 26.2 (17C52); its captured inventories and selected device are retained
-with the test artifact. Core/purchase tests and the Release preview pin
-Xcode 16.4 (16F6), retaining the previously validated runtime selection. This
-compatibility lane does not claim an SDK-matched runtime; the test result
-records its actual device/runtime. The separate recovery compatibility job
-keeps its own pinned toolchain/profile.
+existing selection behavior. Core/purchase and phone guidance CI use Xcode 26.2
+(17C52) and require its matching Simulator runtime. Their test artifacts retain
+the selected device and captured inventories. The Release preview is built with
+the same Xcode version; its provenance records the actual producer. The separate
+recovery compatibility job keeps its own toolchain/profile.
+Phone guidance CI explicitly prepares the selected Simulator's local Files provider
+before its UI cases and retains the bounded preparation receipt. The unchanged
+picker assertions still require real navigation and cancellation; these checks
+cover a preinitialized provider and do not establish cold first-use behavior.
 
 Check the [current CI](https://github.com/4alvit/travel-documents-ios/actions/workflows/ci.yml)
 for the exact revision you intend to build. Historical successful runs and their
@@ -89,6 +91,10 @@ Those channels do not qualify physical-device behavior, live purchases,
 TestFlight or App Store distribution.
 Hosted qualification captures require an independent result-bundle and visual
 review before their operator receipts can authorize a release promotion.
+Batch qualification retains four distinct result bundles: Files preparation,
+native folder creation, native saving of the two synthetic PDF fixtures, and
+the two main purchase/import tests. Each phase must pass its own checks;
+fixture preparation does not establish successful import or original-byte preservation.
 
 In **Debug builds only**, `--ui-testing-unlocked` skips authentication and uses
 a separate synthetic library; `--ui-testing-reset` clears that test library.
@@ -119,7 +125,9 @@ python3 scripts/test-batch-simulator.py --device <simulator-uuid>
 ```
 
 The driver creates a unique Files folder with two fictional PDFs, records their
-hashes, runs exactly one case and removes only its own folder. Its source
+hashes, runs the exact hosted purchase/restore precondition followed by the real
+batch UI case in one invocation, and removes only its own folder. Both cases and
+their execution order must be verified. Its source
 inventory, fixture copies, log and result bundle remain under `build/`. The case
 requires an actual local Xcode purchase, confirms each document individually,
 checks that later edits require confirmation again and opens the saved originals

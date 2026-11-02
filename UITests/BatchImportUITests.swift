@@ -9,7 +9,8 @@ import Vision
 /// PDFs into real Files and obtains Pro through local StoreKit. Paired recovery
 /// phases use the existing demo fixture, remain Free, and export/restore through
 /// real Files. Authentication bypass is confined to the existing Debug fixture.
-/// Run serially, with a runner maximum/default allowance of at least 300 seconds.
+/// Run serially, with a 300-second runner default and a 600-second maximum
+/// for the complete batch workflow. Recovery phases retain their own allowances.
 @MainActor
 final class BatchImportUITests: XCTestCase {
     private let productID = "com.4alvit.tripfolio.pro"
@@ -24,7 +25,7 @@ final class BatchImportUITests: XCTestCase {
         guard !folder.isEmpty, !folder.contains("/"), !folder.contains("\\") else {
             throw BatchTestFailure(message: "TRIPDOCKET_BATCH_FOLDER must name a single nonempty Files folder")
         }
-        executionTimeAllowance = 300
+        executionTimeAllowance = 600
         continueAfterFailure = false
         let app = XCUIApplication()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -35,7 +36,7 @@ final class BatchImportUITests: XCTestCase {
             session.clearTransactions()
             session.resetToDefaultState()
         }
-        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
+        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-batch-diagnostics",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         try await openTrip(app)
@@ -199,6 +200,264 @@ final class BatchImportUITests: XCTestCase {
         // Host must now create and independently prove the exact folder empty.
     }
 
+
+    func testNativeCreateOwnedFilesFolder() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
+                          "Opt in only for the owned native-folder fixture diagnostic")
+        let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
+        let ownedFolder = "TripDocket-Batch-QA-" + token
+        guard UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder else {
+            throw BatchTestFailure(message: "Native folder creation requires its exact canonical owned token")
+        }
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--demo"]
+        app.launch()
+        try await wait("The native-folder demo did not finish loading", app: app) {
+            app.staticTexts["Coast weekend"].exists
+        }
+        try await recoveryTab("Settings", app: app)
+        try await recoveryFreeCard(app)
+        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
+        try await presentRecoverySave(app)
+        let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
+        try await wait("Native-folder Files picker did not open", app: app) {
+            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
+        }
+        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let location = app.cells.matching(NSPredicate(
+            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
+        ))
+        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
+        let directory = picker.element.cells.matching(identifier: ownedFolder + ", Folder")
+        try check(directory.count == 0, app: app, "Owned native folder already exists before creation")
+        let more = navigation.element.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "OverflowBarButtonItem", "More"
+        ))
+        try await wait("Native-folder local root has no unique More action", app: app) {
+            self.isRecoveryFolder(localTitle, navigation: navigation.element)
+                && more.count == 1 && more.element.isEnabled && more.element.isHittable
+        }
+        more.element.tap()
+        let newFolder = app.buttons.matching(NSPredicate(format: "label == %@", "New Folder"))
+        try await wait("Native New Folder action is unavailable", app: app) {
+            newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
+        }
+        newFolder.element.tap()
+        let files = picker.element.collectionViews.matching(identifier: "File View")
+        let inlineNames = files.element.textViews.matching(identifier: "DOC.inlineRenameField")
+        try await wait("Native folder-name editor is not unique and reachable", app: app) {
+            files.count == 1 && inlineNames.count == 1
+                && inlineNames.element.isEnabled && inlineNames.element.isHittable
+        }
+        // Files selects the default inline name. Do not collapse that selection
+        // by tapping the editor; verify that typing replaced the complete value.
+        inlineNames.element.typeText(ownedFolder)
+        try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
+                  app: app, "Native folder name differs from the exact owned UUID name")
+        let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        if keyboardIntroduction.count != 0 {
+            let explanation = keyboardIntroduction.element.staticTexts.matching(NSPredicate(
+                format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
+            ))
+            let acknowledge = keyboardIntroduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+            try check(keyboardIntroduction.count == 1 && explanation.count == 1 && explanation.element.isHittable
+                      && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable,
+                      app: app, "Native keyboard introduction is not uniquely identifiable and reachable")
+            capture(app, "Native keyboard introduction before the single Continue")
+            acknowledge.element.tap()
+            try await wait("Native keyboard introduction did not dismiss back to the exact folder editor", app: app) {
+                keyboardIntroduction.count == 0 && files.count == 1 && inlineNames.count == 1
+                    && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                    && inlineNames.element.value as? String == ownedFolder
+            }
+        }
+        try check(files.count == 1 && inlineNames.count == 1
+                  && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                  && inlineNames.element.value as? String == ownedFolder
+                  && isRecoveryFolder(localTitle, navigation: navigation.element),
+                  app: app, "Native folder editor is not ready for explicit end-editing")
+        guard let before = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle) else {
+            capture(app, "Native folder has no verified blank grid area")
+            throw BatchTestFailure(message: "Native folder has no verified blank grid area")
+        }
+        capture(app, "Native folder exact name before the single blank-grid end-editing tap")
+        guard let current = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle),
+              current.point == before.point, current.normalized == before.normalized,
+              files.count == 1 && inlineNames.count == 1
+                && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                && inlineNames.element.value as? String == ownedFolder else {
+            throw BatchTestFailure(message: "Native folder blank grid area changed before end-editing")
+        }
+        files.element.coordinate(withNormalizedOffset: current.normalized).tap()
+        // An updated folder-cell identifier must not masquerade as editor
+        // dismissal. Check the live editor identifier independently of its cell.
+        let remainingEditors = app.textViews.matching(identifier: "DOC.inlineRenameField")
+        try await wait("Native folder confirmation did not end editing with the exact destination", app: app) {
+            remainingEditors.count == 0
+                && (self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
+                    || (directory.count == 1 && directory.element.isEnabled && directory.element.isHittable))
+        }
+        if !isRecoveryFolder(ownedFolder, navigation: navigation.element) {
+            try check(directory.count == 1 && directory.element.isEnabled && directory.element.isHittable,
+                      app: app, "Created native folder is not uniquely reachable")
+            directory.element.tap()
+        }
+        try await wait("Native Files did not open the exact created folder", app: app) {
+            remainingEditors.count == 0 && self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
+        }
+        capture(app, "Native folder exact destination before host empty-folder verification")
+        // Never tap Save: the host must independently prove this native-created
+        // leaf empty after the fixture stops, before the separate seed phase.
+        app.terminate()
+        try await wait("Native-folder fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
+    func testNativeSaveSeedsBothSyntheticOriginals() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
+                          "Opt in only for the owned native-Save fixture diagnostic")
+        let token = environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] ?? ""
+        guard UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
+            throw BatchTestFailure(message: "Native seed requires its exact canonical owned folder token")
+        }
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
+                                                   "--ui-testing-native-batch-token", token]
+        app.launch()
+        for filename in filenames {
+            let seed = app.buttons["nativeSeed." + filename]
+            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isHittable }
+            seed.tap()
+            let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
+                format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
+                NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
+                NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
+            ))
+            try await waitForStableShareAction(saveToFiles, app: app)
+            saveToFiles.element.tap()
+            let picker = try await openLocalFilesFolder(folder, app: app)
+            let navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            let save = navigation.buttons["Save"]
+            try await wait("Native seed destination Save is unavailable", app: app) {
+                save.exists && save.isEnabled && save.isHittable
+            }
+            capture(app, "Native seed exact destination before Save — " + filename)
+            save.tap()
+            try await wait("Native seed Save did not finish", app: app) {
+                !navigation.exists && seed.exists && seed.isHittable
+            }
+            capture(app, "Native seed returned after Save — " + filename)
+        }
+        // Host compares both exact destination bytes; completion alone is not proof.
+    }
+
+    @MainActor
+    private func nativeFolderBlankPoint(
+        in snapshot: XCUIElementSnapshot, ownedFolder: String, localTitle: String
+    ) -> (point: CGPoint, normalized: CGVector)? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return [] }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return [] }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func finite(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width >= 0 && frame.height >= 0
+        }
+        let all = nodes(snapshot)
+        let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
+        guard pickers.count == 1,
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
+        let pickerNodes = nodes(pickers[0])
+        let rootIdentifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
+        let roots = pickerNodes.filter { $0.elementType == .other && $0.identifier == rootIdentifier }
+        guard roots.count == 1 else { return nil }
+        let rootNodes = nodes(roots[0])
+        guard rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
+              rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1 else { return nil }
+        let files = pickerNodes.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
+        let navigation = pickerNodes.filter {
+            $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar"
+        }
+        let keyboards = all.filter { $0.elementType == .keyboard }
+        let windows = snapshot.children.filter { $0.elementType == .window }
+        guard files.count == 1, navigation.count == 1, keyboards.count == 1, !windows.isEmpty,
+              windows.allSatisfy({ finite($0.frame) && !$0.frame.isEmpty }) else { return nil }
+        let titles = nodes(navigation[0]).filter {
+            ($0.elementType == .staticText && $0.label == localTitle)
+                || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
+        }
+        let fileNodes = nodes(files[0])
+        let editors = fileNodes.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
+        let cells = fileNodes.filter { $0.elementType == .cell }
+        let owners = cells.filter { cell in
+            nodes(cell).contains { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
+        }
+        guard titles.count == 1, editors.count == 1, editors[0].value as? String == ownedFolder,
+              owners.count == 1 else { return nil }
+        let frame = files[0].frame
+        let keyboardFrame = keyboards[0].frame
+        let navigationFrame = navigation[0].frame
+        let ownerFrame = owners[0].frame
+        guard [frame, keyboardFrame, navigationFrame, ownerFrame, editors[0].frame].allSatisfy(finite),
+              !frame.isEmpty, !keyboardFrame.isEmpty, !navigationFrame.isEmpty, !ownerFrame.isEmpty else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        let top = max(frame.minY, navigationFrame.maxY, ownerFrame.minY, window.minY)
+        let bottom = min(frame.maxY, keyboardFrame.minY, ownerFrame.maxY, window.maxY)
+        guard bottom > top else { return nil }
+        let region = CGRect(x: max(frame.minX, window.minX), y: top,
+                            width: min(frame.maxX, window.maxX) - max(frame.minX, window.minX),
+                            height: bottom - top).insetBy(dx: 12, dy: 12)
+        guard finite(region), !region.isEmpty else { return nil }
+        // Containers describe the grid itself. Every other semantic node is an
+        // exclusion, including cells, images, text, editors and action controls.
+        let exclusions = pickerNodes.filter { node in
+            if node.elementType == .collectionView || node.elementType == .scrollView { return false }
+            if node.elementType == .other {
+                if node.identifier == "Browse View (Picker)"
+                    || node.identifier == rootIdentifier {
+                    return false
+                }
+                return !node.identifier.isEmpty || !node.label.isEmpty || node.value != nil
+            }
+            return true
+        }.map { $0.frame }
+        guard exclusions.allSatisfy(finite) else { return nil }
+        for xFraction: CGFloat in [0.5, 0.75, 0.25] {
+            for yFraction: CGFloat in [0.5, 0.25, 0.75] {
+                let point = CGPoint(x: region.minX + region.width * xFraction,
+                                    y: region.minY + region.height * yFraction)
+                let touch = CGRect(x: point.x - 11, y: point.y - 11, width: 22, height: 22)
+                guard region.contains(touch),
+                      !exclusions.contains(where: { !$0.isEmpty && $0.insetBy(dx: -8, dy: -8).intersects(touch) }) else { continue }
+                return (point, CGVector(dx: (point.x - frame.minX) / frame.width,
+                                       dy: (point.y - frame.minY) / frame.height))
+            }
+        }
+        return nil
+    }
 
     private func presentRecoverySave(_ app: XCUIApplication) async throws {
         let export = app.buttons["Export full backup"]
@@ -596,7 +855,7 @@ final class BatchImportUITests: XCTestCase {
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
             throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
         }
-        executionTimeAllowance = phase == "prepare" ? 120 : 300
+        executionTimeAllowance = phase == "prepare" ? 180 : 300
         continueAfterFailure = false
         return value
     }
@@ -639,11 +898,10 @@ final class BatchImportUITests: XCTestCase {
             ("settings.count.documents", "Documents", documents)
         ] {
             let rows = app.descendants(matching: .any).matching(identifier: identifier)
-            let row = rows.firstMatch
+            let row = recoveryCountTarget(rows, typed: app.otherElements.matching(identifier: identifier))
             try await reveal(row, app: app, navigation: "Settings")
             try await wait("Incorrect or ambiguous Settings count for \(label); expected \(count)", app: app) {
-                rows.count == 1 && row.isHittable && row.label == label
-                    && (row.value as? String) == String(count)
+                self.recoveryCountMatches(rows, row: row, identifier: identifier, label: label, count: count)
             }
         }
     }
@@ -843,9 +1101,40 @@ final class BatchImportUITests: XCTestCase {
         }
         let open = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open (")).firstMatch
         try await wait("Files did not expose Open after selecting both originals", app: app) { open.exists && open.isEnabled && open.isHittable }
-        capture(app, "Two synthetic originals selected in real Files")
+        capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)
         open.tap()
-        try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
+        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now)
+    }
+
+    private func requireFilesDismissal(_ app: XCUIApplication, navigation: XCUIElement,
+                                      openedAt: ContinuousClock.Instant) async throws {
+        do {
+            try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
+        } catch let originalFailure as BatchTestFailure {
+            // Diagnostic branch only: the original 15-second criterion already
+            // failed and captured its PNG/AX. Observe once, with no further action.
+            // The 30-second request cannot cap an in-flight XCTest RPC; the
+            // unchanged 600/1200/2400-second case/driver/outer limits still apply.
+            let observationStarted = ContinuousClock.now
+            let disappeared = navigation.waitForNonExistence(timeout: 30)
+            let observationFinished = ContinuousClock.now
+            let timing = XCTAttachment(string: """
+                originalDismissalCriterion=failed
+                requestedObservationSeconds=30
+                observationStartedSinceOpenReturned=\(openedAt.duration(to: observationStarted))
+                observationFinishedSinceOpenReturned=\(openedAt.duration(to: observationFinished))
+                observedElapsed=\(observationStarted.duration(to: observationFinished))
+                navigationDisappeared=\(disappeared)
+                acceptance=failed
+                """)
+            timing.name = "Files passive late observation — original failure retained"
+            timing.lifetime = .keepAlways
+            add(timing)
+            capture(app, "Files after passive late observation — original failure retained", batchDiagnostic: true)
+            // Neither a late disappearance nor unavailable diagnostic state
+            // converts this run into a pass. Cancellation is not intercepted.
+            throw originalFailure
+        }
     }
 
     private func reviewRows(in app: XCUIApplication) -> XCUIElementQuery {
@@ -949,31 +1238,92 @@ final class BatchImportUITests: XCTestCase {
         for _ in 0..<10 {
             let bar = app.navigationBars[navigation]
             try check(bar.exists, app: app, "Expected navigation is missing: \(navigation)")
-            var viewport = app.frame.intersection(CGRect(x: bar.frame.minX, y: bar.frame.maxY,
-                width: bar.frame.width, height: max(0, app.frame.maxY - bar.frame.maxY))).insetBy(dx: 6, dy: 8)
+            let appFrame = app.frame
+            let navigationFrame = bar.frame
+            var viewport = appFrame.intersection(CGRect(x: navigationFrame.minX, y: navigationFrame.maxY,
+                width: navigationFrame.width, height: max(0, appFrame.maxY - navigationFrame.maxY))).insetBy(dx: 6, dy: 8)
             for obstruction in app.tabBars.allElementsBoundByIndex + app.keyboards.allElementsBoundByIndex
-                where obstruction.exists && obstruction.isHittable && obstruction.frame.minY > viewport.minY {
-                viewport.size.height = max(0, min(viewport.maxY, obstruction.frame.minY - 8) - viewport.minY)
+                where obstruction.exists && obstruction.isHittable {
+                let obstructionFrame = obstruction.frame
+                if obstructionFrame.minY > viewport.minY {
+                    viewport.size.height = max(0, min(viewport.maxY, obstructionFrame.minY - 8) - viewport.minY)
+                }
             }
-            let frame = element.exists ? element.frame : .null
-            if element.exists && element.isHittable && !frame.isEmpty && viewport.contains(frame) { return }
+            let targetExists = element.exists
+            let frame = targetExists ? element.frame : .null
+            if targetExists && element.isHittable && !frame.isEmpty && viewport.contains(frame) { return }
             let candidates = app.collectionViews.allElementsBoundByIndex + app.scrollViews.allElementsBoundByIndex
-            let container = candidates.reversed().first {
-                $0.exists && $0.isHittable && $0.frame.width <= bar.frame.width + 32
-                    && $0.frame.intersection(viewport).height > 100
-            }
+            let container = revealContainer(candidates, navigationFrame: navigationFrame, viewport: viewport)
             guard let container else { throw failure("No active scroll container for \(navigation)", app: app) }
-            viewport = viewport.intersection(container.frame).insetBy(dx: 8, dy: 8)
+            let containerFrame = container.frame
+            viewport = viewport.intersection(containerFrame).insetBy(dx: 8, dy: 8)
             try check(viewport.height > 80, app: app, "No safe scroll viewport for \(navigation)")
             let upwards = frame.isNull || frame.midY > viewport.midY
             let distance = min(140, viewport.height * 0.45)
             let start = container.coordinate(withNormalizedOffset: .zero).withOffset(
-                CGVector(dx: viewport.midX - container.frame.minX, dy: viewport.midY - container.frame.minY))
+                CGVector(dx: viewport.midX - containerFrame.minX, dy: viewport.midY - containerFrame.minY))
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: upwards ? -distance : distance)),
                         withVelocity: .slow, thenHoldForDuration: 0.2)
             try await Task.sleep(for: .milliseconds(100))
         }
         throw failure("Required control did not become fully reachable in \(navigation): \(element.identifier)", app: app)
+    }
+
+    private func revealContainer(_ candidates: [XCUIElement], navigationFrame: CGRect,
+                                 viewport: CGRect) -> XCUIElement? {
+        // Keep the directly hittable path and its existing selection order.
+        if let direct = candidates.reversed().first(where: {
+            $0.exists && $0.isHittable && $0.frame.width <= navigationFrame.width + 32
+                && $0.frame.intersection(viewport).height > 100
+        }) { return direct }
+
+        func finite(_ frame: CGRect) -> Bool {
+            !frame.isNull && !frame.isInfinite && !frame.isEmpty
+                && frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+        }
+        guard finite(navigationFrame), finite(viewport) else { return nil }
+        // A presented native List and its covered parent can both retain
+        // aligned geometry while their wrappers report non-hittable. Require
+        // one container with a live, visible descendant before using its
+        // geometry for the existing bounded drag.
+        let wrappers = candidates.compactMap { candidate -> (XCUIElement, CGRect)? in
+            guard candidate.exists else { return nil }
+            let frame = candidate.frame
+            guard finite(frame), frame.width <= navigationFrame.width + 32,
+                  abs(frame.midX - navigationFrame.midX) < max(32, navigationFrame.width / 4),
+                  frame.intersection(viewport).height > 100 else { return nil }
+            return (candidate, frame)
+        }
+        let active = wrappers.filter { wrapper, frame in
+            let descendants = wrapper.buttons.allElementsBoundByIndex + wrapper.staticTexts.allElementsBoundByIndex
+            return descendants.contains(where: { child in
+                guard child.exists, child.isHittable else { return false }
+                let childFrame = child.frame
+                guard finite(childFrame) else { return false }
+                let visible = childFrame.intersection(frame).intersection(viewport)
+                return !visible.isNull && visible.width >= min(44, childFrame.width)
+                    && visible.height >= min(44, childFrame.height)
+            })
+        }
+        guard active.count == 1 else { return nil }
+        return active[0].0
+    }
+
+    private func recoveryCountTarget(_ rows: XCUIElementQuery, typed: XCUIElementQuery) -> XCUIElement {
+        // Settings currently exposes count rows as Other. Keep the generic
+        // query for another representation and for the global uniqueness gate.
+        typed.count == 1 ? typed.element(boundBy: 0) : rows.firstMatch
+    }
+
+    private func recoveryCountMatches(_ rows: XCUIElementQuery, row: XCUIElement,
+                                      identifier: String, label: String, count: Int) -> Bool {
+        // A typed handle must not hide a duplicate identifier on another type.
+        // Read label and value together from one current snapshot, never from
+        // the preceding reveal observation or a previous wait iteration.
+        guard rows.count == 1, row.isHittable, let snapshot = try? row.snapshot() else { return false }
+        return snapshot.identifier == identifier && snapshot.label == label
+            && (snapshot.value as? String) == String(count)
     }
 
     private func wait(_ message: String, app: XCUIApplication, springboard: XCUIApplication? = nil,
@@ -984,7 +1334,7 @@ final class BatchImportUITests: XCTestCase {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(100))
         } while ContinuousClock.now < deadline
-        capture(app, message, springboard: springboard)
+        capture(app, message, springboard: springboard, batchDiagnostic: true)
         throw BatchTestFailure(message: message)
     }
 
@@ -993,7 +1343,7 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func failure(_ message: String, app: XCUIApplication) -> BatchTestFailure {
-        capture(app, message)
+        capture(app, message, batchDiagnostic: true)
         return BatchTestFailure(message: message)
     }
 
@@ -1055,7 +1405,16 @@ final class BatchImportUITests: XCTestCase {
         add(attachment)
     }
 
-    private func capture(_ app: XCUIApplication, _ name: String, springboard: XCUIApplication? = nil) {
+    private func capture(_ app: XCUIApplication, _ name: String, springboard: XCUIApplication? = nil,
+                         batchDiagnostic: Bool = false) {
+        if batchDiagnostic && app.launchArguments.contains("--ui-testing-batch-diagnostics") {
+            var value = "unavailable"
+            if let snapshot = try? app.snapshot() { value = batchImporterDiagnosticValue(snapshot) }
+            let diagnostic = XCTAttachment(string: value)
+            diagnostic.name = name + " — batch importer state"
+            diagnostic.lifetime = .keepAlways
+            add(diagnostic)
+        }
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
@@ -1064,6 +1423,28 @@ final class BatchImportUITests: XCTestCase {
         tree.name = name + " — accessibility hierarchy"
         tree.lifetime = .keepAlways
         add(tree)
+    }
+
+    private func batchImporterDiagnosticValue(_ root: any XCUIElementSnapshot) -> String {
+        // One immutable snapshot avoids a count-to-live-value race during dismissal.
+        // Traverse only a bounded number/depth of nodes and reject duplicates.
+        var pending: [(any XCUIElementSnapshot, Int)] = [(root, 0)]
+        var visited = 0
+        var found: String?
+        while let (node, depth) = pending.popLast() {
+            visited += 1
+            guard visited <= 1_024, depth <= 64 else { return "unavailable" }
+            if node.elementType == .collectionView && node.identifier == "batch.importer" {
+                guard found == nil, let value = node.value as? String,
+                      value.utf8.count <= 128,
+                      value.range(of: #"\Abatch-importer showsFiles=[01] callbackCount=(?:0|[1-9][0-9]?) resultKind=(?:none|success|failure) urlCount=(?:[0-9]|10|11) draftPhase=(?:choosing|preparing|reviewing|committing)\z"#,
+                                  options: .regularExpression) != nil else { return "unavailable" }
+                found = value
+            }
+            guard node.children.count <= 1_024 - visited - pending.count else { return "unavailable" }
+            pending.append(contentsOf: node.children.map { ($0, depth + 1) })
+        }
+        return found ?? "unavailable"
     }
 
     private struct BatchTestFailure: LocalizedError {

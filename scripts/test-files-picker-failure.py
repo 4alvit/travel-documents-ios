@@ -510,21 +510,20 @@ class Controls(unittest.TestCase):
               for job,following in [('validate','ui_guidance'),('ui_guidance','privacy_ipad')]}
         for job,cohort in [('validate','core-purchase'),('ui_guidance','ui-guidance')]:
             body=jobs[job]
-            sdk_match = job == 'ui_guidance'
-            version, build = ('26.2', '17C52') if sdk_match else ('16.4', '16F6')
+            prepare_files = job == 'ui_guidance'
+            version, build = '26.2', '17C52'
             self.assertIn('DEVELOPER_DIR: /Applications/Xcode_'+version+'.app/Contents/Developer',body)
             self.assertIn("$'Xcode "+version+"\\nBuild version "+build+"'",body)
             self.assertIn('    timeout-minutes: 35\n',body)
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
-            match_option = ' --require-sdk-match' if sdk_match else ''
+            match_option = ' --require-sdk-match' + (' --prepare-files' if prepare_files else '')
             self.assertIn('run: bash scripts/test-simulator.sh'+match_option+' --cohort '+cohort+'\n',original)
             self.assertNotIn('continue-on-error',original)
             self.assertIn("if: ${{ failure() && steps.integration.outcome == 'failure' }}",body)
             evidence=body.split('      - name: Test evidence\n')[1].split('      - name:')[0]
             paths=[line.strip() for line in evidence.split('          path: |\n',1)[1].split('          if-no-files-found:',1)[0].splitlines()]
-            expected_paths = ['build/*.xcresult']
-            if sdk_match: expected_paths.append('build/ci-toolchain/simulator-selection.*/')
+            expected_paths = ['build/*.xcresult','build/ci-toolchain/simulator-selection.*/']
             self.assertEqual(paths,expected_paths)
             public=body.split('name: TripDocket-files-picker-failure-'+cohort+'-')[1].split('if-no-files-found')[0]
             self.assertNotIn('scratch',public);self.assertNotIn('*',public)
