@@ -1134,6 +1134,26 @@ single-attempt rule, positive Xcode marker, transaction checks and deadlines are
 unchanged. These observations help diagnose a failure; they cannot satisfy a failed
 purchase assertion.
 
+## Declaring access to provider originals
+
+The [`21e0603` capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41505246211)
+completed the Xcode purchase and reached Files with both synthetic PDFs selected.
+After one Open action, Files remained visible; the extra passive observation
+also failed to observe dismissal. The application log reports File Provider
+item-resolution errors followed by an empty internal document selection, with
+no recorded app picker callback. This is failed batch evidence,
+not a completed import or proof of missing source bytes.
+
+The app now declares `LSSupportsOpeningDocumentsInPlace`, matching its existing
+`asCopy: false` picker and security-scoped, coordinated reads of original URLs.
+Apple [defines this key](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsopeningdocumentsinplace)
+as support for opening a provider's original document. File sharing and document
+type registration are not enabled by this change. The provider error does not
+prove that the missing declaration caused it; a new complete native capture
+must determine whether the corrected configuration resolves this boundary.
+Purchase handling, picker ownership, single Open action and all validation
+deadlines remain unchanged.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large
