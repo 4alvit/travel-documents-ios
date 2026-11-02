@@ -108,14 +108,19 @@ jobs:
   ui_guidance:
     name: Accessibility, localization and guidance UI
     runs-on: macos-15
-    timeout-minutes: 35
+    # Run 41440392190 completed all phone cases in 37m56s but exceeded the old 35m job cap.
+    # 60m = checkout2 + toolchain3 + integration40 + cancellation5
+    #       + raw evidence3 + optional extraction3/upload2 + finalization2.
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Toolchain
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           mkdir -p build/ci-toolchain
@@ -125,8 +130,21 @@ jobs:
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
+        timeout-minutes: 40
         # Provider initialization is explicit; this is not cold Files first-use coverage.
         run: bash scripts/test-simulator.sh --require-sdk-match --prepare-files --cohort ui-guidance
+      # Preserve raw results before optional failure extraction consumes its budget.
+      - name: Test evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TripDocket-tests-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -145,16 +163,6 @@ jobs:
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/evidence.json
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure.png
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure-ax.txt
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: TripDocket-tests-ui-guidance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/*.xcresult
-            build/ci-toolchain/simulator-selection.*/
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
