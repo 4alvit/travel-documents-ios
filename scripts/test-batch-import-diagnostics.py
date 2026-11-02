@@ -281,7 +281,14 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         ui = UI.read_text()
         selection = section(ui, "    private func selectRealFiles(", "\n    private func reviewRows(")
         self.assertEqual(selection.count("open.tap()"), 1)
-        self.assertIn('capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)\n        open.tap()', selection)
+        diagnostic = 'capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)'
+        self.assertEqual(selection.count(diagnostic), 1)
+        self.assertLess(selection.index(diagnostic), selection.index("open.tap()"))
+        between = selection[selection.index(diagnostic) + len(diagnostic):selection.index("open.tap()")]
+        self.assertEqual(between.strip(), """if nativeRoot {
+            try check(isNativeFilesRoot(app) && openActions.count == 1,
+                      app: app, "Batch selection left its verified local root or unique Open action")
+        }""")
         capture = section(ui, "    private func capture(", "\n    private struct BatchTestFailure")
         self.assertIn('if batchDiagnostic && app.launchArguments.contains("' + FLAG + '")', capture)
         self.assertEqual(capture.count("app.snapshot()"), 1)
