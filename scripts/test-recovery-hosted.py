@@ -600,6 +600,80 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('host_capability',r.report)
         self.assertEqual(r.limit,1380)
 
+    def test_capability_wakeup_at_deadline_stops_before_next_output_scan(self):
+        for overshoot in (0., .115):
+            with self.subTest(overshoot=overshoot):
+                original_root=self.root
+                self.root=original_root/str(overshoot);self.root.mkdir()
+                try:
+                    r=self.runner(self.capability_ops())
+                    original_sleep=r.ops.sleep;original_read=r.ops.read
+                    woke_late=False;late_reads=[]
+                    def sleep(amount):
+                        nonlocal woke_late
+                        before=r.ops.now();original_sleep(amount)
+                        if not woke_late and before<12<=r.ops.now():
+                            woke_late=True;r.ops.t=12+overshoot
+                            # Reproduce a resource scan due at this wakeup.
+                            r.next_scan=0.
+                    def read(process):
+                        if r.ops.now()>=12:late_reads.append(r.ops.now())
+                        return original_read(process)
+                    r.ops.sleep=sleep;r.ops.read=read
+                    # Fake process evidence still cannot approve real capability.
+                    with self.assertRaisesRegex(RuntimeError,'Injected boundary'):
+                        r.check_capability()
+                    rows=json.loads((r.out/'Capability/receipt.json').read_text())['commands']
+                    self.assertTrue(woke_late);self.assertEqual(late_reads,[])
+                    self.assertEqual(len(rows),2)
+                    row=rows[1]
+                    self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                    self.assertEqual((row['work_deadline'],row['command_deadline']),(12.,20.))
+                    self.assertEqual(row['stop']['signals'],[15,9])
+                    self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+                    self.assertLess(row['finish'],20.)
+                    self.assertNotIn('resource_scan_failure',r.report)
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    self.assertNotIn('host_capability',r.report)
+                    self.assertEqual((r.limit,r.final),(1380.,1500.))
+                finally:self.root=original_root
+
+    def test_capability_output_stall_stops_before_expired_resource_scan(self):
+        for overshoot in (0., .115):
+            with self.subTest(overshoot=overshoot):
+                original_root=self.root
+                self.root=original_root/str(overshoot);self.root.mkdir()
+                try:
+                    r=self.runner(self.capability_ops())
+                    original_read=r.ops.read;original_monitor=r.monitor
+                    stalled=False;scan_starts=[]
+                    def read(process):
+                        nonlocal stalled
+                        result=original_read(process)
+                        if process.pid==102 and not stalled:
+                            stalled=True;r.ops.t=12+overshoot;r.next_scan=0.
+                        return result
+                    def monitor(**kwargs):
+                        scan_starts.append(r.ops.now())
+                        return original_monitor(**kwargs)
+                    r.ops.read=read;r.monitor=monitor
+                    with self.assertRaisesRegex(RuntimeError,'Injected boundary'):
+                        r.check_capability()
+                    rows=json.loads((r.out/'Capability/receipt.json').read_text())['commands']
+                    self.assertTrue(stalled);self.assertTrue(scan_starts)
+                    self.assertTrue(all(start<12 for start in scan_starts))
+                    row=rows[1]
+                    self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                    self.assertEqual((row['work_deadline'],row['command_deadline']),(12.,20.))
+                    self.assertEqual(row['stop']['signals'],[15,9])
+                    self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+                    self.assertLess(row['finish'],20.)
+                    self.assertNotIn('resource_scan_failure',r.report)
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    self.assertNotIn('host_capability',r.report)
+                    self.assertEqual((r.limit,r.final),(1380.,1500.))
+                finally:self.root=original_root
+
     def delegated_capability_scan(self, stage):
         r=self.runner(self.capability_ops());r.ops.t=100.
         # The actual parent previously finished runtime discovery; only the

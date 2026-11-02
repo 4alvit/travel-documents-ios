@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Opt-in real Files / local StoreKit batch UI test on one already booted UUID.
 
-Run xcodegen generate first. This driver creates only synthetic PDFs in its own
-unique Files folder, runs one hosted purchase precondition and one batch test
-in a single invocation, and removes only that folder afterward.
-It neither boots simulators nor changes Apple accounts. Authentication is bypassed
+Run xcodegen generate first. The default driver writes synthetic PDFs into its
+unique Files folder and removes only that folder afterward. Qualification alone
+can select native Save into its fresh owned Simulator's empty provider root;
+that mode neither writes provider files nor removes the root or individual files,
+and defers cleanup to the qualification's verified whole-device teardown.
+Both modes run one hosted purchase precondition and one batch test in a single
+invocation. This driver neither boots simulators nor changes Apple accounts.
+Authentication is bypassed
 by this functional UI test; its result is not privacy or rendered-PDF proof.
 """
 
@@ -154,6 +158,8 @@ class Driver:
         self.fixture_directory = None
         self.native_folder_destination = None
         self.fixture_identity = None
+        self.native_root_provider = None
+        self.native_root_group_identity = None
         self.provider_identity = None
         self.summary = {"status": "running", "started_at": timestamp(), "device": args.device,
                         "folder": self.folder_name, "tests": list(TESTS), "timeout_seconds": args.timeout,
@@ -252,7 +258,25 @@ class Driver:
         self.provider_identity = (provider.stat().st_dev, provider.stat().st_ino)
         owned = provider / self.folder_name
         native_folder = getattr(self.args, "native_folder", False)
-        if native_folder:
+        native_root = getattr(self.args, "native_root", False)
+        if native_root:
+            if native_folder or not getattr(self.args, "native_seed", False):
+                raise RuntimeError("Native root requires native seeding without folder creation")
+            # Only the qualification owner supplies this internal mode; no CLI
+            # option adopts a caller's existing simulator root.
+            self.native_root_provider = provider
+            value = group.lstat()
+            self.native_root_group_identity = (value.st_dev, value.st_ino)
+            self.native_root_identity()
+            with os.scandir(provider) as entries:
+                if next(entries, None) is not None:
+                    raise RuntimeError("Native seed provider root is not empty")
+            self.native_root_identity()
+            owned = provider
+            self.fixture_directory = provider
+            self.fixture_identity = self.provider_identity
+            self.summary["fixture_destination_mode"] = "native_root"
+        elif native_folder:
             if not getattr(self.args, "native_seed", False):
                 raise RuntimeError("Native folder creation requires native file seeding")
             try:
@@ -286,8 +310,10 @@ class Driver:
         (self.directory / "fixture-manifest.json").write_text(json.dumps({
             "device": self.args.device, "folder": self.folder_name, "directory": str(owned),
             "group_identifier": GROUP, "fixtures": fixtures,
+            "destination_mode": "native_root" if native_root else "owned_folder",
         }, indent=2) + "\n", encoding="utf-8")
-        self.record("native_folder_absence_verified" if native_folder else
+        self.record("native_root_empty_verified" if native_root else
+                    "native_folder_absence_verified" if native_folder else
                     "prepared_empty_owned_folder" if getattr(self.args, "native_seed", False)
                     else "seeded_owned_folder", path=str(owned), fixtures=fixtures)
         self.save()
@@ -305,6 +331,10 @@ class Driver:
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
                      "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        if getattr(self.args, "native_root", False):
+            self.native_root_identity()
+            overrides.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": self.token})
         self.summary.update({"command": command, "environment_overrides": overrides})
         self.save()
         self.record("xcodebuild_started", argv=command, environment_overrides=overrides)
@@ -388,7 +418,33 @@ class Driver:
         self.summary["source_originals_unchanged"] = True
         self.record("verified_source_originals_unchanged", files=[fixture["name"] for fixture in fixtures])
 
+    def native_root_identity(self):
+        """Read-only pin check; this directory is never a recursive cleanup target."""
+        provider = self.native_root_provider
+        if (not getattr(self.args, "native_root", False) or provider is None
+                or not getattr(self.args, "native_seed", False)
+                or getattr(self.args, "native_folder", False)
+                or not provider.is_absolute() or provider.resolve(strict=True) != provider
+                or provider.name != "File Provider Storage"):
+            raise RuntimeError("Invalid native provider root mode")
+        group = provider.parent
+        if (tuple(group.parts[-6:-1]) != (self.args.device, "data", "Containers", "Shared", "AppGroup")
+                or str(uuid.UUID(group.name)).upper() != group.name.upper()):
+            raise RuntimeError("Native provider root belongs to another simulator")
+        for path, expected in ((provider, self.provider_identity), (group, self.native_root_group_identity)):
+            value = path.lstat()
+            if not stat.S_ISDIR(value.st_mode) or (value.st_dev, value.st_ino) != expected:
+                raise RuntimeError("Native provider root identity changed")
+        return self.provider_identity
+
     def remove_fixtures(self):
+        if getattr(self.args, "native_root", False):
+            self.native_root_identity()
+            # Ownership belongs to the outer qualification's fresh device, not
+            # to this pre-existing provider directory. Never remove its tree.
+            self.summary["fixture_cleanup"] = "native root retained for verified owned Simulator teardown"
+            self.record("native_root_cleanup_deferred_to_owned_simulator")
+            return
         owned = self.fixture_directory
         if owned is None:
             return

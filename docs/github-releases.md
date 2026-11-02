@@ -45,47 +45,43 @@ Save to Files. It checks an absent synthetic folder without saving a backup.
 This covers a preinitialized provider, not cold first use. Its own result bundle
 must pass the exact one-case, device and runtime checks before the driver starts.
 The preparation keeps a 600-second build/test cap and a 180-second case allowance.
-The qualification driver next records an absent, uniquely named destination
-under the pinned local provider and retains the two synthetic PDF source copies.
-It does not create the destination folder. A separate invocation runs
-`testNativeCreateOwnedFilesFolder` once through the native New Folder interface.
-The host adopts the result only after the exact one-case result passes and the
-same provider contains the expected empty directory with a verified identity.
-This phase has a 240-second build/test cap and a 180-second case allowance.
-If the native keyboard presents its first-use swipe-typing introduction, the
-test acknowledges that exact prompt once and verifies the unchanged folder
-name. It then ends editing with one tap in a verified empty part of the current
-Files grid, outside the captured item and control frames and above the keyboard.
-Two snapshots must agree on the target, and the exact editor must remain
-reachable before the tap. Success still requires the editor to disappear and
-the exact destination to open; the tap itself does not establish creation.
-If creation or validation fails, an unadopted leaf is not removed separately;
-it is retained for teardown of the exclusively owned Simulator.
+The qualification driver next verifies the exact local provider root on that
+exclusively owned Simulator. It requires a canonical directory, stable provider
+identity, and no entries of any kind. It retains the two synthetic PDF source
+copies outside the provider; the host does not create a fixture folder or write
+fixture bytes into the provider.
 
-A third invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
-each PDF from an opt-in Debug Simulator view into that folder through Save to
-Files. The host requires the owned destination to be empty immediately before
-seeding, then verifies exactly the two expected filenames and complete bytes
-against the retained sources. Provider and destination directory identities
-must remain unchanged; successful UI actions alone are insufficient.
-This seed phase has a 300-second build/test cap and a 180-second case allowance.
+A second invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
+each PDF from an opt-in Debug Simulator view into the exact local root through
+Save to Files. The host checks that the root is still empty immediately before
+seeding, then requires exactly the two expected regular files and compares all
+bytes against the retained sources. The provider identity must remain unchanged;
+successful UI actions alone are insufficient. This seed phase has a 300-second
+build/test cap and a 180-second case allowance.
 
-Folder creation, native seeding, their result inspection and the main functional
-invocation consume the same 1,200-second driver clock, started before destination
-preflight. No phase renews it. Admission requires enough remaining time for the
-following phases; startup and inspection still consume that budget, so it is
-not a completion guarantee. Batch work remains bounded by 2,400 seconds, with
-180 seconds for owned cleanup. A failed preparation, folder or seed phase
-prevents the main functional suite from starting. The standalone
-`test-batch-simulator.py` command retains its default direct creation of its own
-folder and fixture bytes; these native ingress phases belong to hosted qualification.
+Native seeding, result inspection and the main functional invocation consume
+the same 1,200-second driver clock, started before destination preflight. No
+phase renews it. Admission requires enough remaining time for following phases;
+startup and inspection still consume that budget, so it is not a completion
+guarantee. Batch work remains bounded by 2,400 seconds, with 180 seconds for
+owned cleanup. A failed preparation or seed phase prevents the main functional
+suite from starting.
+
+The root fixture mode belongs only to the hosted qualifier's exclusively owned
+Simulator. Its driver never recursively removes the provider root or deletes
+individual root entries: fixture cleanup is deferred to deletion of that whole
+owned Simulator. Capture remains incomplete until the qualifier proves that
+deletion and the unchanged inventory of other devices. The standalone
+`test-batch-simulator.py` command retains its default creation and cleanup of a
+unique fixture folder. The earlier native-folder experiment remains separate
+and does not supply a result or a fabricated pass for this three-phase route.
 
 The hosted purchase prerequisite keeps the runner's 300-second default allowance.
 The complete batch UI case explicitly uses 600 seconds, with the runner maximum
 set to 600. A retained run reached final reconfirmation at its former 300-second
 limit; its later Save action did not establish completed save, relaunch or
-original-byte verification. Those checks remain required. Folder creation,
-native seeding, inspection, build, startup, both functional cases and
+original-byte verification. Those checks remain required. Native seeding,
+inspection, build, startup, both functional cases and
 postprocessing share the original driver budget; the larger case allowance does
 not guarantee completion or extend any UI-action deadline.
 One serial functional invocation runs the exact hosted purchase/restore
@@ -227,19 +223,18 @@ and output hashes. The reader must report the exact expected two or six passed
 cases, zero failures/skips/expected failures, the captured device, and explicit
 empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
 failure or any warning block acceptance. Inspect the retained screenshots and
-the mode-specific byte/cleanup evidence too. Batch mode requires four distinct
+the mode-specific byte/cleanup evidence too. Batch mode requires three distinct
 result-bundle reviews, in execution order:
 
 1. Files preparation: `testRecoveryPrepareFilesProvider`, exactly one passed case.
-2. Native folder creation: `testNativeCreateOwnedFilesFolder`, exactly one passed case.
-3. Native PDF seeding: `testNativeSaveSeedsBothSyntheticOriginals`, exactly one passed case.
-4. Main flow: the two exact hosted purchase and batch-import methods listed below.
+2. Native PDF seeding: `testNativeSaveSeedsBothSyntheticOriginals`, exactly one passed case.
+3. Main flow: the two exact hosted purchase and batch-import methods listed below.
 
 Each bundle must match the same captured source and device, retain an unchanged
 original manifest, and have no skips, failures or runtime warnings. Review the
-folder's single end-editing action and verified empty destination, both native Save
-operations and their complete-byte proof, and the main test's purchase, import,
-review, save and relaunch evidence. The three preparation cases remain separate
+verified empty provider root and unchanged identity, both native Save operations
+and their complete-byte proof, and the main test's purchase, import, review,
+save and relaunch evidence. The two preparation cases remain separate
 prerequisites; they do not add methods to the public two-method batch receipt.
 Only this complete review may produce the separate operator `passed` receipt
 described below; never rewrite the raw capture report into a pass. These checks

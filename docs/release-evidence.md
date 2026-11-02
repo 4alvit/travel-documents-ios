@@ -40,8 +40,8 @@ The [matched native Save control](https://github.com/4alvit/travel-documents-ios
 also failed at that boundary, so native saving and matching the SDK alone did not
 establish successful import.
 
-The subsequent four-phase control replaces the remaining host-created fixture
-folder with native New Folder, followed by native Save. Its required evidence is
+A subsequent four-phase control replaced the remaining host-created fixture
+folder with native New Folder, followed by native Save. Its required evidence was
 **one Files preparation case + one native folder case + one native seed case +
 two main cases**, in four separate original result bundles. Every phase needs
 exact-source/device, result, immutable-manifest and independent warning review;
@@ -58,10 +58,33 @@ acknowledged only that exact introduction once and verified its dismissal and
 the unchanged folder name. The [following run](https://github.com/4alvit/travel-documents-ios/actions/runs/41400000817)
 delivered the single Done key event, but the editor and keyboard remained
 active. Neither failed run executed native seeding or the main import tests.
-The next control replaces Done with one tap in a verified empty part of the
-Files grid. It retains the editor-dismissal, exact-destination and host
-empty-folder checks. Its offline geometry checks do not establish native
-folder creation or completed import.
+The next control replaced Done with one tap in a verified empty part of the
+Files grid, retaining the editor-dismissal, exact-destination and host
+empty-folder checks. Its [first run](https://github.com/4alvit/travel-documents-ios/actions/runs/41403200979)
+failed before typing: a remote Files snapshot took about 29 seconds, and the
+retained state showed an untitled folder without an editor. The [same-source
+repeat](https://github.com/4alvit/travel-documents-ios/actions/runs/41405086602)
+failed earlier, with the export share sheet still visible after Save to Files.
+Neither run reached the new end-editing action, native seed or main import.
+
+The current control removes that extra fixture-folder creation. After real
+Files preparation, native Save places two synthetic PDFs directly in the
+verified empty provider root of an exclusively owned Simulator. It requires
+three distinct bundles: one preparation case, one native-seed case, and the
+two main purchase/import cases. Exact provider identity, complete source and
+imported bytes, visual review, and deletion of only the owned Simulator remain
+required. The driver never removes the provider root itself. This simplifies
+the fixture setup; it does not establish the cause of earlier Files errors or
+assert that the new control has passed.
+
+The subsequent main-branch CI stopped in its subprocess capability probe before
+creating a Simulator or running recovery tests. The command woke after its work
+deadline and entered another resource scan, so the expected command timeout was
+misclassified as a scan deadline failure. The loop now checks the unchanged work
+deadline before draining output or scanning resources. The eight-second stop
+reserve, genuine scan failures and complete process-cleanup requirements remain.
+Offline boundary tests cover both an exact-deadline wakeup and an oversleep; they
+do not substitute for a successful hosted recovery run.
 
 ## Release preparation — 1 November 2026
 
