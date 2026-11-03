@@ -152,7 +152,12 @@ def make_runner(q, core):
                   and args==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
                   and ((child is not None and child.pid==pending.get('pgid'))
                        or ('pgid' not in pending and not self.active and not self.unknown_spawn)))
-            allowance=(core.CAPS['phase_scan_seconds'] if writer else core.CAPS['boot_scan_seconds']
+            coordinator=getattr(self.pair,'commands',None)
+            postbuild_boot=(boot and self.pair.report.get('shared_build_verified') is True
+                and self.pair.current is self and not self.unknown_spawn
+                and len(self.active)==(1 if child is not None else 0)
+                and coordinator is not None and not coordinator.active and not coordinator.unknown_spawn)
+            allowance=(core.CAPS['phase_scan_seconds'] if writer or postbuild_boot else core.CAPS['boot_scan_seconds']
                        if boot else core.CAPS['scan_seconds'])
             deadline=min(self.limit,started+allowance)
             if unfinished: deadline=min(deadline,self.t0+pending['work_deadline'])
@@ -295,6 +300,7 @@ def make_runner(q, core):
             self.product_paths = q.shared_product_paths(raw,self.derived,tuple(self.settings))
             self.product_snapshot('products-built')
             self.source('source-after-build')
+            self.report['shared_build_verified']=True
 
         def capture(self, arm, mode):
             result = self.out/(mode+'.xcresult')

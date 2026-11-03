@@ -473,6 +473,99 @@ class Guards(unittest.TestCase):
                 self.assertFalse(scan.call_args.kwargs['allow_xcresult_restart'])
                 self.assertFalse(scan.call_args.kwargs['allow_products_restart'])
 
+    def postbuild_boot_context(self,root,active=True):
+        p=self.fake_pair(root);p.report['shared_build_verified']=True
+        arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
+        now=[p.started];arm.ops.now=lambda:now[0]
+        row={'id':'boot-ready','argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b'],
+             'work_deadline':1000}
+        if active:row['pgid']=123;arm.active[123]=SimpleNamespace(pid=123)
+        arm.report['commands'].append(row)
+        return p,arm,now,row
+
+    def test_postbuild_owned_boot_twenty_second_scan_keeps_writer_privileges_false(self):
+        for active in (False,True):
+            with self.subTest(active=active),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,row=self.postbuild_boot_context(Path(tmp),active)
+                def scan(*args,**kwargs):now[0]+=20;return {'allocated':0}
+                with mock.patch.object(core,'live_sizes',side_effect=scan) as walk, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    arm.monitor()
+                self.assertEqual(arm.report['resources'][-1]['requested_scan_seconds'],30)
+                self.assertEqual(walk.call_args.args[3],p.started+30)
+                self.assertFalse(walk.call_args.kwargs['allow_xcresult_restart'])
+                self.assertFalse(walk.call_args.kwargs['allow_products_restart'])
+
+    def test_postbuild_scan_rejects_missing_proof_or_different_ownership(self):
+        faults=('missing-proof','false-proof','nonboolean-proof','other-current','unknown','other-group',
+                'coordinator-active','coordinator-unknown','wrong-id','wrong-device','wrong-pgid','finished')
+        for fault in faults:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,row=self.postbuild_boot_context(Path(tmp))
+                if fault=='missing-proof':del p.report['shared_build_verified']
+                elif fault=='false-proof':p.report['shared_build_verified']=False
+                elif fault=='nonboolean-proof':p.report['shared_build_verified']=1
+                elif fault=='other-current':p.current=None
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='other-group':arm.active[124]=SimpleNamespace(pid=124)
+                elif fault=='coordinator-active':p.commands.active[124]=SimpleNamespace(pid=124)
+                elif fault=='coordinator-unknown':p.commands.unknown_spawn=True
+                elif fault=='wrong-id':row['id']='other'
+                elif fault=='wrong-device':row['argv'][3]='OTHER'
+                elif fault=='wrong-pgid':row['pgid']=124
+                elif fault=='finished':row['finish']=1
+                def scan(*args,**kwargs):now[0]+=20;return {'allocated':0}
+                with mock.patch.object(core,'live_sizes',side_effect=scan) as walk, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.monitor()
+                self.assertLessEqual(walk.call_args.args[3],p.started+15)
+                self.assertFalse(walk.call_args.kwargs['allow_xcresult_restart'])
+                self.assertFalse(walk.call_args.kwargs['allow_products_restart'])
+
+    def test_postbuild_scan_keeps_original_global_and_command_deadlines(self):
+        for global_remaining,command_remaining in ((7,1000),(1000,8),(6,8)):
+            with self.subTest(global_remaining=global_remaining,command_remaining=command_remaining),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,row=self.postbuild_boot_context(Path(tmp))
+                arm.limit=p.started+global_remaining;row['work_deadline']=command_remaining
+                def scan(*args,**kwargs):now[0]+=20;return {'allocated':0}
+                with mock.patch.object(core,'live_sizes',side_effect=scan) as walk, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.monitor()
+                self.assertEqual(walk.call_args.args[3],p.started+min(global_remaining,command_remaining))
+                self.assertEqual(arm.limit,p.started+global_remaining)
+                self.assertFalse(walk.call_args.kwargs['allow_xcresult_restart'])
+                self.assertFalse(walk.call_args.kwargs['allow_products_restart'])
+
+    def test_postbuild_proof_only_after_complete_actual_prepare(self):
+        for fault in (None,'build','settings','products','source-after'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
+                settings=json.dumps([{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'YES' if fault=='settings' else 'NO'}}
+                                    for name in ('Tripfolio','TripfolioTests','TripfolioUITests')])
+                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                         'architecture':'arm64','build-settings':settings}
+                def command(label,*args):
+                    self.assertIsNot(p.report.get('shared_build_verified'),True)
+                    if fault=='build' and label=='build-for-testing':raise RuntimeError('build failed')
+                    return replies.get(label,'')
+                def source(label):
+                    self.assertIsNot(p.report.get('shared_build_verified'),True)
+                    if fault=='source-after' and label=='source-after-build':raise RuntimeError('source changed')
+                def products(label):
+                    self.assertIsNot(p.report.get('shared_build_verified'),True)
+                    if fault=='products':raise RuntimeError('product identity failed')
+                p.commands.command=command;p.source=source;p.product_snapshot=products
+                p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
+                    'version':'26.2','buildversion':'23C54','isAvailable':True,'supportedArchitectures':['arm64'],
+                    'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
+                with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}), \
+                        mock.patch.object(q,'shared_product_paths',return_value={}):
+                    if fault:
+                        with self.assertRaises(RuntimeError):p.prepare()
+                        self.assertIsNot(p.report.get('shared_build_verified'),True)
+                    else:
+                        p.prepare();self.assertIs(p.report['shared_build_verified'],True)
+
     def test_log_accounting_is_shared_across_contexts(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=self.fake_pair(Path(tmp));a=Context(p,p.root/'child',p.final,'a');b=Context(p,p.root/'ancestor',p.final,'b')
