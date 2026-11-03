@@ -140,11 +140,15 @@ class SeedGuards(unittest.TestCase):
         self.assertIn("NativeSeedExportPicker(request: request)",view)
         self.assertIn("Button(file.lastPathComponent) { beginExport(file) }",view)
         self.assertIn("UIDocumentPickerViewController(forExporting: request.sources, asCopy: true)",view)
-        self.assertIn('if reopenEnabled {\n                    Button("Export both synthetic PDFs")',view)
+        self.assertIn('Button("Export both synthetic PDFs") { beginExportBoth() }',view)
         self.assertIn('.accessibilityIdentifier("nativeSeed.exportBoth")',view)
         self.assertIn('for name in names { exports[name] = request }',view)
         self.assertIn('guard !reopenEnabled, !unavailable, !pending',view)
-        self.assertIn('Text("Export verified")',view)
+        self.assertIn('Text("Returned destination verified")',view)
+        self.assertIn('request.verifiedNames.contains(file.lastPathComponent)',view)
+        self.assertIn('exports[$0.0]?.verifiedNames.contains($0.0) == true',view)
+        self.assertIn('.accessibilityIdentifier("nativeSeed.callbackVerified")',view)
+        self.assertIn('.accessibilityValue(callbackVerification)',view)
         self.assertIn('"nativeSeed.failure"',view)
         self.assertIn('"nativeSeed.saved." + file.lastPathComponent',view)
         self.assertIn("= AppModel.readExternal",view)
@@ -162,21 +166,25 @@ class SeedGuards(unittest.TestCase):
         ordinary, control = seed.rsplit('        if reopenControl {', 1)
         control, completion = control.split('        // Host compares both exact destination bytes;', 1)
         self.assertEqual((ordinary + completion).count(".tap()"),2)  # source, verified Save per export group
-        self.assertIn('let exportGroups = reopenControl ? [filenames] : filenames.map { [$0] }',ordinary)
-        self.assertIn('reopenControl ? "nativeSeed.exportBoth" : "nativeSeed." + exportNames[0]',ordinary)
+        self.assertIn('let exportGroups = [filenames]',ordinary)
+        self.assertIn('let sourceIdentifier = "nativeSeed.exportBoth"',ordinary)
         self.assertEqual(control.count(".tap()"),1)
         self.assertIn('reopen.tap()',control)
         self.assertIn('let reopenControl = reopenValue == "1"',ordinary)
         self.assertIn('guard reopenValue == nil || reopenValue == "" || reopenValue == "1"',ordinary)
         self.assertIn('guard !reopenControl || (nativeRoot && checkpoint != nil)',ordinary)
         self.assertIn('failed: failed, observeLateFailure: reopenControl)',ordinary)
-        self.assertIn('if reopenControl {\n            app.launchArguments += ["--ui-testing-native-reopen", "--ui-testing-batch-diagnostics"]\n        }',ordinary)
+        launch, conditional = ordinary.split('        if reopenControl {\n',1)
+        self.assertIn('"--ui-testing-batch-diagnostics"',launch)
+        self.assertIn('app.launchArguments += ["--ui-testing-native-reopen"]',conditional)
         self.assertIn('try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)',control)
         self.assertIn('try check(verified.exists && !failed.exists',control)
         self.assertNotIn('app.launch()',control)
         self.assertNotIn('app.terminate()',control)
         self.assertNotIn("saveToFiles",seed)
-        self.assertIn('let verified = exportNames.map { app.staticTexts["nativeSeed.saved." + $0] }',seed)
+        self.assertIn('let verified = [app.staticTexts["nativeSeed.callbackVerified"]]',seed)
+        self.assertIn('try check(expectedValues.contains(callbackValue)',seed)
+        self.assertLess(seed.index('expectedValues.contains(callbackValue)'), seed.index('Self.recordBatchProducer(checkpoint)'))
         self.assertIn('try check(!failed.exists && verified.allSatisfy { $0.exists }',seed)
         self.assertIn('let nativeRoot = try nativeRootMode("seed")',seed)
         self.assertIn("picker = try await openNativeFilesRoot(app)",seed)
@@ -294,7 +302,7 @@ actor Reader {
             return try await withCheckedThrowingContinuation { pending = $0 }
         }
         await Task.yield()
-        if mode == "read-error" { throw ProbeError.rejected }
+        if mode == "read-error" || mode == "array-partial-error" { throw ProbeError.rejected }
         if mode == "read-error-known" {
             throw NSError(domain: NSCocoaErrorDomain, code: 257,
                           userInfo: [NSLocalizedDescriptionKey: "private description", NSFilePathErrorKey: "/private/secret.pdf"])
@@ -304,7 +312,7 @@ actor Reader {
                           userInfo: [NSLocalizedDescriptionKey: "private description"])
         }
         if mode == "cancelled-read" { throw CancellationError() }
-        if mode == "wrong-bytes" { return Data("incorrect".utf8) }
+        if mode == "wrong-bytes" || mode == "array-partial-wrong" { return Data("incorrect".utf8) }
         if calls == 2 && mode == "array-wrong-second" { return Data("incorrect".utf8) }
         if calls == 2 && mode == "array-error-second" { throw ProbeError.rejected }
         return try Data(contentsOf: url)
@@ -333,8 +341,20 @@ actor Reader {
         let array = mode.hasPrefix("array-")
         let session: NativeSeedExportSession
         if array {
-            session = NativeSeedExportSession(sources: [source,secondSource],
-                expected: [source.lastPathComponent: bytes,secondSource.lastPathComponent: secondBytes],
+            var sources = [source,secondSource]
+            var expected = [source.lastPathComponent: bytes,secondSource.lastPathComponent: secondBytes]
+            switch mode {
+            case "array-no-sources": sources = []; expected = [:]
+            case "array-too-many-sources":
+                sources.append(root.appendingPathComponent("source/third.pdf")); expected["third.pdf"] = bytes
+            case "array-duplicate-sources": sources = [source,source]
+            case "array-wrong-source-name": sources[1] = root.appendingPathComponent("source/other.pdf")
+            case "array-missing-expected": expected.removeValue(forKey: secondSource.lastPathComponent)
+            case "array-empty-expected": expected[secondSource.lastPathComponent] = Data()
+            case "array-large-expected": expected[secondSource.lastPathComponent] = Data(repeating: 1,count:1025)
+            default: break
+            }
+            session = NativeSeedExportSession(sources: sources, expected: expected,
                 read: { try await reader.read($0,$1) })
         } else {
             session = NativeSeedExportSession(source: source, expected: expected, read: { url, limit in
@@ -354,10 +374,17 @@ actor Reader {
         case "source-alias": urls = [source.deletingLastPathComponent().appendingPathComponent("../source/synthetic-ticket.pdf")]
         case "cancel-before": session.cancel()
         case "array-reverse": urls.reverse()
-        case "array-missing", "array-failed-then-valid": urls = [secondDestination]
+        case "array-partial-insurance", "array-partial-error", "array-partial-wrong",
+             "array-partial-then-aggregate": urls = [secondDestination]
+        case "array-partial-ticket": urls = [destination]
+        case "array-empty", "array-failed-then-valid": urls = []
         case "array-duplicate": urls = [destination,destination]
+        case "array-duplicate-name": urls = [destination,root.appendingPathComponent("other/synthetic-ticket.pdf")]
         case "array-extra": urls.append(root.appendingPathComponent("destination/extra.pdf"))
         case "array-source": urls[1] = secondSource
+        case "array-source-alias": urls[1] = secondSource.deletingLastPathComponent().appendingPathComponent("../source/synthetic-insurance.pdf")
+        case "array-remote": urls[1] = URL(string:"https://example.invalid/synthetic-insurance.pdf")!
+        case "array-foreign-host": urls[1] = URL(string:"file://foreign.invalid/synthetic-insurance.pdf")!
         case "array-wrong-name": urls[1] = root.appendingPathComponent("destination/other.pdf")
         case "array-cancel-before": session.cancel()
         default: break
@@ -369,6 +396,7 @@ actor Reader {
         if mode == "duplicate" { session.receive([destination]); session.cancel() }
         if mode == "failure-then-valid" { session.receive([destination]) }
         if mode == "array-failed-then-valid" { session.receive([destination,secondDestination]) }
+        if mode == "array-partial-then-aggregate" { session.receive([destination,secondDestination]); session.cancel() }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(3))
         var heldWithoutSuccess = false
@@ -377,7 +405,8 @@ actor Reader {
                 guard clock.now < deadline else { throw ProbeError.rejected }
                 try await Task.sleep(for: .milliseconds(1))
             }
-            heldWithoutSuccess = session.phase == .verifying
+            heldWithoutSuccess = session.phase == .verifying && session.verifiedNames.isEmpty
+                && session.callbackVerification == nil
             guard heldWithoutSuccess else { throw ProbeError.rejected }
             // An accepted delegate result owns verification; later events
             // cannot replace it or publish success before the second read.
@@ -389,13 +418,18 @@ actor Reader {
             try await Task.sleep(for: .milliseconds(1))
         }
         let first = session.phase == .verified
+        let firstNames = session.verifiedNames
+        let firstEvidence = session.callbackVerification
         session.receive(array ? [destination,secondDestination] : [destination]); session.cancel()
         while session.phase == .verifying {
             guard clock.now < deadline else { throw ProbeError.rejected }
             try await Task.sleep(for: .milliseconds(1))
         }
         let readURLs = await reader.urls
-        let result:[String:Any] = ["verified":session.phase == .verified,"stable":first == (session.phase == .verified),
+        let result:[String:Any] = ["verified":session.phase == .verified,
+            "stable":first == (session.phase == .verified) && firstNames == session.verifiedNames
+                && firstEvidence == session.callbackVerification,
+            "verified_names":session.verifiedNames,"callback_evidence":session.callbackVerification as Any? ?? NSNull(),
             "calls":await reader.calls,"exact_url":await reader.url == destination,"maximum":await reader.maximum,
             "exact_urls":readURLs == Array(urls.prefix(readURLs.count)),
             "read_names":readURLs.map(\.lastPathComponent),"held_without_success":heldWithoutSuccess,
@@ -430,6 +464,9 @@ actor Reader {
             self.assertTrue(value["second_source_unchanged"])
             self.assertTrue(value["second_destination_unchanged"])
             self.assertTrue(value["pending_drained"])
+            if not value["verified"]:
+                self.assertEqual(value["verified_names"], [])
+                self.assertIsNone(value["callback_evidence"])
             return value
 
     def test_actual_export_state_requires_single_correct_external_destination_before_read(self):
@@ -459,13 +496,46 @@ actor Reader {
                 self.assertTrue(value["verified"]);self.assertEqual(value["calls"],2)
                 self.assertEqual(value["read_names"],names);self.assertTrue(value["exact_urls"])
                 self.assertEqual(value["maximum"],1024)
+                self.assertEqual(value["verified_names"],sorted(names))
+                self.assertEqual(value["callback_evidence"],
+                    "sourceCount=2 sourceNames=synthetic-insurance.pdf,synthetic-ticket.pdf "
+                    "verifiedCount=2 verifiedNames=synthetic-insurance.pdf,synthetic-ticket.pdf")
 
-    def test_actual_array_export_rejects_partial_duplicate_extra_or_source_destinations(self):
-        for mode in ["array-missing","array-duplicate","array-extra","array-source",
+    def test_actual_array_export_reports_only_returned_verified_destinations(self):
+        for mode,name in [("array-partial-insurance","synthetic-insurance.pdf"),
+                          ("array-partial-ticket","synthetic-ticket.pdf"),
+                          ("array-partial-then-aggregate","synthetic-insurance.pdf")]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertTrue(value["verified"]); self.assertEqual(value["calls"],1)
+                self.assertEqual(value["read_names"],[name]); self.assertTrue(value["exact_urls"])
+                self.assertEqual(value["verified_names"],[name])
+                self.assertEqual(value["callback_evidence"],
+                    "sourceCount=2 sourceNames=synthetic-insurance.pdf,synthetic-ticket.pdf "
+                    "verifiedCount=1 verifiedNames=" + name)
+
+    def test_actual_array_export_rejects_invalid_whole_callback_before_any_read(self):
+        for mode in ["array-empty","array-duplicate","array-duplicate-name","array-extra","array-source",
+                     "array-source-alias","array-remote","array-foreign-host",
                      "array-wrong-name","array-cancel-before","array-failed-then-valid"]:
             with self.subTest(mode=mode):
                 value = self.probe(mode)
                 self.assertFalse(value["verified"]);self.assertEqual(value["calls"],0)
+
+    def test_actual_array_export_preserves_complete_source_validation(self):
+        for mode in ["array-no-sources","array-too-many-sources","array-duplicate-sources",
+                     "array-wrong-source-name","array-missing-expected","array-empty-expected",
+                     "array-large-expected"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertFalse(value["verified"]); self.assertEqual(value["calls"],0)
+
+    def test_actual_partial_callback_still_requires_complete_correct_bytes(self):
+        for mode in ["array-partial-error","array-partial-wrong"]:
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertFalse(value["verified"]); self.assertEqual(value["calls"],1)
+                self.assertTrue(value["exact_urls"])
 
     def test_actual_array_export_waits_for_second_read_and_rejects_late_replacement(self):
         for mode in ["array-held-success","array-held-wrong","array-wrong-second","array-error-second"]:
@@ -491,7 +561,9 @@ actor Reader {
         modes = ["success", "read-error", "wrong-bytes", "cancelled-read", "empty", "multiple",
                  "wrong-name", "remote", "foreign-host", "source", "source-alias", "empty-expected",
                  "large-expected", "cancel-before", "duplicate", "array-success", "array-reverse",
-                 "array-missing", "array-duplicate", "array-extra", "array-source", "array-wrong-name",
+                 "array-partial-insurance", "array-partial-ticket", "array-partial-then-aggregate",
+                 "array-partial-error", "array-partial-wrong", "array-empty",
+                 "array-duplicate", "array-duplicate-name", "array-extra", "array-source", "array-wrong-name",
                  "array-cancel-before", "array-failed-then-valid", "array-held-success",
                  "array-held-wrong", "array-wrong-second", "array-error-second"]
         for mode in modes:
@@ -504,7 +576,7 @@ actor Reader {
     def test_export_trace_discriminates_guard_and_read_failures_without_private_strings(self):
         buckets = {"empty": "resultCount", "private-name": "resultNames", "directory-result": "resultNames",
                    "remote": "nonFile", "foreign-host": "foreignHost", "source-alias": "sourceAlias",
-                   "empty-expected": "expectedSize", "array-missing": "resultCount"}
+                   "empty-expected": "expectedSize", "array-empty": "resultCount"}
         for mode, bucket in buckets.items():
             with self.subTest(mode=mode):
                 value = self.probe(mode, diagnostics="--ui-testing-batch-diagnostics")

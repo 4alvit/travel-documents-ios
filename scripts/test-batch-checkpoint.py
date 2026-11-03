@@ -213,8 +213,8 @@ class CheckpointTests(unittest.TestCase):
         self.assertIn('try Self.recordBatchProducer(', completion)
         verified = seed.index('try check(!failed.exists && verified.allSatisfy { $0.exists }')
         self.assertLess(seed.index('save.tap()'), verified)
-        self.assertLess(verified, seed.index('capture(app, "Native seed returned after Save'))
-        self.assertGreater(seed.index('try Self.recordBatchProducer('), seed.index('capture(app, "Native seed returned after Save'))
+        self.assertLess(verified, seed.index('capture(app, "Native seed returned URLs verified after Save'))
+        self.assertGreater(seed.index('try Self.recordBatchProducer('), seed.index('capture(app, "Native seed returned URLs verified after Save'))
         self.assertNotIn('awaitBatchCheckpoint(', seed)
 
 

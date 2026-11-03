@@ -147,8 +147,11 @@ private struct NativeBatchSeedView: View {
     private var pending: Bool { exports.values.contains { $0.phase == .waiting || $0.phase == .verifying } }
     private var bothExportsVerified: Bool {
         exports.count == 2 && NativeBatchSeedFiles.fixtures.allSatisfy {
-            exports[$0.0]?.phase == .verified
+            exports[$0.0]?.phase == .verified && exports[$0.0]?.verifiedNames.contains($0.0) == true
         }
+    }
+    private var callbackVerification: String? {
+        exports.values.first(where: { $0.sources.count == 2 })?.callbackVerification
     }
 
     var body: some View {
@@ -163,15 +166,19 @@ private struct NativeBatchSeedView: View {
                     Button(file.lastPathComponent) { beginExport(file) }
                         .accessibilityIdentifier("nativeSeed." + file.lastPathComponent)
                         .disabled(reopenEnabled || unavailable || pending || exports[file.lastPathComponent] != nil)
-                    if exports[file.lastPathComponent]?.phase == .verified {
-                        Text("Export verified")
+                    if let request = exports[file.lastPathComponent], request.phase == .verified,
+                       request.verifiedNames.contains(file.lastPathComponent) {
+                        Text("Returned destination verified")
                             .accessibilityIdentifier("nativeSeed.saved." + file.lastPathComponent)
                     }
                 }
-                if reopenEnabled {
-                    Button("Export both synthetic PDFs") { beginExportBoth() }
-                        .accessibilityIdentifier("nativeSeed.exportBoth")
-                        .disabled(unavailable || pending || !exports.isEmpty || files.count != 2)
+                Button("Export both synthetic PDFs") { beginExportBoth() }
+                    .accessibilityIdentifier("nativeSeed.exportBoth")
+                    .disabled(unavailable || pending || !exports.isEmpty || files.count != 2)
+                if let callbackVerification {
+                    Text("Returned export URLs verified")
+                        .accessibilityIdentifier("nativeSeed.callbackVerified")
+                        .accessibilityValue(callbackVerification)
                 }
                 if reopenEnabled && bothExportsVerified {
                     Button("Reopen exported files") { beginReopen() }
@@ -226,7 +233,7 @@ private struct NativeBatchSeedView: View {
 
     private func beginExportBoth() {
         let names = Set(NativeBatchSeedFiles.fixtures.map(\.0))
-        guard reopenEnabled, !unavailable, !pending, exports.isEmpty,
+        guard !unavailable, !pending, exports.isEmpty,
               presentedExport == nil, files.count == 2,
               Set(files.map(\.lastPathComponent)) == names else { return }
         var expected: [String: Data] = [:]
@@ -235,7 +242,8 @@ private struct NativeBatchSeedView: View {
             expected[name] = bytes
         }
         let request = NativeSeedExportSession(sources: files, expected: expected)
-        // Both markers share one terminal result, after both destination reads.
+        // One terminal result records only the destinations UIKit returned.
+        // The host separately verifies both saved files before the main case.
         for name in names { exports[name] = request }
         presentedExport = request
     }
@@ -260,6 +268,13 @@ private final class NativeSeedExportSession: Identifiable {
     private let expected: [String: Data]
     private let read: @Sendable (URL, Int) async throws -> Data
     private(set) var phase: Phase = .waiting
+    private(set) var verifiedNames: [String] = []
+    var callbackVerification: String? {
+        guard phase == .verified else { return nil }
+        let sourceNames = sources.map(\.lastPathComponent).sorted()
+        return "sourceCount=\(sourceNames.count) sourceNames=\(sourceNames.joined(separator: ",")) "
+            + "verifiedCount=\(verifiedNames.count) verifiedNames=\(verifiedNames.joined(separator: ","))"
+    }
     private let diagnosticsEnabled = ProcessInfo.processInfo.arguments.contains("--ui-testing-batch-diagnostics")
     @ObservationIgnored private var diagnosticLineCount = 0
     @ObservationIgnored private var diagnosticCallbackCount = 0
@@ -289,8 +304,9 @@ private final class NativeSeedExportSession: Identifiable {
               expected.values.allSatisfy({ !$0.isEmpty && $0.count <= 1024 }),
               sourceURLs.count == sources.count,
               Set(sources.map(\.lastPathComponent)) == names,
-              urls.count == sources.count,
-              Set(urls.map(\.lastPathComponent)) == names,
+              (1...sources.count).contains(urls.count),
+              Set(urls.map(\.lastPathComponent)).count == urls.count,
+              Set(urls.map(\.lastPathComponent)).isSubset(of: names),
               Set(urls.map(\.standardizedFileURL)).count == urls.count,
               urls.allSatisfy({ destination in
                   destination.isFileURL
@@ -328,6 +344,7 @@ private final class NativeSeedExportSession: Identifiable {
                 verified = false
             }
             guard let self, self.phase == .verifying else { return }
+            if verified { self.verifiedNames = urls.map(\.lastPathComponent).sorted() }
             self.phase = verified ? .verified : .failed
             self.trace("event=terminal phase=\(self.phase)")
         }
@@ -375,7 +392,7 @@ private final class NativeSeedExportSession: Identifiable {
         }
     }
 
-    // Called lazily only after the unchanged acceptance guard fails. Repeat
+    // Called lazily only after the acceptance guard fails. Repeat
     // its pure predicates in order to explain the first failed condition.
     private func failedGuardBucket(_ urls: [URL]) -> String {
         let sourceURLs = Set(sources.map(\.standardizedFileURL))
@@ -385,8 +402,9 @@ private final class NativeSeedExportSession: Identifiable {
         guard expected.values.allSatisfy({ !$0.isEmpty && $0.count <= 1024 }) else { return "expectedSize" }
         guard sourceURLs.count == sources.count else { return "sourceUnique" }
         guard Set(sources.map(\.lastPathComponent)) == names else { return "sourceNames" }
-        guard urls.count == sources.count else { return "resultCount" }
-        guard Set(urls.map(\.lastPathComponent)) == names else { return "resultNames" }
+        guard (1...sources.count).contains(urls.count) else { return "resultCount" }
+        guard Set(urls.map(\.lastPathComponent)).count == urls.count,
+              Set(urls.map(\.lastPathComponent)).isSubset(of: names) else { return "resultNames" }
         guard Set(urls.map(\.standardizedFileURL)).count == urls.count else { return "resultUnique" }
         for destination in urls {
             guard destination.isFileURL else { return "nonFile" }
