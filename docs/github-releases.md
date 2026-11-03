@@ -208,7 +208,7 @@ this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
 the package tests. A validated `EXCLUDED_SOURCE_FILE_NAMES` argument excludes
 the other sixteen test files in preparation, build-settings inspection and the
 subsequent invocation. It does not exclude production App or TravelCore code,
-StoreKit resources, or any of the four selected test methods. The exact source
+StoreKit resources, or any of the five selected test methods. The exact source
 selection is recorded in the capture receipt. Unexpected test files or an
 excluded filename colliding with another tracked source fail before the build.
 The tracked project and test plan are unchanged; ordinary full CI and
