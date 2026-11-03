@@ -279,8 +279,7 @@ def make_runner(q, core):
             # These exact read-only queries write only their bounded command logs.
             # Keep full shared-output checks at both boundaries, without repeatedly
             # walking the settled build while CoreSimulator answers the query.
-            identifiers={'pretest-installed-Tripfolio':q.APP_ID,
-                         'installed-Tripfolio':q.APP_ID,
+            identifiers={'installed-Tripfolio':q.APP_ID,
                          'installed-TripfolioUITestsRunner':q.RUNNER_ID}
             identifier=identifiers.get(label)
             coordinator=getattr(self.pair,'commands',None)
@@ -305,10 +304,8 @@ def make_runner(q, core):
                 and proof.get('post_status')=='verified'
                 and row['finish']<=proof.get('post_elapsed',-1)<=row.get('work_deadline',-1)):
                 return False
-            if label=='pretest-installed-Tripfolio':
-                return not any(row['id']=='selected-tests' for row in self.report['commands'])
             tests=[row for row in self.report['commands'] if row['id']=='selected-tests']
-            return (self.report.get('pretest_installed_aut_verified') is True and len(tests)==1
+            return (self.report.get('aut_install_command_completed') is True and len(tests)==1
                 and 'finish' in tests[0] and tests[0].get('stop',{}).get('group_absent') is True
                 and tests[0].get('stop',{}).get('leader_reaped') is True)
 
@@ -567,14 +564,9 @@ def make_runner(q, core):
             arm.checkpoint()
             arm.once('install-aut')
             arm.sim('install-aut','install',arm.owned,self.product_paths['Tripfolio'],cap=120)
-            raw=arm.sim('pretest-installed-Tripfolio','get_app_container',arm.owned,q.APP_ID,'app',cap=38)
-            path=arm.owned_path(raw,('data','Containers','Bundle','Application'),self.product_paths['Tripfolio'].name)
-            identity=q.compiled_identity(path,arm.checkpoint)
-            require(identity['content']==self.products['Tripfolio']['content'],
-                    'Pretest installed AUT bytes differ from shared build')
-            arm.persist('pretest-installed-aut.json',{'identity':identity,'content_matches_shared':True,
-                'modes_match_shared':identity['modes']==self.products['Tripfolio']['modes']})
-            arm.report['pretest_installed_aut_verified']=True
+            # This proves successful installation command closure, not installed bytes.
+            # Both installed products must still match the shared build after testing.
+            arm.report['aut_install_command_completed']=True
 
         def installed(self,arm):
             installed={}
@@ -604,7 +596,7 @@ def make_runner(q, core):
                 require(arm.owned not in self.used_devices, 'Pair reused a Simulator')
                 self.used_devices.add(arm.owned)
                 self.install_aut(arm)
-                require(arm.report.get('pretest_installed_aut_verified') is True, 'Pretest AUT proof missing')
+                require(arm.report.get('aut_install_command_completed') is True, 'AUT installation command did not complete')
                 arm.once('selected-tests')
                 arm.ops.env={**arm.ops.env,**arm.report['environment_overrides']}
                 try:
@@ -635,7 +627,7 @@ def make_runner(q, core):
                 except BaseException as error: arm.error('Cleanup: '+repr(error))
                 arm.report['status']=('passed_pending_independent_review' if arm.report.get('native_command_passed')
                     and arm.report.get('native_result',{}).get('selected_case_passed') and not arm.report['errors']
-                    and arm.report['cleanup_verified'] else 'failed')
+                    and post_verified and arm.report['cleanup_verified'] else 'failed')
                 arm.report['unresolved_groups']=sorted(arm.active);arm.report['unknown_spawn']=arm.unknown_spawn
                 arm.save(); self.commands.save()
             safe=(arm.report['cleanup_verified'] and not arm.active and not arm.unknown_spawn
