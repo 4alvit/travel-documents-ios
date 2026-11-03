@@ -514,7 +514,8 @@ class Controls(unittest.TestCase):
             version, build = '26.2', '17C52'
             self.assertIn('DEVELOPER_DIR: /Applications/Xcode_'+version+'.app/Contents/Developer',body)
             self.assertIn("$'Xcode "+version+"\\nBuild version "+build+"'",body)
-            self.assertIn('    timeout-minutes: 35\n',body)
+            job_minutes = 40 if job == 'ui_guidance' else 35
+            self.assertIn(f'    timeout-minutes: {job_minutes}\n',body)
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
             match_option = ' --require-sdk-match' + (' --prepare-files' if prepare_files else '')

@@ -108,7 +108,8 @@ jobs:
   ui_guidance:
     name: Accessibility, localization and guidance UI
     runs-on: macos-15
-    timeout-minutes: 35
+    # Keep upload and runner teardown headroom after the unchanged test budgets.
+    timeout-minutes: 40
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
