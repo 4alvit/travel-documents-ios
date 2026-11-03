@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture one same-build, fresh-Simulator purchase-anchor pair; never release acceptance."""
+"""Capture a same-build prelaunch/fresh pair using the ordinary child API; never release acceptance."""
 import argparse
 import hashlib
 import importlib.util
@@ -17,9 +17,9 @@ import uuid
 WORK_SECONDS, CLEANUP_SECONDS = 1800, 180
 BUILD_CAP, TEST_CAP, CASE_SECONDS = 420, 780, 180  # Command caps include eight-second stop reserve.
 CACHE_CAP = 300  # New prerequisite; includes stop reserve and shares the original global clock.
-CASE = 'BatchImportUITests/testDiagnosticPurchasePresentationAnchor()'
+CASE = 'BatchImportUITests/testDiagnosticPurchaseSessionOrder()'
 SELECTOR = 'TripfolioUITests/' + CASE.removesuffix('()')
-MODES = ('child', 'swiftUI')
+MODES = ('prelaunch', 'fresh')
 RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-2'
 DEVICE = 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro'
 PINS = {
@@ -46,9 +46,9 @@ def context(env, machine):
             and machine == profile['architecture'], 'Hosted diagnostic runner identity mismatch')
     require(env.get('GITHUB_REPOSITORY') == '4alvit/travel-documents-ios'
             and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
-            and env.get('GITHUB_WORKFLOW') == 'Purchase anchor diagnostic'
+            and env.get('GITHUB_WORKFLOW') == 'Purchase session order diagnostic'
             and env.get('GITHUB_JOB') == 'anchor', 'Unexpected diagnostic workflow context')
-    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/purchase-swiftui', 'Diagnostic branch required')
+    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/purchase-session-order', 'Diagnostic branch required')
     require(re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', '')), 'Missing source commit')
     for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
         require(re.fullmatch('[1-9][0-9]*', env.get(key, '')), 'Invalid run identity')
@@ -380,11 +380,11 @@ def make_runner(q, core):
             self.profile = dict(job['runner_profile'])
             self.started = time.monotonic()
             self.work_end, self.final = self.started+WORK_SECONDS, self.started+WORK_SECONDS+CLEANUP_SECONDS
-            self.out = root/'build'/('PurchaseAnchor-'+job['GITHUB_RUN_ID']+'-'+job['GITHUB_RUN_ATTEMPT'])
+            self.out = root/'build'/('PurchaseSessionOrder-'+job['GITHUB_RUN_ID']+'-'+job['GITHUB_RUN_ATTEMPT'])
             require(self.out.parent.is_dir() and not self.out.parent.is_symlink(), 'Unsafe build parent')
             self.current = None
             self.report = {'status':'running','source':{'commit':job['GITHUB_SHA']},'job':job,
-                           'diagnostic':'same-build-purchase-anchor-pair','release_acceptance':False,
+                           'diagnostic':'same-build-purchase-session-order-pair','release_acceptance':False,
                            'runner_profile':self.profile,
                            'limits':{'work_seconds':WORK_SECONDS,'cleanup_seconds':CLEANUP_SECONDS,
                            'build_total_cap':BUILD_CAP,'test_total_cap':TEST_CAP,'stop_reserve':8,'case_seconds':CASE_SECONDS},
@@ -583,11 +583,11 @@ def make_runner(q, core):
         def run_arm(self,mode,index):
             self.commands.checkpoint()
             self.source('source-enter-'+mode); self.product_snapshot('products-before-'+mode)
-            arm=Context(self,self.out/mode,self.final,'TripDocket-Anchor-'+mode+'-'+str(uuid.uuid4()))
+            arm=Context(self,self.out/mode,self.final,'TripDocket-SessionOrder-'+mode+'-'+str(uuid.uuid4()))
             self.current=arm; self.report['arms'][mode]=arm.report
-            arm.report['mode']=mode; arm.report['runtime_selection']=self.selection
-            arm.report['environment_overrides']={'TEST_RUNNER_TRIPDOCKET_PURCHASE_ANCHOR_CONTROL':'1',
-                'TEST_RUNNER_TRIPDOCKET_PURCHASE_ANCHOR_MODE':mode,'TEST_RUNNER_NSUnbufferedIO':'YES','NSUnbufferedIO':'YES'}
+            arm.report['mode']=mode; arm.report['purchase_api']='child'; arm.report['runtime_selection']=self.selection
+            arm.report['environment_overrides']={'TEST_RUNNER_TRIPDOCKET_PURCHASE_SESSION_ORDER_CONTROL':'1',
+                'TEST_RUNNER_TRIPDOCKET_PURCHASE_SESSION_ORDER_MODE':mode,'TEST_RUNNER_NSUnbufferedIO':'YES','NSUnbufferedIO':'YES'}
             post_verified=False; normal_cleanup=False
             try:
                 arm.setup()

@@ -153,6 +153,15 @@ private struct TripsView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(action: addTrip) { Label(L10n.ui("trip.create", defaultValue: "Create trip"), systemImage: "plus") }
                         .disabled(model.isBusy)
+                        #if DEBUG && targetEnvironment(simulator)
+                        .modifier(PurchaseDiagnosticValue(value: PurchaseSessionOrderObservation.value(
+                            arguments: ProcessInfo.processInfo.arguments,
+                            state: model.purchases.purchaseDiagnostics.stateAccessibilityValue(
+                                isPro: model.purchases.isPro, isBusy: model.purchases.isBusy
+                            ),
+                            diagnostic: model.purchases.purchaseDiagnostics.accessibilityValue
+                        )))
+                        #endif
                 }
             }
             .sheet(isPresented: $showsNewTrip) { NewTripView() }
@@ -992,6 +1001,15 @@ private struct SettingsView: View {
 }
 
 #if DEBUG && targetEnvironment(simulator)
+private enum PurchaseSessionOrderObservation {
+    // Passive state only: no load, refresh, purchase, restore or navigation.
+    static func value(arguments: [String], state: String?, diagnostic: String?) -> String? {
+        guard arguments.filter({ $0 == "--ui-testing-purchase-session-state" }).count == 1,
+              let state else { return nil }
+        return state + "\n" + (diagnostic ?? "purchase-diagnostic none")
+    }
+}
+
 private struct PurchaseDiagnosticValue: ViewModifier {
     let value: String?
 
@@ -1050,51 +1068,6 @@ private final class PurchasePresentationContext {
     }
 
     #if DEBUG && targetEnvironment(simulator)
-    enum DiagnosticAnchorMode: String { case child, swiftUI }
-
-    static func diagnosticAnchorMode(arguments: [String]) throws -> DiagnosticAnchorMode? {
-        let family = arguments.filter { $0.hasPrefix("--ui-testing-purchase-anchor") }
-        guard !family.isEmpty else { return nil }
-        let prefix = "--ui-testing-purchase-anchor="
-        let selectors = family.filter { $0.hasPrefix(prefix) }
-        guard family.count == 2,
-              family.filter({ $0 == "--ui-testing-purchase-anchor-control" }).count == 1,
-              arguments.filter({ $0 == "--ui-testing-purchase-diagnostics" }).count == 1,
-              selectors.count == 1,
-              let mode = DiagnosticAnchorMode(rawValue: String(selectors[0].dropFirst(prefix.count))) else {
-            throw PresentationError.unavailable
-        }
-        return mode
-    }
-
-    // Both arms retain the current screen's ownership checks. Only the
-    // SwiftUI arm delegates selection of the purchase UI context to StoreKit.
-    func diagnosticPurchase(_ product: Product, arguments: [String],
-                            swiftUIPurchase: () async throws -> Product.PurchaseResult) async throws -> Product.PurchaseResult {
-        let mode = try Self.diagnosticAnchorMode(arguments: arguments)
-        guard mode == .swiftUI else {
-            if mode == .child { print("purchase-anchor mode=child") }
-            return try await purchase(product)
-        }
-        tracePresentation(.entry)
-        defer { tracePresentation(.returned) }
-        guard isActive, let controller, controller.parent != nil,
-              let window = controller.viewIfLoaded?.window,
-              let scene = window.windowScene,
-              scene.activationState == .foregroundActive else {
-            throw PresentationError.unavailable
-        }
-        var ancestor: UIViewController? = controller
-        while let current = ancestor {
-            guard !current.isBeingDismissed, !current.isMovingFromParent else {
-                throw PresentationError.unavailable
-            }
-            ancestor = current.parent
-        }
-        print("purchase-anchor mode=swiftUI")
-        return try await swiftUIPurchase()
-    }
-
     private enum ObservationPoint: String { case entry, returned }
 
     /// Passive, bounded observations of this screen only. Never record class
@@ -1154,9 +1127,6 @@ private struct PurchasePresentationBridge: UIViewControllerRepresentable {
 
 @MainActor
 private struct ProView: View {
-    #if DEBUG && targetEnvironment(simulator)
-    @Environment(\.purchase) private var purchaseAction
-    #endif
     @State private var purchasePresentation = PurchasePresentationContext()
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -1192,14 +1162,7 @@ private struct ProView: View {
                             let generation = purchaseFeedback.begin()
                             Task {
                                 let failure = await model.purchases.purchase(using: { product in
-                                    #if DEBUG && targetEnvironment(simulator)
-                                    try await purchasePresentation.diagnosticPurchase(
-                                        product, arguments: ProcessInfo.processInfo.arguments,
-                                        swiftUIPurchase: { try await purchaseAction(product) }
-                                    )
-                                    #else
                                     try await purchasePresentation.purchase(product)
-                                    #endif
                                 })
                                 guard !model.purchases.isPro else {
                                     purchaseFeedback.reset()

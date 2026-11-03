@@ -1665,39 +1665,76 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
-    private static func diagnosticPurchaseAnchorMode(_ environment: [String: String]) throws -> String? {
-        let enabled = environment["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL"]
-        let mode = environment["TRIPDOCKET_PURCHASE_ANCHOR_MODE"]
-        guard enabled != nil || mode != nil else { return nil }
-        guard enabled == "1", let mode, ["child", "swiftUI"].contains(mode) else {
-            throw BatchTestFailure(message: "Invalid explicit purchase-anchor diagnostic configuration")
+    private static func diagnosticPurchaseSessionOrder(_ environment: [String: String]) throws -> String? {
+        let family = environment.filter { $0.key.hasPrefix("TRIPDOCKET_PURCHASE_SESSION_ORDER") }
+        guard !family.isEmpty else { return nil }
+        guard family.count == 2,
+              family["TRIPDOCKET_PURCHASE_SESSION_ORDER_CONTROL"] == "1",
+              let mode = family["TRIPDOCKET_PURCHASE_SESSION_ORDER_MODE"],
+              ["prelaunch", "fresh"].contains(mode) else {
+            throw BatchTestFailure(message: "Invalid explicit purchase session-order configuration")
         }
         return mode
     }
 
-    func testDiagnosticPurchasePresentationAnchor() async throws {
-        guard let mode = try Self.diagnosticPurchaseAnchorMode(ProcessInfo.processInfo.environment) else {
-            throw XCTSkip("Opt in with the explicit purchase-anchor diagnostic configuration")
+    private static func sessionOrderReady(_ value: String) -> Bool {
+        value.utf8.count <= 512 && value.split(separator: "\n", maxSplits: 1).first
+            == "purchase-state isPro=false isBusy=false load=returned purchase=notStarted restore=notStarted"
+    }
+
+    private func prelaunchForSessionOrder(_ app: XCUIApplication) async throws {
+        var terminated = false
+        defer { if !terminated { app.terminate() } }
+        app.launch()
+        let navigation = app.navigationBars.matching(identifier: "TripDocket")
+        var observed = ""
+        let readyDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        try await wait("Prelaunch did not reach initial Trips with a returned idle Free load", app: app) {
+            guard app.state == .runningForeground, navigation.count == 1 else { return false }
+            let buttons = navigation.element.buttons.matching(identifier: "Create trip")
+            guard buttons.count == 1, buttons.element.exists, buttons.element.isHittable,
+                  let value = buttons.element.value as? String else { return false }
+            observed = value
+            return Self.sessionOrderReady(value) && ContinuousClock.now < readyDeadline
+        }
+        try Task.checkCancellation()
+        let state = XCTAttachment(string: observed)
+        state.name = "Session-order prelaunch state before explicit SKTestSession"
+        state.lifetime = .keepAlways
+        add(state)
+        capture(app, "Session-order prelaunch initial Trips; no explicit SKTestSession yet")
+        app.terminate()
+        terminated = true
+        let stopDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        try await wait("Prelaunch AUT did not stop before explicit SKTestSession", app: app) {
+            app.state == .notRunning && ContinuousClock.now < stopDeadline
+        }
+        try Task.checkCancellation()
+    }
+
+    func testDiagnosticPurchaseSessionOrder() async throws {
+        guard let mode = try Self.diagnosticPurchaseSessionOrder(ProcessInfo.processInfo.environment) else {
+            throw XCTSkip("Opt in with the explicit purchase session-order configuration")
         }
         executionTimeAllowance = 180
         continueAfterFailure = false
         let app = XCUIApplication()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.terminate()
+        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
+                               "--ui-testing-purchase-diagnostics", "--ui-testing-purchase-session-state",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        let selection = XCTAttachment(string: "purchase-session-order diagnosticOnly=true mode=\(mode) api=child")
+        selection.name = "Explicit purchase session-order diagnostic selection"
+        selection.lifetime = .keepAlways
+        add(selection)
+        if mode == "prelaunch" { try await prelaunchForSessionOrder(app) }
         let session = try await localStoreSession()
         defer {
             app.terminate()
             session.clearTransactions()
             session.resetToDefaultState()
         }
-        let selection = XCTAttachment(string: "purchase-anchor diagnosticOnly=true mode=\(mode)")
-        selection.name = "Explicit purchase anchor diagnostic selection"
-        selection.lifetime = .keepAlways
-        add(selection)
-        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
-                               "--ui-testing-purchase-diagnostics", "--ui-testing-purchase-anchor-control",
-                               "--ui-testing-purchase-anchor=\(mode)",
-                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         try await openTrip(app)
         try await openBatchEntry(app)
@@ -1705,7 +1742,7 @@ final class BatchImportUITests: XCTestCase {
             app.navigationBars["TripDocket Pro"].exists && !app.buttons["batch.chooseFiles"].exists
         }
         try await purchaseOnce(app, springboard: springboard, session: session)
-        capture(app, "Diagnostic purchase anchor \(mode) verified; not release qualification")
+        capture(app, "Diagnostic session order \(mode) with child API verified; not release qualification")
     }
 
     private func localStoreSession() async throws -> SKTestSession {
@@ -1717,7 +1754,7 @@ final class BatchImportUITests: XCTestCase {
         do {
             let transaction = try await session.buyProduct(identifier: productID, options: [])
             guard transaction.environment == .xcode, transaction.productID == productID else {
-                throw BatchTestFailure(message: "StoreKit preflight did not return the expected Xcode test product; app was not launched")
+                throw BatchTestFailure(message: "StoreKit preflight did not return the expected Xcode test product; purchase-test launch has not begun")
             }
             session.clearTransactions()
             guard session.allTransactions().isEmpty else {

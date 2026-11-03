@@ -26,8 +26,8 @@ class Guards(unittest.TestCase):
     def env(self):
         return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',PURCHASE_ANCHOR_RUNNER='macos-15',
                     GITHUB_REPOSITORY='4alvit/travel-documents-ios',GITHUB_EVENT_NAME='workflow_dispatch',
-                    GITHUB_WORKFLOW='Purchase anchor diagnostic',GITHUB_JOB='anchor',
-                    GITHUB_REF='refs/heads/diagnostic/purchase-swiftui',GITHUB_SHA='a'*40,
+                    GITHUB_WORKFLOW='Purchase session order diagnostic',GITHUB_JOB='anchor',
+                    GITHUB_REF='refs/heads/diagnostic/purchase-session-order',GITHUB_SHA='a'*40,
                     GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',DEVELOPER_DIR=q.DEVELOPER_DIR)
 
     def test_context_is_explicit_manual_arm_branch(self):
@@ -101,10 +101,10 @@ class Guards(unittest.TestCase):
                 def native(arm,label,args,cap=38):commands.append((arm.out.name,args,cap));return ''
                 with mock.patch.object(Context,'setup',setup),mock.patch.object(Context,'command',native), \
                         mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                    p.run_arm('child',0);p.run_arm('swiftUI',1)
+                    p.run_arm('prelaunch',0);p.run_arm('fresh',1)
                 self.assertEqual(hosts,['x86_64','x86_64'])
-                selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','child','swiftUI')]
-                self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','child','swiftUI'])
+                selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','prelaunch','fresh')]
+                self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','prelaunch','fresh'])
                 self.assertEqual([c[2] for c in selected],[420,48,780,780])
                 for _,args,_ in selected:self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1)
 
@@ -186,10 +186,10 @@ class Guards(unittest.TestCase):
                     self.assertEqual(events[start+offset][2],['/usr/bin/xcrun','simctl','get_app_container',owned,identifier,'app'])
                 self.assertEqual([x[3] for x in events[start:start+4]],[120,780,38,38])
             self.assertNotEqual(events[0][0],events[4][0]);self.assertEqual(owned_path.call_count,4)
-            self.assertEqual(p.source.call_args_list,[mock.call('source-enter-child'),mock.call('source-after-child'),
-                mock.call('source-enter-swiftUI'),mock.call('source-after-swiftUI')])
-            self.assertEqual(p.product_snapshot.call_args_list,[mock.call('products-before-child'),mock.call('products-after-child'),
-                mock.call('products-before-swiftUI'),mock.call('products-after-swiftUI')])
+            self.assertEqual(p.source.call_args_list,[mock.call('source-enter-prelaunch'),mock.call('source-after-prelaunch'),
+                mock.call('source-enter-fresh'),mock.call('source-after-fresh')])
+            self.assertEqual(p.product_snapshot.call_args_list,[mock.call('products-before-prelaunch'),mock.call('products-after-prelaunch'),
+                mock.call('products-before-fresh'),mock.call('products-after-fresh')])
             for mode in m.MODES:
                 self.assertFalse((p.root/mode/'pretest-installed-aut.json').exists())
                 receipt=json.loads((p.root/mode/'installed-products.json').read_text())
@@ -215,9 +215,9 @@ class Guards(unittest.TestCase):
                         mock.patch.object(Context,'command',command), \
                         mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
                     self.assertEqual(p.run(),1)
-                self.assertEqual(list(p.report['arms']),['child']);self.assertNotIn('selected-tests',events)
-                self.assertTrue(p.report['arms']['child']['cleanup_verified'])
-                self.assertNotIn('aut_install_command_completed',p.report['arms']['child'])
+                self.assertEqual(list(p.report['arms']),['prelaunch']);self.assertNotIn('selected-tests',events)
+                self.assertTrue(p.report['arms']['prelaunch']['cleanup_verified'])
+                self.assertNotIn('aut_install_command_completed',p.report['arms']['prelaunch'])
 
     def test_posttest_identity_failure_rejects_native_success_and_second_arm(self):
         cases=[(name,fault) for name in ('Tripfolio','TripfolioUITestsRunner') for fault in ('query','path','bytes')]
@@ -247,8 +247,8 @@ class Guards(unittest.TestCase):
                         mock.patch.object(Context,'owned_path',side_effect=owned_path), \
                         mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
                     self.assertEqual(p.run(),1)
-                self.assertEqual(list(p.report['arms']),['child']);self.assertEqual(events.count('selected-tests'),1)
-                result=p.report['arms']['child']
+                self.assertEqual(list(p.report['arms']),['prelaunch']);self.assertEqual(events.count('selected-tests'),1)
+                result=p.report['arms']['prelaunch']
                 self.assertTrue(result['native_command_passed']);self.assertTrue(result['aut_install_command_completed'])
                 self.assertTrue(result['cleanup_verified']);self.assertEqual(result['status'],'failed')
                 self.assertNotIn('installed_product_content_verified',result)
@@ -259,27 +259,27 @@ class Guards(unittest.TestCase):
             p=self.fake_pair(Path(tmp));events=[]
             def command(arm,label,args,cap=38):
                 events.append((arm.out.name,label,cap))
-                if arm.out.name=='child': raise RuntimeError('retained native failure')
+                if arm.out.name=='prelaunch': raise RuntimeError('retained native failure')
                 return ''
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',command),mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                self.assertEqual(p.run_arm('child',0),'failed')
-                self.assertEqual(p.run_arm('swiftUI',1),'passed_pending_independent_review')
-            self.assertEqual(events,[('child','selected-tests',780),('swiftUI','selected-tests',780)])
+                self.assertEqual(p.run_arm('prelaunch',0),'failed')
+                self.assertEqual(p.run_arm('fresh',1),'passed_pending_independent_review')
+            self.assertEqual(events,[('prelaunch','selected-tests',780),('fresh','selected-tests',780)])
             self.assertEqual(len(p.used_devices),2)
-            self.assertTrue(p.report['arms']['child']['errors'])
+            self.assertTrue(p.report['arms']['prelaunch']['errors'])
 
     def test_unconfirmed_cleanup_aborts_before_second(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=self.fake_pair(Path(tmp));p.prepare=lambda:None
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',lambda arm:None):
                 self.assertEqual(p.run(),1)
-            self.assertEqual(list(p.report['arms']),['child'])
+            self.assertEqual(list(p.report['arms']),['prelaunch'])
             self.assertTrue(p.report['errors'])
 
     def test_unknown_spawn_cannot_run_global_source_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=self.fake_pair(Path(tmp))
-            arm=Context(p,p.root/'child',p.final,'intent');p.current=arm
+            arm=Context(p,p.root/'prelaunch',p.final,'intent');p.current=arm
             arm.unknown_spawn=True
             coordinator=Context(p,p.root/'coordinator',p.final,'unused');p.commands=coordinator
             with self.assertRaisesRegex(RuntimeError,'Other diagnostic process ownership'):
@@ -291,7 +291,7 @@ class Guards(unittest.TestCase):
             def command(arm,*args): arm.unknown_spawn=True;raise RuntimeError('unknown spawn')
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',command),mock.patch.object(Context,'cleanup',lambda arm:None):
                 self.assertEqual(p.run(),1)
-            self.assertEqual(list(p.report['arms']),['child'])
+            self.assertEqual(list(p.report['arms']),['prelaunch'])
             self.assertEqual(p.source.call_count,1)
 
     def test_normal_cleanup_uses_work_deadline_final_arm_uses_fixed_reserve(self):
@@ -300,7 +300,7 @@ class Guards(unittest.TestCase):
             def clean(arm):
                 clocks.append((arm.t0,arm.final,arm.limit));self.clean_arm(arm)
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',clean):
-                p.run_arm('child',0);p.run_arm('swiftUI',1)
+                p.run_arm('prelaunch',0);p.run_arm('fresh',1)
             self.assertEqual(clocks,[(p.started,p.work_end,p.work_end),(p.started,p.final,p.work_end)])
 
     def test_insufficient_interarm_cleanup_budget_uses_final_reserve_and_stops(self):
@@ -308,7 +308,7 @@ class Guards(unittest.TestCase):
             p=self.fake_pair(Path(tmp));p.work_end=time.monotonic()+30;clocks=[]
             def clean(arm): clocks.append(arm.final);self.clean_arm(arm)
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',clean):
-                with self.assertRaisesRegex(RuntimeError,'No work budget'):p.run_arm('child',0)
+                with self.assertRaisesRegex(RuntimeError,'No work budget'):p.run_arm('prelaunch',0)
             self.assertEqual(clocks,[p.final])
 
     def test_interrupt_uses_final_cleanup_and_stops(self):
@@ -317,7 +317,7 @@ class Guards(unittest.TestCase):
             def command(arm,*args):p.signal();raise RuntimeError('interrupted')
             def clean(arm):clocks.append(arm.final);self.clean_arm(arm)
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',command),mock.patch.object(Context,'cleanup',clean):
-                with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('child',0)
+                with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('prelaunch',0)
             self.assertEqual(clocks,[p.final]);self.assertTrue(p.commands.interrupted)
 
     def test_source_or_product_change_aborts_even_after_cleanup(self):
@@ -325,7 +325,7 @@ class Guards(unittest.TestCase):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
                 p=self.fake_pair(Path(tmp));getattr(p,fault).side_effect=[{},RuntimeError('changed')]
                 with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                    with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('child',0)
+                    with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('prelaunch',0)
 
     def test_runtime_validation_rejects_extra_cases_and_wrong_device(self):
         sample=json.loads((ROOT/'scripts'/'../Tripfolio.xctestplan').read_text())
@@ -371,10 +371,10 @@ class Guards(unittest.TestCase):
         with self.assertRaises(RuntimeError):m.validate_result(q,summary,{**tree,'testNodes':[{'nodeType':'Runtime Warning'}]},'ABC',selection)
 
     def capture_fixture(self, p, fail=False):
-        arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
+        arm=Context(p,p.root/'prelaunch',p.final,'unused');p.current=arm;arm.owned='ABC'
         p.selection={'identifier':m.RUNTIME,'version':'26.2','build':'23C54','architecture':'arm64',
                      'sdk_version':'26.2','sdk_matched':True}
-        raw=p.out/'child.xcresult';raw.mkdir();(raw/'Data').mkdir();(raw/'Info.plist').write_bytes(b'fixture')
+        raw=p.out/'prelaunch.xcresult';raw.mkdir();(raw/'Data').mkdir();(raw/'Info.plist').write_bytes(b'fixture')
         summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0,
                  'testFailures':[],'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.2',
                  'osBuildNumber':'23C54','architecture':'arm64'}}]}
@@ -387,7 +387,7 @@ class Guards(unittest.TestCase):
             if label.startswith('export-'):
                 dest=Path(args[args.index('--output-path')+1]);dest.mkdir();(dest/'evidence.txt').write_text('raw evidence')
                 return ''
-            (p.out/'child-inspection.xcresult'/'database.sqlite3').write_bytes(b'sqlite fixture')
+            (p.out/'prelaunch-inspection.xcresult'/'database.sqlite3').write_bytes(b'sqlite fixture')
             return json.dumps(summary if label=='result-summary' else tree)
         arm.command=command
         return arm,raw,events
@@ -395,9 +395,9 @@ class Guards(unittest.TestCase):
     def test_actual_capture_preserves_original_and_removes_owned_copy(self):
         with tempfile.TemporaryDirectory() as tmp,mock.patch.object(Context,'checkpoint',lambda self,**kwargs:None):
             p=self.fake_pair(Path(tmp));arm,raw,events=self.capture_fixture(p)
-            before=core.tree_manifest(raw);p.capture=Pair.capture.__get__(p,Pair);p.capture(arm,'child')
+            before=core.tree_manifest(raw);p.capture=Pair.capture.__get__(p,Pair);p.capture(arm,'prelaunch')
             self.assertEqual(core.tree_manifest(raw),before)
-            self.assertFalse((p.out/'child-inspection.xcresult').exists())
+            self.assertFalse((p.out/'prelaunch-inspection.xcresult').exists())
             self.assertTrue(arm.report['native_result']['selected_case_passed'])
             self.assertEqual([x[0] for x in events],['export-attachments','export-diagnostics','result-summary','result-tests'])
             self.assertTrue(all(x[1]==68 for x in events))
@@ -412,14 +412,14 @@ class Guards(unittest.TestCase):
                 def command(label,args,cap=38):
                     result=original_command(label,args,cap)
                     if label=='result-tests':
-                        copy=p.out/'child-inspection.xcresult'
+                        copy=p.out/'prelaunch-inspection.xcresult'
                         if name=='sidecar-mode':(copy/'database.sqlite3').chmod(0o666)
                         elif name=='sidecar-size':
                             with (copy/'database.sqlite3').open('r+b') as file:file.truncate(16*1024*1024+1)
                         else:(copy/name).write_text('changed')
                     return result
                 arm.command=command;p.capture=Pair.capture.__get__(p,Pair)
-                with self.assertRaises(RuntimeError):p.capture(arm,'child')
+                with self.assertRaises(RuntimeError):p.capture(arm,'prelaunch')
                 self.assertEqual(core.tree_manifest(raw),before)
                 self.assertFalse(arm.report['native_result']['inspection_copy_closed'])
                 self.assertFalse(arm.report['native_result']['evidence_capture_complete'])
@@ -428,14 +428,14 @@ class Guards(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp,mock.patch.object(Context,'checkpoint',lambda self,**kwargs:None):
             p=self.fake_pair(Path(tmp));arm,raw,events=self.capture_fixture(p,fail=True)
             before=core.tree_manifest(raw);p.capture=Pair.capture.__get__(p,Pair)
-            with self.assertRaisesRegex(RuntimeError,'export failed'):p.capture(arm,'child')
+            with self.assertRaisesRegex(RuntimeError,'export failed'):p.capture(arm,'prelaunch')
             self.assertEqual(core.tree_manifest(raw),before)
-            self.assertFalse((p.out/'child-inspection.xcresult').exists())
+            self.assertFalse((p.out/'prelaunch-inspection.xcresult').exists())
             self.assertNotIn('selected_case_passed',arm.report['native_result'])
 
     def test_actual_nonzero_command_retains65_and_reaps_group(self):
         with tempfile.TemporaryDirectory() as tmp,mock.patch.object(Context,'checkpoint',lambda self,**kwargs:None):
-            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
             child=SimpleNamespace(pid=77,returncode=65,poll=lambda:65)
             closed=[]
             arm.ops=SimpleNamespace(now=time.monotonic,spawn=lambda args:child,prepare=lambda proc:None,
@@ -476,7 +476,7 @@ class Guards(unittest.TestCase):
 
     def test_full_pair_output_scan_has_owned_writer_and_command_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
             pid=123;arm.active[pid]=SimpleNamespace(pid=pid)
             arm.report['commands'].append({'id':'selected-tests','pgid':pid,'work_deadline':90,
                 'argv':['xcodebuild','test-without-building']})
@@ -492,7 +492,7 @@ class Guards(unittest.TestCase):
 
     def test_owned_boot_scan_preserves_fifteen_seconds(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
             arm.owned='ABC';arm.active[123]=SimpleNamespace(pid=123)
             arm.report['commands'].append({'id':'boot-ready','pgid':123,'work_deadline':100,
                 'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']})
@@ -509,11 +509,11 @@ class Guards(unittest.TestCase):
                 if missing=='installed':p.installed=lambda arm:None
                 else:p.capture=lambda arm,mode:arm.report.update(native_result={'evidence_capture_complete':True,'inspection_copy_closed':False})
                 with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                    with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('child',0)
+                    with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('prelaunch',0)
 
     def test_pending_owned_boot_scan_allows_six_seconds_without_writer_privileges(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
             now=[p.started];arm.ops.now=lambda:now[0];arm.owned='ABC'
             arm.report['commands'].append({'id':'boot-ready','work_deadline':100,
                 'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']})
@@ -533,7 +533,7 @@ class Guards(unittest.TestCase):
     def test_pending_boot_scan_wrong_identity_or_ownership_stays_five_seconds(self):
         for fault in ('id','argv','device','no-device','finished','pgid-none','foreign-active','foreign-pgid','unknown'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
-                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
                 arm.ops.now=lambda:p.started;arm.owned='ABC'
                 command={'id':'boot-ready','work_deadline':100,
                     'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']}
@@ -558,7 +558,7 @@ class Guards(unittest.TestCase):
     def test_pending_boot_scan_keeps_original_global_and_command_deadlines(self):
         for global_remaining,command_remaining,expected in ((4,100,4),(100,3,3),(2,3,2)):
             with self.subTest(global_remaining=global_remaining,command_remaining=command_remaining),tempfile.TemporaryDirectory() as tmp:
-                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'prelaunch',p.final,'unused')
                 now=[p.started];arm.ops.now=lambda:now[0];arm.owned='ABC';arm.limit=p.started+global_remaining
                 arm.report['commands'].append({'id':'boot-ready','work_deadline':command_remaining,
                     'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']})
@@ -575,7 +575,7 @@ class Guards(unittest.TestCase):
 
     def postbuild_boot_context(self,root,active=True):
         p=self.fake_pair(root);p.report['shared_build_verified']=True
-        arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
+        arm=Context(p,p.root/'prelaunch',p.final,'unused');p.current=arm;arm.owned='ABC'
         now=[p.started];arm.ops.now=lambda:now[0]
         row={'id':'boot-ready','argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b'],
              'work_deadline':1000}
@@ -668,7 +668,7 @@ class Guards(unittest.TestCase):
 
     def boot_command_fixture(self,root):
         p=self.fake_pair(root);p.report['shared_build_verified']=True
-        arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
+        arm=Context(p,p.root/'prelaunch',p.final,'unused');p.current=arm;arm.owned='ABC'
         now=[p.started];polls=[];scans=[]
         child=SimpleNamespace(pid=77,returncode=None)
         def poll():
@@ -792,7 +792,7 @@ class Guards(unittest.TestCase):
     def late_stop_fixture(self,root):
         with mock.patch.object(time,'monotonic',return_value=1000.0), \
                 mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
-            p=self.fake_pair(root);arm=Context(p,p.root/'child',p.final,'unused');p.current=arm
+            p=self.fake_pair(root);arm=Context(p,p.root/'prelaunch',p.final,'unused');p.current=arm
         now=[p.started];arm.owned='ABC';arm.cleaning=True
         arm.limit=p.started+110;arm.write_deadline=p.started+120
         sent=[];child=SimpleNamespace(pid=77,returncode=None)
@@ -864,7 +864,7 @@ class Guards(unittest.TestCase):
 
     def test_log_accounting_is_shared_across_contexts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=self.fake_pair(Path(tmp));a=Context(p,p.root/'child',p.final,'a');b=Context(p,p.root/'ancestor',p.final,'b')
+            p=self.fake_pair(Path(tmp));a=Context(p,p.root/'prelaunch',p.final,'a');b=Context(p,p.root/'ancestor',p.final,'b')
             seen=[]
             def pump(context,*args):seen.append(context.log_total);context.log_total+=10
             with mock.patch.object(core.Recovery,'pump',pump):
@@ -905,9 +905,9 @@ class Guards(unittest.TestCase):
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)), \
                     mock.patch.object(Context,'command',native), \
                     mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                p.run_arm('child',0);p.run_arm('swiftUI',1)
-            relevant=[(label,args,cap) for label,args,cap in calls if label in ('build-for-testing','build-settings','child','swiftUI')]
-            self.assertEqual([label for label,_,_ in relevant],['build-for-testing','build-settings','child','swiftUI'])
+                p.run_arm('prelaunch',0);p.run_arm('fresh',1)
+            relevant=[(label,args,cap) for label,args,cap in calls if label in ('build-for-testing','build-settings','prelaunch','fresh')]
+            self.assertEqual([label for label,_,_ in relevant],['build-for-testing','build-settings','prelaunch','fresh'])
             for label,args,cap in relevant:
                 self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1,label)
                 self.assertIn('EXCLUDED_SOURCE_FILE_NAMES=Other.swift',args)

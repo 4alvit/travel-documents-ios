@@ -1,5 +1,5 @@
-name: Purchase anchor diagnostic
-run-name: "Purchase anchor pair (${{ inputs.runner }}): child then swiftUI"
+name: Purchase session order diagnostic
+run-name: "Purchase session order (${{ inputs.runner }}): prelaunch then fresh; child API"
 on:
   workflow_dispatch:
     inputs:
@@ -41,9 +41,9 @@ jobs:
         timeout-minutes: 4
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: TripDocket-diagnostic-purchase-anchor-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: TripDocket-diagnostic-purchase-session-order-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/PurchaseAnchor-*/
-            !build/PurchaseAnchor-*/DerivedData/
+            build/PurchaseSessionOrder-*/
+            !build/PurchaseSessionOrder-*/DerivedData/
           if-no-files-found: error
           retention-days: 14
