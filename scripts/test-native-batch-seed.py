@@ -169,6 +169,7 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('let reopenControl = reopenValue == "1"',ordinary)
         self.assertIn('guard reopenValue == nil || reopenValue == "" || reopenValue == "1"',ordinary)
         self.assertIn('guard !reopenControl || (nativeRoot && checkpoint != nil)',ordinary)
+        self.assertIn('failed: failed, observeLateFailure: reopenControl)',ordinary)
         self.assertIn('if reopenControl {\n            app.launchArguments += ["--ui-testing-native-reopen", "--ui-testing-batch-diagnostics"]\n        }',ordinary)
         self.assertIn('try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)',control)
         self.assertIn('try check(verified.exists && !failed.exists',control)
@@ -542,6 +543,170 @@ actor Reader {
         log = "\n".join(self.last_trace)
         self.assertLess(log.index("event=lateIgnored phase=verifying"), log.index("event=readResult role=insurance"))
         self.assertLess(log.index("event=readResult role=insurance"), log.index("event=terminal phase=verified"))
+
+
+class PassiveExportObservationGuards(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(); cls.addClassCleanup(cls.scratch.cleanup)
+        folder = Path(cls.scratch.name); cls.binary = folder / "passive-export"
+        start = UI.index("    private func waitForNativeSeedExport(")
+        helper = UI[start:UI.index("    // Combined qualification preserves", start)]
+        wait_start = UI.index("    private func wait(")
+        helper += UI[wait_start:UI.index("    private func check(", wait_start)]
+        code = r'''
+import Foundation
+final class BatchTestFailure: Error, @unchecked Sendable { let token = UUID() }
+struct ObservationError: Error {}
+struct Instant: Comparable {
+    let milliseconds: Int
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.milliseconds < rhs.milliseconds }
+    func advanced(by duration: Duration) -> Self {
+        let parts = duration.components
+        return Self(milliseconds: milliseconds + Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000))
+    }
+    func duration(to other: Self) -> Duration { .milliseconds(other.milliseconds - milliseconds) }
+    @MainActor static var now: Self { ContinuousClock.now }
+}
+@MainActor enum ContinuousClock { static var now = Instant(milliseconds: 0) }
+@MainActor enum State {
+    static var mode = ""
+    static var cancelled = false
+    static var reads = 0
+    static var sleepRequests: [Int] = []
+}
+@MainActor enum Task {
+    static var isCancelled: Bool { State.cancelled }
+    static func sleep(for duration: Duration) async throws {
+        let before = ContinuousClock.now
+        ContinuousClock.now = before.advanced(by: duration)
+        State.sleepRequests.append(ContinuousClock.now.milliseconds - before.milliseconds)
+        let time = ContinuousClock.now.milliseconds
+        if State.mode == "initial-cancel" && time >= 500
+            || State.mode == "observation-cancel" && time >= 20000 {
+            State.cancelled = true; throw CancellationError()
+        }
+        if State.mode == "observation-error" && time >= 20000 { throw ObservationError() }
+    }
+}
+@MainActor final class XCUIApplication {}
+@MainActor final class XCUIElement {
+    let role: String
+    init(_ role: String) { self.role = role }
+    var exists: Bool {
+        State.reads += 1
+        let late = ContinuousClock.now.milliseconds >= 20000
+        let success = State.mode == "initial-success" || State.mode == "late-success" && late
+        if role == "failure" { return State.mode == "late-failure" && late }
+        if role == "navigation" { return !success }
+        return success
+    }
+}
+@MainActor final class XCTAttachment {
+    enum Lifetime { case keepAlways }
+    let text: String
+    var name = ""
+    var lifetime = Lifetime.keepAlways
+    init(string: String) { text = string }
+}
+@MainActor final class Harness {
+    var captures: [String] = []
+    var attachments: [String] = []
+    var firstFailure: BatchTestFailure?
+    func capture(_ app: XCUIApplication, _ message: String,
+                 springboard: XCUIApplication? = nil, batchDiagnostic: Bool) {
+        captures.append(message)
+        if State.mode == "cancel-after-failure" { State.cancelled = true }
+        // Missing diagnostics must not affect the thrown original failure.
+        if State.mode == "unavailable-capture" { return }
+    }
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment.text) }
+    // ACTUAL_HELPERS
+    func run(observe: Bool) async -> String {
+        do {
+            try await waitForNativeSeedExport(XCUIApplication(), navigation: XCUIElement("navigation"),
+                verified: [XCUIElement("ticket"), XCUIElement("insurance")],
+                failed: XCUIElement("failure"), observeLateFailure: observe)
+            return "returned"
+        } catch let error as BatchTestFailure {
+            return error === firstFailure ? "original" : "different-failure"
+        } catch is CancellationError { return "cancelled" }
+        catch { return "other-error" }
+    }
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        State.mode = CommandLine.arguments[1]
+        let harness = Harness()
+        let result = await harness.run(observe: CommandLine.arguments[2] == "1")
+        let value: [String: Any] = ["result": result, "elapsed": ContinuousClock.now.milliseconds,
+            "captures": harness.captures, "attachments": harness.attachments,
+            "maxSleep": State.sleepRequests.max() ?? 0, "reads": State.reads]
+        print(String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+'''
+        # Record the actual thrown object at its sole construction site. No
+        # condition, loop, timeout or catch in the extracted helpers is changed.
+        original = "throw BatchTestFailure(message: message)"
+        assert helper.count(original) == 1
+        helper = helper.replace(original, "let original = BatchTestFailure(); firstFailure = original; throw original")
+        source = folder / "Passive.swift"; source.write_text(code.replace("    // ACTUAL_HELPERS", helper))
+        compiled = subprocess.run(["swiftc", "-swift-version", "6", "-strict-concurrency=complete", "-parse-as-library",
+                                   str(source), "-o", str(cls.binary)], capture_output=True, text=True, timeout=60)
+        if compiled.returncode:
+            raise AssertionError(compiled.stderr)
+
+    def probe(self, mode, observe=True):
+        out = subprocess.run([str(self.binary), mode, "1" if observe else "0"],
+                             check=True, capture_output=True, text=True, timeout=5)
+        value = json.loads(out.stdout)
+        self.assertLessEqual(value["maxSleep"], 100)
+        return value
+
+    def test_actual_passive_observation_never_turns_late_terminal_into_success(self):
+        for mode in ("late-success", "late-failure"):
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertEqual(value["result"], "original")
+                self.assertEqual(value["elapsed"], 20000)
+                self.assertEqual(len(value["captures"]), 2)
+                self.assertEqual(len(value["attachments"]), 1)
+                self.assertIn("terminalObserved=true", value["attachments"][0])
+                self.assertIn("acceptance=failed", value["attachments"][0])
+
+    def test_actual_passive_observation_expires_once_after_45_seconds(self):
+        value = self.probe("persistent")
+        self.assertEqual(value["result"], "original")
+        self.assertEqual(value["elapsed"], 60000)
+        self.assertEqual(len(value["captures"]), 2)
+        self.assertEqual(len(value["attachments"]), 1)
+        self.assertIn("requestedObservationSeconds=45", value["attachments"][0])
+        self.assertIn("terminalObserved=false", value["attachments"][0])
+
+    def test_actual_passive_observation_is_absent_for_normal_success_or_initial_cancellation(self):
+        for mode, observe, result, elapsed, captures in (
+                ("late-success", False, "original", 15000, 1),
+                ("initial-success", True, "returned", 0, 0),
+                ("initial-cancel", True, "cancelled", 500, 0),
+                ("cancel-after-failure", True, "original", 15000, 1)):
+            with self.subTest(mode=mode):
+                value = self.probe(mode, observe)
+                self.assertEqual((value["result"],value["elapsed"]),(result,elapsed))
+                self.assertEqual(len(value["captures"]), captures)
+                self.assertEqual(value["attachments"], [])
+
+    def test_actual_passive_observation_preserves_original_after_diagnostic_errors(self):
+        for mode, elapsed, captures in (("observation-cancel",20000,1),
+                                        ("observation-error",20000,2),
+                                        ("unavailable-capture",60000,2)):
+            with self.subTest(mode=mode):
+                value = self.probe(mode)
+                self.assertEqual(value["result"], "original")
+                self.assertEqual(value["elapsed"], elapsed)
+                self.assertEqual(len(value["captures"]), captures)
+                self.assertEqual(len(value["attachments"]),1)
+                self.assertIn("acceptance=failed",value["attachments"][0])
 
 
 if __name__ == "__main__":
