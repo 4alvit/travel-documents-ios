@@ -186,8 +186,21 @@ using the same complete-original parser.
 
 The MainActor model owns one bounded, nonpersisted `BatchImportDraft` and its
 preparation task. File-picker, cancel and commit entry points carry the draft ID,
-so a late callback from an old picker cannot change a newer draft. Each item
+so a late callback from an old picker cannot change a newer draft. The draft
+also owns the current picker request: presentation dismissal does not cancel
+that request. A matching result can finish while the interface is covered;
+replaced requests and discarded drafts reject late results and dispose owned
+copies. Picker errors belong to the draft so they survive view replacement. Each item
 stores a confirmation snapshot; changing metadata removes its confirmation.
+The batch picker opens provider originals through UIKit without requesting
+copies. A non-owning selection retains the exact returned URL values until
+preparation and any outstanding reads finish. The model balances security-scoped
+access and coordinates each bounded read; disposing this selection never removes
+or modifies the originals. The separate owned-copy selection accepts only regular
+files inside the app's temporary directory and attempts cleanup after consumption
+or rejection, checking captured file and parent identities before unlinking.
+Replaced or unrecognized paths remain untouched. The model still enforces
+the file-count, complete-content, size and entitlement checks before review.
 Pro gates new batch preparation and save, never old-data access or recovery.
 The batch editor, single-file import and existing-document editor are mutually exclusive. Privacy
 view teardown keeps the model draft; explicit cancel, completed save or source

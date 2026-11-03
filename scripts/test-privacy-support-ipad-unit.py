@@ -292,9 +292,68 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual([a for a in args[0] if str(a).startswith('-only-testing:')],
                     ['-only-testing:TripfolioUITests/PrivacySupportUITests/'+driver.case[1]])
                 self.assertFalse(any(str(a).startswith('-skip-testing:') for a in args[0]))
-                self.assertEqual(kwargs,{'timeout':360,'stream':True})
+                self.assertEqual(kwargs,{'timeout':480,'stream':True})
                 discover.assert_called_once_with();snapshot.assert_called_once_with('products-after-build')
                 self.assertEqual(world.processes,[])
+
+    def test_progressing_build_can_finish_after_former_cap_without_changing_case_budget(self):
+        driver, world = self.driver(locale='ru-RU', delay=400)
+        world.t = 201  # Observed H6 pre-build work was about 201 seconds.
+        driver.owned = 'synthetic-owned-device'
+        actual = driver.command
+        def command(argv, label, **kwargs):
+            return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'discover_products') as discover, \
+             patch.object(driver, 'product_snapshot', return_value={'synthetic':'manifest'}):
+            driver.build_once()
+        discover.assert_called_once_with()
+        self.assertEqual(len(world.processes), 1)
+        self.assertGreater(world.t, 201 + 360)
+        self.assertLess(world.t, 201 + 480)
+        self.assertFalse(any(call[0].startswith('signal_') for call in world.calls))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+        self.assertEqual(driver.case[3], 900)
+        self.assertGreater(driver.work_deadline - world.t, 1487)
+
+    def test_extended_build_does_not_admit_case_without_full_remaining_budget(self):
+        driver, world = self.driver(locale='ru-RU', delay=420)
+        world.t = 201
+        driver.owned = 'synthetic-owned-device'
+        actual = driver.command
+        def command(argv, label, **kwargs):
+            return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'discover_products'), \
+             patch.object(driver, 'product_snapshot', return_value={'synthetic':'manifest'}):
+            driver.build_once()
+        with patch.object(driver, 'product_snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError, 'lacks full case/post-validation budget'):
+                driver.run_case(*driver.case)
+        snapshot.assert_not_called()
+        self.assertEqual(len(world.processes), 1)  # Build only: no partial native case.
+        self.assertEqual(driver.report['cases'][0]['status'], 'not_admitted')
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1487)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+
+    def test_extended_build_still_stops_at_global_work_boundary(self):
+        driver, world = self.driver(locale='ru-RU', delay=1000)
+        world.t = 1700
+        driver.owned = 'synthetic-owned-device'
+        actual = driver.command
+        def command(argv, label, **kwargs):
+            return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'discover_products') as discover:
+            with self.assertRaisesRegex(RuntimeError, 'build-for-testing exceeded its finite timeout'):
+                driver.build_once()
+        discover.assert_not_called()
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2093)
+        self.assertLessEqual(world.t, 2100)
+        self.assertEqual(driver.final_deadline, 2280)
+        self.assertEqual(driver.report['cases'], [])
+        self.assertTrue(driver.report['process_stops'][-1]['group_absent'])
+        self.assertEqual(len(world.processes), 1)
 
     def post_failure_case(self, locale='en-US', **process_plan):
         driver,world=self.driver(locale=locale,**process_plan);case=driver.case;locale,method,size,_=case

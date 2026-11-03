@@ -6,6 +6,7 @@ import contextlib
 import gzip
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import plistlib
@@ -208,12 +209,14 @@ class ReleaseTests(unittest.TestCase):
         receipt = self.f.receipt("release-smoke"); receipt["tested_product"]["configuration"] = "Debug"
         with self.assertRaises(m.InvalidRelease): m.validate_receipt(m.encode_json(receipt), "release-smoke", self.f.commit, self.f.tree, m.digest(self.f.app))
 
-    def test_batch_receipt_accepts_both_exact_passing_methods_in_either_order(self):
+    def test_batch_receipt_accepts_three_exact_passing_methods_in_any_order(self):
         tests = [
             {"name": "testVerifiedPurchaseAndRestoreFromLocalHistory", "result": "passed"},
+            {"name": "testNativeSaveSeedsBothSyntheticOriginals", "result": "passed"},
             {"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals", "result": "passed"},
         ]
-        for ordered in (tests, list(reversed(tests))):
+        for permutation in itertools.permutations(tests):
+            ordered = list(permutation)
             receipt = self.f.receipt("batch-import")
             receipt["tests"] = ordered
             with self.subTest(tests=ordered):
@@ -223,12 +226,15 @@ class ReleaseTests(unittest.TestCase):
     def test_batch_receipt_rejects_missing_wrong_duplicate_and_nonpassing_methods(self):
         purchase = {"name": "testVerifiedPurchaseAndRestoreFromLocalHistory", "result": "passed"}
         batch = {"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals", "result": "passed"}
-        invalid = [[], [batch], [purchase], [batch, batch], [purchase, purchase],
-                   [purchase, {"name": "testOtherBatchCase", "result": "passed"}],
-                   [purchase, batch, batch]]
-        for index in (0, 1):
+        seed = {"name": "testNativeSaveSeedsBothSyntheticOriginals", "result": "passed"}
+        complete = [purchase, seed, batch]
+        invalid = [[], [batch], [purchase], [seed], [purchase, batch],
+                   [purchase, seed], [seed, batch], [purchase, batch, batch],
+                   [purchase, seed, {"name": "testOtherBatchCase", "result": "passed"}],
+                   complete + [seed]]
+        for index in range(3):
             for result in ("failed", "skipped", "expected failure", "Passed"):
-                tests = copy.deepcopy([purchase, batch])
+                tests = copy.deepcopy(complete)
                 tests[index]["result"] = result
                 invalid.append(tests)
         for tests in invalid:
@@ -238,10 +244,10 @@ class ReleaseTests(unittest.TestCase):
                 m.validate_receipt(m.encode_json(receipt), "batch-import",
                                    self.f.commit, self.f.tree, m.digest(self.f.app))
 
-    def test_old_single_batch_receipt_cannot_reach_output_with_updated_hash(self):
+    def test_old_two_case_batch_receipt_cannot_reach_output_with_updated_hash(self):
         receipt = self.f.receipt("batch-import")
-        receipt["tests"] = [{"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals",
-                             "result": "passed"}]
+        receipt["tests"] = [case for case in receipt["tests"]
+                            if case["name"] != "testNativeSaveSeedsBothSyntheticOriginals"]
         data = m.encode_json(receipt)
         (self.root / "batch-import.json").write_bytes(data)
         evidence = m.decode_json(self.f.evidence.read_bytes())
@@ -251,13 +257,13 @@ class ReleaseTests(unittest.TestCase):
             m.prepare(self.f.args(), FakeGitHub(self.f))
         self.assertFalse(self.f.args().output.exists())
 
-    def test_predecessor_single_batch_receipt_rejected_with_updated_hashes(self):
+    def test_predecessor_two_case_batch_receipt_rejected_with_updated_hashes(self):
         output = m.prepare(self.f.args(), FakeGitHub(self.f))
         files = {path.name: path.read_bytes() for path in output.iterdir()}
         acceptance = m.decode_json(files["acceptance.json"])
         receipt = m.decode_json(files["batch-import-receipt.json"])
-        receipt["tests"] = [{"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals",
-                             "result": "passed"}]
+        receipt["tests"] = [case for case in receipt["tests"]
+                            if case["name"] != "testNativeSaveSeedsBothSyntheticOriginals"]
         files["batch-import-receipt.json"] = m.encode_json(receipt)
         acceptance["execution_receipts"]["batch-import"]["sha256"] = m.digest(files["batch-import-receipt.json"])
         files["acceptance.json"] = m.encode_json(acceptance)

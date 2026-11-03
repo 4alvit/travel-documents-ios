@@ -38,63 +38,172 @@ old tag or relabel an old binary as fixed.
 
 The explicit `Release qualification` workflow captures the selected suite once.
 Both modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
+The default Arm profile uses the budgets below; the Intel batch contingency
+is described separately.
 Batch qualification checks the complete path from selecting existing files to
 reviewing, saving and reopening their originals. Before that functional suite,
-a separate invocation runs the recovery preparation case once through Export and
-Save to Files. It checks an absent synthetic folder without saving a backup.
-This covers a preinitialized provider, not cold first use. Its own result bundle
-must pass the exact one-case, device and runtime checks before the driver starts.
-The preparation keeps a 600-second build/test cap and a 180-second case allowance.
-The qualification driver next records an absent, uniquely named destination
-under the pinned local provider and retains the two synthetic PDF source copies.
-It does not create the destination folder. A separate invocation runs
-`testNativeCreateOwnedFilesFolder` once through the native New Folder interface.
-The host adopts the result only after the exact one-case result passes and the
-same provider contains the expected empty directory with a verified identity.
-This phase has a 240-second build/test cap and a 180-second case allowance.
-If the native keyboard presents its first-use swipe-typing introduction, the
-test acknowledges that exact prompt once and verifies the unchanged folder
-name. It then ends editing with one tap in a verified empty part of the current
-Files grid, outside the captured item and control frames and above the keyboard.
-Two snapshots must agree on the target, and the exact editor must remain
-reachable before the tap. Success still requires the editor to disappear and
-the exact destination to open; the tap itself does not establish creation.
-If creation or validation fails, an unadopted leaf is not removed separately;
-it is retained for teardown of the exclusively owned Simulator.
+a separate invocation runs the hosted purchase prerequisite, then the batch-only
+`testBatchPrepareFilesProviderDirectly` case. This case opens the existing Debug
+Simulator synthetic-PDF exporter, verifies the exact local Files root and an
+absent probe folder, and terminates before Save. Its recorded preparation UUID
+must be canonical and distinct from the later native-seed UUID. The independent
+Recovery and phone preparation paths still exercise backup export through the
+share sheet. Batch qualification covers a preinitialized provider, not cold
+first use. The first result bundle must contain both exact
+passed cases, with the hosted pass before preparation starts, and match the
+captured device and runtime before the driver starts.
+Default Arm preparation has a 780-second build/test cap and an unchanged
+180-second case allowance. The Intel envelope is described below.
+A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
+spent about 531–532 seconds in build and runner startup before its case began; its former 600-second command cap stopped
+active preparation at about 68.5 seconds. That failed run did not reach native
+seeding or the main batch flow. The command cap now accommodates that observed
+startup and the unchanged case allowance within the same 2,400-second work
+budget. Admission still reserves the full 1,200-second driver and 120 seconds
+for postchecks; result inspection shares the remaining budget and may still
+fail. The 180-second cleanup budget and all UI waits remain unchanged. This is
+not a claim that startup delay or native Files behavior has been repaired.
+The qualification driver next verifies the exact local provider root on that
+exclusively owned Simulator. It requires a canonical directory, stable provider
+identity, and no entries of any kind. It retains the two synthetic PDF source
+copies outside the provider; the host does not create a fixture folder or write
+fixture bytes into the provider.
 
-A third invocation runs `testNativeSaveSeedsBothSyntheticOriginals`: it shares
-each PDF from an opt-in Debug Simulator view into that folder through Save to
-Files. The host requires the owned destination to be empty immediately before
-seeding, then verifies exactly the two expected filenames and complete bytes
-against the retained sources. Provider and destination directory identities
-must remain unchanged; successful UI actions alone are insufficient.
-This seed phase has a 300-second build/test cap and a 180-second case allowance.
+After preparation, the qualifier resolves the actual paths of all three test
+targets and records their compiled-product identities. One serial
+`test-without-building` invocation reuses those products for native seeding and
+the real batch-import case, with no hosted-test phase between preparation and
+seeding. Missing products or changed bytes/modes stop qualification; no fallback
+build or product copy is substituted. Installed app and data-container identities are recorded. Sharing
+one invocation removes the separate seed-to-import launch boundary; it does not
+by itself prove that Xcode skipped installation or that a Files error is fixed.
 
-Folder creation, native seeding, their result inspection and the main functional
-invocation consume the same 1,200-second driver clock, started before destination
-preflight. No phase renews it. Admission requires enough remaining time for the
-following phases; startup and inspection still consume that budget, so it is
-not a completion guarantee. Batch work remains bounded by 2,400 seconds, with
-180 seconds for owned cleanup. A failed preparation, folder or seed phase
-prevents the main functional suite from starting. The standalone
-`test-batch-simulator.py` command retains its default direct creation of its own
-folder and fixture bytes; these native ingress phases belong to hosted qualification.
+The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, exports both PDFs from
+an opt-in Debug Simulator view through one document picker in copy mode. The test
+selects the exact local root and presses Save once. The app requires a nonempty
+callback containing at most two unique expected filenames and unique local URLs,
+none referring to a source URL. It reads every exact returned URL through the
+existing security-scoped, coordinated reader, capped at 1024 bytes per file.
+Every read must match its complete synthetic source. A missing callback, invalid
+URL, failed read or mismatch fails the seed case; the app never removes a destination
+or constructs an unreturned URL. The callback may contain only one of the exported
+files: this alone does not prove that both files were saved.
 
-The hosted purchase prerequisite keeps the runner's 300-second default allowance.
-The complete batch UI case explicitly uses 600 seconds, with the runner maximum
-set to 600. A retained run reached final reconfirmation at its former 300-second
-limit; its later Save action did not establish completed save, relaunch or
-original-byte verification. Those checks remain required. Folder creation,
-native seeding, inspection, build, startup, both functional cases and
-postprocessing share the original driver budget; the larger case allowance does
-not guarantee completion or extend any UI-action deadline.
-One serial functional invocation runs the exact hosted purchase/restore
-test followed by the exact real Files batch test. The hosted test verifies local
-StoreKit APIs and clears its transactions before the UI test makes its own purchase.
-Both cases must pass with no skips. Four unique XCTest log markers must prove
-hosted start/pass followed by batch start/pass; the original bounded log is hashed
-and checked again during independent review. The original StoreKit and UI assertions
-remain required. Successful purchase setup alone does not qualify the Files workflow.
+The `nativeSeed.callbackVerified` marker and `BATCH_NATIVE_SEED_CALLBACK` record
+report the source names and the successfully read names/count in sorted order.
+A per-file `nativeSeed.saved` marker appears only for a returned file that was
+actually read successfully. These are app callback proofs, distinct from the
+host's two-file proof below. The existing 180-second case allowance and destination
+assertions remain. Single-file direct preparation still opens its own exporter
+without saving. Optional same-process copy-reopen diagnostics are not enabled by
+the normal workflow and require both app readbacks if explicitly requested.
+After seed actions succeed, the UI test process records its run identity and
+terminates the synthetic app. At the start of the import case, before resetting
+or launching the app, the test consumes that same-process record and waits for
+one host response. A missing or restarted producer process cannot authorize import.
+
+The host requires the earlier hosted/preparation pass evidence, then the actual
+seed XCTest pass followed by the import-case start and its fresh checkpoint
+request in the second invocation. It then revalidates the owned destination and
+requires exactly the two expected regular files, comparing every byte with the retained sources. Only a successful,
+recorded verification permits one response on that run's nonce-specific channel.
+The response proves fixture verification, not successful purchase or import.
+Missing, duplicated, stale or out-of-order requests fail. The wait has a
+60-second transport limit within the import case's unchanged 600 seconds.
+
+The first bundle, `files-prepare.xcresult`, contains the hosted prerequisite and
+Files preparation. The second, `Tests.xcresult`, contains native seeding and the
+real import case. Each must report exactly two passes. There is no separate
+seed result bundle or seed command exit code. Final independent review requires
+all four native cases, explicit empty warning/failure arrays, the real log order,
+checkpoint evidence, full original-byte comparisons, and visual checks. Prior
+one-plus-three or three-bundle captures cannot be relabeled as this control.
+
+After preparation, the target-metadata query uses `generic/platform=iOS Simulator`
+with the same Debug configuration, derived-data directory, scheme action and
+source-selection settings. `-showBuildSettings` does not build or execute tests;
+its existing 30-second work cap and eight-second stop reserve remain. The
+returned target paths must still resolve inside the owned build and pass the
+same platform, bundle-identity, nesting and product-byte checks. Preparation,
+installed-container observations and native tests retain the exact owned
+Simulator destination. A generic query avoids selecting that live destination;
+it does not guarantee that Xcode performs no Simulator-service work.
+
+The first invocation shares its profile-specific preparation command cap.
+The hosted prerequisite retains its 300-second default allowance and Files
+preparation retains 180 seconds. Startup, seed, host checkpoint, import and
+result inspection share the same 1,200-second driver clock, started before
+destination preflight. No phase renews it. Seed retains 180 seconds and import
+retains 600 seconds. A 300-second envelope runs from the second native command's
+start to the seed pass, including UI-runner startup.
+For the default Arm profile, the 2,400-second work budget, 180-second cleanup
+budget and UI-action waits remain.
+These limits are not a completion guarantee. Failed preparation or fixture
+verification prevents the import actions from starting.
+
+The explicitly selected Intel batch profile reserves 3,000 seconds of work
+and 600 seconds for the initial boot-readiness check (`simctl bootstatus`). The
+separate `simctl boot` command retains its 60-second cap. The work deadline stays
+anchored to the original qualification start. Its capture step allows 54 minutes
+and its job
+65 minutes. A [boot-only observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
+measured 279.406 seconds for boot, followed by 88.267 seconds for ready inventory.
+The original work budget left insufficient room for the then-current
+2,100-second reservation for preparation, driver and postchecks. This profile
+accommodates that measured startup; it does not establish that the Files failure
+is repaired.
+
+Intel batch preparation now has a fixed 1,200-second command envelope, including
+build, install, runner startup and both selected cases. In the retained
+[`9d8766d` capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41470558345),
+the 780-second envelope expired while the Files case was still active at about
+148.5 seconds; the hosted prerequisite had passed in 8.419 seconds. These timings
+imply approximately 624 seconds outside the two case bodies, not an isolated
+compiler benchmark. The new envelope allocates 720 seconds for that overhead
+and result finalization, plus the existing 300-second hosted and 180-second
+Files allowances. It neither renews a clock nor retries a phase.
+
+Admission reserves the same selected 1,200-second preparation cap, the full
+1,200-second driver and 120 seconds for postchecks within the original
+3,000-second work deadline. Insufficient remaining time fails before preparation
+starts, including after a slow boot. The receipt records the selected phase cap;
+the actual command uses that same cap. This allocation is not a guarantee that
+preparation, subsequent import or result inspection will finish.
+
+Arm and all biometric captures retain their existing budgets. Native case and
+driver limits, the 180-second cleanup budget, runtime matching, source verification
+and complete device-inventory checks remain unchanged. The 54-minute capture
+and 65-minute job envelopes are unchanged.
+
+Both ARM and Intel batch builds compile only the complete test source files needed by
+this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
+the package tests. A validated `EXCLUDED_SOURCE_FILE_NAMES` argument excludes
+the other sixteen test files in preparation, build-settings inspection and the
+subsequent invocation. It does not exclude production App or TravelCore code,
+StoreKit resources, or any of the four selected test methods. The exact source
+selection is recorded in the capture receipt. Unexpected test files or an
+excluded filename colliding with another tracked source fail before the build.
+The tracked project and test plan are unchanged; ordinary full CI and
+biometric qualification keep their original compilation scope. ARM retains
+its default preparation, work and cleanup budgets. This
+reduces unnecessary compilation, but does not establish a measured speedup or
+a passing native result.
+
+The root fixture mode belongs only to the hosted qualifier's exclusively owned
+Simulator. Its driver never removes the provider root or individual root
+entries: cleanup is deferred to deletion of that whole owned Simulator. The
+complete root and source bytes are checked again after the test writer stops,
+even after a native failure. Capture remains incomplete until owned cleanup and
+the unchanged inventory of other devices are proved. The standalone
+`test-batch-simulator.py` command retains its default two-case invocation and
+creation/cleanup of a unique fixture folder.
+
+The real import case still makes its own local Xcode purchase, selects the files,
+requires each review and reconfirmation after edits, saves, relaunches and opens
+the complete originals. Its 600-second allowance was introduced after a retained
+run exhausted the former 300 seconds before completing those checks. The hosted
+prerequisite clears its local transactions before the UI makes its own purchase.
+Successful purchase setup alone does not qualify the Files workflow.
 
 Earlier Xcode 16.4 captures retain their original producer identity and review
 limits. They do not qualify a new 26.2 Release binary. A passing run with either
@@ -172,9 +281,14 @@ now accommodates that measured startup and the unchanged case allowance within
 the same total work budget. Result inspection, provider checks and final inventory
 share the remaining budget and still fail if it expires; their completion is not
 guaranteed. The startup delay and the failed run's unconfirmed process-group
-cleanup are not claimed fixed. Recovery and release-qualification preparation
-retain their 600-second command caps. The guidance test deadlines, 30-second
-cleanup budget and 35-minute job cap are unchanged.
+cleanup are not claimed fixed. Recovery retains its 600-second command cap; batch release qualification
+preparation has the profile-specific cap described above. The guidance test
+deadlines and 30-second cleanup budget are unchanged. The phone integration step
+has a 40-minute cap within a 60-minute job. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
+completed its integration step in 37 minutes 56 seconds but exceeded the former
+35-minute job limit. Raw test artifacts upload before optional failure extraction
+so that extraction cannot consume the time reserved for preserving the original
+results.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
@@ -183,6 +297,15 @@ Privacy/support text reading uses the same one-point inset viewport for scroll
 acceptance and coverage checks. Short text must fit completely in that reading
 viewport; tall text still requires overlapping coverage. Action-control tolerance,
 real hittability, screenshots, hierarchy captures and case deadlines are unchanged.
+
+The iPad driver allows up to 480 seconds for its single fresh build, within the
+unchanged 2,100-second work budget and separate 180-second cleanup reserve.
+An [observed Russian run](https://github.com/4alvit/travel-documents-ios/actions/runs/41417736277/job/125185590697)
+was still compiling when its former 360-second build cap expired. This allocation does not guarantee completion or admission: that
+run had about 1,539 seconds left, only 52.1 seconds beyond the mandatory
+1,487-second preparation, test and post-validation allowance. Native case
+limits, full-budget admission and failure handling remain unchanged; no build
+or test is retried or reused from another run.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
@@ -209,6 +332,18 @@ requires fresh full CI, exact-source artifact checks and release qualification.
 Earlier compiler results are not acceptance of the new binary. Local
 `test-simulator.sh` behavior is unchanged unless `--require-sdk-match` is passed.
 
+Manual release qualification defaults to `macos-15`. Its explicit
+`macos-15-intel` choice is a capacity contingency, never an automatic retry or
+fallback. The runner label must match its actual architecture. Both choices
+retain Xcode 26.2/17C52 and SDK 26.2; Intel additionally requires the installed
+26.2 runtime to report build 23C54 before device creation. The official
+[Intel image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md)
+lists the toolchain and runtime version, but does not establish a particular
+job's runtime build or successful execution. Acceptance still requires its own
+live preflight, exact source/product evidence, native results, cleanup and
+independent 27.1 review. Existing Arm results do not certify Intel execution;
+the ordinary CI runner and Release producer are unchanged.
+
 Successful hosted capture has status `captured_pending_review`, never `passed`.
 It requires successful native execution, exact case counts and device identity,
 unchanged source, matching built/installed products, the batch original-byte
@@ -223,24 +358,28 @@ explicit `runtimeWarnings` array. Verify the Actions artifact digest, exact
 run/attempt/source commit and tree, and the original bundle's complete file
 manifest before making the copy. Preserve the original unchanged and verify
 its manifest again after review. Record the reader version, commands, schema
-and output hashes. The reader must report the exact expected two or six passed
-cases, zero failures/skips/expected failures, the captured device, and explicit
-empty `runtimeWarnings` and `testFailures` arrays. Missing fields, a reader
-failure or any warning block acceptance. Inspect the retained screenshots and
-the mode-specific byte/cleanup evidence too. Batch mode requires four distinct
-result-bundle reviews, in execution order:
+and output hashes. The reader must report the exact expected passed cases,
+zero failures/skips/expected failures, the captured device, and explicit empty
+`runtimeWarnings` and `testFailures` arrays. Missing fields, a reader failure or
+any warning block acceptance. Biometric mode requires its six exact cases.
+Inspect the retained screenshots and the mode-specific byte/cleanup evidence
+too. Batch mode requires two distinct result-bundle reviews, in execution order:
 
-1. Files preparation: `testRecoveryPrepareFilesProvider`, exactly one passed case.
-2. Native folder creation: `testNativeCreateOwnedFilesFolder`, exactly one passed case.
-3. Native PDF seeding: `testNativeSaveSeedsBothSyntheticOriginals`, exactly one passed case.
-4. Main flow: the two exact hosted purchase and batch-import methods listed below.
+1. `files-prepare.xcresult`: `testVerifiedPurchaseAndRestoreFromLocalHistory`,
+   then `testBatchPrepareFilesProviderDirectly`, exactly two passed cases.
+2. `Tests.xcresult`: `testNativeSaveSeedsBothSyntheticOriginals`, then
+   `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`, exactly two
+   passed cases.
 
 Each bundle must match the same captured source and device, retain an unchanged
 original manifest, and have no skips, failures or runtime warnings. Review the
-folder's single end-editing action and verified empty destination, both native Save
-operations and their complete-byte proof, and the main test's purchase, import,
-review, save and relaunch evidence. The three preparation cases remain separate
-prerequisites; they do not add methods to the public two-method batch receipt.
+verified empty provider root and unchanged identity, the single two-source native
+Save and actual callback readback names, the host's complete two-file byte proof,
+and the main test's purchase, import, review,
+save and relaunch evidence. The public batch receipt retains the three named
+functional methods: hosted purchase/restore, native seeding, and real batch
+import. They span the two bundles; the second bundle must not be reported as a
+three-case result. Files preparation is a separately required prerequisite.
 Only this complete review may produce the separate operator `passed` receipt
 described below; never rewrite the raw capture report into a pass. These checks
 cover the retained XCTest record, not every application or system-console message.
@@ -364,9 +503,11 @@ candidate being considered; it does **not** claim the Release ZIP was executed
 by those tests. The source commit/tree must still match exactly. Preserve any
 remaining runtime/toolchain limitations.
 
-The batch receipt requires exactly these two passed methods:
+The batch receipt requires exactly these three passed methods across the two
+reviewed result bundles:
 
 - `testVerifiedPurchaseAndRestoreFromLocalHistory`
+- `testNativeSaveSeedsBothSyntheticOriginals`
 - `testRealFilesBatchRequiresEveryReviewAndPreservesOriginals`
 
 The biometric receipt requires all six distinct passed methods:

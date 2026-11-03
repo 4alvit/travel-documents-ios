@@ -40,6 +40,7 @@ TESTS = {
     "release-smoke": {"ordinary-release-launch"},
     "batch-import": {
         "testVerifiedPurchaseAndRestoreFromLocalHistory",
+        "testNativeSaveSeedsBothSyntheticOriginals",
         "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals",
     },
     "privacy-biometric": BIOMETRIC_TESTS,

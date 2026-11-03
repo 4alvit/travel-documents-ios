@@ -40,33 +40,61 @@ final class PurchaseManager {
     /// ask for an Apple Account login or require fetching a product price.
     func load() async {
         #if DEBUG && targetEnvironment(simulator)
+        let loadTraceID = PurchaseLoadTrace.begin()
+        traceLoad(.entry, id: loadTraceID)
+        defer { traceLoad(.exit, id: loadTraceID) }
         purchaseDiagnostics.observe(.load, stage: .entitlements)
         defer { purchaseDiagnostics.observe(.load, stage: .returned) }
         #endif
         // A load arriving during another operation may refresh rights, but
         // must not acquire the catalog later and displace a user's purchase.
         guard !isBusy else {
+            #if DEBUG && targetEnvironment(simulator)
+            traceLoad(.awaitEntitlements, id: loadTraceID)
+            #endif
             await refreshEntitlements()
+            #if DEBUG && targetEnvironment(simulator)
+            traceLoad(.returnedEntitlements, id: loadTraceID)
+            #endif
             return
         }
         isBusy = true
         defer { isBusy = false }
+        #if DEBUG && targetEnvironment(simulator)
+        traceLoad(.awaitEntitlements, id: loadTraceID)
+        #endif
         await refreshEntitlements()
         #if DEBUG && targetEnvironment(simulator)
+        traceLoad(.returnedEntitlements, id: loadTraceID)
         purchaseDiagnostics.beginCatalog()
         #endif
         do {
             #if DEBUG && targetEnvironment(simulator)
             purchaseDiagnostics.observe(.load, stage: .catalog)
+            traceLoad(.awaitCatalog, id: loadTraceID)
             #endif
             try await loadProduct()
+            #if DEBUG && targetEnvironment(simulator)
+            traceLoad(.returnedCatalog, id: loadTraceID)
+            #endif
         } catch {
             #if DEBUG && targetEnvironment(simulator)
+            traceLoad(.caught, id: loadTraceID)
             purchaseDiagnostics.recordCatalog(error)
             #endif
             statusMessage = L10n.service("services.purchase.priceUnavailable", defaultValue: "The App Store price is unavailable. Try again when connected. Your existing documents remain available.")
         }
     }
+
+    #if DEBUG && targetEnvironment(simulator)
+    private func traceLoad(_ stage: PurchaseLoadTrace.Stage, id: Int?) {
+        if let line = PurchaseLoadTrace.line(id: id, stage: stage, isBusy: isBusy,
+                                             isCancelled: Task.isCancelled,
+                                             hasProduct: product != nil) {
+            print(line)
+        }
+    }
+    #endif
 
     @discardableResult
     func purchase(
@@ -295,6 +323,35 @@ struct PurchaseFeedback {
 }
 
 #if DEBUG && targetEnvironment(simulator)
+/// Passive stdout observations, including runs without the UI diagnostics flag.
+/// At most 32 load invocations and 192 fixed-vocabulary lines per app process.
+/// IDs distinguish overlapping calls; no extra task, await, retry or timer is used.
+@MainActor
+private enum PurchaseLoadTrace {
+    enum Stage: String {
+        case entry, awaitEntitlements, returnedEntitlements
+        case awaitCatalog, returnedCatalog, caught, exit
+    }
+
+    private static var sequence = 0
+    private static var remaining = 192
+    private static let started = ProcessInfo.processInfo.systemUptime
+
+    static func begin() -> Int? {
+        guard sequence < 32 else { return nil }
+        sequence += 1
+        return sequence
+    }
+
+    static func line(id: Int?, stage: Stage, isBusy: Bool,
+                     isCancelled: Bool, hasProduct: Bool) -> String? {
+        guard let id, (1...32).contains(id), remaining > 0 else { return nil }
+        remaining -= 1
+        let milliseconds = Int(min(max(ProcessInfo.processInfo.systemUptime - started, 0), 86_400) * 1_000)
+        return "purchase-load v=1 id=\(id) ms=\(milliseconds) stage=\(stage.rawValue) isBusy=\(isBusy) isCancelled=\(isCancelled) hasProduct=\(hasProduct)"
+    }
+}
+
 /// Test-only, bounded fields. No error descriptions, userInfo, or identifiers.
 struct PurchaseDiagnostic: Equatable {
     enum Phase: String { case catalog, purchase }

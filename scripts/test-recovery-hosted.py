@@ -298,6 +298,20 @@ class BoundaryTests(unittest.TestCase):
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
 
+    def test_recovery_workflow_pins_matched_toolchain_and_keeps_existing_budgets(self):
+        workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
+        recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
+        environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
+        self.assertEqual(environment.splitlines(),[
+            '      TRIPDOCKET_RUNNER_LABEL: macos-15',
+            '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
+        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 35\n',recovery)
+        attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 27\n',attempt)
+        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
+        evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
+        self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
+
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
         driver=(HERE/'test-simulator.sh').read_text()
         plan=json.loads((HERE.parent/'Tripfolio.xctestplan').read_text())
@@ -600,6 +614,80 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('host_capability',r.report)
         self.assertEqual(r.limit,1380)
 
+    def test_capability_wakeup_at_deadline_stops_before_next_output_scan(self):
+        for overshoot in (0., .115):
+            with self.subTest(overshoot=overshoot):
+                original_root=self.root
+                self.root=original_root/str(overshoot);self.root.mkdir()
+                try:
+                    r=self.runner(self.capability_ops())
+                    original_sleep=r.ops.sleep;original_read=r.ops.read
+                    woke_late=False;late_reads=[]
+                    def sleep(amount):
+                        nonlocal woke_late
+                        before=r.ops.now();original_sleep(amount)
+                        if not woke_late and before<12<=r.ops.now():
+                            woke_late=True;r.ops.t=12+overshoot
+                            # Reproduce a resource scan due at this wakeup.
+                            r.next_scan=0.
+                    def read(process):
+                        if r.ops.now()>=12:late_reads.append(r.ops.now())
+                        return original_read(process)
+                    r.ops.sleep=sleep;r.ops.read=read
+                    # Fake process evidence still cannot approve real capability.
+                    with self.assertRaisesRegex(RuntimeError,'Injected boundary'):
+                        r.check_capability()
+                    rows=json.loads((r.out/'Capability/receipt.json').read_text())['commands']
+                    self.assertTrue(woke_late);self.assertEqual(late_reads,[])
+                    self.assertEqual(len(rows),2)
+                    row=rows[1]
+                    self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                    self.assertEqual((row['work_deadline'],row['command_deadline']),(12.,20.))
+                    self.assertEqual(row['stop']['signals'],[15,9])
+                    self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+                    self.assertLess(row['finish'],20.)
+                    self.assertNotIn('resource_scan_failure',r.report)
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    self.assertNotIn('host_capability',r.report)
+                    self.assertEqual((r.limit,r.final),(1380.,1500.))
+                finally:self.root=original_root
+
+    def test_capability_output_stall_stops_before_expired_resource_scan(self):
+        for overshoot in (0., .115):
+            with self.subTest(overshoot=overshoot):
+                original_root=self.root
+                self.root=original_root/str(overshoot);self.root.mkdir()
+                try:
+                    r=self.runner(self.capability_ops())
+                    original_read=r.ops.read;original_monitor=r.monitor
+                    stalled=False;scan_starts=[]
+                    def read(process):
+                        nonlocal stalled
+                        result=original_read(process)
+                        if process.pid==102 and not stalled:
+                            stalled=True;r.ops.t=12+overshoot;r.next_scan=0.
+                        return result
+                    def monitor(**kwargs):
+                        scan_starts.append(r.ops.now())
+                        return original_monitor(**kwargs)
+                    r.ops.read=read;r.monitor=monitor
+                    with self.assertRaisesRegex(RuntimeError,'Injected boundary'):
+                        r.check_capability()
+                    rows=json.loads((r.out/'Capability/receipt.json').read_text())['commands']
+                    self.assertTrue(stalled);self.assertTrue(scan_starts)
+                    self.assertTrue(all(start<12 for start in scan_starts))
+                    row=rows[1]
+                    self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                    self.assertEqual((row['work_deadline'],row['command_deadline']),(12.,20.))
+                    self.assertEqual(row['stop']['signals'],[15,9])
+                    self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+                    self.assertLess(row['finish'],20.)
+                    self.assertNotIn('resource_scan_failure',r.report)
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    self.assertNotIn('host_capability',r.report)
+                    self.assertEqual((r.limit,r.final),(1380.,1500.))
+                finally:self.root=original_root
+
     def delegated_capability_scan(self, stage):
         r=self.runner(self.capability_ops());r.ops.t=100.
         # The actual parent previously finished runtime discovery; only the
@@ -754,6 +842,29 @@ class BoundaryTests(unittest.TestCase):
         # parsing and selection use the actual candidate implementation.
         with patch.object(hosted,'toolchain_paths'),patch.object(hosted.core,'file_digest',return_value='a'*64):
             runner.discover_profile()
+
+    def test_matched_262_discovery_freezes_toolchain_and_rejects_older_runtime_fallback(self):
+        developer=self.root/'Xcode_26.2.app/Contents/Developer'
+        sdk_path=developer/'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator26.2.sdk'
+        sdk_path.mkdir(parents=True)
+        selected={**self.runtime('26.2'),'buildversion':'23C54'}
+        older=self.runtime('18.5')
+        texts=[str(developer),'Xcode 26.2\nBuild version 17C52','26.2',str(sdk_path),
+               json.dumps({'runtimes':[older,self.runtime('27.0'),selected]})]
+        r=self.runner(Ops(*[{'output':[('stdout',text.encode())]} for text in texts]))
+        self.discover(r)
+        resolved=json.loads((r.out/'resolved-profile.json').read_text())
+        self.assertEqual(resolved['runtime'],selected)
+        self.assertEqual(resolved['host']['xcode_version'],'Xcode 26.2\nBuild version 17C52')
+        self.assertEqual(resolved['host']['sdk_version'],'26.2')
+        self.assertEqual(r.ops.env['DEVELOPER_DIR'],str(developer))
+        self.assertEqual(r.plan['runtime'],selected['identifier'])
+        self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],
+                         [20,20,20,20,300])
+        self.assertEqual((r.t0,r.limit,r.final),(0,300,1500))
+        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected]]:
+            with self.subTest(runtimes=runtimes),self.assertRaises(RuntimeError):
+                hosted.select_runtime('26.2',{'runtimes':runtimes},PROFILE)
 
     def test_first_runtime_query_allows_150_seconds_inside_shared_300_budget(self):
         r=self.discovery_runner(delay=150)
@@ -1020,7 +1131,8 @@ class BoundaryTests(unittest.TestCase):
         ops.after_probe = slow_first_probe
         r.stop(p, 8., row)
         self.assertEqual(row['stop']['signals'], [15, 9])
-        self.assertEqual(ops.kill_at, 6.)
+        self.assertGreater(ops.kill_at, 5.25)
+        self.assertLess(ops.kill_at, 8.)
         self.assertEqual(row['stop']['post_kill_confirmation'],
                          {'deadline': 8., 'status': 'confirmed'})
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
@@ -1028,8 +1140,30 @@ class BoundaryTests(unittest.TestCase):
         self.assertLess(ops.t, 8.)
         self.assertTrue(all(t < 8. for _, t in ops.events))
 
+    def test_short_stop_observes_after_term_and_escalates_with_remaining_budget(self):
+        for deadline, term_cost in ((.01, 0.), (.5, 0.), (1., 0.), (2., 0.),
+                                    (2.75, 1.5), (8., 6.5)):
+            with self.subTest(deadline=deadline, term_cost=term_cost):
+                ops = PostKillOps(reap_after=0., absent_after=0.)
+                r, p, row = self.owned_stop(ops)
+                def slow_term():
+                    if ops.kill_at is None:
+                        ops.t += term_cost
+                ops.after_send = slow_term
+                r.stop(p, deadline, row)
+                self.assertEqual(row['stop']['signals'], [15, 9])
+                first_signal = next(i for i, e in enumerate(ops.events) if e[0] == 'signal')
+                second_signal = next(i for i in range(first_signal + 1, len(ops.events))
+                                     if ops.events[i][0] == 'signal')
+                self.assertTrue(any(e[0] == 'probe' for e in ops.events[first_signal + 1:second_signal]))
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertEqual(row['stop']['post_kill_confirmation']['status'], 'confirmed')
+                self.assertFalse(r.active)
+                self.assertLess(ops.t, deadline)
+                self.assertTrue(all(t < deadline for _, t in ops.events))
+
     def test_short_stop_retains_term_observation_when_unknown_settles_in_reserved_slice(self):
-        ops = PostTermOps(reap_after=1., absent_after=1.2)
+        ops = PostTermOps(reap_after=1.5, absent_after=2.)
         r, p, row = self.owned_stop(ops)
         r.stop(p, 2.75, row)
         self.assertEqual(row['stop']['signals'], [15])
@@ -1037,12 +1171,12 @@ class BoundaryTests(unittest.TestCase):
                          {'deadline': 2.75, 'status': 'confirmed'})
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertFalse(r.active)
-        self.assertGreaterEqual(ops.t, 1.2)
+        self.assertGreaterEqual(ops.t, 2.)
         self.assertLess(ops.t, 2.75)
         self.assertTrue(all(t < 2.75 for _, t in ops.events))
 
     def test_short_stop_permanent_term_unknown_keeps_original_observation_cap(self):
-        for deadline, observation_end in ((2.75, 2.75), (5.25, 5.)):
+        for deadline, observation_end in ((.5, .5), (2., 2.), (2.75, 2.75), (5.25, 5.)):
             with self.subTest(deadline=deadline):
                 ops = PostTermOps(absent_after=float('inf'))
                 r, p, row = self.owned_stop(ops)
@@ -2352,12 +2486,12 @@ class BoundaryTests(unittest.TestCase):
             row['work_deadline']=592.;r.limit=4.;r.monitor();r.limit=1380.
             probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[{'id':'normal','work_deadline':3.}]})
             r.monitor(command_owner=probe)
-        self.assertEqual(deadlines,[5.,15.,15.,5.,5.,7.,4.,3.])
-        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']), (5,15))
+        self.assertEqual(deadlines,[5.,30.,30.,5.,5.,7.,4.,3.])
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],hosted.core.CAPS['boot_scan_seconds']), (5,30,15))
         self.assertEqual((r.limit,r.final,hosted.core.CAPS['phase_seconds']), (1380.,1500.,600))
         self.assertEqual(r.ops.processes,[])
 
-    def test_phase_scan_slow_return_completes_uncached_traversal_within_fixed_15(self):
+    def test_phase_scan_slow_return_completes_uncached_traversal_within_fixed_30(self):
         r=self.runner();(r.out/'synthetic.bin').write_bytes(b'complete original')
         r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;delayed=False
@@ -2396,7 +2530,7 @@ class BoundaryTests(unittest.TestCase):
             r.monitor(command_owner=probe)
         self.assertEqual(observed,[(end,False,False) for end in [5.,15.,5.,5.,5.,5.,5.,7.,4.,5.]])
         self.assertEqual((r.limit,r.final,hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds']),
-                         (1380.,1500.,5,15))
+                         (1380.,1500.,5,30))
         self.assertEqual(r.ops.processes,[])
 
     def test_boot_scan_completes_full_uncached_traversal_after_six_second_span(self):
@@ -2455,25 +2589,77 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertLess(r.ops.t,120.);self.assertFalse(r.active)
 
+    def test_phase_scan_measured_duration_succeeds_only_under_new_ceiling(self):
+        for ceiling,success in [(15,False),(30,True)]:
+            with self.subTest(ceiling=ceiling):
+                parent=self.root;self.root=parent/str(ceiling);self.root.mkdir()
+                try:r=self.runner()
+                finally:self.root=parent
+                payload=b'exact complete accounting';(r.out/'source.bin').write_bytes(payload)
+                r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+                real=hosted.core.os.scandir;delayed=[False]
+                def scan(fd):
+                    result=real(fd)
+                    if not delayed[0]:delayed[0]=True;r.ops.t+=16.848
+                    return result
+                with patch.dict(hosted.core.CAPS,phase_scan_seconds=ceiling), \
+                        patch.object(hosted.core.os,'scandir',side_effect=scan):
+                    if success:r.monitor()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+                if success:
+                    row=r.report['resources'][-1];metrics=row['scan']
+                    self.assertGreaterEqual(row['logical'],len(payload))
+                    self.assertGreaterEqual(row['entries'],2)
+                    self.assertEqual(metrics['duration_seconds'],16.848)
+                    self.assertEqual(metrics['traversal_duration_seconds'],16.848)
+                    self.assertEqual(metrics['requested_scan_seconds'],30)
+                    self.assertEqual(metrics['deadline_elapsed'],30)
+                    self.assertEqual(metrics['encounter_count'],row['entries'])
+                    self.assertGreater(metrics['operation_count'],metrics['encounter_count'])
+                    self.assertEqual(metrics['traversal_attempts'],1)
+                    self.assertEqual(set(metrics),{'started_elapsed','deadline_elapsed',
+                        'requested_scan_seconds','duration_seconds','traversal_duration_seconds',
+                        'operation_count','encounter_count','traversal_attempts','max_depth'})
+                    self.assertTrue(all(type(v) in (int,float) for v in metrics.values()))
+                    self.assertLess(len(json.dumps(metrics)),512)
+                    self.assertEqual(r.next_scan,17.848)
+                else:
+                    self.assertEqual(r.report['resources'],[])
+                    self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],15)
+                self.assertEqual(r.ops.processes,[])
+
+    def test_phase_scan_exact_new_ceiling_rejects_without_partial_success(self):
+        r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
+        real=hosted.core.os.scandir;calls=[]
+        def scan(fd):
+            result=real(fd);calls.append(fd);r.ops.t+=30.;return result
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        self.assertEqual(len(calls),1);self.assertEqual(r.report['resources'],[])
+        self.assertEqual(r.next_scan,0)
+        self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],30.)
+        self.assertTrue(r.report['resource_scan_failure']['partial_counts_are_not_valid_accounting'])
+
     def test_phase_scan_cooperative_overshoot_keeps_failed_totals_and_never_renews(self):
         r=self.runner();r.report['commands'].append({'id':'phase-export','work_deadline':592.})
         real=hosted.core.os.scandir;calls=0
         def scan(fd):
             nonlocal calls
-            calls+=1;value=real(fd);r.ops.t+=15.25;return value
+            calls+=1;value=real(fd);r.ops.t+=30.25;return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
         row=r.report['resource_scan_failure']
         self.assertEqual(calls,1)
-        self.assertEqual((row['started_elapsed'],row['deadline_elapsed'],row['finished_elapsed']),(0.,15.,15.25))
-        self.assertEqual(row['requested_scan_seconds'],15)
+        self.assertEqual((row['started_elapsed'],row['deadline_elapsed'],row['finished_elapsed']),(0.,30.,30.25))
+        self.assertEqual(row['requested_scan_seconds'],30)
         self.assertEqual(row['traversal']['last_operation']['operation'],'scandir_open')
         self.assertEqual(row['traversal']['partial_totals']['entries'],0)
         self.assertTrue(row['partial_counts_are_not_valid_accounting'])
         self.assertEqual((r.report['resources'],r.next_scan),([],0))
         self.assertEqual(r.ops.processes,[])
 
-    def test_phase_scan_actual_command_clips_15_to_original_work_and_stop_reserve(self):
+    def test_phase_scan_actual_command_clips_30_to_original_work_and_stop_reserve(self):
         r=self.runner(Ops({'delay':float('inf')}));real=hosted.core.os.scandir;delayed=False
         r.ops.on_spawn=lambda argv:setattr(r.ops,'t',50.)
         def scan(fd):
@@ -2488,14 +2674,14 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(delayed);self.assertEqual(len(r.ops.processes),1)
         self.assertEqual((row['work_deadline'],row['command_deadline']),(52.,60.))
         self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),(50.,52.,52.25))
-        self.assertEqual(failed['requested_scan_seconds'],15)
+        self.assertEqual(failed['requested_scan_seconds'],30)
         self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
         self.assertEqual(row['stop']['signals'],[15])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertLess(r.ops.t,60.);self.assertEqual((r.limit,r.final),(1380.,1500.))
         self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
 
-    def test_combined_phase15_rescan_uses_same_original_command_deadline(self):
+    def test_combined_phase30_rescan_uses_same_original_command_deadline(self):
         for name,work,success,passes in [('phase-export',592.,True,2),
                 ('selected-tests',592.,False,1),('phase-export',10.,False,2)]:
             with self.subTest(name=name,work=work):
@@ -2531,7 +2717,7 @@ class BoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual(r.report['resources'],[]);self.assertEqual(r.next_scan,0)
                     failed=r.report['resource_scan_failure']
-                    self.assertEqual(failed['deadline_elapsed'],min(work,15. if name=='phase-export' else 5.))
+                    self.assertEqual(failed['deadline_elapsed'],min(work,30. if name=='phase-export' else 5.))
                     self.assertTrue(failed['partial_counts_are_not_valid_accounting'])
                 self.assertEqual(r.ops.processes,[])
 

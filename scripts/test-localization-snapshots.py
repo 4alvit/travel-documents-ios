@@ -103,6 +103,41 @@ CASES = r'''
  view.navigationBars.element.isHittable=false;view.tabBars.element.isHittable=false
  check(h.snapshotViewport(in:view,navigationTitle:"Настройки")==windowFrame.insetBy(dx:2,dy:2),"live unhittable bars do not crop")
  (view.root.children[0] as! Snapshot).children.append(Snapshot(.navigationBar,"Настройки"));check(h.snapshotViewport(in:view,navigationTitle:"Настройки")==nil,"ambiguous navigation falls back")
+ let viewport=bodyFrame.intersection(dialogFrame).intersection(windowFrame).insetBy(dx:2,dy:2)
+ let drag=h.backupWarningDrag(viewport:viewport,frame:warningFrame,coveredThrough:35.333333,bodyFrame:bodyFrame)!
+ check(viewport.contains(drag.start) && viewport.contains(drag.end) && drag.start.y > drag.end.y,"both upward endpoints inside exact text viewport")
+ check(drag.start.y-drag.end.y > 480 && drag.start.y-drag.end.y < 490,"measured538pt viewport avoids old160pt cap")
+ check(viewport.height-(drag.start.y-drag.end.y) >= 48,"retains minimum48pt geometric overlap")
+ check(drag.start.y < actionFrame.minY && drag.end.y < actionFrame.minY,"gesture stays above separate native actions")
+ let reverse=h.backupWarningDrag(viewport:viewport,frame:warningFrame.offsetBy(dx:0,dy:-1000),coveredThrough:0,bodyFrame:bodyFrame)!
+ check(reverse.start.y < reverse.end.y && viewport.contains(reverse.start) && viewport.contains(reverse.end),"missed prefix scrolls back inside pane")
+ let small=CGRect(x:10,y:20,width:100,height:81)
+ let smallDrag=h.backupWarningDrag(viewport:small,frame:CGRect(x:15,y:90,width:80,height:1000),coveredThrough:11,bodyFrame:small.insetBy(dx:-2,dy:-2))!
+ check(small.contains(smallDrag.start) && small.contains(smallDrag.end) && small.height-(smallDrag.start.y-smallDrag.end.y) >= small.height*0.25,"small viewport endpoints and proportional overlap")
+ check(h.backupWarningDrag(viewport:viewport,frame:warningFrame,coveredThrough:35,bodyFrame:bodyFrame.offsetBy(dx:0,dy:10))==nil,"moved live body cannot contain old viewport")
+ check(h.backupWarningDrag(viewport:.infinite,frame:warningFrame,coveredThrough:35,bodyFrame:bodyFrame)==nil,"invalid viewport rejected")
+ check(h.backupWarningDrag(viewport:viewport,frame:.null,coveredThrough:35,bodyFrame:bodyFrame)==nil,"invalid label rejected")
+ check(h.backupWarningDrag(viewport:viewport,frame:warningFrame,coveredThrough:.nan,bodyFrame:bodyFrame)==nil,"nonfinite coverage rejected")
+ check(h.backupWarningDrag(viewport:viewport,frame:warningFrame,coveredThrough:-1,bodyFrame:bodyFrame)==nil,"negative coverage rejected")
+ check(h.backupWarningDrag(viewport:viewport,frame:warningFrame,coveredThrough:warningFrame.height,bodyFrame:bodyFrame)==nil,"completed label needs no extra drag")
+ check(h.backupWarningDrag(viewport:CGRect(x:83,y:74,width:44,height:538),frame:warningFrame,coveredThrough:35,bodyFrame:bodyFrame)==nil,"narrow viewport rejected")
+ check(h.coverage([0...35,100...500,500...2611])==35,"first and final portions cannot bridge an unseen middle")
+ check(h.coverage([500...900,0...100,90...510])==900,"actual overlapping slices merge independent of order")
+ var measured=warningFrame; var slices:[ClosedRange<CGFloat>]=[]; var count=0
+ for _ in 0..<19 {
+  let visible=measured.intersection(viewport)
+  if !visible.isNull && !visible.isEmpty { slices.append(max(0,visible.minY-measured.minY)...min(measured.height,visible.maxY-measured.minY)) }
+  count += 1; let covered=h.coverage(slices)
+  if covered >= measured.height-1 { break }
+  guard let motion=h.backupWarningDrag(viewport:viewport,frame:measured,coveredThrough:covered,bodyFrame:bodyFrame) else { print("FAIL synthetic motion unavailable");exit(1) }
+  // Synthetic response uses measured C13 10.333pt touch deadband. It is
+  // geometry coverage evidence only, not a prediction of native timing.
+  let delta=motion.end.y-motion.start.y
+  let moved=delta < 0 ? min(0,delta+10.333333) : max(0,delta-10.333333)
+  measured=measured.offsetBy(dx:0,dy:moved)
+ }
+ check(h.coverage(slices)>=measured.height-1 && count<=8,"synthetic C13 geometry covers every interval in at most8captures")
+ check(h.coverage(Array(repeating:0...35,count:19))==35,"stationary native response never becomes covered")
  print("PASS \(passed) extracted-helper actor-isolated offline guards; native app calls=0")
  }
 }
@@ -125,6 +160,7 @@ def declaration(source: str, marker: str) -> str:
 def fixture(source: str) -> str:
     markers = [
         "    private func snapshotViewport(",
+        "    private func backupWarningDrag(",
         "    private struct BackupWarningObservation",
         "    private func backupWarningObservation(",
         "    private func snapshotNodes(",
@@ -140,6 +176,10 @@ def fixture(source: str) -> str:
     # Execute the real fast branch too: global tree uniqueness alone cannot
     # prove that the retained index-based body query still names that pane.
     warning = declaration(source, "    private func verifyCompleteBackupWarning(")
+    coverage_start = warning.index("            var coveredThrough: CGFloat = 0")
+    coverage_end = warning.index('            print("WARNING_COVERAGE', coverage_start)
+    parts.append("func coverage(_ slices: [ClosedRange<CGFloat>]) -> CGFloat {\n"
+                 + warning[coverage_start:coverage_end] + "\nreturn coveredThrough\n}")
     start = warning.index("            if let observation = backupWarningObservation(in: app) {")
     end = warning.index("            } else {", start) + len("            }")
     branch = warning[start:end]
@@ -177,7 +217,7 @@ def main() -> None:
             "-parse-as-library", str(source), "-o", str(executable),
         ], timeout=60)
         output = checked([str(executable)], timeout=30)
-        if output.strip() != "PASS 22 extracted-helper actor-isolated offline guards; native app calls=0":
+        if output.strip() != "PASS 39 extracted-helper actor-isolated offline guards; native app calls=0":
             raise RuntimeError("Unexpected localization guard count or output: " + output)
         print(output, end="")
 

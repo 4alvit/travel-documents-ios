@@ -514,8 +514,10 @@ class Controls(unittest.TestCase):
             version, build = '26.2', '17C52'
             self.assertIn('DEVELOPER_DIR: /Applications/Xcode_'+version+'.app/Contents/Developer',body)
             self.assertIn("$'Xcode "+version+"\\nBuild version "+build+"'",body)
-            job_minutes = 40 if job == 'ui_guidance' else 35
-            self.assertIn(f'    timeout-minutes: {job_minutes}\n',body)
+            job_minutes = 60 if prepare_files else 35
+            self.assertEqual([line for line in body.splitlines()
+                              if line.startswith('    timeout-minutes:')],
+                             [f'    timeout-minutes: {job_minutes}'])
             original=body.split('      - name: Simulator integration and StoreKit tests\n')[1].split('      - name:')[0]
             self.assertIn('id: integration',original)
             match_option = ' --require-sdk-match' + (' --prepare-files' if prepare_files else '')
@@ -526,6 +528,22 @@ class Controls(unittest.TestCase):
             paths=[line.strip() for line in evidence.split('          path: |\n',1)[1].split('          if-no-files-found:',1)[0].splitlines()]
             expected_paths = ['build/*.xcresult','build/ci-toolchain/simulator-selection.*/']
             self.assertEqual(paths,expected_paths)
+            if prepare_files:
+                steps = body.split('      - ')[1:]
+                self.assertEqual([step.splitlines()[0] for step in steps], [
+                    'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+                    'name: Toolchain', 'name: Simulator integration and StoreKit tests',
+                    'name: Test evidence', 'name: Extract existing Files/payment failure pairs',
+                    'name: Files/payment failure evidence'])
+                step_minutes = [2, 3, 40, 3, 3, 2]
+                for step, minutes in zip(steps, step_minutes):
+                    self.assertEqual([line.strip() for line in step.splitlines()
+                                      if line.strip().startswith('timeout-minutes:')],
+                                     [f'timeout-minutes: {minutes}'])
+                # Leave five minutes for cancellation and two for finalization.
+                self.assertEqual(sum(step_minutes) + 5 + 2, job_minutes)
+                self.assertIn('        if: always()\n', evidence)
+                self.assertNotIn('continue-on-error', evidence)
             public=body.split('name: TripDocket-files-picker-failure-'+cohort+'-')[1].split('if-no-files-found')[0]
             self.assertNotIn('scratch',public);self.assertNotIn('*',public)
             paths=[line.strip() for line in public.splitlines() if '/public/' in line]

@@ -18,7 +18,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = '73e2569fac6c4dae1f8d43267e517f80e1222750c0891f1ebb4f4efe3201b465'
+HELPER_SHA = '5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
@@ -30,7 +30,7 @@ MIB = 1024 ** 2
 CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             phase_seconds=600, testcase_seconds=300, admission_free_bytes=16*GIB,
             work_free_bytes=8*GIB, output_bytes=8*GIB, xcresult_bytes=2*GIB,
-            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=15,
+            stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=30, boot_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 # Preparation reached local Files checks at 132s on a cold hosted run.
 # Keep this case bounded inside the unchanged 600s phase/work deadlines.
@@ -414,16 +414,17 @@ class Recovery:
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
-        # Native prepare/export/restore builds and an actively owned boot wait
-        # share the existing15s scan allowance. Boot admission, other discovery,
-        # capability and evidence stay at5s; no command/stop deadline is extended.
+        # Native phase scans allow30s after a retained export scan exceeded15s.
+        # Active owned boot waits retain15s; admission, other discovery, capability
+        # and evidence retain5s. No command/global/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         boot_process = (self.active.get(pending.get('pgid'))
                         if owner is self and unfinished and pending.get('id') == 'boot-ready' else None)
         boot_scan = (boot_process is not None and boot_process.pid == pending.get('pgid')
                      and self.owned is not None
                      and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
-        allowance = CAPS['phase_scan_seconds'] if phase_scan or boot_scan else CAPS['scan_seconds']
+        allowance = (CAPS['phase_scan_seconds'] if phase_scan else
+                     CAPS['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
             deadline = min(deadline, owner.t0+pending['work_deadline'])
@@ -466,7 +467,18 @@ class Recovery:
             free = shutil.disk_usage(self.out).free
             check()
             require(free >= CAPS['work_free_bytes'], 'Work free-space floor reached')
-            row.update(elapsed=self.ops.now()-self.t0, free_bytes=free)
+            finished = self.ops.now()
+            row.update(elapsed=finished-self.t0, free_bytes=free)
+            # Fixed-size successful-scan telemetry; no paths or per-entry list.
+            traversal = observation['traversal']
+            row['scan'] = dict(started_elapsed=started-self.t0,
+                deadline_elapsed=deadline-self.t0, requested_scan_seconds=allowance,
+                duration_seconds=finished-started,
+                traversal_duration_seconds=traversal.get('duration_seconds'),
+                operation_count=traversal.get('operation_count'),
+                encounter_count=traversal.get('encounter_count', 0),
+                traversal_attempts=traversal.get('traversal_attempts'),
+                max_depth=traversal.get('max_depth'))
         except BaseException as error:
             observation.update(status='failed', finished_elapsed=self.ops.now()-self.t0,
                                error=repr(error)[:512], partial_counts_are_not_valid_accounting=True)
