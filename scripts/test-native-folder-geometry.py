@@ -48,13 +48,17 @@ enum Kind {
     init() {
         editor.value = name; cell.children = [editor]; files.children = [cell]
         nav.children = [title]; browser.children = [nav, files]; picker.children = [browser]
-        window.children = [picker, keyboard]; app.children = [window]
+        window.children = [keyboard]; app.children = [window]
     }
 
     // ACTUAL_HELPER
 
+    var pickerInputOverride: XCUIElementSnapshot?
+    var applicationInputOverride: XCUIElementSnapshot?
+    var pickerInput: XCUIElementSnapshot { pickerInputOverride ?? picker }
+    var applicationInput: XCUIElementSnapshot { applicationInputOverride ?? app }
     func point() -> (point: CGPoint, normalized: CGVector)? {
-        nativeFolderBlankPoint(in: app, ownedFolder: name, localTitle: "On My iPhone")
+        nativeFolderBlankPoint(in: pickerInput, applicationSnapshot: applicationInput, ownedFolder: name, localTitle: "On My iPhone")
     }
 }
 
@@ -66,6 +70,21 @@ enum Kind {
         var expected: CGPoint?
         let covering = CGRect(x: 0, y: 200, width: 400, height: 220)
         switch name {
+        case "application-as-picker": h.pickerInputOverride = h.app
+        case "root-as-picker": h.pickerInputOverride = h.browser
+        case "picker-as-application": h.applicationInputOverride = h.picker
+        case "window-as-application": h.applicationInputOverride = h.window
+        case "application-also-includes-picker":
+            accepts = true; expected = CGPoint(x: 200, y: 300); h.window.children.append(h.picker)
+        case "second-compatible-window":
+            accepts = true; expected = CGPoint(x: 200, y: 300)
+            h.app.children.append(XCUIElementSnapshot(.window, "", "", h.window.frame))
+        case "environment-excessive-node-count":
+            h.window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "environment-excessive-depth":
+            let top = XCUIElementSnapshot(.other); var current = top
+            for _ in 0..<100 { let child = XCUIElementSnapshot(.other); current.children = [child]; current = child }
+            h.window.children.append(top)
         case "safe-region": accepts = true; expected = CGPoint(x: 200, y: 300)
         case "translated-scaled-region":
             accepts = true; expected = CGPoint(x: 350, y: 470)
@@ -74,11 +93,11 @@ enum Kind {
                                  width: n.frame.width * 1.5, height: n.frame.height * 1.5)
                 n.children.forEach(move)
             }
-            move(h.app)
+            move(h.app); move(h.picker)
         case "alternate-local-title-shape":
             accepts = true; h.title.elementType = .button; h.title.label = "On My iPhone, Actions Menu"
         case "missing-picker": h.picker.identifier = "unrelated"
-        case "duplicate-picker": h.window.children.append(h.picker)
+        case "duplicate-picker": h.picker.children.append(XCUIElementSnapshot(.other, "Browse View (Picker)"))
         case "introduction-present": h.window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
         case "missing-provider-root": h.browser.identifier = "unrelated"
         case "duplicate-provider-root": h.picker.children.append(h.browser)
@@ -90,9 +109,9 @@ enum Kind {
         case "duplicate-navigation": h.browser.children.append(h.nav)
         case "wrong-root": h.title.label = "iCloud Drive"
         case "duplicate-root-heading": h.nav.children.append(h.title)
-        case "missing-keyboard": h.window.children = [h.picker]
+        case "missing-keyboard": h.window.children = []
         case "duplicate-keyboard": h.window.children.append(h.keyboard)
-        case "missing-window": h.app.children = [h.picker, h.keyboard]
+        case "missing-window": h.app.children = [h.keyboard]
         case "wrong-name": h.editor.value = "another folder"
         case "nonstring-name": h.editor.value = 17
         case "missing-editor": h.cell.children = []
@@ -118,7 +137,7 @@ enum Kind {
             let child = XCUIElementSnapshot(.staticText, "", "overlay text", CGRect(x: 5, y: 205, width: 50, height: 20))
             h.files.children.append(XCUIElementSnapshot(.other, "overlay", "", covering, [child]))
         case "excessive-node-count":
-            h.window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+            h.picker.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
         case "excessive-depth":
             let top = XCUIElementSnapshot(.other)
             var current = top
@@ -126,7 +145,7 @@ enum Kind {
                 let child = XCUIElementSnapshot(.other)
                 current.children = [child]; current = child
             }
-            h.window.children.append(top)
+            h.picker.children.append(top)
         case "second-cell-leaves-safe-column":
             accepts = true; expected = CGPoint(x: 294, y: 300)
             h.files.children.append(XCUIElementSnapshot(.cell, "second", "", CGRect(x: 180, y: 220, width: 60, height: 160)))
@@ -157,6 +176,9 @@ enum Kind {
 
 CASES = (
     'safe-region', 'translated-scaled-region', 'alternate-local-title-shape',
+    'application-as-picker', 'root-as-picker', 'picker-as-application', 'window-as-application',
+    'application-also-includes-picker', 'second-compatible-window',
+    'environment-excessive-node-count', 'environment-excessive-depth',
     'missing-picker', 'duplicate-picker', 'introduction-present', 'missing-grid',
     'missing-provider-root', 'duplicate-provider-root', 'grid-outside-provider-root',
     'navigation-outside-provider-root',
@@ -180,7 +202,7 @@ class GeometryTests(unittest.TestCase):
         marker = '    @MainActor\n    private func nativeFolderBlankPoint('
         assert source.count(marker) == 1
         start = source.index(marker)
-        end = source.index('\n    private func presentRecoverySave(', start)
+        end = source.index('\n    @MainActor\n    private func nativeFolderSnapshots(', start)
         helper = source[start:end]
         assert len(helper) < 65536
         cls.directory = tempfile.TemporaryDirectory(prefix='native-folder-geometry-')

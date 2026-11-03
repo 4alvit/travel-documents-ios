@@ -1,5 +1,4 @@
 """Pure controls for the actual evidence adapter; no native processes or signals."""
-import copy
 import errno
 import importlib.util
 import json

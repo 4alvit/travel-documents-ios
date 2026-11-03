@@ -18,6 +18,7 @@ if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && ( "$TRIPFOLIO_REQUIRE_SDK_MATCH" != 1 |
   exit 2
 fi
 TEST_ARGUMENTS=(test)
+MAXIMUM_TEST_SECONDS=480
 if [[ $# -ne 0 ]]; then
   if [[ $# -ne 2 || "$1" != "--cohort" ]]; then
     echo "Usage: $0 [--require-sdk-match [--prepare-files]] [--cohort core-purchase|ui-guidance]" >&2
@@ -31,6 +32,7 @@ if [[ $# -ne 0 ]]; then
         -only-testing:TripfolioUITests/TripfolioUITests)
       ;;
     ui-guidance)
+      MAXIMUM_TEST_SECONDS=600
       TEST_ARGUMENTS=(test
         -only-testing:TripfolioUITests
         -skip-testing:TripfolioUITests/PurchaseUITests
@@ -72,13 +74,14 @@ print(phones[0]["udid"])
 ')
 fi
 mkdir -p build
-# Keep the default at 180s while allowing the Russian maximum-type guidance
-# flow to request 480s. Other tests retain their existing individual allowances.
+# Keep the default at 180s. Only the guidance cohort permits the Russian
+# maximum-type flow to request 600s; other individual allowances are unchanged.
+# Core/local cohorts and the dedicated iPad driver retain their 480s ceilings.
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \
   -configuration Debug -destination "platform=iOS Simulator,id=$TRIPFOLIO_SIMULATOR_ID" \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
   -collect-test-diagnostics never \
-  -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 480 \
+  -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance "$MAXIMUM_TEST_SECONDS" \
   -derivedDataPath build/DerivedData \
   -resultBundlePath "build/Tests-$(date -u +%Y%m%dT%H%M%SZ).xcresult" \
   CODE_SIGNING_ALLOWED=NO "${TEST_ARGUMENTS[@]}"

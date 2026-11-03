@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline actual-protocol/host guards; no Simulator or app is launched."""
-import copy, hashlib, importlib.util, itertools, json, os, subprocess, sys
+import copy, hashlib, importlib.util, itertools, json, subprocess, sys
 from pathlib import Path
-import tempfile, time, unittest, uuid
+import tempfile, time, unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -186,7 +186,7 @@ class HostGuards(unittest.TestCase):
   r.verify_preparation_prerequisite=Mock(return_value=copy.deepcopy(self.preparation_proof))
   r.report['combined_batch']={'preparation_prerequisite':copy.deepcopy(self.preparation_proof)}
   p=SimpleNamespace(pid=123,poll=lambda:None);r.xcode.active={123:p}
-  self.driver=SimpleNamespace(process=p,args=SimpleNamespace(device=OWNED),checkpoint_session=SESSION,token=TOKEN,deadline=time.monotonic()+60,summary={'combined_batch':True,'fixtures':[{'name':'synthetic-ticket.pdf','bytes':713,'sha256':'a'*64},{'name':'synthetic-insurance.pdf','bytes':716,'sha256':'b'*64}]},fixture_directory=self.root/'provider',provider_identity=(1,2))
+  self.driver=SimpleNamespace(process=p,args=SimpleNamespace(device=OWNED),checkpoint_session=SESSION,token=TOKEN,deadline=time.monotonic()+60,summary={'combined_batch':True,'fixtures':[{'name':'synthetic-ticket.pdf','bytes':713,'sha256':'a'*64},{'name':'synthetic-insurance.pdf','bytes':716,'sha256':'b'*64}]},fixture_directory=self.root/'provider'/('TripDocket-Batch-QA-'+TOKEN),provider_identity=(1,2),fixture_identity=(1,3))
   self.bundle=self.root/'Tripfolio.app';self.bundle.mkdir();(self.bundle/'Tripfolio').write_bytes(b'executable')
   r.container_path=Mock(return_value=self.bundle);r.native_seed_files=Mock();r.before={'files':{}}
   self.commands=[];self.listing='999 /bin/ps -axww -o pid=,command=\n123 /usr/bin/xcodebuild\n'
@@ -195,11 +195,17 @@ class HostGuards(unittest.TestCase):
     proof=json.loads((r.out/'receipt.json').read_text())['batch_checkpoint']
     self.assertTrue(proof['aut_stopped']);self.assertTrue(proof['source_unchanged'])
     self.assertEqual(proof['status'],'verifying');self.assertEqual(proof['fixtures'],self.driver.summary['fixtures'])
+    if r.native_folder_control:
+     self.assertEqual(proof['provider_root'],str(self.root/'provider'))
+     self.assertEqual(proof['fixture_identity'],[1,3])
+    else:
+     self.assertNotIn('provider_root',proof);self.assertNotIn('fixture_identity',proof)
    self.commands.append((label,argv,seconds));r.commands.report['commands'].append({'id':label,'returncode':0,'pgid':999})
    return str(self.bundle) if label=='checkpoint-app' else self.listing if label=='checkpoint-app-stopped' else ''
   r.command=command;self.request=cp.execution_order(raw(),SESSION,TOKEN)['request']
  def invoke(self):return self.run.acknowledge_batch_seed(self.driver,self.request,time.monotonic()+60)
  def test_ack_requires_stopped_app_bytes_and_clips_scoped_commands(self):
+  self.assertTrue(self.run.native_folder_control)
   limit=self.run.commands.limit;self.invoke()
   self.assertEqual([x[0] for x in self.commands],['checkpoint-app','checkpoint-app-stopped','checkpoint-ack'])
   self.run.verify_preparation_prerequisite.assert_called_once()
@@ -209,6 +215,13 @@ class HostGuards(unittest.TestCase):
   self.run.native_seed_files.assert_called_once_with(self.driver)
   self.assertTrue(self.run.report['batch_checkpoint_verified']);self.assertEqual(limit,self.run.commands.limit)
   self.assertTrue(all(0<x[2]<=10 for x in self.commands));self.assertEqual(self.commands[-1][1],['xcrun','simctl','notify_set_state',OWNED,self.request['name'],'1'])
+ def test_root_route_ack_does_not_claim_a_created_leaf(self):
+  self.run.native_folder_control=False
+  self.driver.fixture_directory=self.root/'provider'
+  del self.driver.fixture_identity
+  self.invoke()
+  self.assertTrue(self.run.report['batch_checkpoint_verified'])
+  self.assertEqual(self.commands[-1][0],'checkpoint-ack')
  def test_running_missing_reader_and_ambiguous_process_reject_before_ack(self):
   old=Path.home()/'Library/Developer/CoreSimulator/Devices'/OWNED/'data/Containers/Bundle/Application'/NONCE/'Tripfolio.app/Tripfolio'
   for text in ('','123 /usr/bin/xcodebuild\n',self.listing+f'42 {self.bundle}/Tripfolio\n',self.listing+f'42 {old} --old-container\n',self.listing+'42 Tripfolio --arg\n','malformed'):

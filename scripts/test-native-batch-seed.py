@@ -29,7 +29,7 @@ class SeedGuards(unittest.TestCase):
         helper = APP[APP.index("@MainActor\nprivate enum NativeBatchSeedFiles"):
                      APP.index("@MainActor\nprivate struct NativeBatchSeedView")]
         config = UI[UI.index("    private static func directPreparationToken"):
-                    UI.index("    func testNativeCreateOwnedFilesFolder")]
+                    UI.index("    private func acknowledgeNativeFolderKeyboardIntroduction(")]
         helper += "\n@MainActor private enum Preparation {\n" + \
             "struct BatchTestFailure: Error { let message: String }\n" + config + \
             "static func check(_ env: [String: String], _ debug: Bool) throws -> String { " + \
@@ -252,24 +252,41 @@ class SeedGuards(unittest.TestCase):
     def test_native_folder_case_is_separate_opt_in_one_creation_without_save(self):
         case=UI[UI.index("func testNativeCreateOwnedFilesFolder"):
                 UI.index("func testNativeSaveSeedsBothSyntheticOriginals")]
+        configuration=UI[UI.index("private static func nativeFolderConfiguration"):
+                         UI.index("func testNativeCreateOwnedFilesFolder")]
         self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1"',case)
-        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"]',case)
-        self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',case)
-        self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder',case)
+        self.assertIn('Self.nativeFolderConfiguration(environment, debugSimulator: debugSimulator)',case)
+        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"]',configuration)
+        self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',configuration)
+        self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token',configuration)
         self.assertIn("executionTimeAllowance = 180",case)
         for action in ("more.element.tap()","newFolder.element.tap()",
                        "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"):
             self.assertEqual(case.count(action),1)
-        self.assertIn("remainingEditors.count == 0",case)
-        self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)",case)
+        handoff=case[case.index("files.element.coordinate(withNormalizedOffset: current.normalized).tap()")+len("files.element.coordinate(withNormalizedOffset: current.normalized).tap()") :]
+        self.assertNotIn("remainingEditors",handoff)
+        self.assertNotIn("directory.element.tap()",handoff)
+        self.assertIn('capture(app, "Native folder rename requested; host empty-folder verification pending")',handoff)
+        self.assertLess(handoff.index("saved.count == 0 && !failed.exists"),handoff.index("app.terminate()"))
+        self.assertLess(handoff.index("app.terminate()"),handoff.index("app.state == .notRunning"))
         self.assertIn('app.state == .notRunning',case)
         self.assertNotIn('buttons["Save"]',case)
         self.assertEqual(case.count('coordinate('),1)
         self.assertNotIn("create.element.tap()",case)
-        self.assertEqual(case.count("nativeFolderBlankPoint(in: try app.snapshot()"),2)
+        self.assertEqual(case.count("nativeFolderBlankPoint(in:"),2)
+        for name in ("beforeBlankSnapshots", "currentBlankSnapshots"):
+            self.assertIn(name + " = try nativeFolderSnapshots(app)",case)
+            self.assertIn("in: " + name + ".picker",case)
+            self.assertIn("applicationSnapshot: " + name + ".application",case)
         self.assertIn("current.point == before.point, current.normalized == before.normalized",case)
         self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
-        self.assertNotIn('press(forDuration',case)
+        self.assertEqual(case.count('press(forDuration'),1)
+        self.assertIn('created.element.press(forDuration: 1)',case)
+        self.assertIn('Self.nativeFolderRenameFrame(in: snapshots.picker,',case)
+        self.assertIn('applicationSnapshot: snapshots.application,',case)
+        self.assertIn('localTitle: localTitle) == before',case)
+        self.assertIn('created.count == 1 && created.element.frame == before',case)
+        self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',case)
 
 
 class ExportResultGuards(unittest.TestCase):
