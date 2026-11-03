@@ -8,6 +8,8 @@ import json
 import os
 import plistlib
 import re
+import signal
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -1275,6 +1277,121 @@ class Guards(unittest.TestCase):
         own_note = "Snapshot descriptor cleanup failed: errno=5, errno=None"
         error.__notes__ = ["unrelated context"] * 100 + [own_note]
         self.assertEqual(q.snapshot_error_details(error, "Cleanup: "), ["Cleanup: " + repr(error), own_note])
+
+    def bounded_read_signal(self, trigger, signum, body_failure=None, nested=False, protected=None, cleaning_check=False):
+        with tempfile.TemporaryDirectory(dir=self.root) as value:
+            directory = Path(value)
+            (directory / "nested").mkdir()
+            (directory / "nested/file").write_bytes(b"synthetic")
+            run = SimpleNamespace(interrupted=False, acquiring=False, finalizing_driver=False, cleaning=False)
+            if protected is not None: setattr(run, protected, True)
+            if cleaning_check:
+                run.cleanup_deadline = time.monotonic() + 60
+                run.work_deadline = run.cleanup_deadline
+                check_method = q.Qualification.check
+                check = lambda: check_method(run)
+            else:
+                check = lambda: None
+            opened, attempted = [], []
+            real_open, real_close = os.open, os.close
+            sent = False
+            prior_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+            def send_once():
+                nonlocal sent
+                if not sent:
+                    sent = True
+                    os.kill(os.getpid(), signum)
+            def tracked_open(*args, **kwargs):
+                fd = real_open(*args, **kwargs)
+                opened.append(fd)
+                if trigger == "open": send_once()
+                return fd
+            def tracked_close(fd):
+                attempted.append(fd)
+                real_close(fd)
+                if trigger == "close": send_once()
+            def operation():
+                if not nested:
+                    return q.bounded_read(directory, "nested/file", 32, check)
+                entered = False
+                def nested_check():
+                    nonlocal entered
+                    if entered: return
+                    entered = True
+                    outer = q._descriptor_read_state
+                    with self.assertRaises(KeyboardInterrupt):
+                        q.bounded_read(directory, "nested/file", 32, lambda: None)
+                    self.assertIs(q._descriptor_read_state, outer)
+                return q.bounded_read(directory, "nested/file", 32, nested_check)
+            run.execute = operation
+            try:
+                with patch.object(q, "Qualification", return_value=run), \
+                     patch.object(sys, "argv", ["qualify-release.py", "--mode", "batch"]), \
+                     patch.object(q.os, "open", side_effect=tracked_open), \
+                     patch.object(q.os, "close", side_effect=tracked_close):
+                    if body_failure is None: return q.main()
+                    with patch.object(q.os, "read", side_effect=body_failure): return q.main()
+            finally:
+                for sig, handler in prior_handlers.items(): signal.signal(sig, handler)
+                try:
+                    self.assertTrue(sent)
+                    self.assertTrue(run.interrupted)
+                    self.assertIsNone(q._descriptor_read_state)
+                    self.assertEqual(len(attempted), len(opened))
+                    for fd in opened:
+                        with self.assertRaises(OSError) as closed: os.fstat(fd)
+                        self.assertEqual(closed.exception.errno, errno.EBADF)
+                finally:
+                    # Fixture recovery only if the candidate regresses.
+                    for fd in opened:
+                        try: real_close(fd)
+                        except OSError as error:
+                            if error.errno != errno.EBADF: raise
+
+    def test_bounded_read_defers_signals_through_acquisition_and_all_closes(self):
+        for trigger in ("open", "close"):
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(trigger=trigger, signum=signum), self.assertRaises(KeyboardInterrupt):
+                    self.bounded_read_signal(trigger, signum)
+
+    def test_bounded_read_preserves_existing_signal_protection_inside_read(self):
+        for flag in ("acquiring", "finalizing_driver", "cleaning"):
+            for trigger in ("open", "close"):
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    with self.subTest(flag=flag, trigger=trigger, signum=signum):
+                        self.assertEqual(self.bounded_read_signal(trigger, signum, protected=flag), b"synthetic")
+        self.assertEqual(self.bounded_read_signal("close", signal.SIGINT,
+                         protected="cleaning", cleaning_check=True), b"synthetic")
+
+    def test_bounded_read_signal_during_cleanup_preserves_body_failure(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            primary = RuntimeError("synthetic read failure")
+            with self.subTest(signum=signum), self.assertRaises(RuntimeError) as failed:
+                self.bounded_read_signal("close", signum, body_failure=primary)
+            self.assertIs(failed.exception, primary)
+
+    def test_bounded_read_nested_scope_retains_pending_signal(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.bounded_read_signal("close", signal.SIGINT, nested=True)
+
+    def test_qualification_signal_outside_descriptor_scope_keeps_existing_behavior(self):
+        prior_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            for flag in (None, "acquiring", "finalizing_driver", "cleaning"):
+                run = SimpleNamespace(interrupted=False, acquiring=False, finalizing_driver=False, cleaning=False)
+                if flag is not None: setattr(run, flag, True)
+                def operation():
+                    os.kill(os.getpid(), signal.SIGINT)
+                    return 0
+                run.execute = operation
+                with self.subTest(flag=flag), patch.object(q, "Qualification", return_value=run), \
+                     patch.object(sys, "argv", ["qualify-release.py", "--mode", "batch"]):
+                    if flag is None:
+                        with self.assertRaises(KeyboardInterrupt): q.main()
+                    else: self.assertEqual(q.main(), 0)
+                self.assertTrue(run.interrupted)
+        finally:
+            for sig, handler in prior_handlers.items(): signal.signal(sig, handler)
 
     def test_bounded_read_rejects_byte_growth_and_links(self):
         directory=self.root/"bounded";directory.mkdir();path=directory/"file";path.write_bytes(b"12345")
