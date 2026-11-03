@@ -317,8 +317,12 @@ share the remaining budget and still fail if it expires; their completion is not
 guaranteed. The earlier 600-second failure's unconfirmed process-group cleanup
 remains historical evidence. The later 780-second run confirmed its owned group
 absent and its leader reaped; neither result proves the startup delay fixed.
-Recovery retains its 600-second command cap; batch release qualification
-preparation has the profile-specific cap described above. The guidance test
+Recovery allows at most 780 seconds for its prepare command and retains
+600 seconds each for export and restore, including the eight-second stop
+reserve. Its 180-second preparation case and 300-second export/restore cases
+share the unchanged 1,380-second work deadline and 120-second cleanup reserve.
+This accommodates measured cold runner startup without guaranteeing completion.
+Batch release qualification preparation has the profile-specific cap described above. The guidance test
 deadlines and 30-second cleanup budget are unchanged. The phone integration step
 has a 45-minute cap within a 65-minute job. Its planning envelope leaves one
 minute for initial selection, 1,080 seconds for preparation work plus 30 seconds
