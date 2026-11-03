@@ -492,7 +492,7 @@ def make_runner(q, core):
                     'AUT installation requires the current owned device')
             arm.checkpoint()
             arm.once('install-aut')
-            arm.sim('install-aut','install',arm.owned,self.product_paths['Tripfolio'],cap=38)
+            arm.sim('install-aut','install',arm.owned,self.product_paths['Tripfolio'],cap=120)
             raw=arm.sim('pretest-installed-Tripfolio','get_app_container',arm.owned,q.APP_ID,'app',cap=38)
             path=arm.owned_path(raw,('data','Containers','Bundle','Application'),self.product_paths['Tripfolio'].name)
             identity=q.compiled_identity(path,arm.checkpoint)

@@ -176,7 +176,7 @@ class Guards(unittest.TestCase):
                 owned=events[start][0]
                 self.assertEqual(events[start][2],['/usr/bin/xcrun','simctl','install',owned,built])
                 self.assertEqual(events[start+1][2],['/usr/bin/xcrun','simctl','get_app_container',owned,q.APP_ID,'app'])
-                self.assertEqual([x[3] for x in events[start:start+3]],[38,38,780])
+                self.assertEqual([x[3] for x in events[start:start+3]],[120,38,780])
             self.assertNotEqual(events[0][0],events[3][0]);self.assertEqual(owned_path.call_count,2)
             for mode in m.MODES:
                 receipt=json.loads((p.root/mode/'pretest-installed-aut.json').read_text())
@@ -985,6 +985,82 @@ class Guards(unittest.TestCase):
             self.assertTrue(row['install_accounting']['full_post_verified'])
             self.assertTrue(row['stop']['leader_reaped']);self.assertTrue(row['stop']['group_absent'])
             self.assertEqual([s[0] for s in scans],['post','pre','post'])
+    def install_timing_fixture(self, root, completes=True):
+        with mock.patch.object(m.time,'monotonic',return_value=1000.0), \
+                mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
+            p,arm,now,child,polls,scans,scan=self.install_command_fixture(root)
+        built=p.product_paths['Tripfolio'];built.mkdir(parents=True);(built/'binary').write_bytes(b'same build')
+        p.products={'Tripfolio':q.compiled_identity(built,lambda:None)}
+        p.install_aut=Pair.install_aut.__get__(p,Pair)
+        invoked=[];spawned=[];sent=[];real_sim=arm.sim
+        def sim(label,*args,cap=38):
+            invoked.append((label,cap))
+            if label=='pretest-installed-Tripfolio':return str(built)
+            return real_sim(label,*args,cap=cap)
+        arm.sim=sim;arm.owned_path=lambda *args:built
+        def spawn(args):
+            spawned.append((list(args),now[0]));return child
+        def poll():
+            polls.append(now[0])
+            if completes and spawned and now[0]-spawned[0][1]>=40 and child.returncode is None:
+                child.returncode=0
+            return child.returncode
+        def send(proc,sig):
+            sent.append(int(sig));proc.returncode=-int(sig);return 'syscall_returned'
+        child.poll=poll;arm.ops.spawn=spawn;arm.ops.send=send
+        arm.ops.absent=lambda proc:proc.returncode is not None
+        arm.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+1)
+        return p,arm,now,child,scans,scan,invoked,spawned,sent
+
+    def test_install_only_timing_experiment_preserves_content_and_one_attempt(self):
+        for changed in (False,True):
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,scans,scan,invoked,spawned,sent=self.install_timing_fixture(Path(tmp))
+                if changed:(p.product_paths['Tripfolio']/'binary').write_bytes(b'changed')
+                with mock.patch.object(m.time,'monotonic',side_effect=lambda:now[0]), \
+                        mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    if changed:
+                        with self.assertRaisesRegex(RuntimeError,'bytes differ'):p.install_aut(arm)
+                    else:p.install_aut(arm)
+                    with self.assertRaises(RuntimeError):p.install_aut(arm)
+                row=next(x for x in arm.report['commands'] if x['id']=='install-aut')
+                self.assertEqual(row['requested_cap_seconds'],120)
+                self.assertAlmostEqual(row['work_deadline']-row['start'],112)
+                self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+                self.assertGreaterEqual(row['finish']-row['start'],40)
+                self.assertTrue(row['install_accounting']['full_post_verified'])
+                self.assertEqual(invoked,[('install-aut',120),('pretest-installed-Tripfolio',38)])
+                self.assertEqual(len(spawned),1);self.assertEqual(sent,[])
+                self.assertEqual(arm.report['attempts']['install-aut'],1)
+                self.assertEqual(arm.report.get('pretest_installed_aut_verified',False),not changed)
+                self.assertEqual((p.work_end,p.final),(2800.0,2980.0))
+                self.assertFalse(arm.active)
+                self.assertTrue(all(not kw['allow_products_restart'] and not kw['allow_xcresult_restart']
+                                    for _,_,kw in scans))
+
+    def test_install_only_timeout_and_parent_clipping_keep_failure(self):
+        for remaining,expected_work in ((None,112),(20,12)):
+            with self.subTest(remaining=remaining),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,scans,scan,invoked,spawned,sent=self.install_timing_fixture(Path(tmp),False)
+                if remaining is not None:arm.limit=now[0]+remaining
+                with mock.patch.object(m.time,'monotonic',side_effect=lambda:now[0]), \
+                        mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaisesRegex(RuntimeError,'install-aut failed'):p.install_aut(arm)
+                    with self.assertRaises(RuntimeError):p.install_aut(arm)
+                row=next(x for x in arm.report['commands'] if x['id']=='install-aut')
+                self.assertEqual(row['requested_cap_seconds'],120)
+                self.assertAlmostEqual(row['work_deadline']-row['start'],expected_work)
+                self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+                self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                self.assertFalse(row['install_accounting']['full_post_verified'])
+                self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+                self.assertEqual(invoked,[('install-aut',120)]);self.assertEqual(len(spawned),1)
+                self.assertEqual(sent,[15]);self.assertFalse(arm.active)
+                self.assertNotIn('pretest_installed_aut_verified',arm.report)
+                self.assertEqual((p.work_end,p.final),(2800.0,2980.0))
+
 
 
 if __name__=='__main__':unittest.main()
