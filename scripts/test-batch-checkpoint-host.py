@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline actual-protocol/host guards; no Simulator or app is launched."""
-import copy, hashlib, importlib.util, itertools, json, os, subprocess, sys
+import copy, hashlib, importlib.util, itertools, json, subprocess, sys
 from pathlib import Path
-import tempfile, time, unittest, uuid
+import tempfile, time, unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 

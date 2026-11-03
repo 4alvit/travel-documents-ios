@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline guards for the explicit hosted qualification adapter."""
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1181,6 +1182,95 @@ class Guards(unittest.TestCase):
             with self.subTest(mutation=mutation),patch.object(Path,"home",return_value=home):
                 with self.assertRaisesRegex(RuntimeError,"limit"):run.batch_snapshot(driver)
                 self.assertNotIn("batch_snapshot",run.report)
+
+    def bounded_read_descriptors(self, close_failures=(), body_failure=None):
+        directory = self.root / "bounded-cleanup"
+        (directory / "nested").mkdir(parents=True)
+        (directory / "nested/file").write_bytes(b"synthetic")
+        opened, attempted = [], []
+        real_open, real_close = os.open, os.close
+        def tracked_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        def tracked_close(fd):
+            attempted.append(fd)
+            if len(attempted) in close_failures:
+                raise OSError(errno.EIO, "synthetic close failure")
+            real_close(fd)
+        try:
+            with patch.object(q.os, "open", side_effect=tracked_open), \
+                 patch.object(q.os, "close", side_effect=tracked_close):
+                if body_failure is None:
+                    result = q.bounded_read(directory, "nested/file", 32, lambda: None)
+                else:
+                    with patch.object(q.os, "read", side_effect=body_failure):
+                        result = q.bounded_read(directory, "nested/file", 32, lambda: None)
+            return result
+        finally:
+            try:
+                self.assertEqual(len(opened), 3)
+                self.assertEqual(attempted, list(reversed(opened)))
+                for position, fd in enumerate(attempted, 1):
+                    if position not in close_failures:
+                        with self.assertRaises(OSError) as closed:
+                            os.fstat(fd)
+                        self.assertEqual(closed.exception.errno, errno.EBADF)
+            finally:
+                # Only the fixture closes descriptors deliberately left open by
+                # its injected EIO; production must not retry an ambiguous close.
+                for fd in opened:
+                    try: real_close(fd)
+                    except OSError as error:
+                        if error.errno != errno.EBADF: raise
+
+    def test_bounded_read_closes_every_descriptor_on_success(self):
+        self.assertEqual(self.bounded_read_descriptors(), b"synthetic")
+
+    def test_bounded_read_attempts_remaining_closes_after_one_error(self):
+        with self.assertRaisesRegex(RuntimeError, "Snapshot descriptor cleanup failed") as failed:
+            self.bounded_read_descriptors(close_failures=(1,))
+        self.assertEqual(failed.exception.__cause__.errno, errno.EIO)
+
+    def test_bounded_read_records_multiple_close_errors_without_retry(self):
+        with self.assertRaisesRegex(RuntimeError, "errno=5, errno=5"):
+            self.bounded_read_descriptors(close_failures=(1, 2))
+
+    def test_bounded_read_preserves_primary_error_and_records_cleanup_error(self):
+        primary = RuntimeError("synthetic read failure")
+        with self.assertRaises(RuntimeError) as failed:
+            self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        self.assertIs(failed.exception, primary)
+        self.assertEqual(primary.__notes__, ["Snapshot descriptor cleanup failed: errno=5"])
+
+    def test_bounded_read_preserves_abort_while_attempting_remaining_closes(self):
+        primary = KeyboardInterrupt("synthetic abort")
+        with self.assertRaises(KeyboardInterrupt) as failed:
+            self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        self.assertIs(failed.exception, primary)
+        self.assertEqual(primary.__notes__, ["Snapshot descriptor cleanup failed: errno=5"])
+
+    def test_bounded_read_failure_receipt_retains_primary_and_cleanup_note(self):
+        run = self.run_object()
+        primary = RuntimeError("synthetic read failure")
+        run.prepare = lambda: self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        run.cleanup = lambda: run.report.update(cleanup_verified=True)
+        self.assertEqual(run.execute(), 1)
+        self.assertEqual(run.report["status"], "failed")
+        self.assertEqual(run.report["errors"], [repr(primary), "Snapshot descriptor cleanup failed: errno=5"])
+        self.assertEqual(json.loads((run.out / "receipt.json").read_text())["errors"], run.report["errors"])
+
+    def test_snapshot_error_details_only_copies_one_bounded_errno_note(self):
+        error = RuntimeError("synthetic failure")
+        for note in ("private context must not be copied", "x" * 4096,
+                     "Snapshot descriptor cleanup failed: errno=5 /private/path",
+                     "Snapshot descriptor cleanup failed: errno=5\nenvironment=value",
+                     "Snapshot descriptor cleanup failed: " + ", ".join(["errno=5"] * 10)):
+            error.__notes__ = [note]
+            self.assertEqual(q.snapshot_error_details(error), [repr(error)])
+        own_note = "Snapshot descriptor cleanup failed: errno=5, errno=None"
+        error.__notes__ = ["unrelated context"] * 100 + [own_note]
+        self.assertEqual(q.snapshot_error_details(error, "Cleanup: "), ["Cleanup: " + repr(error), own_note])
 
     def test_bounded_read_rejects_byte_growth_and_links(self):
         directory=self.root/"bounded";directory.mkdir();path=directory/"file";path.write_bytes(b"12345")
