@@ -158,7 +158,9 @@ class Guards(unittest.TestCase):
         with self.assertRaises(RuntimeError):core.validate_result(summary,{**tree,'testNodes':tree['testNodes']*2},m.CASE,'ABC')
 
     def test_real_initializer_and_cleanup_keep_original_clock(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(m.time, "monotonic", return_value=1000.0), \
+                mock.patch.object(core.base.RealOps, "now", return_value=1000.0):
             root=Path(tmp).resolve();(root/'build').mkdir()
             p=Pair(root,{'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','GITHUB_SHA':'a'*40})
             self.assertEqual(p.commands.t0,p.started)
