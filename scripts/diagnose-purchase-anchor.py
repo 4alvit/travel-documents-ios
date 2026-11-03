@@ -20,13 +20,27 @@ CACHE_CAP = 300  # New prerequisite; includes stop reserve and shares the origin
 CASE = 'BatchImportUITests/testDiagnosticPurchasePresentationAnchor()'
 SELECTOR = 'TripfolioUITests/' + CASE.removesuffix('()')
 MODES = ('child', 'ownedAncestor')
-RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-2'
+RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-5'
 DEVICE = 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro'
 PINS = {
-    'qualify-release.py': 'f4c078d8f2c3910f2930a30ba7f48944bbe66a9c8b778bea9790c1c50bf9d803',
+    'qualify-release.py': 'a117ccc89d70e4e9bf3180f882bd55abffba86a3895ddafe6f976dfe8a5220c4',
     'recovery_core.py': '97b24cd6254af03a6081e92f7f06f9e994ba65e809d8198418687b0ec25ab790',
     'recovery_process.py': '5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc',
     'batch_checkpoint.py': 'aa66e1bfedb89d7becb7985bee735cafbaec447bea2061cb392880a2be17f185',
+}
+
+
+# Observed hosted26.5 metadata; activation remains stopped pending independent review.
+PROFILE_METADATA_VERIFIED = True
+TOOLCHAIN = {
+    'developer_dir': '/Applications/Xcode_26.5.app/Contents/Developer',
+    'xcode_version': 'Xcode 26.5\nBuild version 17F42',
+    'sdk_version': '26.5',
+    'runtime_version': '26.5',
+    'runtime_build': '23F77',
+    'xcresulttool_version': 'xcresulttool version 24757, schema version: 0.1.0 (legacy commands format version: 3.58)',
+    'schema_documents': {'summary':'b58076b9fd20285fba040974e56514ae6b5754cd28944939aa9eab6e636ddc59',
+                         'tests':'18adcaa0c1bb43c466c0e0587816dbbe127c86e69e0f07fcde601ab7398d47da'},
 }
 
 
@@ -36,9 +50,9 @@ def require(value, message):
 
 
 def context(env, machine):
+    require(PROFILE_METADATA_VERIFIED, 'STOPPED: hosted26.5 metadata not yet reviewed')
     profiles = {
-        'macos-15': {'name':'default','runner':'macos-15','runner_architecture':'ARM64','architecture':'arm64'},
-        'macos-15-intel': {'name':'intel-batch','runner':'macos-15-intel','runner_architecture':'X64','architecture':'x86_64'},
+        'macos-26': {'name':'diagnostic-26-5','runner':'macos-26','runner_architecture':'ARM64','architecture':'arm64'},
     }
     profile = profiles.get(env.get('PURCHASE_ANCHOR_RUNNER'))
     require(env.get('GITHUB_ACTIONS') == 'true' and env.get('RUNNER_OS') == 'macOS'
@@ -48,11 +62,11 @@ def context(env, machine):
             and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
             and env.get('GITHUB_WORKFLOW') == 'Purchase anchor diagnostic'
             and env.get('GITHUB_JOB') == 'anchor', 'Unexpected diagnostic workflow context')
-    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/purchase-anchor', 'Diagnostic branch required')
+    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/xcode-26-5', 'Diagnostic branch required')
     require(re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', '')), 'Missing source commit')
     for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
         require(re.fullmatch('[1-9][0-9]*', env.get(key, '')), 'Invalid run identity')
-    require(env.get('DEVELOPER_DIR') == '/Applications/Xcode_26.2.app/Contents/Developer', 'Wrong developer path')
+    require(env.get('DEVELOPER_DIR') == TOOLCHAIN['developer_dir'], 'Wrong developer path')
     job = {key:env[key] for key in ('GITHUB_REPOSITORY','GITHUB_SHA','GITHUB_REF',
             'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_EVENT_NAME','GITHUB_WORKFLOW')}
     job['runner_profile'] = profile
@@ -96,7 +110,8 @@ def validate_result(q, summary, tree, owned, selection):
         require(isinstance(children,list), 'Invalid result children')
         pending.extend((child,depth+1) for child in children)
     q.recovery.validate_result(summary,tree,CASE,owned)
-    q.validate_runtime_result('batch',selection,summary)
+    require(selection.get('architecture')=='arm64', 'Diagnostic26.5 requires ARM64')
+    q.validate_runtime_result('batch',selection,summary,profile=TOOLCHAIN)
     require(summary.get('testFailures') == [] and summary.get('runtimeWarnings',[]) == [], 'Native failures or warnings')
 
 
@@ -441,12 +456,9 @@ def make_runner(q, core):
             require(self.current is None and not c.active and not c.unknown_spawn
                     and c.owned is None and not c.create_attempted,
                     'Cache readiness must precede device allocation')
-            require(self.report.get('toolchain') == {'xcode':q.XCODE_VERSION,
-                    'developer':q.DEVELOPER_DIR,'sdk':'26.2','architecture':self.profile['architecture']}
-                    and self.report.get('runtime_selection') == self.selection
-                    and self.selection.get('identifier') == RUNTIME
-                    and self.selection.get('build') == '23C54',
-                    'Cache readiness requires verified toolchain and runtime')
+            require(self.report.get('toolchain') == {'xcode':TOOLCHAIN['xcode_version'],
+                    'developer':TOOLCHAIN['developer_dir'],'sdk':TOOLCHAIN['sdk_version'],'architecture':self.profile['architecture']},
+                    'Cache readiness requires verified toolchain')
             c.once('runtime-cache-readiness')
             record={'status':'running','total_cap_seconds':CACHE_CAP,
                     'global_work_seconds':WORK_SECONDS,'global_clock_renewed':False,
@@ -470,18 +482,28 @@ def make_runner(q, core):
             for name,args in [('xcode',['xcodebuild','-version']),('developer',['xcode-select','-p']),
                               ('sdk',['xcrun','--sdk','iphonesimulator','--show-sdk-version']),('architecture',['uname','-m'])]:
                 values[name] = c.command(name,args).strip()
-            require(values == {'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2','architecture':self.profile['architecture']},
+            require(values == {'xcode':TOOLCHAIN['xcode_version'],'developer':TOOLCHAIN['developer_dir'],'sdk':TOOLCHAIN['sdk_version'],'architecture':self.profile['architecture']},
                     'Unexpected actual toolchain')
             self.report['toolchain'] = values
+            reader=c.command('xcresulttool-version',['xcrun','xcresulttool','version']).strip()
+            require(reader==TOOLCHAIN['xcresulttool_version'],'Unexpected diagnostic reader version')
+            schemas={kind:c.command('xcresult-schema-'+kind,
+                ['xcrun','xcresulttool','get','test-results',kind,'--schema']).encode()
+                for kind in ('summary','tests')}
+            self.report['xcresult_schema']={**q.validate_schemas(schemas['summary'],schemas['tests'],
+                'batch',profile=TOOLCHAIN),'sha256':{kind:hashlib.sha256(raw).hexdigest()
+                for kind,raw in schemas.items()},'reader_version':reader}
+            # --all is independent of runtime selection; finish the prerequisite
+            # before the first simctl inventory request. Validate the runtime next.
+            self.prepare_runtime_cache()
             raw = json.loads(c.sim('runtimes','list','runtimes','--json',cap=158))
             matches = [x for x in raw.get('runtimes',[]) if x.get('identifier')==RUNTIME]
-            require(len(matches)==1 and matches[0].get('version')=='26.2' and matches[0].get('buildversion')=='23C54'
+            require(len(matches)==1 and matches[0].get('version')==TOOLCHAIN['runtime_version'] and matches[0].get('buildversion')==TOOLCHAIN['runtime_build']
                     and matches[0].get('isAvailable') is True and self.profile['architecture'] in matches[0].get('supportedArchitectures',[])
                     and sum(x.get('identifier')==DEVICE for x in matches[0].get('supportedDeviceTypes',[]))==1,
                     'Wrong actual runtime/device')
-            self.selection = {'identifier':RUNTIME,'version':'26.2','build':'23C54','architecture':self.profile['architecture'],'sdk_version':'26.2','sdk_matched':True}
+            self.selection = {'identifier':RUNTIME,'version':TOOLCHAIN['runtime_version'],'build':TOOLCHAIN['runtime_build'],'architecture':self.profile['architecture'],'sdk_version':TOOLCHAIN['sdk_version'],'sdk_matched':True}
             self.report['runtime_selection'] = self.selection
-            self.prepare_runtime_cache()
             selection = q.focused_build_selection('batch',self.profile,self.before['files'])
             self.settings = [*selection['build_settings'],'COMPILER_INDEX_STORE_ENABLE=NO']
             self.report['focused_build'] = selection

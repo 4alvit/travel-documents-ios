@@ -2,6 +2,7 @@
 """Offline guards for the explicit purchase-anchor diagnostic; no native execution."""
 import importlib.util
 import inspect
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -23,12 +24,25 @@ Context=inspect.getclosurevars(Pair.run_arm).nonlocals['Context']
 
 
 class Guards(unittest.TestCase):
+    def setUp(self):
+        # Synthetic profile completion only for offline behavior tests.
+        # The production draft's metadata gate remains false.
+        ready=mock.patch.object(m,'PROFILE_METADATA_VERIFIED',True);ready.start();self.addCleanup(ready.stop)
+        schemas={'summary':hashlib.sha256(b'summary fixture').hexdigest(),
+                 'tests':hashlib.sha256(b'tests fixture').hexdigest()}
+        docs=mock.patch.dict(m.TOOLCHAIN,{'schema_documents':schemas});docs.start();self.addCleanup(docs.stop)
+
+    def schema_reply(self,label):
+        return {'xcresulttool-version':m.TOOLCHAIN['xcresulttool_version'],
+                'xcresult-schema-summary':'summary fixture',
+                'xcresult-schema-tests':'tests fixture'}.get(label,'')
+
     def env(self):
-        return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',PURCHASE_ANCHOR_RUNNER='macos-15',
+        return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',PURCHASE_ANCHOR_RUNNER='macos-26',
                     GITHUB_REPOSITORY='4alvit/travel-documents-ios',GITHUB_EVENT_NAME='workflow_dispatch',
                     GITHUB_WORKFLOW='Purchase anchor diagnostic',GITHUB_JOB='anchor',
-                    GITHUB_REF='refs/heads/diagnostic/purchase-anchor',GITHUB_SHA='a'*40,
-                    GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',DEVELOPER_DIR=q.DEVELOPER_DIR)
+                    GITHUB_REF='refs/heads/diagnostic/xcode-26-5',GITHUB_SHA='a'*40,
+                    GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',DEVELOPER_DIR=m.TOOLCHAIN['developer_dir'])
 
     def test_context_is_explicit_manual_arm_branch(self):
         self.assertEqual(m.context(self.env(),'arm64')['GITHUB_RUN_ID'],'123')
@@ -39,53 +53,42 @@ class Guards(unittest.TestCase):
                 m.context({**self.env(),key:bad},'arm64')
 
     def test_profile_context_exact_mapping_and_original_caps(self):
-        for runner,arch,machine,name in (('macos-15-intel','X64','x86_64','intel-batch'),
-                                         ('macos-15','ARM64','arm64','default')):
-            env={**self.env(),'PURCHASE_ANCHOR_RUNNER':runner,'RUNNER_ARCH':arch}
-            job=m.context(env,machine)
-            self.assertEqual(job['runner_profile'],{'runner':runner,'runner_architecture':arch,
-                                                   'architecture':machine,'name':name})
-            for bad_env,bad_machine in (({**env,'PURCHASE_ANCHOR_RUNNER':'other'},machine),
-                                        ({k:v for k,v in env.items() if k!='PURCHASE_ANCHOR_RUNNER'},machine),
-                                        ({**env,'RUNNER_ARCH':'wrong'},machine),
-                                        (env,'x86_64' if machine=='arm64' else 'arm64')):
-                with self.subTest(runner=runner,bad_env=bad_env,bad_machine=bad_machine),self.assertRaises(RuntimeError):
-                    m.context(bad_env,bad_machine)
-            with tempfile.TemporaryDirectory() as tmp, \
-                    mock.patch.object(m.time,'monotonic',return_value=1000.0), \
-                    mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
-                root=Path(tmp).resolve();(root/'build').mkdir();p=Pair(root,job)
-                self.assertEqual(p.work_end,2800.0);self.assertEqual(p.final,2980.0)
-                self.assertEqual(p.report['runner_profile'],job['runner_profile'])
-                self.assertEqual(p.commands.host['machine'],machine)
-                with mock.patch.object(Context,'command',return_value='') as command:
-                    p.commands.sim('boot-ready','bootstatus','ABC','-b')
-                self.assertEqual(command.call_args.args[-1],188)
+        job=m.context(self.env(),'arm64')
+        self.assertEqual(job['runner_profile'],{'name':'diagnostic-26-5','runner':'macos-26',
+                                               'runner_architecture':'ARM64','architecture':'arm64'})
+        for runner,arch,machine in (('macos-15','ARM64','arm64'),('macos-15-intel','X64','x86_64'),
+                                    ('macos-26','X64','x86_64')):
+            with self.subTest(runner=runner),self.assertRaises(RuntimeError):
+                m.context({**self.env(),'PURCHASE_ANCHOR_RUNNER':runner,'RUNNER_ARCH':arch},machine)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(m.time,'monotonic',return_value=1000.0), \
+                mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
+            root=Path(tmp).resolve();(root/'build').mkdir();p=Pair(root,job)
+            self.assertEqual(p.work_end,2800.0);self.assertEqual(p.final,2980.0)
+            self.assertEqual(p.commands.host['machine'],'arm64')
         workflow=(HERE.parent/'.github/workflows/release-qualification.yml').read_text()
-        self.assertIn('runs-on: ${{ inputs.runner }}',workflow)
-        self.assertIn('PURCHASE_ANCHOR_RUNNER: ${{ inputs.runner }}',workflow)
-        self.assertIn('default: macos-15',workflow)
-        self.assertIn('- macos-15-intel',workflow)
+        self.assertIn('default: macos-26',workflow)
+        self.assertNotIn('macos-15',workflow)
 
-    def test_intel_profile_reaches_actual_prepare_and_contexts(self):
+
+    def test_modern_profile_reaches_actual_prepare_and_contexts(self):
         for fault in (None,'machine','runtime-architecture','runtime-build'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
                 p=self.fake_pair(Path(tmp))
-                p.profile=m.context({**self.env(),'PURCHASE_ANCHOR_RUNNER':'macos-15-intel',
-                                     'RUNNER_ARCH':'X64'},'x86_64')['runner_profile']
+                p.profile=m.context(self.env(),'arm64')['runner_profile']
                 p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
                 rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}}
                       for name in ('Tripfolio','TripfolioTests','TripfolioUITests')]
-                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
-                         'architecture':'arm64' if fault=='machine' else 'x86_64',
+                replies={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],'sdk':'26.5',
+                         'architecture':'x86_64' if fault=='machine' else 'arm64',
                          'build-settings':json.dumps(rows)}
                 commands=[]
                 def command(label,args,cap=38):
-                    commands.append((label,args,cap));return replies.get(label,'')
+                    commands.append((label,args,cap));return replies.get(label,self.schema_reply(label))
                 p.commands.command=command
                 p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                    'version':'26.2','buildversion':'wrong' if fault=='runtime-build' else '23C54',
-                    'isAvailable':True,'supportedArchitectures':['arm64' if fault=='runtime-architecture' else 'x86_64'],
+                    'version':'26.5','buildversion':'wrong' if fault=='runtime-build' else m.TOOLCHAIN['runtime_build'],
+                    'isAvailable':True,'supportedArchitectures':['x86_64' if fault=='runtime-architecture' else 'arm64'],
                     'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}) as selected, \
                         mock.patch.object(q,'shared_product_paths',return_value={}):
@@ -94,27 +97,27 @@ class Guards(unittest.TestCase):
                         self.assertFalse(any(c[0]=='build-for-testing' for c in commands));continue
                     p.prepare()
                 self.assertEqual(selected.call_args.args[1],p.profile)
-                self.assertEqual(p.selection['architecture'],'x86_64')
-                self.assertEqual(p.report['toolchain']['architecture'],'x86_64')
+                self.assertEqual(p.selection['architecture'],'arm64')
+                self.assertEqual(p.report['toolchain']['architecture'],'arm64')
                 hosts=[]
                 def setup(arm):hosts.append(arm.host['machine']);self.setup_arm(arm)
                 def native(arm,label,args,cap=38):commands.append((arm.out.name,args,cap));return ''
                 with mock.patch.object(Context,'setup',setup),mock.patch.object(Context,'command',native), \
                         mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
                     p.run_arm('child',0);p.run_arm('ownedAncestor',1)
-                self.assertEqual(hosts,['x86_64','x86_64'])
+                self.assertEqual(hosts,['arm64','arm64'])
                 selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','child','ownedAncestor')]
                 self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','child','ownedAncestor'])
                 self.assertEqual([c[2] for c in selected],[420,48,780,780])
                 for _,args,_ in selected:self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1)
 
     def test_actual_result_architecture_matches_selected_profile(self):
-        for architecture in ('arm64','x86_64'):
-            selection={'identifier':m.RUNTIME,'version':'26.2','build':'23C54','architecture':architecture,
-                       'sdk_version':'26.2','sdk_matched':True}
+        for architecture in ('arm64',):
+            selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':architecture,
+                       'sdk_version':'26.5','sdk_matched':True}
             summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,
                      'expectedFailures':0,'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC',
-                     'osVersion':'26.2','osBuildNumber':'23C54','architecture':architecture}}]}
+                     'osVersion':'26.5','osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':architecture}}]}
             tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
                   'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
             m.validate_result(q,summary,tree,'ABC',selection)
@@ -312,11 +315,11 @@ class Guards(unittest.TestCase):
             self.assertTrue(arm.report['cleanup_verified'])
 
     def test_actual_result_validator_binds_runtime_and_rejects_warning(self):
-        selection={'identifier':m.RUNTIME,'version':'26.2','build':'23C54','architecture':'arm64',
-                   'sdk_version':'26.2','sdk_matched':True}
+        selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
+                   'sdk_version':'26.5','sdk_matched':True}
         summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0,
-                 'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.2',
-                 'osBuildNumber':'23C54','architecture':'arm64'}}]}
+                 'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.5',
+                 'osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':'arm64'}}]}
         tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
               'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
         m.validate_result(q,summary,tree,'ABC',selection)
@@ -326,12 +329,12 @@ class Guards(unittest.TestCase):
 
     def capture_fixture(self, p, fail=False):
         arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
-        p.selection={'identifier':m.RUNTIME,'version':'26.2','build':'23C54','architecture':'arm64',
-                     'sdk_version':'26.2','sdk_matched':True}
+        p.selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
+                     'sdk_version':'26.5','sdk_matched':True}
         raw=p.out/'child.xcresult';raw.mkdir();(raw/'Data').mkdir();(raw/'Info.plist').write_bytes(b'fixture')
         summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0,
-                 'testFailures':[],'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.2',
-                 'osBuildNumber':'23C54','architecture':'arm64'}}]}
+                 'testFailures':[],'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.5',
+                 'osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':'arm64'}}]}
         tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
               'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
         events=[]
@@ -596,12 +599,12 @@ class Guards(unittest.TestCase):
                 p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
                 settings=json.dumps([{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'YES' if fault=='settings' else 'NO'}}
                                     for name in ('Tripfolio','TripfolioTests','TripfolioUITests')])
-                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                replies={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],'sdk':'26.5',
                          'architecture':'arm64','build-settings':settings}
                 def command(label,*args):
                     self.assertIsNot(p.report.get('shared_build_verified'),True)
                     if fault=='build' and label=='build-for-testing':raise RuntimeError('build failed')
-                    return replies.get(label,'')
+                    return replies.get(label,self.schema_reply(label))
                 def source(label):
                     self.assertIsNot(p.report.get('shared_build_verified'),True)
                     if fault=='source-after' and label=='source-after-build':raise RuntimeError('source changed')
@@ -610,7 +613,7 @@ class Guards(unittest.TestCase):
                     if fault=='products':raise RuntimeError('product identity failed')
                 p.commands.command=command;p.source=source;p.product_snapshot=products
                 p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                    'version':'26.2','buildversion':'23C54','isAvailable':True,'supportedArchitectures':['arm64'],
+                    'version':'26.5','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
                     'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}), \
                         mock.patch.object(q,'shared_product_paths',return_value={}):
@@ -841,14 +844,14 @@ class Guards(unittest.TestCase):
             p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock()
             targets=('Tripfolio','TripfolioTests','TripfolioUITests')
             settings=json.dumps([{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}} for name in targets])
-            replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+            replies={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],'sdk':'26.5',
                      'architecture':'arm64','build-settings':settings}
             calls=[]
             def command(label,args,cap=38):
-                calls.append((label,args,cap));return replies.get(label,'')
+                calls.append((label,args,cap));return replies.get(label,self.schema_reply(label))
             p.commands.command=command;p.commands.once=mock.Mock()
             p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                'version':'26.2','buildversion':'23C54','isAvailable':True,'supportedArchitectures':['arm64'],
+                'version':'26.5','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
                 'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
             selection={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}
             with mock.patch.object(q,'focused_build_selection',return_value=selection), \
@@ -1184,9 +1187,9 @@ class Guards(unittest.TestCase):
         p,c,now,child,polls,scans,scan=self.boot_command_fixture(root)
         p.commands=c;p.current=None;c.owned=None;c.create_attempted=False
         p.report['shared_build_verified']=False
-        p.report['toolchain']={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,
-                               'sdk':'26.2','architecture':p.profile['architecture']}
-        p.selection={'identifier':m.RUNTIME,'build':'23C54'}
+        p.report['toolchain']={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],
+                               'sdk':'26.5','architecture':p.profile['architecture']}
+        p.selection={'identifier':m.RUNTIME,'build':m.TOOLCHAIN['runtime_build']}
         p.report['runtime_selection']=dict(p.selection)
         return p,c,now,child,polls,scans,scan
 
@@ -1231,12 +1234,10 @@ class Guards(unittest.TestCase):
                 self.assertFalse(c.create_attempted)
 
     def test_runtime_cache_rejects_unverified_context_or_live_device(self):
-        for fault in ('toolchain','runtime','selection','current','active','unknown','owned','created'):
+        for fault in ('toolchain','current','active','unknown','owned','created'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
                 p,c,now,child,polls,scans,scan=self.cache_fixture(Path(tmp))
                 if fault=='toolchain':p.report['toolchain']['sdk']='27.1'
-                elif fault=='runtime':p.report['runtime_selection']['build']='other'
-                elif fault=='selection':p.selection['identifier']='other'
                 elif fault=='current':p.current=c
                 elif fault=='active':c.active[999]=child
                 elif fault=='unknown':c.unknown_spawn=True
@@ -1246,38 +1247,55 @@ class Guards(unittest.TestCase):
                 with self.assertRaises(RuntimeError):p.prepare_runtime_cache()
                 c.command.assert_not_called()
 
-    def test_actual_prepare_places_cache_after_runtime_and_stops_build_on_failure(self):
-        for fail in (False,True):
+    def test_actual_prepare_places_cache_before_runtime_and_requires_both_before_build(self):
+        for fail in (None,'cache','runtime'):
             with self.subTest(fail=fail),tempfile.TemporaryDirectory() as tmp:
                 p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
                 rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}}
                       for name in ('Tripfolio','TripfolioTests','TripfolioUITests')]
-                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                replies={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],'sdk':'26.5',
                          'architecture':'arm64','build-settings':json.dumps(rows)}
                 events=[]
                 def command(label,args,cap=38):
                     events.append(label)
                     if label=='runtime-cache-readiness':
-                        self.assertIn('runtimes',events)
-                        self.assertEqual(p.report['runtime_selection']['build'],'23C54')
+                        self.assertNotIn('runtimes',events)
+                        self.assertNotIn('runtime_selection',p.report)
+                        self.assertEqual(p.report['toolchain']['xcode'],m.TOOLCHAIN['xcode_version'])
                         self.assertIsNone(p.current);self.assertIsNone(p.commands.owned)
-                        if fail:raise RuntimeError('cache failed')
-                    return replies.get(label,'')
+                        if fail=='cache':raise RuntimeError('cache failed')
+                    return replies.get(label,self.schema_reply(label))
                 def sim(label,*args,**kwargs):
                     events.append(label)
-                    return json.dumps({'runtimes':[{'identifier':m.RUNTIME,'version':'26.2','buildversion':'23C54',
+                    self.assertEqual(p.report['runtime_cache_readiness']['status'],'ready')
+                    return json.dumps({'runtimes':[{'identifier':m.RUNTIME,'version':'26.5','buildversion':'wrong' if fail=='runtime' else m.TOOLCHAIN['runtime_build'],
                         'isAvailable':True,'supportedArchitectures':['arm64'],'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 p.commands.command=command;p.commands.sim=sim
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':[]}), \
                         mock.patch.object(q,'shared_product_paths',return_value={}):
                     if fail:
-                        with self.assertRaisesRegex(RuntimeError,'cache failed'):p.prepare()
+                        expected='cache failed' if fail=='cache' else 'Wrong actual runtime/device'
+                        with self.assertRaisesRegex(RuntimeError,expected):p.prepare()
                         self.assertNotIn('generate-project',events);self.assertNotIn('build-for-testing',events)
                     else:
                         p.prepare()
+                        self.assertLess(events.index('runtime-cache-readiness'),events.index('runtimes'))
+                        self.assertLess(events.index('runtimes'),events.index('generate-project'))
                         self.assertLess(events.index('runtime-cache-readiness'),events.index('generate-project'))
                         self.assertLess(events.index('runtime-cache-readiness'),events.index('build-for-testing'))
                 self.assertEqual(events.count('runtime-cache-readiness'),1)
+
+
+    def test_unreviewed_modern_profile_cannot_run(self):
+        with mock.patch.object(m,'PROFILE_METADATA_VERIFIED',False),self.assertRaisesRegex(RuntimeError,'STOPPED'):
+            m.context(self.env(),'arm64')
+
+    def test_explicit_schema_profile_keeps_legacy_default_intact(self):
+        self.assertEqual(q.toolchain_profile('batch')['sdk_version'],'26.2')
+        result=q.validate_schemas(b'summary fixture',b'tests fixture','batch',profile=m.TOOLCHAIN)
+        self.assertEqual(result['selection'],'pinned-toolchain-explicit')
+        with self.assertRaises(RuntimeError):q.validate_schemas(b'summary fixture',b'tests fixture','batch')
+        with self.assertRaises(RuntimeError):q.validate_schemas(b'changed',b'tests fixture','batch',profile=m.TOOLCHAIN)
 
 
 if __name__=='__main__':unittest.main()

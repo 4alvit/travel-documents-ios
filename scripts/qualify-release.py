@@ -110,6 +110,7 @@ def focused_build_selection(mode, profile, files):
     identity = tuple(profile.get(key) for key in ("name", "runner", "runner_architecture", "architecture"))
     require(mode == "batch" and identity in (
         ("default", "macos-15", "ARM64", "arm64"),
+        ("diagnostic-26-5", "macos-26", "ARM64", "arm64"),
         ("intel-batch", "macos-15-intel", "X64", "x86_64")),
         "Focused build requires a verified batch profile")
     require(isinstance(files, dict), "Focused build requires captured source files")
@@ -369,15 +370,16 @@ def toolchain_profile(mode):
             "xcresulttool_version": None, "schema_documents": dict(SCHEMA_DOCUMENTS)}
 
 
-def validate_schemas(summary, tests, mode="biometrics"):
+def validate_schemas(summary, tests, mode="biometrics", *, profile=None):
     """Recognize exact pinned-toolchain docs without loosening any JSON parser."""
-    documents = toolchain_profile(mode)["schema_documents"]
+    require(mode in MODES, "Select exactly batch or biometrics")
+    documents = (toolchain_profile(mode) if profile is None else profile)["schema_documents"]
     require(documents is not None, "Pinned batch producer does not support schema documentation")
     for kind, raw in (("summary", summary), ("tests", tests)):
         require(isinstance(raw, bytes) and 0 < len(raw) <= MIB, "Invalid schema documentation bytes")
         require(hashlib.sha256(raw).hexdigest() == documents[kind],
                 "Unrecognized " + kind + " schema documentation for pinned Xcode")
-    return {"selection": "pinned-toolchain-default", "documentation_verified": True,
+    return {"selection": "pinned-toolchain-default" if profile is None else "pinned-toolchain-explicit", "documentation_verified": True,
             "runtime_evidence": "Independent pinned-reader review must provide explicit warnings, failures, counts, cases and device identity"}
 
 
@@ -425,8 +427,9 @@ def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
                 for k in ("match", "nomatch")), "Full biometric sequence missing")
 
 
-def validate_runtime_result(mode, selection, result):
-    profile = toolchain_profile(mode)
+def validate_runtime_result(mode, selection, result, *, profile=None):
+    require(mode in MODES, "Select exactly batch or biometrics")
+    profile = toolchain_profile(mode) if profile is None else profile
     require(isinstance(selection, dict) and set(selection) == {
         "identifier", "version", "build", "architecture", "sdk_version", "sdk_matched"
     }, "Missing runtime selection evidence")
