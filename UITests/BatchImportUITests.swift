@@ -1665,6 +1665,49 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
+    private static func diagnosticPurchaseAnchorMode(_ environment: [String: String]) throws -> String? {
+        let enabled = environment["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL"]
+        let mode = environment["TRIPDOCKET_PURCHASE_ANCHOR_MODE"]
+        guard enabled != nil || mode != nil else { return nil }
+        guard enabled == "1", let mode, ["child", "ownedAncestor"].contains(mode) else {
+            throw BatchTestFailure(message: "Invalid explicit purchase-anchor diagnostic configuration")
+        }
+        return mode
+    }
+
+    func testDiagnosticPurchasePresentationAnchor() async throws {
+        guard let mode = try Self.diagnosticPurchaseAnchorMode(ProcessInfo.processInfo.environment) else {
+            throw XCTSkip("Opt in with the explicit purchase-anchor diagnostic configuration")
+        }
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        app.terminate()
+        let session = try await localStoreSession()
+        defer {
+            app.terminate()
+            session.clearTransactions()
+            session.resetToDefaultState()
+        }
+        let selection = XCTAttachment(string: "purchase-anchor diagnosticOnly=true mode=\(mode)")
+        selection.name = "Explicit purchase anchor diagnostic selection"
+        selection.lifetime = .keepAlways
+        add(selection)
+        app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo",
+                               "--ui-testing-purchase-diagnostics", "--ui-testing-purchase-anchor-control",
+                               "--ui-testing-purchase-anchor=\(mode)",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        try await openTrip(app)
+        try await openBatchEntry(app)
+        try await wait("Free batch entry must show Pro, not a file picker", app: app) {
+            app.navigationBars["TripDocket Pro"].exists && !app.buttons["batch.chooseFiles"].exists
+        }
+        try await purchaseOnce(app, springboard: springboard, session: session)
+        capture(app, "Diagnostic purchase anchor \(mode) verified; not release qualification")
+    }
+
     private func localStoreSession() async throws -> SKTestSession {
         let configuration = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "Tripfolio", withExtension: "storekit"))
         let session = try SKTestSession(contentsOf: configuration)
