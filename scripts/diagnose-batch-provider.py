@@ -21,8 +21,7 @@ COMMAND_SECONDS = 30
 STOP_SECONDS = 8
 FINALIZER_SECONDS = 120
 PREDICATE = (
-    'process == "fileproviderd" OR process CONTAINS[c] "FileProvider" OR '
-    'process CONTAINS[c] "DocumentManager" OR subsystem CONTAINS[c] "fileprovider" OR '
+    'subsystem CONTAINS[c] "fileprovider" OR '
     'subsystem CONTAINS[c] "documentmanager" OR senderImagePath CONTAINS[c] "FileProvider" OR '
     'senderImagePath CONTAINS[c] "DocumentManager"'
 )
@@ -74,7 +73,7 @@ class ProviderLogQualification(BaseQualification):
         diagnostic = self.report.setdefault("diagnostic_provider_log", {
             "enabled": True, "release_acceptance": False, "status": "pending",
             "scope": "Persisted logs only; unchanged normal batch tests and acceptance predicates",
-            "window": "last 15m at target command execution; retained info/debug only",
+            "window": "last 5m at target command execution; retained info/debug only",
             "helper_sha256": dict(PINS),
         })
         if self.report.get("status") == "captured_pending_review":
@@ -142,7 +141,7 @@ class ProviderLogQualification(BaseQualification):
         diagnostic["target_uuid"] = self.owned
         diagnostic["log_start_unix_seconds"] = time.time()
         self.command("provider-log-show", ["xcrun", "simctl", "spawn", self.owned, "log", "show",
-                     "--last", "15m", "--style", "ndjson", "--info", "--debug",
+                     "--last", "5m", "--style", "ndjson", "--info", "--debug",
                      "--predicate", PREDICATE], COMMAND_SECONDS)
         diagnostic["log_finish_unix_seconds"] = time.time()
         record = self.commands.report["commands"][-1]

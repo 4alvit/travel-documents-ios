@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import signal
 import tempfile
 from types import SimpleNamespace
@@ -102,7 +103,7 @@ class Guards(unittest.TestCase):
         calls = self.diagnostic_calls()
         self.assertEqual([row[0] for row in calls], ["provider-log-inventory", "provider-log-show"])
         self.assertEqual(calls[0][1], ["xcrun", "simctl", "list", "devices", "--json"])
-        self.assertEqual(calls[1][1], ["xcrun", "simctl", "spawn", OWNED, "log", "show", "--last", "15m",
+        self.assertEqual(calls[1][1], ["xcrun", "simctl", "spawn", OWNED, "log", "show", "--last", "5m",
             "--style", "ndjson", "--info", "--debug", "--predicate", d.PREDICATE])
         self.assertTrue(all(row[2:] == (38, False, clocks[1]) for row in calls))
         self.assertEqual([row[0] for row in self.calls[2:]], ["before-cleanup", "shutdown", "delete", "after-cleanup"])
@@ -111,7 +112,33 @@ class Guards(unittest.TestCase):
         self.assertTrue(run.report["diagnostic_provider_log"]["full_raw_baseline_verified"])
         self.assertEqual(run.report["diagnostic_provider_log"]["stdout_bytes"], len(self.log_stdout.encode()))
         self.assertFalse(run.report["diagnostic_provider_log"]["empty_stdout"])
+        self.assertEqual(run.report["diagnostic_provider_log"]["window"],
+                         "last 5m at target command execution; retained info/debug only")
         self.assertEqual((q.processes.PER_LOG, q.processes.ALL_LOG), (16 * 1024**2, 64 * 1024**2))
+
+    def test_predicate_keeps_provider_metadata_without_process_only_traffic(self):
+        clauses = []
+        for clause in d.PREDICATE.split(" OR "):
+            match = re.fullmatch(r'(subsystem|senderImagePath) CONTAINS\[c\] "([^"]+)"', clause)
+            self.assertIsNotNone(match, clause)
+            clauses.append(match.groups())
+        self.assertEqual(clauses, [("subsystem", "fileprovider"), ("subsystem", "documentmanager"),
+                                   ("senderImagePath", "FileProvider"), ("senderImagePath", "DocumentManager")])
+        cases = [
+            ({"subsystem": "com.apple.FileProvider"}, True),
+            ({"subsystem": "com.apple.DocumentManager"}, True),
+            ({"subsystem": "com.apple.Foundation", "senderImagePath": "/Frameworks/FILEPROVIDER.framework/FileProvider"}, True),
+            ({"subsystem": "com.apple.Foundation", "senderImagePath": "/Frameworks/DocumentManager.framework/DocumentManager"}, True),
+            ({"process": "fileproviderd", "subsystem": "com.apple.apsd",
+              "senderImagePath": "/PrivateFrameworks/ApplePushService.framework/ApplePushService"}, False),
+            ({"process": "com.apple.DocumentManager.Service", "subsystem": "com.apple.UIKit",
+              "senderImagePath": "/Frameworks/UIKitCore.framework/UIKitCore"}, False),
+            ({"subsystem": "com.apple.unrelated"}, False),
+        ]
+        for row, expected in cases:
+            with self.subTest(row=row):
+                self.assertEqual(any(value.casefold() in row.get(field, "").casefold()
+                                     for field, value in clauses), expected)
 
     def test_empty_retained_log_is_explicitly_incomplete_and_still_cleans_up(self):
         run = self.make_run()
