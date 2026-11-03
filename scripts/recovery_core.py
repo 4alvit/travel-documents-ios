@@ -18,7 +18,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = '717e17a3ba6e5f1e4828fb374fad7a073ad251a715b38edd96a5805dff1e28a9'
+HELPER_SHA = '5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
