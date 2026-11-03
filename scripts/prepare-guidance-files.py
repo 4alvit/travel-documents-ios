@@ -22,17 +22,21 @@ spec.loader.exec_module(selector)
 require = process.require
 FILES = "com.apple.DocumentsApp"
 GROUP = "group.com.apple.FileProvider.LocalStorage"
-WORK, STOP, WRITE = 900, 30, 10
-PREPARE_COMMAND_SECONDS = 780
+WORK, STOP, WRITE = 1080, 30, 10
+PREPARE_COMMAND_SECONDS = 960
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
 # retains its measured 120s cap; ordinary commands get 30/60s. The one native
 # preparation invocation owns startup of the exact selected device. Every
 # command includes the shared primitive's 8s stop reserve. This phone command
-# includes build and runner startup, measured at about 518s before the case.
-# Its 780s cap fits the unchanged 900s work budget and 180s case allowance.
-# Postprocessing shares the remaining work budget; its completion is not
-# guaranteed. Recovery retains 600s; batch qualification separately allows 780s.
+# includes build and runner startup: run 41577208390 used about 711s before
+# the case and exhausted the old 780s cap after only 61s of the unchanged
+# 180s case allowance. The 960s command cap includes its 8s stop reserve;
+# all postprocessing still shares the fixed 1080s work deadline. This is a
+# bounded combined allowance, not a separately enforced launch deadline.
+# The 45m integration / 65m job budget preserves time for the measured 24m
+# guidance invocation plus cleanup and evidence. Completion is not guaranteed.
+# Recovery retains 600s; batch qualification separately allows 780s.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 

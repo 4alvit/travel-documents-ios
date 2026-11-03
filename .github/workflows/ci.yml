@@ -112,9 +112,10 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: macos-15
     # Run 41440392190 completed all phone cases in 37m56s but exceeded the old 35m job cap.
-    # 60m = checkout2 + toolchain3 + integration40 + cancellation5
+    # Cold startup in run 41577208390 consumed about 711s before its preparation case.
+    # 65m = checkout2 + toolchain3 + integration45 + cancellation5
     #       + raw evidence3 + optional extraction3/upload2 + finalization2.
-    timeout-minutes: 60
+    timeout-minutes: 65
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
@@ -133,7 +134,7 @@ jobs:
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        timeout-minutes: 40
+        timeout-minutes: 45
         # Provider initialization is explicit; this is not cold Files first-use coverage.
         run: bash scripts/test-simulator.sh --require-sdk-match --prepare-files --cohort ui-guidance
       # Preserve raw results before optional failure extraction consumes its budget.
