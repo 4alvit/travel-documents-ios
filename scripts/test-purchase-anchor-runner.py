@@ -1063,4 +1063,121 @@ class Guards(unittest.TestCase):
 
 
 
+    def query_command_fixture(self,root,label='pretest-installed-Tripfolio'):
+        p,arm,now,child,polls,scans,scan=self.install_command_fixture(root)
+        arm.report['commands'].append({'id':'install-aut',
+            'argv':['/usr/bin/xcrun','simctl','install','ABC',str(p.product_paths['Tripfolio'])],
+            'returncode':0,'outcome':'completed','finish':0,'work_deadline':112,
+            'stop':{'group_absent':True,'leader_reaped':True},
+            'install_accounting':{'full_pre_verified':True,'full_post_verified':True,
+                                  'post_status':'verified','post_elapsed':0}})
+        if label!='pretest-installed-Tripfolio':
+            arm.report['pretest_installed_aut_verified']=True
+            arm.report['commands'].append({'id':'selected-tests','finish':0,
+                'stop':{'group_absent':True,'leader_reaped':True}})
+        return p,arm,now,child,polls,scans,scan
+
+    def test_owned_container_queries_preserve_boundaries_and_thirty_second_budget(self):
+        for label,identifier in (('pretest-installed-Tripfolio',q.APP_ID),
+                                 ('installed-Tripfolio',q.APP_ID),
+                                 ('installed-TripfolioUITestsRunner',q.RUNNER_ID)):
+            with self.subTest(label=label),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.query_command_fixture(Path(tmp),label)
+                arm.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+4)
+                spawned=[];arm.ops.spawn=lambda args:(spawned.append(args) or child)
+                with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    self.assertEqual(arm.sim(label,'get_app_container','ABC',identifier,'app'),'')
+                row=arm.report['commands'][-1];proof=row['query_accounting']
+                self.assertEqual([s[0] for s in scans],['post','pre','post'])
+                self.assertGreaterEqual(proof['interim_checks'],3)
+                self.assertTrue(proof['full_pre_verified']);self.assertTrue(proof['full_post_verified'])
+                self.assertEqual(row['requested_cap_seconds'],38)
+                self.assertAlmostEqual(row['work_deadline']-row['start'],30,places=4)
+                self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+                self.assertEqual(len(spawned),1);self.assertFalse(arm.active)
+                for _,args,kwargs in scans[-2:]:
+                    self.assertLessEqual(args[3],p.started+row['work_deadline'])
+                    self.assertFalse(kwargs['allow_products_restart']);self.assertFalse(kwargs['allow_xcresult_restart'])
+
+    def test_container_query_accounting_rejects_changed_identity_or_unsettled_prerequisites(self):
+        for case in ('label','bundle','device','container','unverified-build','other-context','unknown',
+                     'foreign-active','coordinator-active','cleaning','missing-install','duplicate-install',
+                     'failed-install','wrong-installed-device','missing-pre','missing-post','late-post',
+                     'unclosed-install','unreaped-install','pretest-after-tests','posttest-without-tests',
+                     'posttest-active-tests','posttest-without-pretest-proof'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as tmp:
+                label='installed-Tripfolio' if case.startswith('posttest-') else 'pretest-installed-Tripfolio'
+                p,arm,now,child,polls,scans,scan=self.query_command_fixture(Path(tmp),label)
+                args=['/usr/bin/xcrun','simctl','get_app_container','ABC',q.APP_ID,'app']
+                row=arm.report['commands'][1]
+                if case=='label':label='arbitrary-query'
+                elif case=='bundle':args[4]='com.other.app'
+                elif case=='device':args[3]='OTHER'
+                elif case=='container':args[5]='data'
+                elif case=='unverified-build':p.report['shared_build_verified']=False
+                elif case=='other-context':p.current=None
+                elif case=='unknown':arm.unknown_spawn=True
+                elif case=='foreign-active':arm.active[999]=SimpleNamespace(pid=999)
+                elif case=='coordinator-active':p.commands.active[999]=SimpleNamespace(pid=999)
+                elif case=='cleaning':arm.cleaning=True
+                elif case=='missing-install':arm.report['commands'].pop(1)
+                elif case=='duplicate-install':arm.report['commands'].append(dict(row))
+                elif case=='failed-install':row['returncode']=1
+                elif case=='wrong-installed-device':row['argv'][3]='OTHER'
+                elif case=='missing-pre':row['install_accounting']['full_pre_verified']=False
+                elif case=='missing-post':row['install_accounting']['full_post_verified']=False
+                elif case=='late-post':row['install_accounting']['post_elapsed']=113
+                elif case=='unclosed-install':row['stop']['group_absent']=False
+                elif case=='unreaped-install':row['stop']['leader_reaped']=False
+                elif case=='pretest-after-tests':arm.report['commands'].append({'id':'selected-tests'})
+                elif case=='posttest-without-tests':arm.report['commands'].pop()
+                elif case=='posttest-active-tests':arm.report['commands'][-1]['stop']['group_absent']=False
+                elif case=='posttest-without-pretest-proof':arm.report['pretest_installed_aut_verified']=False
+                self.assertFalse(arm.query_boundary_eligible(label,args))
+
+    def test_container_query_postcheck_failure_still_blocks_content_verification(self):
+        for case in ('scan-error','deadline'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.query_command_fixture(Path(tmp))
+                def post_failure(*args,**kwargs):
+                    row=arm.report['commands'][-1];result=scan(*args,**kwargs)
+                    if row['id']=='pretest-installed-Tripfolio' and 'finish' in row:
+                        if case=='scan-error':raise RuntimeError('synthetic full post failure')
+                        now[0]=p.started+row['work_deadline']+0.01
+                    return result
+                with mock.patch.object(core,'live_sizes',side_effect=post_failure), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):
+                        arm.sim('pretest-installed-Tripfolio','get_app_container','ABC',q.APP_ID,'app')
+                row=arm.report['commands'][-1]
+                self.assertEqual(row['returncode'],0)
+                self.assertFalse(row['query_accounting']['full_post_verified'])
+                self.assertEqual(row['query_accounting']['post_status'],'failed')
+                self.assertFalse(arm.active);self.assertIsNone(arm._boot_boundary)
+                self.assertNotIn('pretest_installed_aut_verified',arm.report)
+
+    def test_container_query_timeout_keeps_one_process_and_parent_deadline(self):
+        for remaining,expected in ((None,30),(20,12)):
+            with self.subTest(remaining=remaining),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.query_command_fixture(Path(tmp))
+                if remaining is not None:arm.limit=now[0]+remaining
+                spawned=[];sent=[]
+                child.poll=lambda:child.returncode
+                arm.ops.spawn=lambda args:(spawned.append(args) or child)
+                arm.ops.absent=lambda proc:proc.returncode is not None
+                def send(proc,sig):sent.append(int(sig));proc.returncode=-int(sig);return 'syscall_returned'
+                arm.ops.send=send;arm.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+1)
+                with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaisesRegex(RuntimeError,'pretest-installed-Tripfolio failed'):
+                        arm.sim('pretest-installed-Tripfolio','get_app_container','ABC',q.APP_ID,'app')
+                row=arm.report['commands'][-1]
+                self.assertAlmostEqual(row['work_deadline']-row['start'],expected,places=4)
+                self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                self.assertFalse(row['query_accounting']['full_post_verified'])
+                self.assertEqual(len(spawned),1);self.assertEqual(sent,[15]);self.assertFalse(arm.active)
+                self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+
+
 if __name__=='__main__':unittest.main()

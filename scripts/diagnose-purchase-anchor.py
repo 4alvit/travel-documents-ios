@@ -160,17 +160,22 @@ def make_runner(q, core):
             boundary=getattr(self,'_boot_boundary',None)
             post=bool(boundary and boundary.get('post'))
             kind=boundary.get('kind','boot') if boundary else 'boot'
-            proof_key='boot_accounting' if kind=='boot' else 'install_accounting'
-            phase='Boot' if kind=='boot' else 'AUT install'
+            proof_key={'boot':'boot_accounting','install':'install_accounting','query':'query_accounting'}[kind]
+            phase={'boot':'Boot','install':'AUT install','query':'Installed-container query'}[kind]
             postbuild_install=(unfinished and boundary is not None and kind=='install'
                 and ((child is not None and child.pid==pending.get('pgid'))
                      or ('pgid' not in pending and not self.active and not self.unknown_spawn))
                 and self.install_boundary_eligible(pending['id'],args,child))
-            bounded_phase=postbuild_boot or postbuild_install
+            postbuild_query=(unfinished and boundary is not None and kind=='query'
+                and ((child is not None and child.pid==pending.get('pgid'))
+                     or ('pgid' not in pending and not self.active and not self.unknown_spawn))
+                and self.query_boundary_eligible(pending['id'],args,child))
+            bounded_phase=postbuild_boot or postbuild_install or postbuild_query
             if boundary and boundary.get('record') is not None:
                 require(pending is boundary['record'],f'{phase} accounting record changed')
                 settled=((self.boot_boundary_eligible(pending['id'],pending['argv']) if kind=='boot'
-                          else self.install_boundary_eligible(pending['id'],pending['argv']))
+                          else self.install_boundary_eligible(pending['id'],pending['argv']) if kind=='install'
+                          else self.query_boundary_eligible(pending['id'],pending['argv']))
                          and pending.get('returncode')==0 and 'error' not in pending
                          and pending.get('stop',{}).get('group_absent') is True
                          and pending.get('stop',{}).get('leader_reaped') is True)
@@ -182,7 +187,7 @@ def make_runner(q, core):
                     require(bounded_phase or settled,f'{phase} accounting ownership or build proof changed')
             if boundary and boundary.get('record') is not None and boundary['record'] is pending and not post:
                 # Deliberate phase policy: unexpected subtree writes/peak size are
-                # checked at full boundaries, not recursively on every exact boot/install pump.
+                # checked at full boundaries, not recursively on every exact boot/install/query pump.
                 deadline=min(self.limit,self.t0+pending['work_deadline'])
                 self.timecheck();require(self.ops.now()<deadline,f'{phase} phase deadline exceeded')
                 require(core.identity_of(self.pair.out)==self.pair.output_id,f'{phase} output root changed')
@@ -269,15 +274,52 @@ def make_runner(q, core):
                 and proof.get('post_status')=='verified'
                 and row['finish']<=proof.get('post_elapsed',-1)<=row.get('work_deadline',-1))
 
+        def query_boundary_eligible(self,label,argv,child=None):
+            # These exact read-only queries write only their bounded command logs.
+            # Keep full shared-output checks at both boundaries, without repeatedly
+            # walking the settled build while CoreSimulator answers the query.
+            identifiers={'pretest-installed-Tripfolio':q.APP_ID,
+                         'installed-Tripfolio':q.APP_ID,
+                         'installed-TripfolioUITestsRunner':q.RUNNER_ID}
+            identifier=identifiers.get(label)
+            coordinator=getattr(self.pair,'commands',None)
+            ownership=(not self.active if child is None else
+                       len(self.active)==1 and self.active.get(child.pid) is child)
+            if not (identifier is not None and not self.cleaning and self.owned is not None
+                and argv==['/usr/bin/xcrun','simctl','get_app_container',self.owned,identifier,'app']
+                and self.pair.current is self and self.pair.report.get('shared_build_verified') is True
+                and ownership and not self.unknown_spawn and coordinator is not None
+                and not coordinator.active and not coordinator.unknown_spawn):
+                return False
+            installs=[row for row in self.report['commands'] if row['id']=='install-aut']
+            if len(installs)!=1: return False
+            row=installs[0];proof=row.get('install_accounting',{})
+            product=(getattr(self.pair,'product_paths',None) or {}).get('Tripfolio')
+            if not (product is not None
+                and row.get('argv')==['/usr/bin/xcrun','simctl','install',self.owned,str(product)]
+                and row.get('returncode')==0 and row.get('outcome')=='completed' and 'error' not in row
+                and 'finish' in row and row.get('stop',{}).get('group_absent') is True
+                and row.get('stop',{}).get('leader_reaped') is True
+                and proof.get('full_pre_verified') is True and proof.get('full_post_verified') is True
+                and proof.get('post_status')=='verified'
+                and row['finish']<=proof.get('post_elapsed',-1)<=row.get('work_deadline',-1)):
+                return False
+            if label=='pretest-installed-Tripfolio':
+                return not any(row['id']=='selected-tests' for row in self.report['commands'])
+            tests=[row for row in self.report['commands'] if row['id']=='selected-tests']
+            return (self.report.get('pretest_installed_aut_verified') is True and len(tests)==1
+                and 'finish' in tests[0] and tests[0].get('stop',{}).get('group_absent') is True
+                and tests[0].get('stop',{}).get('leader_reaped') is True)
+
         def command(self, label, argv, cap=38):
             argv=[str(x) for x in argv]
-            kind='boot' if self.boot_boundary_eligible(label,argv) else 'install' if self.install_boundary_eligible(label,argv) else None
+            kind='boot' if self.boot_boundary_eligible(label,argv) else 'install' if self.install_boundary_eligible(label,argv) else 'query' if self.query_boundary_eligible(label,argv) else None
             if kind is None:
                 return super().command(label,argv,cap)
             require(getattr(self,'_boot_boundary',None) is None,'Nested boot accounting')
             boundary={'record':None,'post':False,'kind':kind};self._boot_boundary=boundary
-            proof_key='boot_accounting' if kind=='boot' else 'install_accounting'
-            phase='Boot' if kind=='boot' else 'AUT install'
+            proof_key={'boot':'boot_accounting','install':'install_accounting','query':'query_accounting'}[kind]
+            phase={'boot':'Boot','install':'AUT install','query':'Installed-container query'}[kind]
             try:
                 result=super().command(label,argv,cap)
                 require(boundary['record'] is not None,f'{phase} full precheck missing')
