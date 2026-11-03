@@ -262,6 +262,7 @@ def bounded_read(root, relative, maximum, check):
     require(1 <= len(parts) <= 8 and all(p and p not in (".", "..") and "\\" not in p
                                       for p in parts), "Invalid snapshot relative path")
     opened, pins = [], []
+    primary_error = None
     try:
         check()
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -297,8 +298,38 @@ def bounded_read(root, relative, maximum, check):
         require((root.lstat().st_dev, root.lstat().st_ino) == (root_stat.st_dev, root_stat.st_ino),
                 "Snapshot root identity changed")
         return b"".join(chunks)
+    except BaseException as error:
+        # Preserve the original failure, including an abort, while still
+        # attempting every owned close below.
+        primary_error = error
+        raise
     finally:
-        for fd in reversed(opened): os.close(fd)
+        close_errors = []
+        for fd in reversed(opened):
+            try:
+                os.close(fd)
+            except OSError as error:
+                # A failed close has ambiguous ownership; never retry its FD.
+                close_errors.append(error)
+        if close_errors:
+            note = "Snapshot descriptor cleanup failed: " + ", ".join(
+                "errno=" + str(error.errno) for error in close_errors)
+            if primary_error is not None:
+                primary_error.add_note(note)
+            else:
+                raise RuntimeError(note) from close_errors[0]
+
+
+def snapshot_error_details(error, prefix=""):
+    """Persist only our bounded errno-only cleanup notes, never arbitrary notes."""
+    details = [prefix + repr(error)]
+    notes = getattr(error, "__notes__", None)
+    for note in notes[-1:] if type(notes) is list else ():
+        if type(note) is str and len(note) <= 256 and re.fullmatch(
+                r"Snapshot descriptor cleanup failed: errno=(?:[0-9]{1,10}|None)"
+                r"(?:, errno=(?:[0-9]{1,10}|None)){0,8}", note):
+            details.append(note)
+    return details
 
 
 # Exact producer documentation captured from Xcode 26.2 build 17C52.
@@ -1625,10 +1656,10 @@ class Qualification:
             self.prepare(); self.run_driver()
             require(self.source("source-after") == self.before, "Source changed during qualification")
         except BaseException as error:
-            self.report["errors"].append(repr(error))
+            self.report["errors"].extend(snapshot_error_details(error))
         finally:
             try: self.cleanup()
-            except BaseException as error: self.report["errors"].append("Cleanup: " + repr(error))
+            except BaseException as error: self.report["errors"].extend(snapshot_error_details(error, "Cleanup: "))
             capture_ready = (not self.report["errors"] and self.report.get("driver_capture_verified")
                              and self.report.get("products_verified") and self.report["cleanup_verified"]
                              and (self.mode != "batch" or (self.report.get("batch_snapshot", {}).get("verified")
@@ -1637,7 +1668,7 @@ class Qualification:
                                   and self.report.get("combined_batch", {}).get("result_bundles") == 2)))
             if capture_ready:
                 try: self.capture_original_result()
-                except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))
+                except BaseException as error: self.report["errors"].extend(snapshot_error_details(error, "Original result capture: "))
             self.report["status"] = ("captured_pending_review" if capture_ready and not self.report["errors"]
                                      and self.report.get("original_xcresult") else "failed")
             if self.native_reopen_control and self.report["status"] == "captured_pending_review":
