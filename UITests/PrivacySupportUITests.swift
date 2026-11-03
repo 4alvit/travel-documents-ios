@@ -28,7 +28,10 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        executionTimeAllowance = russian && maximumType ? 480 : 360
+        // The complete Russian maximum-type flow reached Trips at 493.61s in
+        // main CI. Keep every action/readability check and allow finalization.
+        // Dedicated iPad runs retain their separate 480s command-line ceiling.
+        executionTimeAllowance = russian && maximumType ? 600 : 360
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()

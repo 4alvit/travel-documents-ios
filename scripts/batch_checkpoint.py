@@ -202,7 +202,7 @@ def monitor(process, path, deadline, session, token, callback, *, started, now=t
                 return {"returncode": final_code,
                         "seed_observed_seconds": seed_elapsed, "seed_envelope_seconds": 300,
                         "seed_started_monotonic": started,
-                        "seed_envelope_boundary": "second invocation start to observed seed PASS"}
+                        "seed_envelope_boundary": "combined invocation start to observed seed PASS"}
             sleep(min(0.1, max(0.0, deadline-now())))
     finally:
         os.close(fd)

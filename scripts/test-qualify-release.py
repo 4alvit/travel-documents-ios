@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline guards for the explicit hosted qualification adapter."""
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
@@ -55,7 +56,11 @@ class Guards(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
 
     def run_object(self, mode="batch"):
-        return q.Qualification(self.root, mode, ENV)
+        run = q.Qualification(self.root, mode, ENV)
+        # Keep the legacy root-path guard fixtures explicit. The normal
+        # batch constructor and folder route are tested in test-native-folder-control.py.
+        run.native_folder_control = False
+        return run
 
     def fixture(self, mode="batch"):
         cases = list(batch.CASES) if mode == "batch" else ["Privacy/case" + str(n) + "()" for n in range(6)]
@@ -556,7 +561,7 @@ class Guards(unittest.TestCase):
         cases=list(q.checkpoint.CASES);result.update(totalTestCount=2,passedTests=2)
         tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
         summary["execution_order"]=copy.deepcopy(COMBINED_ORDER)
-        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"second invocation start to observed seed PASS"}
+        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"combined invocation start to observed seed PASS"}
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
         if missing_warnings:result.pop("runtimeWarnings")
@@ -811,7 +816,7 @@ class Guards(unittest.TestCase):
         run.report["native_root"]={"verified_empty_before_seed":True}
         run.report["shared_build"]={"observations":{"before_seed":{}}}
         remaining=[1200.0]
-        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True),
+        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True,native_root=True,native_folder=False),
             qualified_build=run.root/"build/shared",remaining=lambda:remaining[0])
         original=q.recovery.tree_manifest
         def traversing(path,check,**kwargs):
@@ -1181,6 +1186,95 @@ class Guards(unittest.TestCase):
             with self.subTest(mutation=mutation),patch.object(Path,"home",return_value=home):
                 with self.assertRaisesRegex(RuntimeError,"limit"):run.batch_snapshot(driver)
                 self.assertNotIn("batch_snapshot",run.report)
+
+    def bounded_read_descriptors(self, close_failures=(), body_failure=None):
+        directory = self.root / "bounded-cleanup"
+        (directory / "nested").mkdir(parents=True)
+        (directory / "nested/file").write_bytes(b"synthetic")
+        opened, attempted = [], []
+        real_open, real_close = os.open, os.close
+        def tracked_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        def tracked_close(fd):
+            attempted.append(fd)
+            if len(attempted) in close_failures:
+                raise OSError(errno.EIO, "synthetic close failure")
+            real_close(fd)
+        try:
+            with patch.object(q.os, "open", side_effect=tracked_open), \
+                 patch.object(q.os, "close", side_effect=tracked_close):
+                if body_failure is None:
+                    result = q.bounded_read(directory, "nested/file", 32, lambda: None)
+                else:
+                    with patch.object(q.os, "read", side_effect=body_failure):
+                        result = q.bounded_read(directory, "nested/file", 32, lambda: None)
+            return result
+        finally:
+            try:
+                self.assertEqual(len(opened), 3)
+                self.assertEqual(attempted, list(reversed(opened)))
+                for position, fd in enumerate(attempted, 1):
+                    if position not in close_failures:
+                        with self.assertRaises(OSError) as closed:
+                            os.fstat(fd)
+                        self.assertEqual(closed.exception.errno, errno.EBADF)
+            finally:
+                # Only the fixture closes descriptors deliberately left open by
+                # its injected EIO; production must not retry an ambiguous close.
+                for fd in opened:
+                    try: real_close(fd)
+                    except OSError as error:
+                        if error.errno != errno.EBADF: raise
+
+    def test_bounded_read_closes_every_descriptor_on_success(self):
+        self.assertEqual(self.bounded_read_descriptors(), b"synthetic")
+
+    def test_bounded_read_attempts_remaining_closes_after_one_error(self):
+        with self.assertRaisesRegex(RuntimeError, "Snapshot descriptor cleanup failed") as failed:
+            self.bounded_read_descriptors(close_failures=(1,))
+        self.assertEqual(failed.exception.__cause__.errno, errno.EIO)
+
+    def test_bounded_read_records_multiple_close_errors_without_retry(self):
+        with self.assertRaisesRegex(RuntimeError, "errno=5, errno=5"):
+            self.bounded_read_descriptors(close_failures=(1, 2))
+
+    def test_bounded_read_preserves_primary_error_and_records_cleanup_error(self):
+        primary = RuntimeError("synthetic read failure")
+        with self.assertRaises(RuntimeError) as failed:
+            self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        self.assertIs(failed.exception, primary)
+        self.assertEqual(primary.__notes__, ["Snapshot descriptor cleanup failed: errno=5"])
+
+    def test_bounded_read_preserves_abort_while_attempting_remaining_closes(self):
+        primary = KeyboardInterrupt("synthetic abort")
+        with self.assertRaises(KeyboardInterrupt) as failed:
+            self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        self.assertIs(failed.exception, primary)
+        self.assertEqual(primary.__notes__, ["Snapshot descriptor cleanup failed: errno=5"])
+
+    def test_bounded_read_failure_receipt_retains_primary_and_cleanup_note(self):
+        run = self.run_object()
+        primary = RuntimeError("synthetic read failure")
+        run.prepare = lambda: self.bounded_read_descriptors(close_failures=(1,), body_failure=primary)
+        run.cleanup = lambda: run.report.update(cleanup_verified=True)
+        self.assertEqual(run.execute(), 1)
+        self.assertEqual(run.report["status"], "failed")
+        self.assertEqual(run.report["errors"], [repr(primary), "Snapshot descriptor cleanup failed: errno=5"])
+        self.assertEqual(json.loads((run.out / "receipt.json").read_text())["errors"], run.report["errors"])
+
+    def test_snapshot_error_details_only_copies_one_bounded_errno_note(self):
+        error = RuntimeError("synthetic failure")
+        for note in ("private context must not be copied", "x" * 4096,
+                     "Snapshot descriptor cleanup failed: errno=5 /private/path",
+                     "Snapshot descriptor cleanup failed: errno=5\nenvironment=value",
+                     "Snapshot descriptor cleanup failed: " + ", ".join(["errno=5"] * 10)):
+            error.__notes__ = [note]
+            self.assertEqual(q.snapshot_error_details(error), [repr(error)])
+        own_note = "Snapshot descriptor cleanup failed: errno=5, errno=None"
+        error.__notes__ = ["unrelated context"] * 100 + [own_note]
+        self.assertEqual(q.snapshot_error_details(error, "Cleanup: "), ["Cleanup: " + repr(error), own_note])
 
     def test_bounded_read_rejects_byte_growth_and_links(self):
         directory=self.root/"bounded";directory.mkdir();path=directory/"file";path.write_bytes(b"12345")
@@ -1863,7 +1957,8 @@ class SharedBuildGuards(unittest.TestCase):
         self.run.observe_shared_build(self.driver,"after_main")
         proof=self.run.report["shared_build"]
         self.assertEqual(set(proof["observations"]),{"before_seed","after_seed","after_main"})
-        self.assertEqual(len(self.calls),7);self.assertTrue(all(c[2]==30 for c in self.calls))
+        self.assertEqual(len(self.calls),7)
+        self.assertEqual([c[2] for c in self.calls], [40, 30, 30, 30, 30, 30, 30])
         self.assertIn("-showBuildSettings",self.calls[0][1])
         self.assertEqual(self.calls[0][1][-1],"build-for-testing")
         query = self.calls[0][1]
@@ -1926,7 +2021,7 @@ class SharedBuildGuards(unittest.TestCase):
     def test_symlink_product_or_inactive_budget_never_starts_seed(self):
         p=self.paths["TripfolioTests"];moved=p.with_name("Original.xctest");p.rename(moved);p.symlink_to(moved)
         with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
-        self.driver.remaining=lambda:1174
+        self.driver.remaining=lambda:1184
         with self.assertRaisesRegex(RuntimeError,"budget"):self.run.prepare_shared_build(self.driver)
         self.assertEqual(self.calls,[])
         self.driver.remaining=lambda:1200;self.run.commands.active[999]=object()
@@ -1942,12 +2037,71 @@ class SharedBuildGuards(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"deadline"):self.run.observe_shared_build(self.driver,"after_seed")
 
     def test_shared_command_preserves_stop_reserve_inside_driver_deadline(self):
-        self.driver.remaining=lambda:19
-        self.run.shared_build_command(self.driver,"observation",["query"])
-        self.assertEqual(self.calls[-1][2],11)
-        self.driver.remaining=lambda:8
-        with self.assertRaisesRegex(RuntimeError,"budget"):
-            self.run.shared_build_command(self.driver,"observation",["query"])
+        # Exercise the real Qualification.command adapter as well as the shared
+        # helper; only the process runner is replaced, so no child is spawned.
+        self.run.command = q.Qualification.command.__get__(self.run)
+        self.driver.deadline = self.run.started + 1440
+        clocks = (self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                  self.driver.deadline, self.run.commands.limit)
+        with patch.object(self.run.commands, "command", return_value="complete") as command:
+            for remaining, label, total_cap in (
+                (1200, "shared-build-settings", 48),
+                (1200, "shared-before_seed-app", 38),
+                (1200, "shared-after_main-data", 38),
+                (1200, "shared-build-settings-extra", 38),
+                (19, "shared-build-settings", 19),
+                (19, "observation", 19),
+            ):
+                with self.subTest(remaining=remaining, label=label):
+                    self.driver.remaining = lambda value=remaining: value
+                    self.assertEqual(self.run.shared_build_command(self.driver, label, ["query"]), "complete")
+                    command.assert_called_with(label, ["query"], total_cap)
+            for remaining in (8, 0):
+                for label in ("shared-build-settings", "observation"):
+                    self.driver.remaining = lambda value=remaining: value
+                    before_calls = command.call_count
+                    with self.subTest(remaining=remaining, label=label), self.assertRaisesRegex(RuntimeError, "budget"):
+                        self.run.shared_build_command(self.driver, label, ["query"])
+                    self.assertEqual(command.call_count, before_calls)
+        self.assertEqual((self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                          self.driver.deadline, self.run.commands.limit), clocks)
+
+    def test_shared_build_admission_reserves_only_one_larger_settings_rpc(self):
+        self.driver.deadline = self.run.started + 1440
+        clocks = self.run.started, self.run.work_deadline, self.run.cleanup_deadline, self.driver.deadline
+        for combined, admission in ((True, 1108), (False, 1184)):
+            self.run.native_folder_control = combined
+            self.run.report["native_folder_verified"] = combined
+            self.driver.args = SimpleNamespace(native_root=not combined, native_folder=combined,
+                                               combined_batch=combined)
+            for remaining in (admission - 1, admission):
+                self.driver.remaining = lambda value=remaining: value
+                with self.subTest(combined=combined, remaining=remaining), \
+                     patch.object(self.run, "require_no_build_writer") as writer, \
+                     self.assertRaisesRegex(RuntimeError, "Insufficient shared-build"):
+                    self.run.prepare_shared_build(self.driver)
+                writer.assert_not_called()
+                self.assertEqual(self.calls, [])
+            self.driver.remaining = lambda value=admission + 1: value
+            with self.subTest(combined=combined, admission_passes=True), \
+                 patch.object(self.run, "require_no_build_writer", side_effect=RuntimeError("admission reached")) as writer, \
+                 self.assertRaisesRegex(RuntimeError, "admission reached"):
+                self.run.prepare_shared_build(self.driver)
+            writer.assert_called_once_with()
+            self.assertEqual(self.calls, [])
+        self.assertEqual((self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                          self.driver.deadline), clocks)
+
+    def test_incomplete_or_timed_out_settings_never_install_shared_product_proof(self):
+        for outcome in (RuntimeError("Command timeout"), '[{"target":"Tripfolio'):
+            replacement = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with self.subTest(outcome=outcome), patch.object(self.run, "shared_build_command", **replacement), \
+                 self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                self.run.prepare_shared_build(self.driver)
+            self.assertFalse(hasattr(self.run, "shared_products"))
+            self.assertFalse(hasattr(self.driver, "qualified_build"))
+            self.assertNotIn("shared_build", self.run.report)
+            self.assertEqual(self.calls, [])
 
     def test_shared_settings_require_same_symroot_and_real_bundle_identifier(self):
         different=self.derived/"other";different.mkdir()

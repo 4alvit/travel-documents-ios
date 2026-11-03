@@ -11,6 +11,18 @@ attached to their original runs.
 
 ## Source/Simulator integration and qualification evidence
 
+The current normal batch contract requires five exact passes in three original
+bundles: hosted purchase/restore plus direct Files preparation, native folder
+setup, then native seeding plus real two-file import. Folder setup requests
+the exact UUID name and terminates the fixture app; it does not assert editor
+dismissal. The host must adopt the exact empty native-created leaf before
+seeding, prove both saved PDF bytes before the import checkpoint response,
+and verify originals and owned cleanup afterward. See the
+[current qualification contract](github-releases.md#prepare-without-publishing).
+This contract is not a passing result; final acceptance requires fresh normal
+evidence for the exact integrated source. All earlier controls below retain
+their original case counts, scope and outcomes.
+
 The matched Xcode 26.2 workflow and its native fixture-preparation phases define
 a candidate validation path, not an acceptance record. Release acceptance still
 requires complete CI and the ordinary Release smoke at the exact integrated
@@ -362,9 +374,10 @@ attachments around 396.64 seconds, after its timeout. Its observed text slices
 covered all 24 blocks with overlap, but post-timeout coverage is diagnostic
 evidence and does not turn the failed case into a pass.
 
-Only that Russian maximum-type case now requests 480 seconds, with a matching
-runner ceiling. English guidance remains at 360 seconds, the ordinary default
-at 180 seconds, and the job at 35 minutes. The preceding job took 30m55s. The
+Only that Russian maximum-type case then requested 480 seconds, with a matching
+runner ceiling. At that stage, English guidance remained at 360 seconds, the
+ordinary default was 180 seconds, and the job was 35 minutes. The preceding job
+took 30m55s. The
 additional case margin is based on observed completion time; no assertion,
 scenario, attachment, retry policy or unrelated case allowance changed. At that stage the
 new published revision still required its own successful CI result; the later
@@ -1182,6 +1195,30 @@ Optional copy-reopen diagnostics are excluded from the normal workflow; if invok
 separately, they require both actual app readbacks. No deadline, ownership or product
 assertion is relaxed, and no successful native qualification is claimed for this
 new fixture contract until its full capture is independently reviewed.
+
+## Russian guidance execution allowance — 3 November 2026
+
+The accepted [PR #8 run, attempt 2](https://github.com/4alvit/travel-documents-ios/actions/runs/41582316228)
+completed Russian maximum-type guidance in 411.166 seconds. On the same source
+tree, [main run 41590929989](https://github.com/4alvit/travel-documents-ios/actions/runs/41590929989)
+reached the 480-second XCTest limit while retaining the page after the fourth
+website confirmation was cancelled. It returned to Trips around 493.61 seconds,
+then reported a secondary app-termination failure. The finalized result has
+eight passes, one failure and thirteen opt-in skips; the late checks do not
+turn that failed run into accepted evidence.
+
+That Russian maximum-type case now requests 600 seconds. Only the main guidance
+cohort raises its runner ceiling to 600; English remains at 360, the ordinary
+default at 180, and core/local cohorts keep their 480-second ceiling. The
+separate iPad driver also keeps its explicit 480-second maximum, which caps the
+same method's larger request. Ordinary hosted guidance leaves batch opt-in
+disabled, preserving its existing skips. An explicitly opted-in batch case in
+this cohort also inherits the 600-second ceiling for its existing 600-second
+request; dedicated batch drivers remain unchanged. All text slices, geometry
+checks, four website cancellations, return checks, attachments, per-action waits, and the existing
+45-minute integration/65-minute job envelopes remain unchanged. This is a
+measured allowance correction, not a claim to have fixed the latency or the
+secondary termination error. The revised source requires a new full CI run.
 
 ## Distribution and physical-device limits
 

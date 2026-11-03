@@ -159,6 +159,20 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
         selection = json.loads(records[0].read_text())
         self.assertEqual(selection["udid"], FIRST); self.assertEqual(len(selection["inventory_sha256"]), 5)
 
+    def test_only_guidance_cohort_allows_measured_russian_flow_budget(self):
+        for arguments, ceiling in [((), "480"),
+                                   (("--cohort", "core-purchase"), "480"),
+                                   (("--cohort", "ui-guidance"), "600")]:
+            with self.subTest(arguments=arguments):
+                result = self.run_script(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = json.loads(self.output.read_text())
+                self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
+                self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], ceiling)
+        source = (Path(__file__).resolve().parents[1] / "UITests/PrivacySupportUITests.swift").read_text()
+        self.assertIn("executionTimeAllowance = russian && maximumType ? 600 : 360", source)
+        self.assertEqual(source.count("executionTimeAllowance ="), 1)
+
     def test_strict_wrong_requested_uuid_prevents_native_test_command(self):
         result = self.run_script("--require-sdk-match", requested=SECOND)
         self.assertNotEqual(result.returncode, 0); self.assertFalse(self.output.exists())

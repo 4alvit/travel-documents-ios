@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Portable prepare/export/restore core with a deterministic empty-folder boundary."""
-import argparse
 from contextlib import ExitStack
 import errno
 import hashlib
@@ -8,12 +7,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
-import signal
 import stat
-import sys
 import time
 import uuid
 

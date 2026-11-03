@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Exercise native-root admission, byte proofs and teardown without native tools."""
 import copy
-import hashlib
 import importlib.util
-import io
 import json
 from pathlib import Path
-import tempfile
 import time
 from types import SimpleNamespace
 import unittest

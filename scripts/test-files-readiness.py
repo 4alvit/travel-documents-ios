@@ -235,8 +235,10 @@ class ReadinessTests(unittest.TestCase):
         native_folder = source[source.index('    func testNativeCreateOwnedFilesFolder'):source.index('    func testNativeSaveSeedsBothSyntheticOriginals')]
         call = 'try await reachRecoveryLocalRoot(localTitle,'
         self.assertEqual(prepare.count(call), 1)
-        self.assertEqual(native_folder.count(call), 1)
-        self.assertEqual(source.count(call), 2)
+        self.assertEqual(native_folder.count(call), 0)
+        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app)"), 1)
+        self.assertNotIn("presentRecoverySave(app)", native_folder)
+        self.assertEqual(source.count(call), 1)
         self.assertIn('timeout: Duration = .seconds(15)', source)
         self.assertIn('let deadline = ContinuousClock.now.advanced(by: timeout)', source)
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
@@ -1344,7 +1346,7 @@ class SelectionDiagnosticTests(unittest.TestCase):
         cls.addClassCleanup(cls.directory.cleanup)
         source = SOURCE.read_text()
         start = source.index('    private func captureRecoverySelectionFailure(')
-        end = source.index('    private func capture(', start)
+        end = source.index('\n    private func ', start + 1)
         root = Path(cls.directory.name)
         path = root / 'SelectionDiagnostic.swift'
         path.write_text(SELECTION_DIAGNOSTIC_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
