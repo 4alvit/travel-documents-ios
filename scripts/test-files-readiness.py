@@ -358,6 +358,7 @@ final class World {
     var frames: [State]
     var index = 0
     var taps: [String] = []
+    var timeouts: [Duration] = []
     var browseFrames = [State(location: true)]
     init(_ frames: [State]) { self.frames = frames }
     var current: State { frames[index] }
@@ -439,11 +440,19 @@ final class Harness {
     func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
         if !condition { throw FixtureFailure() }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.timeouts.append(timeout)
         for _ in 0..<8 { if condition() { return }; world.advance() }
         throw FixtureFailure()
     }
-    func run() async throws { _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world)) }
+    func run(seedAllowance: Bool = false) async throws {
+        if seedAllowance {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world), initialNavigationTimeout: .seconds(30))
+        } else {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world))
+        }
+    }
     // ACTUAL_HELPER
 }
 @main struct Main {
@@ -453,6 +462,9 @@ final class Harness {
         var expected: [String] = []
         var mustFail = false
         switch name {
+        case "seed-ready": world = World([State(destination: true)])
+        case "seed-absent": world = World([State(navigationCount: 0)]); mustFail = true
+        case "seed-ambiguous": world = World([State(navigationCount: 2)]); mustFail = true
         case "already-current": world = World([State(destination: true)])
         case "delayed-current": world = World([State(), State(destination: true)])
         case "recents-route":
@@ -505,7 +517,11 @@ final class Harness {
         default: fatalError("Unknown fixture")
         }
         var failed = false
-        do { try await Harness(world).run() } catch { failed = true }
+        let seedAllowance = name.hasPrefix("seed-")
+        do { try await Harness(world).run(seedAllowance: seedAllowance) } catch { failed = true }
+        precondition(world.timeouts.first == (seedAllowance ? .seconds(30) : .seconds(15)))
+        precondition(world.timeouts.dropFirst().allSatisfy { $0 == .seconds(15) })
+        if name == "seed-absent" || name == "seed-ambiguous" { precondition(world.timeouts.count == 1) }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
         print("PASS " + name)
     }
@@ -542,6 +558,13 @@ class OpenFolderTests(unittest.TestCase):
                      'wrong-recents-source', 'wrong-recents-heading', 'ambiguous-native-tabs',
                      'wrong-native-tabs', 'wrong-browse-label', 'ambiguous-browse',
                      'disabled-browse', 'unhittable-browse']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_initial_seed_allowance_preserves_later_waits_and_rejects_absent_or_ambiguous_navigation(self):
+        for name in ['seed-ready', 'seed-absent', 'seed-ambiguous']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)

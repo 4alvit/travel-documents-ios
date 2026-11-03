@@ -838,7 +838,7 @@ final class BatchImportUITests: XCTestCase {
                 picker = try await openNativeFilesRoot(app)
                 navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar").element
             } else {
-                picker = try await openLocalFilesFolder(folder, app: app)
+                picker = try await openLocalFilesFolder(folder, app: app, initialNavigationTimeout: .seconds(30))
                 navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
             }
             let save = navigation.buttons["Save"]
@@ -1951,10 +1951,11 @@ final class BatchImportUITests: XCTestCase {
 
 
     private func openLocalFilesFolder(_ folder: String, app: XCUIApplication,
+                                      initialNavigationTimeout: Duration = .seconds(15),
                                       retryRecoveryFolderEntry: Bool = false) async throws -> XCUIElement {
         let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let navigation = navigations.element
-        try await wait("Files did not present its navigation", app: app) {
+        try await wait("Files did not present its navigation", app: app, timeout: initialNavigationTimeout) {
             navigations.count == 1 && navigation.exists
         }
         let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
