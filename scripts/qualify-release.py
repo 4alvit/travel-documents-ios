@@ -471,6 +471,8 @@ class Commands(processes.Smoke):
 
 
 class Qualification:
+    native_folder_control = False
+
     def __init__(self, root, mode, env):
         self.job = context(mode, env); self.root = Path(root).resolve(); self.mode = mode
         reopen_control = env.get("TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL", "")
@@ -879,8 +881,22 @@ class Qualification:
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
                 "Invalid shared native folder build")
+        preparation_token = self.report["files_preparation"].get("fixture_token")
+        require(isinstance(preparation_token, str)
+                and str(uuid.UUID(preparation_token)) == preparation_token
+                and preparation_token != driver.token,
+                "Native folder requires a distinct canonical first preparation token")
+        source_token = str(uuid.uuid4())
+        require(source_token not in (preparation_token, driver.token),
+                "Native folder source token collided with another phase")
+        overrides = {"TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_UI": "1",
+                     "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_TOKEN": driver.token,
+                     "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN": source_token,
+                     "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
+                     "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         self.report["native_folder"] = {"calls": 1, "case": FOLDER_CASE, "phase_seconds": FOLDER_SECONDS,
-            "case_seconds": FOLDER_CASE_SECONDS, "token": driver.token, "absent_before": True,
+            "case_seconds": FOLDER_CASE_SECONDS, "token": driver.token, "source_token": source_token,
+            "absent_before": True, "environment_overrides": dict(overrides),
             "destination": str(driver.native_folder_destination), "provider_identity": list(driver.provider_identity),
             "ingress": "native New Folder", "adopted": False,
             "driver_deadline": driver.deadline - self.started, "driver_remaining_before": driver.remaining(),
@@ -892,12 +908,10 @@ class Qualification:
             "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(FOLDER_CASE_SECONDS),
             "-maximum-test-execution-time-allowance", str(FOLDER_CASE_SECONDS), "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "native-folder.xcresult",
-            "-only-testing:TripfolioUITests/" + FOLDER_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+            "-only-testing:TripfolioUITests/" + FOLDER_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO",
+            *self.build_settings, "test"]
         previous = self.commands.ops.env
-        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_UI": "1",
-            "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_TOKEN": driver.token,
-            "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
-            "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        self.commands.ops.env = {**previous, **overrides}
         failure = None
         try:
             self.command("native-folder-ui", argv, min(FOLDER_SECONDS, driver.remaining()))
@@ -993,7 +1007,10 @@ class Qualification:
         self.save()
 
     def prepare_shared_build(self, driver):
-        require(self.mode == "batch" and getattr(driver.args, "native_root", False)
+        require(self.mode == "batch"
+                and (getattr(driver.args, "native_root", False)
+                     or (self.native_folder_control and getattr(driver.args, "native_folder", False)
+                         and self.report.get("native_folder_verified") is True))
                 and self.report.get("files_preparation_verified") is True
                 and not hasattr(self, "shared_products"), "Shared build requires one owned preparation")
         # Combined mode removes one invocation; five settings/container RPCs
@@ -1077,10 +1094,22 @@ class Qualification:
         self.save()
 
     def prepare_combined_batch(self, driver):
+        folder = self.native_folder_control
+        destination_verified = (
+            getattr(driver.args, "native_folder", False)
+            and not getattr(driver.args, "native_root", False)
+            and self.report.get("native_folder_verified") is True
+            and self.report.get("native_folder", {}).get("adopted") is True
+            and self.report.get("native_folder", {}).get("empty_after") is True
+        ) if folder else (
+            getattr(driver.args, "native_root", False)
+            and not getattr(driver.args, "native_folder", False)
+            and self.report.get("native_root", {}).get("verified_empty_before_seed") is True
+        )
         require(self.mode == "batch" and getattr(driver.args, "combined_batch", False)
                 and "combined_batch" not in self.report and self.report.get("files_preparation_verified") is True
-                and self.report.get("native_root", {}).get("verified_empty_before_seed") is True,
-                "Combined batch requires verified owned root and preparation")
+                and destination_verified,
+                "Combined batch requires verified owned destination and preparation")
         self.require_no_build_writer()
         require(getattr(driver, "qualified_build", None)
                     == self.root / self.report.get("files_preparation", {}).get("derived_data", "")
@@ -1098,10 +1127,11 @@ class Qualification:
         driver.checkpoint_callback = lambda request, deadline: self.acknowledge_batch_seed(driver, request, deadline)
         self.report["combined_batch"] = {"session": driver.checkpoint_session, "token": driver.token,
             "cases": list(checkpoint.CASES), "preparation_cases": list(checkpoint.PREPARATION_CASES),
-            "preparation_prerequisite": prerequisite, "result_bundles": 2,
+            "preparation_prerequisite": prerequisite, "result_bundles": 3 if folder else 2,
+            "destination_mode": "native_folder" if folder else "native_root",
             "driver_deadline": driver.deadline - self.started, "driver_seconds": 1200,
             "seed_case_seconds": 180, "seed_observed_envelope_seconds": 300,
-            "seed_envelope_boundary": "second invocation start to observed seed PASS",
+            "seed_envelope_boundary": "combined invocation start to observed seed PASS",
             "main_case_seconds": 600, "checkpoint_seconds": 60,
             "checkpoint_position": "main entry after observed seed PASS and deferred AUT termination"}
         self.save()
@@ -1181,6 +1211,9 @@ class Qualification:
             proof.update(aut_stopped=True, app_bundle=str(bundle), source_unchanged=True,
                 provider=str(driver.fixture_directory), provider_identity=list(driver.provider_identity),
                 fixtures=[{key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]])
+            if self.native_folder_control:
+                proof.update(provider_root=str(driver.fixture_directory.parent),
+                             fixture_identity=list(driver.fixture_identity))
             # Persist the completed byte/source/stopped-AUT proof before the
             # external ACK can release the consumer's destructive reset.
             self.save()
@@ -1317,14 +1350,18 @@ class Qualification:
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
         args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None,
-                               native_seed=self.mode == "batch", native_folder=False,
-                               native_root=self.mode == "batch", combined_batch=self.mode == "batch")
+                               native_seed=self.mode == "batch", native_folder=self.native_folder_control,
+                               native_root=self.mode == "batch" and not self.native_folder_control,
+                               combined_batch=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
             driver.prepare()
             if self.mode == "batch":
-                self.prepare_native_root(driver)
+                if self.native_folder_control:
+                    self.prepare_native_folder(driver)
+                else:
+                    self.prepare_native_root(driver)
                 self.prepare_shared_build(driver)
                 self.prepare_combined_batch(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
@@ -1368,7 +1405,18 @@ class Qualification:
                                 if failure is None:
                                     driver.summary["native_root_post_main_verified"] = True
                                     self.report["native_root"]["verified_after_main"] = True
+                            elif self.native_folder_control:
+                                self.native_seed_files(driver)
+                                if failure is None:
+                                    driver.summary["native_folder_post_main_verified"] = True
+                                    self.report["native_folder"]["verified_after_main"] = True
                             driver.remove_fixtures()
+                            if self.native_folder_control:
+                                cleanup = driver.summary.get("native_folder_cleanup", {})
+                                require(cleanup == {"leaf_absent": True,
+                                                   "provider_identity": list(driver.provider_identity)},
+                                        "Native folder cleanup proof is incomplete")
+                                self.report["native_folder"]["cleanup"] = dict(cleanup)
                         else:
                             driver.summary["fixture_cleanup"] = "Unadopted native folder intent; owned Simulator teardown only"
                         driver.summary["source_after"] = driver.source_snapshot()
@@ -1400,6 +1448,9 @@ class Qualification:
         expected = list(driver.expected_cases) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
         tree = json.loads(bounded_read(driver.directory, "xcresult-tests.json", 16 * MIB, self.check))
         validate_driver(self.mode, driver.summary, result, tree, expected, self.owned, self.job["GITHUB_SHA"])
+        if self.native_folder_control:
+            require(driver.summary.get("native_folder_post_main_verified") is True,
+                    "Native folder originals not verified after main flow")
         validate_runtime_result(self.mode, self.report.get("runtime_selection"), result)
         if self.mode == "batch":
             order = checkpoint.execution_order(bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
@@ -1412,15 +1463,16 @@ class Qualification:
             elapsed = monitor.get("seed_observed_seconds")
             require(monitor.get("returncode") == 0 and type(elapsed) in (int, float)
                     and 0 <= elapsed <= 300 and monitor.get("seed_envelope_seconds") == 300
-                    and monitor.get("seed_envelope_boundary") == "second invocation start to observed seed PASS",
+                    and monitor.get("seed_envelope_boundary") == "combined invocation start to observed seed PASS",
                     "Missing combined seed-envelope evidence")
             self.report["batch_execution_order"] = order
             self.report["combined_monitor"] = monitor
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
         self.report["driver_capture_verified"] = True
-        self.report["selected_cases"] = ([checkpoint.PREPARATION_CASES[0], *expected]
-                                         if self.mode == "batch" else expected)
+        self.report["selected_cases"] = (
+            [*checkpoint.PREPARATION_CASES, FOLDER_CASE, *expected] if self.native_folder_control
+            else [checkpoint.PREPARATION_CASES[0], *expected] if self.mode == "batch" else expected)
 
     def products(self, driver):
         if self.mode == "batch" and hasattr(self, "shared_products"):
@@ -1585,6 +1637,32 @@ class Qualification:
                     prerequisites = (("files_preparation", "files-prepare"),)
                 else:
                     prerequisites = (("files_preparation", "files-prepare"), ("native_seed", "native-seed"))
+            elif self.native_folder_control and "combined_batch" in self.report:
+                folder = self.report.get("native_folder", {})
+                require(self.report.get("native_folder_verified") is True
+                        and folder.get("adopted") is True and folder.get("empty_after") is True
+                        and folder.get("verified_after_main") is True
+                        and folder.get("cleanup") == {"leaf_absent": True,
+                                                      "provider_identity": folder.get("provider_identity")}
+                        and self.baseline is not None and self.owned not in self.baseline
+                        and self.report.get("final_inventory") == self.baseline,
+                        "Native folder lacks original-byte or owned-device cleanup proof")
+                prerequisite = self.verify_preparation_prerequisite()
+                combined = self.report["combined_batch"]
+                require(prerequisite == combined.get("preparation_prerequisite")
+                        == self.report.get("batch_checkpoint", {}).get("preparation_prerequisite")
+                        and combined.get("preparation_cases") == list(checkpoint.PREPARATION_CASES)
+                        and combined.get("destination_mode") == "native_folder"
+                        and combined.get("result_bundles") == 3
+                        and combined.get("cases") == list(checkpoint.CASES)
+                        and self.report.get("batch_checkpoint_verified") is True
+                        and self.report.get("batch_execution_order", {}).get("request")
+                            == self.report.get("batch_checkpoint", {}).get("request"),
+                        "Combined folder capture lacks exact prerequisite/checkpoint proof")
+                require(not any(key.startswith("native_seed") for key in self.report)
+                        and not (self.out / "native-seed.xcresult").exists(),
+                        "Combined folder capture cannot claim a separate seed result bundle")
+                prerequisites = (("files_preparation", "files-prepare"), ("native_folder", "native-folder"))
             else:
                 prerequisites = (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
                                  ("native_seed", "native-seed"))
@@ -1634,7 +1712,8 @@ class Qualification:
                              and (self.mode != "batch" or (self.report.get("batch_snapshot", {}).get("verified")
                                   and self.report.get("files_preparation_verified") is True
                                   and self.report.get("batch_checkpoint_verified") is True
-                                  and self.report.get("combined_batch", {}).get("result_bundles") == 2)))
+                                  and self.report.get("combined_batch", {}).get("result_bundles")
+                                      == (3 if self.native_folder_control else 2))))
             if capture_ready:
                 try: self.capture_original_result()
                 except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))

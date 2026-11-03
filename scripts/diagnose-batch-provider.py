@@ -11,11 +11,11 @@ import time
 
 HERE = Path(__file__).resolve().parent
 PINS = {
-    "qualify-release.py": "6469ce2e836145008d9b8c6ae501a68343ecbf9ae0f582254b57adf1bdcaf43c",
+    "qualify-release.py": "9d2c24bb745b03067a6d605208659e6a755de361e9e5e2cea9a0362700b725eb",
     "recovery_process.py": "5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc",
     "recovery_core.py": "d7cae59562ba7aeee9e02a98d429fe7592c8bad61302efe7d1fd92e5e1bd18c3",
-    "batch_checkpoint.py": "edbdbec1435e674a3a4367edc4aa2c21aa41d990c9d2e8cb538b92962ac734ac",
-    "test-batch-simulator.py": "3413b0b086e63d1bba230fd1dc6c8f7c6ae4f6783aaa9b7daa5e4d4dd4910816",
+    "batch_checkpoint.py": "aa66e1bfedb89d7becb7985bee735cafbaec447bea2061cb392880a2be17f185",
+    "test-batch-simulator.py": "88df678b940585cbbaaa263e24a4a2afe1e24c4f44e1d62f3ca5b361c69c14c9",
 }
 COMMAND_SECONDS = 30
 STOP_SECONDS = 8
@@ -58,6 +58,8 @@ def raw_inventory(data):
 
 
 class ProviderLogQualification(BaseQualification):
+    diagnostic_scope = "Persisted logs only; unchanged normal batch tests and acceptance predicates"
+
     def __init__(self, root, mode, env):
         q.require(mode == "batch" and env.get("QUALIFICATION_PROVIDER_LOG") == "1"
                   and not env.get("TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL"),
@@ -72,7 +74,7 @@ class ProviderLogQualification(BaseQualification):
     def save(self):
         diagnostic = self.report.setdefault("diagnostic_provider_log", {
             "enabled": True, "release_acceptance": False, "status": "pending",
-            "scope": "Persisted logs only; unchanged normal batch tests and acceptance predicates",
+            "scope": self.diagnostic_scope,
             "window": "last 5m at target command execution; retained info/debug only",
             "helper_sha256": dict(PINS),
         })

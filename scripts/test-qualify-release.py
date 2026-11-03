@@ -556,7 +556,7 @@ class Guards(unittest.TestCase):
         cases=list(q.checkpoint.CASES);result.update(totalTestCount=2,passedTests=2)
         tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
         summary["execution_order"]=copy.deepcopy(COMBINED_ORDER)
-        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"second invocation start to observed seed PASS"}
+        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"combined invocation start to observed seed PASS"}
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
         if missing_warnings:result.pop("runtimeWarnings")
@@ -811,7 +811,7 @@ class Guards(unittest.TestCase):
         run.report["native_root"]={"verified_empty_before_seed":True}
         run.report["shared_build"]={"observations":{"before_seed":{}}}
         remaining=[1200.0]
-        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True),
+        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True,native_root=True,native_folder=False),
             qualified_build=run.root/"build/shared",remaining=lambda:remaining[0])
         original=q.recovery.tree_manifest
         def traversing(path,check,**kwargs):

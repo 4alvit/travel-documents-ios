@@ -252,10 +252,13 @@ class SeedGuards(unittest.TestCase):
     def test_native_folder_case_is_separate_opt_in_one_creation_without_save(self):
         case=UI[UI.index("func testNativeCreateOwnedFilesFolder"):
                 UI.index("func testNativeSaveSeedsBothSyntheticOriginals")]
+        configuration=UI[UI.index("private static func nativeFolderConfiguration"):
+                         UI.index("func testNativeCreateOwnedFilesFolder")]
         self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1"',case)
-        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"]',case)
-        self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',case)
-        self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder',case)
+        self.assertIn('Self.nativeFolderConfiguration(environment, debugSimulator: debugSimulator)',case)
+        self.assertIn('environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"]',configuration)
+        self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',configuration)
+        self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token',configuration)
         self.assertIn("executionTimeAllowance = 180",case)
         for action in ("more.element.tap()","newFolder.element.tap()",
                        "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"):
@@ -269,7 +272,11 @@ class SeedGuards(unittest.TestCase):
         self.assertEqual(case.count("nativeFolderBlankPoint(in: try app.snapshot()"),2)
         self.assertIn("current.point == before.point, current.normalized == before.normalized",case)
         self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
-        self.assertNotIn('press(forDuration',case)
+        self.assertEqual(case.count('press(forDuration'),1)
+        self.assertIn('created.element.press(forDuration: 1)',case)
+        self.assertIn('Self.nativeFolderRenameFrame(in: try app.snapshot(), localTitle: localTitle) == before',case)
+        self.assertIn('created.count == 1 && created.element.frame == before',case)
+        self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',case)
 
 
 class ExportResultGuards(unittest.TestCase):

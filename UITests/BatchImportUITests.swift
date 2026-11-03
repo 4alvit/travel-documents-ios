@@ -15,6 +15,44 @@ import Vision
 /// for the complete batch workflow. Recovery phases retain their own allowances.
 @MainActor
 final class BatchImportUITests: XCTestCase {
+    @MainActor
+    private static func nativeFolderRenameFrame(in snapshot: XCUIElementSnapshot, localTitle: String) -> CGRect? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return nil }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        guard let all = nodes(snapshot),
+              !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { return nil }
+        let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
+        let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
+        let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
+        let grids = all.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
+        let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
+        guard pickers.count == 1, roots.count == 1, grids.count == 1, navigations.count == 1,
+              let pickerNodes = nodes(pickers[0]), let rootNodes = nodes(roots[0]),
+              pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
+              rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
+              rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
+              let gridNodes = nodes(grids[0]) else { return nil }
+        let cells = gridNodes.filter { $0.elementType == .cell }
+        guard cells.count == 1, cells[0].identifier == "untitled folder, Folder",
+              cells[0].label == "untitled folder, 0 items", cells[0].isEnabled else { return nil }
+        let frame = cells[0].frame
+        let windows = snapshot.children.filter { $0.elementType == .window }
+        guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }),
+              !frame.isEmpty, grids[0].frame.contains(frame),
+              windows.contains(where: { $0.frame.contains(frame) }) else { return nil }
+        return frame
+    }
+
     private let productID = "com.4alvit.tripfolio.pro"
     private var folder: String {
         ProcessInfo.processInfo.environment["TRIPDOCKET_BATCH_FOLDER"] ?? "TripDocket-Batch-QA"
@@ -258,6 +296,7 @@ final class BatchImportUITests: XCTestCase {
         let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
                            "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                            "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN",
                            "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
                            "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
                            "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION"]
@@ -269,43 +308,65 @@ final class BatchImportUITests: XCTestCase {
         return token
     }
 
+    private static func nativeFolderConfiguration(
+        _ environment: [String: String], debugSimulator: Bool
+    ) throws -> (token: String, sourceToken: String) {
+        let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
+        let sourceToken = environment["TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN"] ?? ""
+        let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
+                           "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                           "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                           "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_COMBINED_BATCH_UI",
+                           "TRIPDOCKET_BATCH_CHECKPOINT_SESSION", "TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
+        guard debugSimulator, environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              UUID(uuidString: sourceToken)?.uuidString.lowercased() == sourceToken, sourceToken != token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token,
+              conflicting.allSatisfy({ environment[$0] == nil }) else {
+            throw BatchTestFailure(message: "Native folder creation requires its isolated Debug Simulator token")
+        }
+        return (token, sourceToken)
+    }
+
     func testNativeCreateOwnedFilesFolder() async throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
                           "Opt in only for the owned native-folder fixture diagnostic")
-        let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        let configuration = try Self.nativeFolderConfiguration(environment, debugSimulator: debugSimulator)
+        let token = configuration.token
         let ownedFolder = "TripDocket-Batch-QA-" + token
-        guard UUID(uuidString: token)?.uuidString.lowercased() == token,
-              environment["TRIPDOCKET_BATCH_FOLDER"] == ownedFolder else {
-            throw BatchTestFailure(message: "Native folder creation requires its exact canonical owned token")
-        }
         executionTimeAllowance = 180
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
-        app.launchArguments = recoveryArguments + ["--demo"]
+        app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
+                                                   "--ui-testing-native-batch-token", configuration.sourceToken]
         app.launch()
-        try await wait("The native-folder demo did not finish loading", app: app) {
-            app.staticTexts["Coast weekend"].exists
+        let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+        let failed = app.staticTexts["nativeSeed.failure"]
+        try await wait("Native-folder export source is unavailable", app: app) {
+            failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
         }
-        try await recoveryTab("Settings", app: app)
-        try await recoveryFreeCard(app)
-        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
-        try await presentRecoverySave(app)
+        try check(!failed.exists && source.count == 1 && source.element.isEnabled && source.element.isHittable,
+                  app: app, "Native-folder preparation has no unique live export source")
+        capture(app, "Native folder — direct exporter before opening Files; no Save performed")
+        source.element.tap()
+        let picker = try await openNativeFilesRoot(app)
         let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
-        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
-        try await wait("Native-folder Files picker did not open", app: app) {
-            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
-        }
-        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
-        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
-        let location = app.cells.matching(NSPredicate(
-            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
-        ))
-        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
-        let directory = picker.element.cells.matching(identifier: ownedFolder + ", Folder")
-        try check(directory.count == 0, app: app, "Owned native folder already exists before creation")
+        let localTitle = "On My iPhone"
+        let files = picker.collectionViews.matching(identifier: "File View")
+        let directory = picker.cells.matching(identifier: ownedFolder + ", Folder")
+        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+        try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 0
+                  && directory.count == 0 && saved.count == 0 && !failed.exists,
+                  app: app, "Native folder requires the empty local root and no exported destination")
         let more = navigation.element.buttons.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "OverflowBarButtonItem", "More"
         ))
@@ -319,14 +380,47 @@ final class BatchImportUITests: XCTestCase {
             newFolder.count == 1 && newFolder.element.isEnabled && newFolder.element.isHittable
         }
         newFolder.element.tap()
-        let files = picker.element.collectionViews.matching(identifier: "File View")
         let inlineNames = files.element.textViews.matching(identifier: "DOC.inlineRenameField")
-        try await wait("Native folder-name editor is not unique and reachable", app: app) {
-            files.count == 1 && inlineNames.count == 1
-                && inlineNames.element.isEnabled && inlineNames.element.isHittable
+        var renameFrame: CGRect?
+        try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
+            renameFrame = nil
+            if files.count == 1 && inlineNames.count == 1
+                && inlineNames.element.isEnabled && inlineNames.element.isHittable { return true }
+            guard let snapshot = try? app.snapshot() else { return false }
+            renameFrame = Self.nativeFolderRenameFrame(in: snapshot, localTitle: localTitle)
+            return renameFrame != nil
+        }
+        if let before = renameFrame {
+            // Some Files versions create the default folder without entering
+            // inline editing. Use only that newly created, otherwise empty root.
+            let created = files.element.cells.matching(NSPredicate(
+                format: "identifier == %@ AND label == %@",
+                "untitled folder, Folder", "untitled folder, 0 items"
+            ))
+            capture(app, "Native folder — unique untitled folder before one Rename request")
+            try check(Self.nativeFolderRenameFrame(in: try app.snapshot(), localTitle: localTitle) == before
+                      && isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                      && created.count == 1 && created.element.frame == before
+                      && created.element.isEnabled && created.element.isHittable,
+                      app: app, "New native folder changed before Rename request")
+            try Task.checkCancellation()
+            created.element.press(forDuration: 1)
+            let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
+            try await wait("Native folder context menu has no unique Rename action", app: app) {
+                rename.count == 1 && rename.element.isEnabled && rename.element.isHittable
+            }
+            try Task.checkCancellation()
+            rename.element.tap()
+            try await wait("Native folder Rename did not expose its real editor", app: app) {
+                files.count == 1 && inlineNames.count == 1
+                    && inlineNames.element.isEnabled && inlineNames.element.isHittable
+            }
         }
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
+        try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                  && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable,
+                  app: app, "Native folder editor left the single newly created local folder")
         inlineNames.element.typeText(ownedFolder)
         try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
                   app: app, "Native folder name differs from the exact owned UUID name")
@@ -381,6 +475,8 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Native Files did not open the exact created folder", app: app) {
             remainingEditors.count == 0 && self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
         }
+        try check(saved.count == 0 && !failed.exists, app: app,
+                  "Native-folder preparation unexpectedly exported a destination")
         capture(app, "Native folder exact destination before host empty-folder verification")
         // Never tap Save: the host must independently prove this native-created
         // leaf empty after the fixture stops, before the separate seed phase.
@@ -571,12 +667,18 @@ final class BatchImportUITests: XCTestCase {
         guard environment["TRIPDOCKET_COMBINED_BATCH_UI"] != nil
                 || environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] != nil else { return nil }
         let session = environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] ?? ""
-        let token = environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] ?? ""
+        let root = environment["TRIPDOCKET_NATIVE_ROOT_UI"] != nil
+            || environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] != nil
+        let nativeFolder = environment["TRIPDOCKET_NATIVE_FOLDER_UI"] != nil
+            || environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] != nil
+        let token = environment[root ? "TRIPDOCKET_NATIVE_ROOT_TOKEN" : "TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
         guard debugSimulator, environment["TRIPDOCKET_COMBINED_BATCH_UI"] == "1",
+              root != nativeFolder,
+              environment["TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN"] == nil,
               let sessionID = UUID(uuidString: session), sessionID.uuidString == session,
               sessionID.uuid.6 & 0xf0 == 0x40, sessionID.uuid.8 & 0xc0 == 0x80,
               UUID(uuidString: token)?.uuidString.lowercased() == token,
-              environment["TRIPDOCKET_NATIVE_ROOT_UI"] == "1",
+              environment[root ? "TRIPDOCKET_NATIVE_ROOT_UI" : "TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
               environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
               environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] == token,
               environment["TRIPDOCKET_BATCH_UI"] == "1",
