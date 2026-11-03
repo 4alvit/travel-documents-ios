@@ -35,7 +35,7 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # bounded combined allowance, not a separately enforced launch deadline.
 # The 45m integration / 65m job budget preserves time for the measured 24m
 # guidance invocation plus cleanup and evidence. Completion is not guaranteed.
-# Recovery retains 600s; batch qualification separately allows 780s.
+# Recovery allows 780s for prepare and 600s for export/restore; batch has separate caps.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 

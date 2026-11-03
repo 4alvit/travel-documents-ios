@@ -88,9 +88,19 @@ published artifacts. It does not replace the UI flows with direct service calls.
 ## Bounds and evidence
 
 The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
-reserved for owned cleanup, including a final 10-second receipt reserve. Each
-Xcode phase has at most 600 seconds including process stop; the preparation
-test has 180 seconds and export/restore each have 300.
+reserved for owned cleanup, including a final 10-second receipt reserve. The
+prepare Xcode command has at most 780 seconds; export and restore retain 600
+seconds each. All command caps include the eight-second stop reserve and are
+clipped to the original remaining work deadline. The preparation case retains
+180 seconds and export/restore each retain 300.
+
+A retained PR16 run spent about 514 seconds before its preparation case began,
+including a 272-second runner launch. Its former 600-second command allowance
+left only 78 seconds for the case and interrupted final evidence formatting
+after Files/root checks. The 780-second allowance covers that observed startup
+plus the full case allowance; it does not diagnose or repair the startup delay.
+Later phases and result inspection still share the original work budget and
+may fail if insufficient time remains. No phase is retried or given a new clock.
 Recovery discovery uses one fixed 300-second window after source/toolchain
 preflight. It covers the first runtime query, profile parsing/selection, the
 existing capability check, runtime recheck, baseline device inventory, one

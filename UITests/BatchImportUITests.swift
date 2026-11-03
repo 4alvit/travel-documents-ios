@@ -668,41 +668,46 @@ final class BatchImportUITests: XCTestCase {
             recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
             throw error
         }
-        try await acknowledgeNativeFolderKeyboardIntroduction(
-            app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
-        )
         if let before = renameFrame {
-            // Some Files versions create the default folder without entering
-            // inline editing. Use only that newly created, otherwise empty root.
+            // The editor can appear after the initial observation selected the
+            // unedited-folder route. Reclassify the existing fresh pair before
+            // choosing any action; an unknown state still fails closed.
             let created = files.element.cells.matching(NSPredicate(
                 format: "identifier == %@ AND label == %@",
                 "untitled folder, Folder", "untitled folder, 0 items"
             ))
-            capture(app, "Native folder — unique untitled folder before one Rename request")
+            capture(app, "Native folder initial Rename candidate before fresh state validation")
             let snapshots = try nativeFolderSnapshots(app)
-            try check(Self.nativeFolderRenameFrame(in: snapshots.picker,
-                                                   applicationSnapshot: snapshots.application,
-                                                   localTitle: localTitle) == before
-                      && isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
-                      && created.count == 1 && created.element.frame == before
-                      && created.element.isEnabled && created.element.isHittable,
-                      app: app, "New native folder changed before Rename request")
-            try Task.checkCancellation()
-            created.element.press(forDuration: 1)
-            let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
-            try await wait("Native folder context menu has no unique Rename action", app: app) {
-                rename.count == 1 && rename.element.isEnabled && rename.element.isHittable
-            }
-            try Task.checkCancellation()
-            rename.element.tap()
-            try await wait("Native folder Rename did not expose its real editor", app: app) {
-                keyboardIntroduction.count != 0 || (files.count == 1 && inlineNames.count == 1
-                    && inlineNames.element.isEnabled && inlineNames.element.isHittable)
-            }
-            try await acknowledgeNativeFolderKeyboardIntroduction(
-                app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+            let currentState = Self.nativeFolderInitialState(
+                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
+            try check(currentState.ready
+                      && (currentState.renameFrame == nil || currentState.renameFrame == before),
+                      app: app, "New native folder changed before Rename request")
+            if currentState.renameFrame != nil {
+                try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                          && created.count == 1 && created.element.frame == before
+                          && created.element.isEnabled && created.element.isHittable,
+                          app: app, "New native folder changed before Rename request")
+                try Task.checkCancellation()
+                created.element.press(forDuration: 1)
+                let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
+                try await wait("Native folder context menu has no unique Rename action", app: app) {
+                    rename.count == 1 && rename.element.isEnabled && rename.element.isHittable
+                }
+                try Task.checkCancellation()
+                rename.element.tap()
+                try await wait("Native folder Rename did not expose its real editor", app: app) {
+                    keyboardIntroduction.count != 0 || (files.count == 1 && inlineNames.count == 1
+                        && inlineNames.element.isEnabled && inlineNames.element.isHittable)
+                }
+            }
         }
+        // One shared acknowledgement covers an initial editor, a late editor,
+        // and an editor opened by Rename, before the unchanged pretype checks.
+        try await acknowledgeNativeFolderKeyboardIntroduction(
+            app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+        )
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
         let pretypeLiveReady = files.count == 1 && files.element.cells.count == 1
@@ -1357,7 +1362,7 @@ final class BatchImportUITests: XCTestCase {
         try await reveal(restore, app: app, navigation: "Settings")
         try check(restore.isEnabled, app: app, "Free backup restore is disabled")
         restore.tap()
-        let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
+        let picker = try await openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         // Folder was created empty and host-verified to contain exactly this
         // one UI-exported file. Match a complete display name, never a prefix.
@@ -1877,7 +1882,76 @@ final class BatchImportUITests: XCTestCase {
         return pickers.element
     }
 
-    private func openLocalFilesFolder(_ folder: String, app: XCUIApplication) async throws -> XCUIElement {
+    // One Recovery-only navigation retry may use this positive parent proof.
+    // The two scopes are sequential observations, not an atomic UI snapshot.
+    @MainActor
+    private static func recoveryFolderParentGeometry(
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
+        folder: String, localTitle: String
+    ) -> [CGRect]? {
+        let prefix = "TripDocket-Recovery-"
+        guard folder.hasPrefix(prefix),
+              let token = UUID(uuidString: String(folder.dropFirst(prefix.count))),
+              folder == prefix + token.uuidString.lowercased(),
+              ["On My iPhone", "On My iPad"].contains(localTitle) else { return nil }
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return nil }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func visible(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width > 0 && frame.height > 0
+        }
+        guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
+              applicationSnapshot.elementType == .application,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot) else { return nil }
+        // Do not dismiss an overlay or infer that an editor is ready to navigate.
+        for node in all + environment {
+            if [.keyboard, .textField, .textView, .menu, .menuItem, .alert, .sheet, .popover].contains(node.elementType)
+                || node.identifier == "DOC.inlineRenameField"
+                || node.identifier == "UIContinuousPathIntroductionView" { return nil }
+        }
+        let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
+        let pickers = all.filter { $0.identifier == "Browse View (Picker)" }
+        let roots = all.filter { $0.identifier.hasPrefix("DOC.browsingRoot Source:") }
+        let grids = all.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
+        let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
+        guard pickers.count == 1, roots.count == 1, roots[0].elementType == .other,
+              roots[0].identifier == rootID, grids.count == 1, navigations.count == 1,
+              let rootNodes = nodes(roots[0]), let gridNodes = nodes(grids[0]),
+              let titleNodes = nodes(navigations[0]),
+              rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
+              rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1 else { return nil }
+        let cells = all.filter { $0.elementType == .cell && $0.identifier == folder + ", Folder" }
+        let titles = titleNodes.filter {
+            ($0.elementType == .staticText && $0.label == localTitle)
+                || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
+        }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
+        guard cells.count == 1, cells[0].isEnabled, cells[0].label == folder + ", 1 item",
+              gridNodes.filter({ $0.elementType == .cell && $0.identifier == folder + ", Folder" }).count == 1,
+              titles.count == 1, !windows.isEmpty else { return nil }
+        let geometry = [snapshot.frame, roots[0].frame, grids[0].frame, navigations[0].frame,
+                        titles[0].frame] + windows.map(\.frame) + [cells[0].frame]
+        guard geometry.allSatisfy(visible) else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        guard visible(window), window.contains(cells[0].frame), window.contains(titles[0].frame),
+              snapshot.frame.contains(cells[0].frame), roots[0].frame.contains(cells[0].frame),
+              grids[0].frame.contains(cells[0].frame), navigations[0].frame.contains(titles[0].frame) else { return nil }
+        return geometry
+    }
+
+
+    private func openLocalFilesFolder(_ folder: String, app: XCUIApplication,
+                                      retryRecoveryFolderEntry: Bool = false) async throws -> XCUIElement {
         let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let navigation = navigations.element
         try await wait("Files did not present its navigation", app: app) {
@@ -1947,8 +2021,69 @@ final class BatchImportUITests: XCTestCase {
             atDestination() || (directory.exists && directory.isHittable)
         }
         if !atDestination() { directory.tap() }
-        try await wait("Files did not reach the exact synthetic folder", app: app) { atDestination() }
-        return picker
+        guard retryRecoveryFolderEntry else {
+            try await wait("Files did not reach the exact synthetic folder", app: app) { atDestination() }
+            return picker
+        }
+        // Preserve the original post-tap destination budget. Synchronous AX
+        // queries may return after it, but never authorize a late second tap.
+        let destinationDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        var retryAvailable = true
+        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+        var previousGeometry: [CGRect]?
+        while ContinuousClock.now < destinationDeadline {
+            if atDestination() { return picker }
+            if retryAvailable {
+                guard ContinuousClock.now < destinationDeadline else { break }
+                let observed = try? nativeFolderSnapshots(app)
+                let geometry = observed.flatMap {
+                    Self.recoveryFolderParentGeometry(in: $0.picker, applicationSnapshot: $0.application,
+                                                      folder: folder, localTitle: localTitle)
+                }
+                if let geometry {
+                    if let previousGeometry {
+                        // A changed/ambiguous state consumes eligibility too.
+                        // Never restart a stability sequence later in this wait.
+                        retryAvailable = false
+                        if geometry == previousGeometry {
+                            guard ContinuousClock.now < destinationDeadline else { break }
+                            if atDestination() { return picker }
+                            guard ContinuousClock.now < destinationDeadline else { break }
+                            let final = try? nativeFolderSnapshots(app)
+                            let finalGeometry = final.flatMap {
+                                Self.recoveryFolderParentGeometry(in: $0.picker, applicationSnapshot: $0.application,
+                                                                  folder: folder, localTitle: localTitle)
+                            }
+                            guard ContinuousClock.now < destinationDeadline else { break }
+                            if atDestination() { return picker }
+                            guard ContinuousClock.now < destinationDeadline else { break }
+                            let roots = picker.otherElements.matching(identifier:
+                                "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle)
+                            let grids = roots.element.collectionViews.matching(identifier: "File View")
+                            let directories = grids.element.cells.matching(identifier: folder + ", Folder")
+                            let liveMatches = finalGeometry == geometry
+                                && navigations.count == 1 && pickers.count == 1 && roots.count == 1 && grids.count == 1
+                                && picker.frame == geometry[0] && roots.element.frame == geometry[1]
+                                && grids.element.frame == geometry[2] && navigation.frame == geometry[3]
+                                && isRecoveryFolder(localTitle, navigation: navigation)
+                                && directories.count == 1 && directories.element.exists
+                                && directories.element.isEnabled && directories.element.isHittable
+                                && directories.element.frame == geometry.last && app.state == .runningForeground
+                            guard ContinuousClock.now < destinationDeadline else { break }
+                            if atDestination() { return picker }
+                            if liveMatches, ContinuousClock.now < destinationDeadline {
+                                print("Recovery folder navigation: one guarded retry in original destination budget")
+                                directories.element.tap()
+                            }
+                        }
+                    } else { previousGeometry = geometry }
+                } else { retryAvailable = false }
+            }
+            if ContinuousClock.now < destinationDeadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        throw failure("Files did not reach the exact synthetic folder", app: app)
     }
 
     private func selectRealFiles(_ app: XCUIApplication, nativeRoot: Bool,

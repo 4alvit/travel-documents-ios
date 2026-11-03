@@ -29,8 +29,9 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
             stream_bytes=16*MIB, total_log_bytes=64*MIB, scan_seconds=5, phase_scan_seconds=30, boot_scan_seconds=15,
             scan_entries=100000, scan_depth=40, scan_interval_seconds=1)
 # Preparation reached local Files checks at 132s on a cold hosted run.
-# Keep this case bounded inside the unchanged 600s phase/work deadlines.
+# The separate cold-start command allowance shares the original work deadline.
 PREPARE_CASE_SECONDS = 180
+PREPARE_PHASE_SECONDS = 780
 CASES = {
     'prepare': 'BatchImportUITests/testRecoveryPrepareFilesProvider()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -357,6 +358,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
 class Recovery:
     # Shared owned-process primitives, including bounded operation diagnostics.
     command = base.Smoke.command
+    accept_nonzero_exit = base.Smoke.accept_nonzero_exit
     pump = base.Smoke.pump
     stop = base.Smoke.stop
     save = base.Smoke.save
@@ -1006,6 +1008,7 @@ class Recovery:
 
     def run_phase(self, phase):
         require(phase in CASES,'Unknown phase')
+        phase_cap = PREPARE_PHASE_SECONDS if phase=='prepare' else CAPS['phase_seconds']
         if phase=='restore': self.authorize_restore()
         if phase=='prepare':
             require(self.folder is None and self.report.get('files_ui_baseline',{}).get('absent') is True,
@@ -1023,10 +1026,10 @@ class Recovery:
         budget = {'started_elapsed':started-self.t0,
                   'original_work_deadline_elapsed':self.limit-self.t0,
                   'remaining_work_before_seconds':self.limit-started,
-                  'requested_command_cap_seconds':CAPS['phase_seconds'],
+                  'requested_command_cap_seconds':phase_cap,
                   'selected_case_max_seconds':PREPARE_CASE_SECONDS if phase=='prepare' else 300,
                   'stop_reserve_seconds':8,
-                  'command_deadline_ceiling_elapsed':min(self.limit,started+CAPS['phase_seconds'])-self.t0}
+                  'command_deadline_ceiling_elapsed':min(self.limit,started+phase_cap)-self.t0}
         self.report.setdefault('phase_budget',{})[phase] = budget
         old_env,old_cwd = self.ops.env,self.ops.cwd
         self.ops.env = {**old_env,'TEST_RUNNER_TRIPDOCKET_RECOVERY_UI':'1',
@@ -1034,7 +1037,7 @@ class Recovery:
                         'TEST_RUNNER_NSUnbufferedIO':'YES','NSUnbufferedIO':'YES'}
         self.ops.cwd = self.candidate
         try:
-            self.command('phase-'+phase,self.phase_argv(phase),CAPS['phase_seconds'])
+            self.command('phase-'+phase,self.phase_argv(phase),phase_cap)
         except BaseException:
             self.failure_evidence(phase)
             raise
