@@ -58,14 +58,27 @@ final class PrivacyTransitionUITests: XCTestCase {
         let original = documentRow(in: app)
         try await reveal(original, in: app)
         original.tap()
-        try await require("Original preview did not expose its Quick Look view and usable Done action", app: app) {
-            app.navigationBars["Original document"].buttons["Done"].isHittable
-                && app.otherElements["QLPreviewControllerView"].exists
+        try await require("Original preview did not render the synthetic PDF with a usable Done action", app: app) {
+            let previews = app.otherElements.matching(identifier: "QLPreviewControllerView")
+            guard previews.count == 1 else { return false }
+            let preview = previews.element
+            let pdfs = preview.otherElements.matching(identifier: "QLPDFViewControllerViewAccessibilityIdentifier")
+            guard pdfs.count == 1 else { return false }
+            let pdf = pdfs.element
+            let warning = pdf.staticTexts.matching(NSPredicate(
+                format: "label == %@", "SYNTHETIC DEMO — NOT VALID FOR TRAVEL"
+            ))
+            let reservation = pdf.staticTexts.matching(NSPredicate(
+                format: "label == %@", "Coast weekend\nSample reservation ABC-000\nAlex Example"
+            ))
+            guard warning.count == 1 && reservation.count == 1 else { return false }
+            let done = app.navigationBars["Original document"].buttons["Done"]
+            return done.exists && done.isHittable
+                && warning.element.isHittable && reservation.element.isHittable
         }
-        // The observed Quick Look container is present before its PDF finishes
-        // drawing. Allow a bounded render interval, then visually review the
-        // actual PDF pixels in this attachment before accepting the evidence.
-        try await attachSettled(app, name: "Original preview before background", delay: .seconds(5))
+        // Require the owned fixture inside Quick Look within the existing wait
+        // budget. The retained screenshot still requires actual PDF pixel review.
+        try await attachSettled(app, name: "Original preview before background")
         try await backgroundAndReturnLocked(app, checkpoint: "Original preview")
         try await requestBiometric("match", in: app)
         try await requireUnlocked(app)
