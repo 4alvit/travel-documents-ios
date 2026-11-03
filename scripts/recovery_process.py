@@ -175,9 +175,14 @@ class Smoke:
                         sent = observed(self, record, 'stop', 'signal_' + str(int(sig)),
                                         lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))
-                    end = min(deadline, self.ops.now() + grace)
+                    now = self.ops.now()
+                    end = min(deadline, now + grace)
+                    if sig == signal.SIGTERM and now < deadline - 2:
+                        end = min(end, deadline - 2)
                     if sig == signal.SIGTERM and sent == 'syscall_returned':
-                        term_end = end
+                        # An unknown group probe after TERM forbids escalation;
+                        # retain its original bounded observation window.
+                        term_end = min(deadline, now + grace)
                     if sig == signal.SIGKILL and sent == 'syscall_returned':
                         confirmation_end, confirmation_kind = end, 'kill'
                         stop['post_kill_confirmation'] = {'deadline': end - self.t0, 'status': 'pending'}
@@ -186,6 +191,8 @@ class Smoke:
                         if done():
                             complete = True
                             break
+                        if confirmation_end is not None:
+                            end = confirmation_end
                         check()
                         remaining = end - self.ops.now()
                         if remaining <= 0:
