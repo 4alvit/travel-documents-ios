@@ -129,6 +129,28 @@ final class BatchImportUITests: XCTestCase {
         return editors[0].frame
     }
 
+    @MainActor
+    private static func nativeFolderInitialState(
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
+        localTitle: String
+    ) -> (ready: Bool, renameFrame: CGRect?) {
+        // All alternatives must describe the same retained observations. Files
+        // can enter inline editing while an accessibility query is in flight.
+        for introduction in [false, true] {
+            if nativeFolderEditorFrame(
+                in: snapshot, applicationSnapshot: applicationSnapshot,
+                expectedName: "untitled folder", localTitle: localTitle,
+                keyboardIntroduction: introduction
+            ) != nil {
+                return (true, nil)
+            }
+        }
+        let frame = nativeFolderRenameFrame(
+            in: snapshot, applicationSnapshot: applicationSnapshot, localTitle: localTitle
+        )
+        return (frame != nil, frame)
+    }
+
     // Evidence only. Serialize the supplied immutable snapshot, never a fresh
     // query, and make incomplete trees/strings explicit rather than implying a
     // complete view of the remote Files hierarchy.
@@ -564,14 +586,12 @@ final class BatchImportUITests: XCTestCase {
         var renameFrame: CGRect?
         try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
             renameFrame = nil
-            if files.count == 1 && inlineNames.count == 1
-                && inlineNames.element.isEnabled && inlineNames.element.isHittable { return true }
-            if keyboardIntroduction.count != 0 { return true }
             guard let snapshots = try? self.nativeFolderSnapshots(app) else { return false }
-            renameFrame = Self.nativeFolderRenameFrame(
+            let state = Self.nativeFolderInitialState(
                 in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
-            return renameFrame != nil
+            renameFrame = state.renameFrame
+            return state.ready
         }
         try await acknowledgeNativeFolderKeyboardIntroduction(
             app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged

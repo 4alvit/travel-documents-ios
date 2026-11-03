@@ -66,6 +66,14 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
     static func candidate(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot) -> CGRect? {
         nativeFolderRenameFrame(in: snapshot, applicationSnapshot: application, localTitle: "On My iPhone")
     }
+    static func initial(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot) -> String {
+        let state = nativeFolderInitialState(in: snapshot, applicationSnapshot: application, localTitle: "On My iPhone")
+        if let frame = state.renameFrame {
+            precondition(state.ready && frame == CGRect(x: 10, y: 212, width: 122, height: 190))
+            return "rename"
+        }
+        return state.ready ? "editor" : "rejected"
+    }
 }
 @MainActor final class Tree {
     let cell = XCUIElementSnapshot(.cell, "untitled folder, Folder", "untitled folder, 0 items",
@@ -202,6 +210,38 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
 @main struct Main {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args[0] == "initial-transition" {
+            let folder = Tree(), editor = EditorTree("untitled folder"), empty = Tree()
+            empty.mutate("missing-folder")
+            let before = Harness.initial(folder.picker, folder.app)
+            // The old fallback, selected by an earlier live editor=false,
+            // rejects this now-editing pair. The actual classifier must not.
+            precondition(Harness.candidate(editor.picker, editor.app) == nil)
+            let editing = Harness.initial(editor.picker, editor.app)
+            editor.mutate("introduction-overlay")
+            let introduction = Harness.initial(editor.picker, editor.app)
+            let absent = Harness.initial(empty.picker, empty.app)
+            print([before, editing, introduction, absent,
+                   Harness.initial(folder.picker, folder.app)].joined(separator: ","))
+            return
+        }
+        if args[0] == "initial-crossed-pair" {
+            let folder = Tree(), editor = EditorTree("untitled folder")
+            print(Harness.initial(editor.picker, folder.app) + "," + Harness.initial(folder.picker, editor.app))
+            return
+        }
+        if ["initial-editor", "initial-introduction"].contains(args[0]) {
+            let tree = EditorTree("untitled folder")
+            if args[0] == "initial-introduction" { tree.mutate("introduction-overlay") }
+            tree.mutate(args[1])
+            let scoped = args[1] == "application-as-picker" ? tree.app : (args[1] == "root-as-picker" ? tree.root : tree.picker)
+            let application = args[1] == "picker-as-application" ? tree.picker : (args[1] == "window-as-application" ? tree.window : tree.app)
+            print(Harness.initial(scoped, application)); return
+        }
+        if args[0] == "initial-rename" {
+            let tree = Tree(); tree.mutate(args[1])
+            print(Harness.initial(tree.picker, tree.app)); return
+        }
         if args[0] == "evidence" || args[0] == "environment-evidence" {
             let tree = EditorTree("untitled folder")
             if args[1] == "missing" { print(Harness.evidence(nil, tree.app)); return }
@@ -508,6 +548,51 @@ class FolderDirectTests(unittest.TestCase):
                 with self.subTest(expected=expected, case=case):
                     self.assertEqual(self.probe("introduction-editor", case, expected), "rejected")
 
+    def test_actual_initial_classifier_recognizes_both_editors_and_exact_rename(self):
+        for mode in ["initial-editor", "initial-introduction"]:
+            for case in ["exact", "application-also-includes-picker", "second-compatible-window"]:
+                with self.subTest(mode=mode, case=case):
+                    self.assertEqual(self.probe(mode, case), "editor")
+        self.assertEqual(self.probe("initial-rename", "exact"), "rename")
+
+    def test_actual_initial_classifier_rejects_invalid_editor_pairs(self):
+        for case in ["wrong-value", "wrong-provider", "wrong-title", "duplicate-picker", "duplicate-root",
+                     "duplicate-grid", "duplicate-nav", "duplicate-editor", "second-cell", "missing-editor",
+                     "missing-keyboard", "duplicate-keyboard", "missing-window", "disabled-editor",
+                     "editor-outside-cell-ancestry", "editor-outside-grid", "editor-under-keyboard",
+                     "remote-placeholder", "application-as-picker", "root-as-picker", "picker-as-application",
+                     "window-as-application"]:
+            with self.subTest(case=case):
+                self.assertEqual(self.probe("initial-editor", case), "rejected")
+        self.assertEqual(self.probe("initial-crossed-pair"), "rejected,rejected")
+
+    def test_actual_initial_classifier_rejects_ambiguous_introduction_and_rename(self):
+        for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
+                     "missing-editor", "wrong-value", "missing-keyboard"]:
+            with self.subTest(case=case):
+                self.assertEqual(self.probe("initial-introduction", case), "rejected")
+        for case in ["missing-folder", "duplicate-folder", "wrong-name", "nonempty-folder",
+                     "save-as-cell", "disabled-folder", "editor-present", "keyboard-present", "wrong-provider"]:
+            with self.subTest(case=case):
+                self.assertEqual(self.probe("initial-rename", case), "rejected")
+
+    def test_actual_initial_classifier_changes_state_without_stale_rename_frame(self):
+        self.assertEqual(self.probe("initial-transition"), "rename,editor,editor,rejected,rename")
+
+    def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
+        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        initial = case[case.index('try await wait("Native folder has neither'):case.index("try await acknowledgeNativeFolderKeyboardIntroduction(")]
+        self.assertEqual(initial.count("try? self.nativeFolderSnapshots(app)"), 1)
+        self.assertEqual(initial.count("Self.nativeFolderInitialState("), 1)
+        self.assertIn("in: snapshots.picker, applicationSnapshot: snapshots.application", initial)
+        self.assertLess(initial.index("renameFrame = nil"), initial.index("try? self.nativeFolderSnapshots(app)"))
+        self.assertIn("else { return false }", initial)
+        self.assertIn("renameFrame = state.renameFrame", initial)
+        self.assertIn("return state.ready", initial)
+        for forbidden in [".count", ".isHittable", ".isEnabled", "nativeFolderRenameFrame(",
+                          "timeout:", ".tap(", ".press(", "sleep", "while "]:
+            self.assertNotIn(forbidden, initial)
+
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         self.assertEqual(case.count("Self.nativeFolderEditorFrame("), 2)
@@ -654,7 +739,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertLess(third, case.index("let endEditingSnapshots"))
         initial_wait = case[case.index('try await wait("Native folder has neither'):first]
         rename_wait = case[case.index('try await wait("Native folder Rename did not'):second]
-        self.assertIn("keyboardIntroduction.count != 0", initial_wait)
+        self.assertIn("Self.nativeFolderInitialState(", initial_wait)
         self.assertIn("keyboardIntroduction.count != 0", rename_wait)
         self.assertEqual(helper.count("acknowledge.element.tap()"), 1)
         self.assertEqual(helper.count("try ready()"), 2)
