@@ -410,5 +410,54 @@ class Guards(unittest.TestCase):
         self.assertNotIn('pull_request:',workflow)
         self.assertNotIn('continue-on-error:',workflow)
 
+    def test_diagnostic_index_setting_reaches_build_query_and_both_arms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock()
+            targets=('Tripfolio','TripfolioTests','TripfolioUITests')
+            settings=json.dumps([{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}} for name in targets])
+            replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                     'architecture':'arm64','build-settings':settings}
+            calls=[]
+            def command(label,args,cap=38):
+                calls.append((label,args,cap));return replies.get(label,'')
+            p.commands.command=command;p.commands.once=mock.Mock()
+            p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
+                'version':'26.2','buildversion':'23C54','isAvailable':True,'supportedArchitectures':['arm64'],
+                'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
+            selection={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}
+            with mock.patch.object(q,'focused_build_selection',return_value=selection), \
+                    mock.patch.object(q,'shared_product_paths',return_value={}) as paths:
+                p.prepare()
+            def native(arm,label,args,cap=38):
+                calls.append((arm.out.name,args,cap));return ''
+            with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)), \
+                    mock.patch.object(Context,'command',native), \
+                    mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
+                p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+            relevant=[(label,args,cap) for label,args,cap in calls if label in ('build-for-testing','build-settings','child','ownedAncestor')]
+            self.assertEqual([label for label,_,_ in relevant],['build-for-testing','build-settings','child','ownedAncestor'])
+            for label,args,cap in relevant:
+                self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1,label)
+                self.assertIn('EXCLUDED_SOURCE_FILE_NAMES=Other.swift',args)
+            self.assertEqual([cap for _,_,cap in relevant],[420,48,780,780])
+            self.assertEqual(paths.call_args.args[2],tuple(p.settings))
+            self.assertEqual(selection['build_settings'],['EXCLUDED_SOURCE_FILE_NAMES=Other.swift'])
+            self.assertEqual(p.report['diagnostic_build_settings'],p.settings)
+            self.assertEqual(p.report['compiler_index_store'],{name:'NO' for name in targets})
+
+    def test_effective_index_setting_requires_every_exact_target(self):
+        targets=('Tripfolio','TripfolioTests','TripfolioUITests')
+        rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}} for name in targets]
+        self.assertEqual(m.validate_index_store_disabled(json.dumps(rows)),{name:'NO' for name in targets})
+        for target in targets:
+            for value in ('Default','YES','',None,False):
+                changed=json.loads(json.dumps(rows))
+                next(row for row in changed if row['target']==target)['buildSettings']['COMPILER_INDEX_STORE_ENABLE']=value
+                with self.subTest(target=target,value=value),self.assertRaises(RuntimeError):
+                    m.validate_index_store_disabled(json.dumps(changed))
+        for changed in (rows[:-1],rows+[rows[0]],{},rows*6):
+            with self.subTest(changed=changed),self.assertRaises(RuntimeError):
+                m.validate_index_store_disabled(json.dumps(changed))
+
 
 if __name__=='__main__':unittest.main()

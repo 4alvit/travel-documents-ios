@@ -91,6 +91,20 @@ def validate_result(q, summary, tree, owned, selection):
     require(summary.get('testFailures') == [] and summary.get('runtimeWarnings',[]) == [], 'Native failures or warnings')
 
 
+def validate_index_store_disabled(raw):
+    values = json.loads(raw)
+    require(isinstance(values,list) and len(values)<=16,'Invalid diagnostic build settings')
+    result = {}
+    for target in ('Tripfolio','TripfolioTests','TripfolioUITests'):
+        matches = [value for value in values if isinstance(value,dict) and value.get('target')==target]
+        require(len(matches)==1,'Missing or ambiguous diagnostic target: '+target)
+        settings = matches[0].get('buildSettings')
+        require(isinstance(settings,dict) and settings.get('COMPILER_INDEX_STORE_ENABLE')=='NO',
+                'Compiler index store must be disabled: '+target)
+        result[target] = settings['COMPILER_INDEX_STORE_ENABLE']
+    return result
+
+
 def make_runner(q, core):
     class Context(core.Recovery):
         """Use reviewed process/resource primitives with one externally allocated clock."""
@@ -257,7 +271,9 @@ def make_runner(q, core):
             self.report['runtime_selection'] = self.selection
             profile = {'name':'default','runner':'macos-15','runner_architecture':'ARM64','architecture':'arm64'}
             selection = q.focused_build_selection('batch',profile,self.before['files'])
-            self.settings = selection['build_settings']; self.report['focused_build'] = selection
+            self.settings = [*selection['build_settings'],'COMPILER_INDEX_STORE_ENABLE=NO']
+            self.report['focused_build'] = selection
+            self.report['diagnostic_build_settings'] = list(self.settings)
             c.command('generate-project',['xcodegen','generate'],128)
             self.admit_build()
             c.once('build-for-testing')
@@ -266,6 +282,7 @@ def make_runner(q, core):
                 '-destination','generic/platform=iOS Simulator','-derivedDataPath',self.derived,
                 'CODE_SIGNING_ALLOWED=NO',*self.settings,'-showBuildSettings','-json','build-for-testing']
             raw = c.command('build-settings',settings_argv,48)
+            self.report['compiler_index_store'] = validate_index_store_disabled(raw)
             self.product_paths = q.shared_product_paths(raw,self.derived,tuple(self.settings))
             self.product_snapshot('products-built')
             self.source('source-after-build')
