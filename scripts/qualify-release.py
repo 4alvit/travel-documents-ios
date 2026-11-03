@@ -257,7 +257,28 @@ def shared_product_paths(raw, derived, build_settings=()):
     return result
 
 
+_descriptor_read_state = None
+
+
 def bounded_read(root, relative, maximum, check):
+    """Defer asynchronous abort until every owned descriptor close is attempted."""
+    global _descriptor_read_state
+    previous = _descriptor_read_state
+    state = previous if previous is not None else {"interrupted": False}
+    _descriptor_read_state = state
+    try:
+        result = _bounded_read(root, relative, maximum, check)
+    finally:
+        _descriptor_read_state = previous
+    # An existing body/close failure bypasses this success-only delivery point.
+    # Some callers supply a no-op check, so retain the signal explicitly too.
+    if state["interrupted"]:
+        raise KeyboardInterrupt
+    check()
+    return result
+
+
+def _bounded_read(root, relative, maximum, check):
     """Read one pinned regular file; never follow a library path component."""
     parts = relative.split("/")
     require(1 <= len(parts) <= 8 and all(p and p not in (".", "..") and "\\" not in p
@@ -1787,7 +1808,11 @@ def main():
     run = Qualification(HERE.parent, args.mode, os.environ)
     def interrupt(_signal, _frame):
         run.interrupted = True
-        if not (run.acquiring or run.finalizing_driver or run.cleaning): raise KeyboardInterrupt
+        if not (run.acquiring or run.finalizing_driver or run.cleaning):
+            if _descriptor_read_state is not None:
+                _descriptor_read_state["interrupted"] = True
+            else:
+                raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt); signal.signal(signal.SIGINT, interrupt)
     return run.execute()
 
