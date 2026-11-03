@@ -1,5 +1,5 @@
 name: Purchase anchor diagnostic
-run-name: "Purchase anchor pair (${{ inputs.runner }}): child then ownedAncestor"
+run-name: "Purchase anchor pair (${{ inputs.runner }}): child then swiftUI"
 on:
   workflow_dispatch:
     inputs:

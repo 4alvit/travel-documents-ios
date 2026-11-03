@@ -1036,20 +1036,6 @@ private final class PurchasePresentationContext {
               scene.activationState == .foregroundActive else {
             throw PresentationError.unavailable
         }
-        #if DEBUG && targetEnvironment(simulator)
-        if let mode = try Self.diagnosticAnchorMode(arguments: ProcessInfo.processInfo.arguments) {
-            guard #available(iOS 18.2, *) else { throw PresentationError.unavailable }
-            let selected = try Self.diagnosticAnchor(mode, from: controller, window: window, scene: scene)
-            print("purchase-anchor mode=\(mode.rawValue) depth=\(selected.depth)")
-            traceController(selected.controller, point: .entry, chain: "selected", index: selected.depth,
-                            window: window, containsAnchor: true)
-            let current = try Self.diagnosticAnchor(mode, from: controller, window: window, scene: scene)
-            guard current.controller === selected.controller, current.depth == selected.depth else {
-                throw PresentationError.unavailable
-            }
-            return try await product.purchase(confirmIn: selected.controller)
-        }
-        #endif
         var ancestor: UIViewController? = controller
         while let current = ancestor {
             guard !current.isBeingDismissed, !current.isMovingFromParent else {
@@ -1064,7 +1050,7 @@ private final class PurchasePresentationContext {
     }
 
     #if DEBUG && targetEnvironment(simulator)
-    enum DiagnosticAnchorMode: String { case child, ownedAncestor }
+    enum DiagnosticAnchorMode: String { case child, swiftUI }
 
     static func diagnosticAnchorMode(arguments: [String]) throws -> DiagnosticAnchorMode? {
         let family = arguments.filter { $0.hasPrefix("--ui-testing-purchase-anchor") }
@@ -1081,43 +1067,32 @@ private final class PurchasePresentationContext {
         return mode
     }
 
-    static func diagnosticAnchor(_ mode: DiagnosticAnchorMode, from bridge: UIViewController,
-                                 window: UIWindow, scene: UIWindowScene) throws -> (controller: UIViewController, depth: Int) {
-        guard bridge.parent != nil, bridge.viewIfLoaded?.window === window,
-              window.windowScene === scene, scene.activationState == .foregroundActive else {
+    // Both arms retain the current screen's ownership checks. Only the
+    // SwiftUI arm delegates selection of the purchase UI context to StoreKit.
+    func diagnosticPurchase(_ product: Product, arguments: [String],
+                            swiftUIPurchase: () async throws -> Product.PurchaseResult) async throws -> Product.PurchaseResult {
+        let mode = try Self.diagnosticAnchorMode(arguments: arguments)
+        guard mode == .swiftUI else {
+            if mode == .child { print("purchase-anchor mode=child") }
+            return try await purchase(product)
+        }
+        tracePresentation(.entry)
+        defer { tracePresentation(.returned) }
+        guard isActive, let controller, controller.parent != nil,
+              let window = controller.viewIfLoaded?.window,
+              let scene = window.windowScene,
+              scene.activationState == .foregroundActive else {
             throw PresentationError.unavailable
         }
-        var chain: [UIViewController] = []
-        var seen = Set<ObjectIdentifier>()
-        var next: UIViewController? = bridge
-        while let current = next {
-            guard chain.count < 12, seen.insert(ObjectIdentifier(current)).inserted,
-                  !current.isBeingDismissed, !current.isMovingFromParent else {
+        var ancestor: UIViewController? = controller
+        while let current = ancestor {
+            guard !current.isBeingDismissed, !current.isMovingFromParent else {
                 throw PresentationError.unavailable
             }
-            chain.append(current)
-            next = current.parent
+            ancestor = current.parent
         }
-        if mode == .child { return (bridge, 0) }
-        guard !window.isHidden, window.alpha > 0,
-              chain.allSatisfy({ !$0.isBeingPresented && !$0.isMovingToParent && $0.transitionCoordinator == nil }) else {
-            throw PresentationError.unavailable
-        }
-        for (depth, candidate) in chain.enumerated().dropFirst() {
-            guard let view = candidate.viewIfLoaded, view.window === window,
-                  bridge.viewIfLoaded?.isDescendant(of: view) == true else {
-                throw PresentationError.unavailable
-            }
-            guard [view.bounds.minX, view.bounds.minY, view.bounds.width, view.bounds.height].allSatisfy({ $0.isFinite }) else {
-                throw PresentationError.unavailable
-            }
-            if view.bounds.isEmpty { continue }
-            guard !view.isHidden, view.alpha > 0, candidate.presentedViewController == nil else {
-                throw PresentationError.unavailable
-            }
-            return (candidate, depth)
-        }
-        throw PresentationError.unavailable
+        print("purchase-anchor mode=swiftUI")
+        return try await swiftUIPurchase()
     }
 
     private enum ObservationPoint: String { case entry, returned }
@@ -1179,6 +1154,9 @@ private struct PurchasePresentationBridge: UIViewControllerRepresentable {
 
 @MainActor
 private struct ProView: View {
+    #if DEBUG && targetEnvironment(simulator)
+    @Environment(\.purchase) private var purchaseAction
+    #endif
     @State private var purchasePresentation = PurchasePresentationContext()
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -1214,7 +1192,14 @@ private struct ProView: View {
                             let generation = purchaseFeedback.begin()
                             Task {
                                 let failure = await model.purchases.purchase(using: { product in
+                                    #if DEBUG && targetEnvironment(simulator)
+                                    try await purchasePresentation.diagnosticPurchase(
+                                        product, arguments: ProcessInfo.processInfo.arguments,
+                                        swiftUIPurchase: { try await purchaseAction(product) }
+                                    )
+                                    #else
                                     try await purchasePresentation.purchase(product)
+                                    #endif
                                 })
                                 guard !model.purchases.isPro else {
                                     purchaseFeedback.reset()

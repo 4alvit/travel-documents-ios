@@ -27,7 +27,7 @@ class Guards(unittest.TestCase):
         return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',PURCHASE_ANCHOR_RUNNER='macos-15',
                     GITHUB_REPOSITORY='4alvit/travel-documents-ios',GITHUB_EVENT_NAME='workflow_dispatch',
                     GITHUB_WORKFLOW='Purchase anchor diagnostic',GITHUB_JOB='anchor',
-                    GITHUB_REF='refs/heads/diagnostic/purchase-anchor',GITHUB_SHA='a'*40,
+                    GITHUB_REF='refs/heads/diagnostic/purchase-swiftui',GITHUB_SHA='a'*40,
                     GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',DEVELOPER_DIR=q.DEVELOPER_DIR)
 
     def test_context_is_explicit_manual_arm_branch(self):
@@ -101,10 +101,10 @@ class Guards(unittest.TestCase):
                 def native(arm,label,args,cap=38):commands.append((arm.out.name,args,cap));return ''
                 with mock.patch.object(Context,'setup',setup),mock.patch.object(Context,'command',native), \
                         mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                    p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+                    p.run_arm('child',0);p.run_arm('swiftUI',1)
                 self.assertEqual(hosts,['x86_64','x86_64'])
-                selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','child','ownedAncestor')]
-                self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','child','ownedAncestor'])
+                selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','child','swiftUI')]
+                self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','child','swiftUI'])
                 self.assertEqual([c[2] for c in selected],[420,48,780,780])
                 for _,args,_ in selected:self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1)
 
@@ -170,7 +170,7 @@ class Guards(unittest.TestCase):
                     mock.patch.object(Context,'command',command), \
                     mock.patch.object(Context,'owned_path',return_value=built) as owned_path, \
                     mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+                p.run_arm('child',0);p.run_arm('swiftUI',1)
             self.assertEqual([x[1] for x in events],['install-aut','pretest-installed-Tripfolio','selected-tests']*2)
             for start in (0,3):
                 owned=events[start][0]
@@ -217,8 +217,8 @@ class Guards(unittest.TestCase):
                 return ''
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',command),mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
                 self.assertEqual(p.run_arm('child',0),'failed')
-                self.assertEqual(p.run_arm('ownedAncestor',1),'passed_pending_independent_review')
-            self.assertEqual(events,[('child','selected-tests',780),('ownedAncestor','selected-tests',780)])
+                self.assertEqual(p.run_arm('swiftUI',1),'passed_pending_independent_review')
+            self.assertEqual(events,[('child','selected-tests',780),('swiftUI','selected-tests',780)])
             self.assertEqual(len(p.used_devices),2)
             self.assertTrue(p.report['arms']['child']['errors'])
 
@@ -254,7 +254,7 @@ class Guards(unittest.TestCase):
             def clean(arm):
                 clocks.append((arm.t0,arm.final,arm.limit));self.clean_arm(arm)
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',clean):
-                p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+                p.run_arm('child',0);p.run_arm('swiftUI',1)
             self.assertEqual(clocks,[(p.started,p.work_end,p.work_end),(p.started,p.final,p.work_end)])
 
     def test_insufficient_interarm_cleanup_budget_uses_final_reserve_and_stops(self):
@@ -859,9 +859,9 @@ class Guards(unittest.TestCase):
             with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)), \
                     mock.patch.object(Context,'command',native), \
                     mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
-                p.run_arm('child',0);p.run_arm('ownedAncestor',1)
-            relevant=[(label,args,cap) for label,args,cap in calls if label in ('build-for-testing','build-settings','child','ownedAncestor')]
-            self.assertEqual([label for label,_,_ in relevant],['build-for-testing','build-settings','child','ownedAncestor'])
+                p.run_arm('child',0);p.run_arm('swiftUI',1)
+            relevant=[(label,args,cap) for label,args,cap in calls if label in ('build-for-testing','build-settings','child','swiftUI')]
+            self.assertEqual([label for label,_,_ in relevant],['build-for-testing','build-settings','child','swiftUI'])
             for label,args,cap in relevant:
                 self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1,label)
                 self.assertIn('EXCLUDED_SOURCE_FILE_NAMES=Other.swift',args)

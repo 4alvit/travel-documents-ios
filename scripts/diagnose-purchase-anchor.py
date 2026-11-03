@@ -19,7 +19,7 @@ BUILD_CAP, TEST_CAP, CASE_SECONDS = 420, 780, 180  # Command caps include eight-
 CACHE_CAP = 300  # New prerequisite; includes stop reserve and shares the original global clock.
 CASE = 'BatchImportUITests/testDiagnosticPurchasePresentationAnchor()'
 SELECTOR = 'TripfolioUITests/' + CASE.removesuffix('()')
-MODES = ('child', 'ownedAncestor')
+MODES = ('child', 'swiftUI')
 RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-2'
 DEVICE = 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro'
 PINS = {
@@ -48,7 +48,7 @@ def context(env, machine):
             and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
             and env.get('GITHUB_WORKFLOW') == 'Purchase anchor diagnostic'
             and env.get('GITHUB_JOB') == 'anchor', 'Unexpected diagnostic workflow context')
-    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/purchase-anchor', 'Diagnostic branch required')
+    require(env.get('GITHUB_REF') == 'refs/heads/diagnostic/purchase-swiftui', 'Diagnostic branch required')
     require(re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', '')), 'Missing source commit')
     for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
         require(re.fullmatch('[1-9][0-9]*', env.get(key, '')), 'Invalid run identity')

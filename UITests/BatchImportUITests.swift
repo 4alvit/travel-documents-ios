@@ -1669,7 +1669,7 @@ final class BatchImportUITests: XCTestCase {
         let enabled = environment["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL"]
         let mode = environment["TRIPDOCKET_PURCHASE_ANCHOR_MODE"]
         guard enabled != nil || mode != nil else { return nil }
-        guard enabled == "1", let mode, ["child", "ownedAncestor"].contains(mode) else {
+        guard enabled == "1", let mode, ["child", "swiftUI"].contains(mode) else {
             throw BatchTestFailure(message: "Invalid explicit purchase-anchor diagnostic configuration")
         }
         return mode

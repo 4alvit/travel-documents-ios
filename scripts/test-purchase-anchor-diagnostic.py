@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the actual diagnostic selector with a minimal UIKit graph substitute."""
+"""Compile actual diagnostic routing with public-API substitutes; never buy anything."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,41 +8,42 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = r'''
 import Foundation
-import CoreGraphics
 @MainActor final class UIWindowScene {
     enum State { case foregroundActive, background }
     var activationState = State.foregroundActive
 }
-@MainActor class UIView {
-    var bounds = CGRect(x: 0, y: 0, width: 300, height: 500)
-    var isHidden = false
-    var alpha: CGFloat = 1
-    weak var window: UIWindow?
-    weak var superview: UIView?
-    func isDescendant(of view: UIView) -> Bool {
-        var next: UIView? = self
-        for _ in 0..<32 {
-            guard let current = next else { return false }
-            if current === view { return true }
-            next = current.superview
-        }
-        return false
-    }
-}
-@MainActor final class UIWindow: UIView { var windowScene: UIWindowScene? }
+@MainActor final class UIWindow { var windowScene: UIWindowScene? }
+@MainActor final class UIView { var window: UIWindow? }
 @MainActor final class UIViewController {
-    var viewIfLoaded: UIView? = UIView()
     var parent: UIViewController?
+    var viewIfLoaded: UIView? = UIView()
     var isBeingDismissed = false
     var isMovingFromParent = false
-    var isBeingPresented = false
-    var isMovingToParent = false
-    var transitionCoordinator: Bool?
-    var presentedViewController: UIViewController?
+}
+enum TestError: Error { case purchase }
+@MainActor final class Counter {
+    var child = 0
+    var swiftUI = 0
+    var failure: Error?
+}
+@MainActor struct Product {
+    enum PurchaseResult { case controller, scene, swiftUI }
+    let counter: Counter
+    func purchase(confirmIn: UIViewController) async throws -> PurchaseResult {
+        counter.child += 1
+        if let failure = counter.failure { throw failure }
+        return .controller
+    }
+    func purchase(confirmIn: UIWindowScene) async throws -> PurchaseResult { .scene }
 }
 struct BatchTestFailure: Error { let message: String }
-@MainActor struct Harness {
+@MainActor final class Harness {
+    weak var controller: UIViewController?
+    var isActive = true
     enum PresentationError: Error { case unavailable }
+    enum ObservationPoint { case entry, returned }
+    func tracePresentation(_ point: ObservationPoint) {}
+    // ACTUAL_PURCHASE
     // ACTUAL_HELPERS
     // ACTUAL_UI_CONFIGURATION
 }
@@ -52,106 +53,96 @@ struct BatchTestFailure: Error { let message: String }
 @MainActor func rejects(_ body: () throws -> Void) {
     do { try body(); print("FAIL unexpectedly accepted"); exit(1) } catch {}
 }
+@MainActor func rejectsAsync(_ body: () async throws -> Void) async {
+    do { try await body(); print("FAIL unexpectedly accepted"); exit(1) } catch {}
+}
 @main struct Main {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         let name = CommandLine.arguments[1]
         let scene = UIWindowScene(), window = UIWindow()
         window.windowScene = scene
         let bridge = UIViewController(), parent = UIViewController(), root = UIViewController()
-        bridge.parent = parent; parent.parent = root
-        bridge.viewIfLoaded!.bounds = .zero
-        bridge.viewIfLoaded!.superview = parent.viewIfLoaded
-        parent.viewIfLoaded!.superview = root.viewIfLoaded
-        for node in [bridge, parent, root] { node.viewIfLoaded!.window = window }
-        func choose(_ mode: Harness.DiagnosticAnchorMode = .ownedAncestor) throws -> (controller: UIViewController, depth: Int) {
-            try Harness.diagnosticAnchor(mode, from: bridge, window: window, scene: scene)
-        }
+        bridge.parent = parent; parent.parent = root; bridge.viewIfLoaded!.window = window
+        let counter = Counter(), harness = Harness()
+        harness.controller = bridge
+        let product = Product(counter: counter)
         let flags = ["--ui-testing-purchase-diagnostics", "--ui-testing-purchase-anchor-control"]
+        func arguments(_ mode: String) -> [String] { flags + ["--ui-testing-purchase-anchor=" + mode] }
+        func request(_ arguments: [String]) async throws -> Product.PurchaseResult {
+            try await harness.diagnosticPurchase(product, arguments: arguments, swiftUIPurchase: {
+                counter.swiftUI += 1
+                if let failure = counter.failure { throw failure }
+                return .swiftUI
+            })
+        }
         switch name {
-        case "ordinary-flags-preserve-default":
+        case "ordinary-default-and-exact-modes":
             expect(try Harness.diagnosticAnchorMode(arguments: []) == nil, "ordinary default")
-            expect(try Harness.diagnosticAnchorMode(arguments: [flags[0]]) == nil, "existing trace-only default")
-        case "exact-mode-and-opt-in":
-            for mode in ["child", "ownedAncestor"] {
-                let actual = try Harness.diagnosticAnchorMode(arguments: flags + ["--ui-testing-purchase-anchor="+mode])
-                expect(actual?.rawValue == mode, "exact selector")
+            expect(try Harness.diagnosticAnchorMode(arguments: [flags[0]]) == nil, "trace-only default")
+            for mode in ["child", "swiftUI"] {
+                expect(try Harness.diagnosticAnchorMode(arguments: arguments(mode))?.rawValue == mode, "exact selector")
             }
-        case "malformed-duplicate-unknown-reject":
-            for arguments in [flags, [flags[1], "--ui-testing-purchase-anchor=child"],
-                flags + ["--ui-testing-purchase-anchor=scene"], flags + ["--ui-testing-purchase-anchor="],
-                flags + ["--ui-testing-purchase-anchor=child", "--ui-testing-purchase-anchor=ownedAncestor"],
-                flags + [flags[1], "--ui-testing-purchase-anchor=child"],
-                flags + [flags[0], "--ui-testing-purchase-anchor=child"],
+            expect(try await request([]) == .controller, "ordinary API")
+            expect(try await request([flags[0]]) == .controller, "trace-only API")
+            expect(counter.child == 2 && counter.swiftUI == 0, "no accidental diagnostic action")
+        case "malformed-flags-stop-before-api":
+            for invalid in [flags, [flags[1], "--ui-testing-purchase-anchor=child"],
+                arguments("ownedAncestor"), arguments("scene"), arguments(""),
+                arguments("child") + ["--ui-testing-purchase-anchor=swiftUI"],
+                arguments("child") + [flags[1]], arguments("child") + [flags[0]],
                 flags + ["--ui-testing-purchase-anchor-malformed"]] {
-                rejects { _ = try Harness.diagnosticAnchorMode(arguments: arguments) }
+                await rejectsAsync { _ = try await request(invalid) }
             }
+            expect(counter.child == 0 && counter.swiftUI == 0, "invalid arguments must not buy")
         case "ui-configuration":
             expect(try Harness.diagnosticPurchaseAnchorMode([:]) == nil, "missing skips")
-            for mode in ["child", "ownedAncestor"] {
+            for mode in ["child", "swiftUI"] {
                 expect(try Harness.diagnosticPurchaseAnchorMode(["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"1", "TRIPDOCKET_PURCHASE_ANCHOR_MODE":mode]) == mode, "valid UI mode")
             }
-            for env in [["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"1"], ["TRIPDOCKET_PURCHASE_ANCHOR_MODE":"child"],
+            for invalid in [["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"1"], ["TRIPDOCKET_PURCHASE_ANCHOR_MODE":"child"],
                 ["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"0", "TRIPDOCKET_PURCHASE_ANCHOR_MODE":"child"],
-                ["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"1", "TRIPDOCKET_PURCHASE_ANCHOR_MODE":"scene"]] {
-                rejects { _ = try Harness.diagnosticPurchaseAnchorMode(env) }
+                ["TRIPDOCKET_PURCHASE_ANCHOR_CONTROL":"1", "TRIPDOCKET_PURCHASE_ANCHOR_MODE":"ownedAncestor"]] {
+                rejects { _ = try Harness.diagnosticPurchaseAnchorMode(invalid) }
             }
-        case "child-keeps-empty-bridge":
-            let result = try choose(.child)
-            expect(result.controller === bridge && result.depth == 0, "child identity")
-        case "nearest-nonempty-owned-ancestor":
-            let result = try choose()
-            expect(result.controller === parent && result.depth == 1, "nearest parent")
-            parent.viewIfLoaded!.bounds = .zero
-            let farther = try choose()
-            expect(farther.controller === root && farther.depth == 2, "skip empty only")
-        case "missing-owned-ancestor":
-            parent.viewIfLoaded!.bounds = .zero; root.viewIfLoaded!.bounds = .zero
-            rejects { _ = try choose() }
-        case "cross-window-and-view-ownership":
-            let foreignWindow = UIWindow()
-            parent.viewIfLoaded!.window = foreignWindow
-            rejects { _ = try choose() }
-            parent.viewIfLoaded!.window = window
-            bridge.viewIfLoaded!.superview = root.viewIfLoaded
-            rejects { _ = try choose() }
-        case "foreground-scene-binding":
-            scene.activationState = .background; rejects { _ = try choose() }
-            scene.activationState = .foregroundActive; window.windowScene = UIWindowScene()
-            rejects { _ = try choose() }
-        case "visibility-and-finite-geometry":
-            parent.viewIfLoaded!.isHidden = true; rejects { _ = try choose() }
-            parent.viewIfLoaded!.isHidden = false; parent.viewIfLoaded!.alpha = 0
-            rejects { _ = try choose() }; parent.viewIfLoaded!.alpha = 1
-            parent.viewIfLoaded!.bounds.size.width = .infinity; rejects { _ = try choose() }
-            parent.viewIfLoaded!.bounds.size.width = 300; window.isHidden = true
-            rejects { _ = try choose() }
-        case "ancestor-transitions-and-presentation":
-            parent.isBeingPresented = true; rejects { _ = try choose() }; parent.isBeingPresented = false
-            parent.isMovingToParent = true; rejects { _ = try choose() }; parent.isMovingToParent = false
-            parent.transitionCoordinator = true; rejects { _ = try choose() }; parent.transitionCoordinator = nil
-            parent.presentedViewController = UIViewController(); rejects { _ = try choose() }
-        case "original-ancestor-removal-guards":
-            root.isBeingDismissed = true; rejects { _ = try choose(.child) }; rejects { _ = try choose() }
-            root.isBeingDismissed = false; root.isMovingFromParent = true
-            rejects { _ = try choose(.child) }; rejects { _ = try choose() }
-        case "higher-ancestor-transitions-stop-before-purchase":
-            var purchases = 0
-            func request() throws { _ = try choose(); purchases += 1 }
-            root.isBeingPresented = true; rejects { try request() }; root.isBeingPresented = false
-            root.isMovingToParent = true; rejects { try request() }; root.isMovingToParent = false
-            root.transitionCoordinator = true; rejects { try request() }
-            expect(purchases == 0, "invalid ancestor must stop before purchase")
-            expect(try choose(.child).controller === bridge, "child keeps original transition policy")
-        case "cycle-and-depth-bounded":
-            root.parent = bridge; rejects { _ = try choose() }; root.parent = nil
-            var last = root
-            for _ in 0..<12 { let next = UIViewController(); last.parent = next; last = next }
-            rejects { _ = try choose() }
-        case "selection-change-is-observable":
-            let before = try choose()
-            parent.viewIfLoaded!.bounds = .zero
-            let after = try choose()
-            expect(before.controller !== after.controller && before.depth != after.depth, "revalidation rejects changed choice")
+        case "one-call-per-selected-api":
+            expect(try await request(arguments("child")) == .controller, "child uses current public API")
+            expect(counter.child == 1 && counter.swiftUI == 0, "exactly one child call")
+            expect(try await request(arguments("swiftUI")) == .swiftUI, "SwiftUI result unchanged")
+            expect(counter.child == 1 && counter.swiftUI == 1, "exactly one SwiftUI call")
+        case "both-arms-retain-site-and-removal-guards":
+            for mode in ["child", "swiftUI"] {
+                harness.isActive = false
+                await rejectsAsync { _ = try await request(arguments(mode)) }; harness.isActive = true
+                harness.controller = nil
+                await rejectsAsync { _ = try await request(arguments(mode)) }; harness.controller = bridge
+                bridge.parent = nil
+                await rejectsAsync { _ = try await request(arguments(mode)) }; bridge.parent = parent
+                let view = bridge.viewIfLoaded; bridge.viewIfLoaded = nil
+                await rejectsAsync { _ = try await request(arguments(mode)) }; bridge.viewIfLoaded = view
+                bridge.viewIfLoaded!.window = nil
+                await rejectsAsync { _ = try await request(arguments(mode)) }; bridge.viewIfLoaded!.window = window
+                window.windowScene = nil
+                await rejectsAsync { _ = try await request(arguments(mode)) }; window.windowScene = scene
+                scene.activationState = .background
+                await rejectsAsync { _ = try await request(arguments(mode)) }; scene.activationState = .foregroundActive
+                for ancestor in [bridge, parent, root] {
+                    ancestor.isBeingDismissed = true
+                    await rejectsAsync { _ = try await request(arguments(mode)) }; ancestor.isBeingDismissed = false
+                    ancestor.isMovingFromParent = true
+                    await rejectsAsync { _ = try await request(arguments(mode)) }; ancestor.isMovingFromParent = false
+                }
+            }
+            expect(counter.child == 0 && counter.swiftUI == 0, "invalid site must not buy")
+        case "error-and-cancellation-no-fallback":
+            for mode in ["child", "swiftUI"] {
+                counter.failure = TestError.purchase
+                do { _ = try await request(arguments(mode)); expect(false, "missing purchase error") }
+                catch TestError.purchase {} catch { expect(false, "changed purchase error") }
+                counter.failure = CancellationError()
+                do { _ = try await request(arguments(mode)); expect(false, "missing cancellation") }
+                catch is CancellationError {} catch { expect(false, "changed cancellation") }
+            }
+            expect(counter.child == 2 && counter.swiftUI == 2, "no retry or fallback")
         default: fatalError("Unknown case")
         }
         print("PASS \(name)")
@@ -159,10 +150,12 @@ struct BatchTestFailure: Error { let message: String }
 }
 '''
 
+
 def between(source, start, end):
     if source.count(start) != 1 or source.count(end) != 1:
         raise ValueError("Unique source boundary missing")
     return source[source.index(start):source.index(end, source.index(start))]
+
 
 class AnchorTests(unittest.TestCase):
     @classmethod
@@ -171,32 +164,37 @@ class AnchorTests(unittest.TestCase):
         cls.addClassCleanup(cls.directory.cleanup)
         views = (ROOT / "App/Views.swift").read_text()
         ui = (ROOT / "UITests/BatchImportUITests.swift").read_text()
+        purchase = between(views, "    func purchase(_ product: Product)", "    enum DiagnosticAnchorMode:")
+        purchase = purchase.removesuffix("    #if DEBUG && targetEnvironment(simulator)\n")
         helper = between(views, "    enum DiagnosticAnchorMode:", "    private enum ObservationPoint:")
         config = between(ui, "    private static func diagnosticPurchaseAnchorMode(", "    func testDiagnosticPurchasePresentationAnchor()")
         config = config.replace("private static func", "static func", 1)
         source = Path(cls.directory.name) / "main.swift"
-        source.write_text(FIXTURE.replace("    // ACTUAL_HELPERS", helper).replace("    // ACTUAL_UI_CONFIGURATION", config))
+        source.write_text(FIXTURE.replace("    // ACTUAL_PURCHASE", purchase).replace("    // ACTUAL_HELPERS", helper).replace("    // ACTUAL_UI_CONFIGURATION", config))
         cls.executable = source.with_suffix("")
         result = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(source), "-o", str(cls.executable)], capture_output=True, text=True, timeout=60)
         if result.returncode: raise AssertionError(result.stdout + result.stderr)
 
-    def test_actual_selectors_and_ownership(self):
-        for case in ["ordinary-flags-preserve-default", "exact-mode-and-opt-in", "malformed-duplicate-unknown-reject", "ui-configuration", "child-keeps-empty-bridge", "nearest-nonempty-owned-ancestor", "missing-owned-ancestor", "cross-window-and-view-ownership", "foreground-scene-binding", "visibility-and-finite-geometry", "ancestor-transitions-and-presentation", "original-ancestor-removal-guards", "higher-ancestor-transitions-stop-before-purchase", "cycle-and-depth-bounded", "selection-change-is-observable"]:
+    def test_actual_routing_and_guards(self):
+        for case in ["ordinary-default-and-exact-modes", "malformed-flags-stop-before-api", "ui-configuration", "one-call-per-selected-api", "both-arms-retain-site-and-removal-guards", "error-and-cancellation-no-fallback"]:
             with self.subTest(case=case):
                 result = subprocess.run([str(self.executable), case], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(result.stdout.strip(), "PASS " + case)
+                self.assertEqual(result.stdout.strip().splitlines()[-1], "PASS " + case)
 
-    def test_one_purchase_and_same_overload_under_debug_only(self):
+    def test_action_is_owned_by_pro_view_and_debug_only(self):
         views = (ROOT / "App/Views.swift").read_text()
-        scope = between(views, "    func purchase(_ product: Product)", "    private enum ObservationPoint:")
-        branch = between(scope, "        #if DEBUG && targetEnvironment(simulator)\n        if let mode", "        var ancestor: UIViewController?")
-        self.assertEqual(branch.count("product.purchase(confirmIn: selected.controller)"), 1)
-        self.assertEqual(branch.count("Self.diagnosticAnchor(mode"), 2)
-        self.assertIn("current.controller === selected.controller, current.depth == selected.depth", branch)
-        self.assertNotIn("confirmIn: scene", branch)
-        self.assertNotIn("catch", branch)
-        self.assertTrue(branch.rstrip().endswith("#endif"))
+        scope = between(views, "private struct ProView: View {", "struct PreviewSheet: View {")
+        self.assertIn("#if DEBUG && targetEnvironment(simulator)\n    @Environment(\\.purchase) private var purchaseAction\n    #endif", scope)
+        route = between(scope, "                                    #if DEBUG && targetEnvironment(simulator)", "                                })")
+        self.assertEqual(route.count("purchasePresentation.diagnosticPurchase("), 1)
+        self.assertEqual(route.count("swiftUIPurchase: { try await purchaseAction(product) }"), 1)
+        self.assertIn("#else\n                                    try await purchasePresentation.purchase(product)\n                                    #endif", route)
+        helper = between(views, "    enum DiagnosticAnchorMode:", "    private enum ObservationPoint:")
+        self.assertIn("#if DEBUG && targetEnvironment(simulator)\n    enum DiagnosticAnchorMode:", views)
+        self.assertEqual(helper.count("return try await swiftUIPurchase()"), 1)
+        self.assertNotIn("catch", helper)
+        self.assertNotIn("buyProduct", helper)
         ui = (ROOT / "UITests/BatchImportUITests.swift").read_text()
         case = between(ui, "    func testDiagnosticPurchasePresentationAnchor()", "    private func localStoreSession()")
         self.assertEqual(case.count("purchaseOnce("), 1)
@@ -207,5 +205,6 @@ class AnchorTests(unittest.TestCase):
         self.assertIn("session.resetToDefaultState()", case)
         for forbidden in ["choose.tap", "selectRealFiles", "nativeFolder", "session.buyProduct", "sleep(", "while "]:
             self.assertNotIn(forbidden, case)
+
 
 if __name__ == "__main__": unittest.main()
