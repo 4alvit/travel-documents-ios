@@ -4,7 +4,6 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
-import time
 from types import SimpleNamespace
 import unittest
 import uuid
@@ -107,7 +106,8 @@ class FolderControlTests(unittest.TestCase):
 
     def test_diagnostic_receipt_never_grants_release_acceptance(self):
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(control.q.os, "uname", return_value=SimpleNamespace(machine="arm64")):
+             patch.object(control.q.os, "uname", return_value=SimpleNamespace(machine="arm64")), \
+             patch.object(control.q.time, "monotonic", return_value=1000.0):
             run = control.FolderQualification(directory, "batch", ENV)
             clocks = run.started, run.work_deadline, run.cleanup_deadline
             self.assertEqual(run.work_deadline - run.started, 2400)
@@ -194,7 +194,9 @@ class FolderControlTests(unittest.TestCase):
     def test_folder_and_shared_admission_keep_original_clock_reserves(self):
         owner = self.fixture_owner()
         run, driver = owner.folder_fixture()
-        now = time.monotonic()
+        # An exactly representable clock keeps the equality boundary independent
+        # of floating-point cancellation in the host's current uptime.
+        now = 1000.0
         driver.deadline = now + 1148
         run.command = Mock()
         with patch.object(q.time, "monotonic", return_value=now), self.assertRaisesRegex(RuntimeError, "budget"):

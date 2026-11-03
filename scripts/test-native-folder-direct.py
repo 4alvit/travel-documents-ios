@@ -22,7 +22,7 @@ SWIFT = r'''
 import Foundation
 import CoreGraphics
 struct BatchTestFailure: Error { let message: String }
-enum Kind { case application, window, other, collectionView, navigationBar, keyboard, cell, button, textView, staticText }
+enum Kind: Int { case application, window, other, collectionView, navigationBar, keyboard, cell, button, textView, staticText }
 @MainActor final class XCUIElementSnapshot {
     var elementType: Kind
     var identifier: String
@@ -50,6 +50,17 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
     }
     static func editor(_ snapshot: XCUIElementSnapshot, _ expected: String) -> CGRect? {
         nativeFolderEditorFrame(in: snapshot, expectedName: expected, localTitle: "On My iPhone")
+    }
+    static func evidence(_ snapshot: XCUIElementSnapshot?) -> String {
+        var reason: String?
+        let result = snapshot.flatMap {
+            nativeFolderEditorFrame(in: $0, expectedName: "untitled folder", localTitle: "On My iPhone",
+                                    diagnostic: { if reason == nil { reason = $0 } })
+        }
+        let data = nativeFolderSnapshotEvidence(snapshot, observation: "pretype-actual-helper-input",
+            expectedName: "untitled folder", localTitle: "On My iPhone", returnedFrame: result,
+            liveFrame: CGRect(x: 0, y: 305, width: 169, height: 63), reason: reason)
+        return String(decoding: data, as: UTF8.self)
     }
     static func candidate(_ snapshot: XCUIElementSnapshot) -> CGRect? {
         nativeFolderRenameFrame(in: snapshot, localTitle: "On My iPhone")
@@ -154,6 +165,13 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
         case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
         case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
         case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "remote-placeholder": window.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
+        case "non-string-value": editor.value = 5
+        case "long-strings": editor.label = String(repeating: "x", count: 10000)
+        case "byte-limit":
+            let payload = String(repeating: "\u{0001}", count: 128)
+            window.children += (0..<3000).map { _ in XCUIElementSnapshot(.other, payload, payload) }
+
         case "oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
         case "too-deep":
             let top = XCUIElementSnapshot(.other); var current = top
@@ -166,6 +184,11 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
 @main struct Main {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args[0] == "evidence" {
+            if args[1] == "missing" { print(Harness.evidence(nil)); return }
+            let tree = EditorTree("untitled folder"); tree.mutate(args[1])
+            print(Harness.evidence(tree.app)); return
+        }
         if args[0] == "editor" {
             let tree = EditorTree(args[2]); tree.mutate(args[1])
             if let frame = Harness.editor(tree.app, args[2]) {
@@ -297,18 +320,81 @@ class FolderDirectTests(unittest.TestCase):
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
-        self.assertEqual(case.count("Self.nativeFolderEditorFrame(in: try app.snapshot()"), 2)
-        self.assertIn('expectedName: "untitled folder"', case)
+        self.assertEqual(case.count("Self.nativeFolderEditorFrame("), 2)
+        self.assertIn('in: snapshot, expectedName: "untitled folder"', case)
         self.assertIn("expectedName: ownedFolder", case)
-        for failure in ["Native folder editor left the single newly created local folder",
-                        "Native folder editor is not ready for explicit end-editing"]:
-            statement = case[:case.index(failure)].rsplit("try check(", 1)[1]
-            self.assertIn("inlineNames.element.isEnabled && inlineNames.element.isHittable", statement)
-            self.assertIn("== inlineNames.element.frame", statement)
-            self.assertNotIn("isRecoveryFolder(", statement)
-            self.assertNotIn("isNativeFilesRoot(", statement)
+        pretype = case[case.index("let pretypeLiveReady"):case.index("inlineNames.element.typeText(ownedFolder)")]
+        self.assertIn("files.count == 1 && files.element.cells.count == 1", pretype)
+        self.assertIn("inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable", pretype)
+        self.assertEqual(pretype.count("try app.snapshot()"), 1)
+        self.assertIn("pretypeSnapshot = snapshot", pretype)
+        self.assertIn("let frame = inlineNames.element.frame", pretype)
+        self.assertIn("pretypeFramesMatch = pretypeReturnedFrame == frame", pretype)
+        self.assertIn("try check(pretypeLiveReady && pretypeFramesMatch,", pretype)
+        self.assertLess(pretype.index("if pretypeLiveReady {"), pretype.index("try app.snapshot()"))
+        self.assertLess(pretype.index("if !pretypeLiveReady || !pretypeFramesMatch"), pretype.index("recordNativeFolderSnapshot("))
+        self.assertIn('observation: "pretype-actual-helper-input"', pretype)
+        self.assertIn('observation: "pretype-failure-later-scoped-picker"', pretype)
+        self.assertIn("if scopedPickers.count == 1", pretype)
+        self.assertEqual(pretype.count("try? scopedPickers.element.snapshot()"), 1)
+        self.assertNotIn(".tap()", pretype)
+        self.assertNotIn("sleep", pretype)
+        end = case[case.index("try check(files.count == 1 && inlineNames.count == 1"):case.index("guard let before = nativeFolderBlankPoint")]
+        self.assertIn("inlineNames.element.isEnabled && inlineNames.element.isHittable", end)
+        self.assertIn("== inlineNames.element.frame", end)
         normal = UI[UI.index("    private func isRecoveryFolder"): ]
         self.assertIn("navigation.exists && titles.count == 1 && titles.element(boundBy: 0).isHittable", normal.split("\n    private func", 1)[0])
+
+    def test_actual_evidence_serializes_input_fields_and_returned_frame(self):
+        evidence = json.loads(self.probe("evidence", "exact"))
+        self.assertTrue(evidence["treeComplete"])
+        self.assertFalse(evidence["stringsTruncated"])
+        self.assertIsNone(evidence["helperReason"])
+        self.assertEqual(evidence["helperReturnedFrame"], [0, 305, 169, 63])
+        self.assertEqual(evidence["liveComparedFrame"], [0, 305, 169, 63])
+        rows = evidence["nodes"]
+        self.assertEqual([n["index"] for n in rows], list(range(len(rows))))
+        editor = next(n for n in rows if n["identifier"] == "DOC.inlineRenameField")
+        self.assertEqual(editor["value"], "untitled folder")
+        self.assertEqual(editor["frame"], [0, 305, 169, 63])
+        self.assertEqual(editor["valueType"], "string")
+        self.assertTrue(editor["enabled"])
+        self.assertEqual(rows[editor["parent"]]["identifier"], "Folder")
+        windows = [n for n in rows if n["type"] == 1]
+        self.assertEqual([n["frame"] for n in windows], [[0, 0, 402, 874]])
+
+    def test_actual_evidence_retains_rejected_shape_without_manufacturing_acceptance(self):
+        for case in ["duplicate-editor", "duplicate-root", "editor-outside-grid", "nonfinite-editor",
+                     "wrong-value", "disabled-editor", "remote-placeholder", "non-string-value"]:
+            with self.subTest(case=case):
+                evidence = json.loads(self.probe("evidence", case))
+                self.assertTrue(evidence["treeComplete"])
+                self.assertIsNone(evidence["helperReturnedFrame"])
+                self.assertIsInstance(evidence["helperReason"], str)
+        duplicate = json.loads(self.probe("evidence", "duplicate-editor"))
+        self.assertEqual(sum(n["identifier"] == "DOC.inlineRenameField" for n in duplicate["nodes"]), 2)
+        bad = json.loads(self.probe("evidence", "nonfinite-editor"))
+        self.assertEqual(next(n for n in bad["nodes"] if n["identifier"] == "DOC.inlineRenameField")["frame"][0], "+inf")
+        remote = json.loads(self.probe("evidence", "remote-placeholder"))
+        self.assertEqual(remote["helperReason"], "structure-counts-or-ancestry")
+        self.assertTrue(any(n["identifier"] == "RemotePlaceholder" for n in remote["nodes"]))
+
+    def test_actual_evidence_bounds_and_unavailable_state_are_explicit(self):
+        for case in ["oversized-tree", "too-deep", "byte-limit"]:
+            with self.subTest(case=case):
+                raw = self.probe("evidence", case)
+                self.assertLessEqual(len(raw.encode()), 1048576)
+                evidence = json.loads(raw)
+                self.assertFalse(evidence["treeComplete"])
+                self.assertIsInstance(evidence["truncation"], str)
+                self.assertLessEqual(len(evidence["nodes"]), 4096)
+        missing = json.loads(self.probe("evidence", "missing"))
+        self.assertFalse(missing["snapshotPresent"])
+        self.assertFalse(missing["treeComplete"])
+        self.assertEqual(missing["nodes"], [])
+        long = json.loads(self.probe("evidence", "long-strings"))
+        self.assertTrue(long["stringsTruncated"])
+        self.assertTrue(all(len(n["label"]) <= 128 for n in long["nodes"]))
 
     def test_ui_has_one_direct_ingress_and_guarded_rename_without_save_or_retry(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")

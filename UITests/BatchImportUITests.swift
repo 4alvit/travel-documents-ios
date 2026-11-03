@@ -58,16 +58,17 @@ final class BatchImportUITests: XCTestCase {
     // navigation and action checks retain their normal hittability requirement.
     @MainActor
     private static func nativeFolderEditorFrame(
-        in snapshot: XCUIElementSnapshot, expectedName: String, localTitle: String
+        in snapshot: XCUIElementSnapshot, expectedName: String, localTitle: String,
+        diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
             var result: [XCUIElementSnapshot] = []
             var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
             while let (node, depth) = pending.popLast() {
-                guard depth <= 96, result.count < 4_096 else { return nil }
+                guard depth <= 96, result.count < 4_096 else { diagnostic?("tree-depth-or-count"); return nil }
                 result.append(node)
                 let children = node.children
-                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                guard children.count <= 4_096 - result.count - pending.count else { diagnostic?("tree-children-count"); return nil }
                 pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
             }
             return result
@@ -77,7 +78,7 @@ final class BatchImportUITests: XCTestCase {
                 && frame.width > 0 && frame.height > 0
         }
         guard let all = nodes(snapshot), !expectedName.isEmpty,
-              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { diagnostic?("empty-name-or-keyboard-introduction"); return nil }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -92,11 +93,11 @@ final class BatchImportUITests: XCTestCase {
               pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
               rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
               rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
-              let gridNodes = nodes(grids[0]), let navigationNodes = nodes(navigations[0]) else { return nil }
+              let gridNodes = nodes(grids[0]), let navigationNodes = nodes(navigations[0]) else { diagnostic?("structure-counts-or-ancestry"); return nil }
         let cells = gridNodes.filter { $0.elementType == .cell }
         guard cells.count == 1, let cellNodes = nodes(cells[0]),
               cellNodes.filter({ $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }).count == 1,
-              editors[0].value as? String == expectedName, editors[0].isEnabled else { return nil }
+              editors[0].value as? String == expectedName, editors[0].isEnabled else { diagnostic?("cell-ancestry-or-editor-value"); return nil }
         let titles = navigationNodes.filter {
             ($0.elementType == .staticText && $0.label == localTitle)
                 || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
@@ -104,16 +105,77 @@ final class BatchImportUITests: XCTestCase {
         guard titles.count == 1,
               [grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
                titles[0].frame, keyboards[0].frame].allSatisfy(visibleFrame),
-              windows.allSatisfy({ visibleFrame($0.frame) }) else { return nil }
+              windows.allSatisfy({ visibleFrame($0.frame) }) else { diagnostic?("title-or-nonfinite-frame"); return nil }
         let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
         guard visibleFrame(window), window.contains(titles[0].frame), window.contains(editors[0].frame),
               window.contains(cells[0].frame), navigations[0].frame.contains(titles[0].frame),
               grids[0].frame.contains(editors[0].frame), grids[0].frame.contains(cells[0].frame),
               !keyboards[0].frame.intersects(editors[0].frame),
-              !keyboards[0].frame.intersects(titles[0].frame) else { return nil }
+              !keyboards[0].frame.intersects(titles[0].frame) else { diagnostic?("window-or-containment-or-keyboard"); return nil }
         // The real inline editor extends beyond the folder cell's horizontal
         // bounds. Ownership is its ancestry; visible bounds are grid/window.
         return editors[0].frame
+    }
+
+    // Evidence only. Serialize the supplied immutable snapshot, never a fresh
+    // query, and make incomplete trees/strings explicit rather than implying a
+    // complete view of the remote Files hierarchy.
+    @MainActor
+    private static func nativeFolderSnapshotEvidence(
+        _ snapshot: XCUIElementSnapshot?, observation: String, expectedName: String,
+        localTitle: String, returnedFrame: CGRect?, liveFrame: CGRect?, reason: String?
+    ) -> Data {
+        func number(_ value: CGFloat) -> Any {
+            value.isFinite ? Double(value) as Any : (value.isNaN ? "nan" : (value > 0 ? "+inf" : "-inf"))
+        }
+        func frame(_ value: CGRect?) -> Any {
+            guard let value else { return NSNull() }
+            return [number(value.minX), number(value.minY), number(value.width), number(value.height)]
+        }
+        var stringsTruncated = false
+        func string(_ value: String) -> String {
+            let prefix = String(value.prefix(128))
+            if prefix != value { stringsTruncated = true }
+            return prefix
+        }
+        var rows: [[String: Any]] = []
+        var pending: [(XCUIElementSnapshot, Int, Int?)] = snapshot.map { [($0, 0, nil)] } ?? []
+        var truncation: String? = nil
+        var encodedBytes = 0
+        while let (node, depth, parent) = pending.popLast() {
+            guard depth <= 96, rows.count < 4_096 else { truncation = "depth-or-count"; break }
+            let children = node.children
+            let rawValue = node.value
+            let row: [String: Any] = [
+                "index": rows.count, "parent": parent.map { $0 as Any } ?? NSNull(), "depth": depth,
+                "type": node.elementType.rawValue, "identifier": string(node.identifier),
+                "label": string(node.label), "enabled": node.isEnabled, "frame": frame(node.frame),
+                "valueType": rawValue == nil ? "nil" : (rawValue is String ? "string" : "non-string"),
+                "value": (rawValue as? String).map { string($0) as Any } ?? NSNull(),
+                "childCount": children.count
+            ]
+            guard let bytes = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
+                  encodedBytes + bytes.count + 1 <= 1_040_000 else { truncation = "byte-limit"; break }
+            encodedBytes += bytes.count + 1
+            let index = rows.count
+            rows.append(row)
+            guard children.count <= 4_096 - rows.count - pending.count else { truncation = "children-count"; break }
+            pending.append(contentsOf: children.reversed().map { ($0, depth + 1, index) })
+        }
+        let payload: [String: Any] = [
+            "version": 1, "observation": string(observation), "expectedName": string(expectedName),
+            "localTitle": string(localTitle), "helperReason": reason.map { string($0) as Any } ?? NSNull(),
+            "helperReturnedFrame": frame(returnedFrame), "liveComparedFrame": frame(liveFrame),
+            "snapshotPresent": snapshot != nil, "treeComplete": snapshot != nil && truncation == nil,
+            "truncation": truncation.map { $0 as Any } ?? NSNull(), "stringsTruncated": stringsTruncated,
+            "limits": ["nodes": 4_096, "depth": 96, "stringCharacters": 128, "bytes": 1_048_576],
+            "nodes": rows
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              data.count <= 1_048_576 else {
+            return Data(#"{"version":1,"treeComplete":false,"truncation":"serialization-limit"}"#.utf8)
+        }
+        return data
     }
 
     private let productID = "com.4alvit.tripfolio.pro"
@@ -481,10 +543,41 @@ final class BatchImportUITests: XCTestCase {
         }
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
-        try check(files.count == 1 && files.element.cells.count == 1
-                  && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable
-                  && Self.nativeFolderEditorFrame(in: try app.snapshot(), expectedName: "untitled folder",
-                                                   localTitle: localTitle) == inlineNames.element.frame,
+        let pretypeLiveReady = files.count == 1 && files.element.cells.count == 1
+            && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable
+        var pretypeSnapshot: XCUIElementSnapshot?
+        var pretypeReturnedFrame: CGRect?
+        var pretypeLiveFrame: CGRect?
+        var pretypeReason: String?
+        var pretypeFramesMatch = false
+        if pretypeLiveReady {
+            let snapshot = try app.snapshot()
+            pretypeSnapshot = snapshot
+            pretypeReturnedFrame = Self.nativeFolderEditorFrame(
+                in: snapshot, expectedName: "untitled folder", localTitle: localTitle,
+                diagnostic: { if pretypeReason == nil { pretypeReason = $0 } }
+            )
+            let frame = inlineNames.element.frame
+            pretypeLiveFrame = frame
+            pretypeFramesMatch = pretypeReturnedFrame == frame
+        }
+        if !pretypeLiveReady || !pretypeFramesMatch {
+            recordNativeFolderSnapshot(
+                pretypeSnapshot, observation: "pretype-actual-helper-input", localTitle: localTitle,
+                returnedFrame: pretypeReturnedFrame, liveFrame: pretypeLiveFrame,
+                reason: pretypeLiveReady ? (pretypeReason ?? "returned-frame-mismatch") : "live-precondition"
+            )
+            // This later, read-only observation cannot replace the original
+            // helper input or change its result. No second action is attempted.
+            let scopedPickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+            if scopedPickers.count == 1 {
+                recordNativeFolderSnapshot(
+                    try? scopedPickers.element.snapshot(), observation: "pretype-failure-later-scoped-picker",
+                    localTitle: localTitle, returnedFrame: nil, liveFrame: nil, reason: nil
+                )
+            }
+        }
+        try check(pretypeLiveReady && pretypeFramesMatch,
                   app: app, "Native folder editor left the single newly created local folder")
         inlineNames.element.typeText(ownedFolder)
         try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
@@ -2008,6 +2101,20 @@ final class BatchImportUITests: XCTestCase {
         lines.append("diagnosticElapsed=\(diagnosticStarted.duration(to: .now))")
         let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
         attachment.name = "Recovery file selection — failure state"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func recordNativeFolderSnapshot(
+        _ snapshot: XCUIElementSnapshot?, observation: String, localTitle: String,
+        returnedFrame: CGRect?, liveFrame: CGRect?, reason: String?
+    ) {
+        let data = Self.nativeFolderSnapshotEvidence(
+            snapshot, observation: observation, expectedName: "untitled folder", localTitle: localTitle,
+            returnedFrame: returnedFrame, liveFrame: liveFrame, reason: reason
+        )
+        let attachment = XCTAttachment(string: String(decoding: data, as: UTF8.self))
+        attachment.name = "Native folder snapshot evidence — " + observation
         attachment.lifetime = .keepAlways
         add(attachment)
     }
