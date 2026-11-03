@@ -16,6 +16,7 @@ import uuid
 
 WORK_SECONDS, CLEANUP_SECONDS = 1800, 180
 BUILD_CAP, TEST_CAP, CASE_SECONDS = 420, 780, 180  # Command caps include eight-second stop reserve.
+CACHE_CAP = 300  # New prerequisite; includes stop reserve and shares the original global clock.
 CASE = 'BatchImportUITests/testDiagnosticPurchasePresentationAnchor()'
 SELECTOR = 'TripfolioUITests/' + CASE.removesuffix('()')
 MODES = ('child', 'ownedAncestor')
@@ -432,6 +433,36 @@ def make_runner(q, core):
             require(free>=core.CAPS['admission_free_bytes'],'Insufficient space before shared build')
             self.report['build_admission']={'free_bytes':free,'elapsed':time.monotonic()-self.started}
 
+        def prepare_runtime_cache(self):
+            # Apple recommends completing this before Simulator boot (152328794).
+            # It updates host-managed runtime caches on this disposable runner;
+            # those caches are outside the app-output ownership/cleanup scope.
+            c=self.commands
+            require(self.current is None and not c.active and not c.unknown_spawn
+                    and c.owned is None and not c.create_attempted,
+                    'Cache readiness must precede device allocation')
+            require(self.report.get('toolchain') == {'xcode':q.XCODE_VERSION,
+                    'developer':q.DEVELOPER_DIR,'sdk':'26.2','architecture':self.profile['architecture']}
+                    and self.report.get('runtime_selection') == self.selection
+                    and self.selection.get('identifier') == RUNTIME
+                    and self.selection.get('build') == '23C54',
+                    'Cache readiness requires verified toolchain and runtime')
+            c.once('runtime-cache-readiness')
+            record={'status':'running','total_cap_seconds':CACHE_CAP,
+                    'global_work_seconds':WORK_SECONDS,'global_clock_renewed':False,
+                    'scope':'host-managed caches for all installed runtimes; not app-output cleanup',
+                    'source_issue':'Apple Xcode release notes 152328794'}
+            self.report['runtime_cache_readiness']=record
+            try:
+                c.command('runtime-cache-readiness',
+                    ['/usr/bin/xcrun','simctl','runtime','dyld_shared_cache','update','--all'],CACHE_CAP)
+                record['status']='ready'
+            except BaseException as error:
+                record.update(status='failed',error=repr(error)[:512])
+                raise
+            finally:
+                c.save()
+
         def prepare(self):
             self.source('source-before')
             c = self.commands
@@ -450,6 +481,7 @@ def make_runner(q, core):
                     'Wrong actual runtime/device')
             self.selection = {'identifier':RUNTIME,'version':'26.2','build':'23C54','architecture':self.profile['architecture'],'sdk_version':'26.2','sdk_matched':True}
             self.report['runtime_selection'] = self.selection
+            self.prepare_runtime_cache()
             selection = q.focused_build_selection('batch',self.profile,self.before['files'])
             self.settings = [*selection['build_settings'],'COMPILER_INDEX_STORE_ENABLE=NO']
             self.report['focused_build'] = selection

@@ -1180,4 +1180,104 @@ class Guards(unittest.TestCase):
                 self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
 
 
+    def cache_fixture(self,root):
+        p,c,now,child,polls,scans,scan=self.boot_command_fixture(root)
+        p.commands=c;p.current=None;c.owned=None;c.create_attempted=False
+        p.report['shared_build_verified']=False
+        p.report['toolchain']={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,
+                               'sdk':'26.2','architecture':p.profile['architecture']}
+        p.selection={'identifier':m.RUNTIME,'build':'23C54'}
+        p.report['runtime_selection']=dict(p.selection)
+        return p,c,now,child,polls,scans,scan
+
+    def test_runtime_cache_ready_uses_exact_command_once_on_original_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,c,now,child,polls,scans,scan=self.cache_fixture(Path(tmp))
+            original=(p.started,p.work_end,p.final,c.limit,c.write_deadline)
+            spawned=[];c.ops.spawn=lambda args:(spawned.append(args) or child)
+            with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                    mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                p.prepare_runtime_cache()
+                with self.assertRaises(RuntimeError):p.prepare_runtime_cache()
+            self.assertEqual(spawned,[['/usr/bin/xcrun','simctl','runtime','dyld_shared_cache','update','--all']])
+            row=c.report['commands'][-1]
+            self.assertEqual(row['requested_cap_seconds'],300)
+            self.assertAlmostEqual(row['work_deadline']-row['start'],292,places=4)
+            self.assertEqual(p.report['runtime_cache_readiness']['status'],'ready')
+            self.assertEqual(c.report['attempts']['runtime-cache-readiness'],1)
+            self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+            self.assertEqual(original,(p.started,p.work_end,p.final,c.limit,c.write_deadline))
+
+    def test_runtime_cache_timeout_clips_to_parent_and_never_allocates_device(self):
+        for remaining,expected in ((None,292),(20,12)):
+            with self.subTest(remaining=remaining),tempfile.TemporaryDirectory() as tmp:
+                p,c,now,child,polls,scans,scan=self.cache_fixture(Path(tmp))
+                if remaining is not None:c.limit=now[0]+remaining
+                original=(p.work_end,p.final,c.limit);spawned=[];sent=[]
+                child.poll=lambda:child.returncode
+                c.ops.spawn=lambda args:(spawned.append(args) or child)
+                c.ops.absent=lambda proc:proc.returncode is not None
+                def send(proc,sig):sent.append(int(sig));proc.returncode=-int(sig);return 'syscall_returned'
+                c.ops.send=send;c.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+1)
+                with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaisesRegex(RuntimeError,'runtime-cache-readiness failed'):p.prepare_runtime_cache()
+                row=c.report['commands'][-1]
+                self.assertAlmostEqual(row['work_deadline']-row['start'],expected,places=4)
+                self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+                self.assertEqual(p.report['runtime_cache_readiness']['status'],'failed')
+                self.assertEqual(len(spawned),1);self.assertEqual(sent,[15]);self.assertFalse(c.active)
+                self.assertEqual(original,(p.work_end,p.final,c.limit));self.assertIsNone(c.owned)
+                self.assertFalse(c.create_attempted)
+
+    def test_runtime_cache_rejects_unverified_context_or_live_device(self):
+        for fault in ('toolchain','runtime','selection','current','active','unknown','owned','created'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,c,now,child,polls,scans,scan=self.cache_fixture(Path(tmp))
+                if fault=='toolchain':p.report['toolchain']['sdk']='27.1'
+                elif fault=='runtime':p.report['runtime_selection']['build']='other'
+                elif fault=='selection':p.selection['identifier']='other'
+                elif fault=='current':p.current=c
+                elif fault=='active':c.active[999]=child
+                elif fault=='unknown':c.unknown_spawn=True
+                elif fault=='owned':c.owned='ABC'
+                elif fault=='created':c.create_attempted=True
+                c.command=mock.Mock()
+                with self.assertRaises(RuntimeError):p.prepare_runtime_cache()
+                c.command.assert_not_called()
+
+    def test_actual_prepare_places_cache_after_runtime_and_stops_build_on_failure(self):
+        for fail in (False,True):
+            with self.subTest(fail=fail),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
+                rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}}
+                      for name in ('Tripfolio','TripfolioTests','TripfolioUITests')]
+                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                         'architecture':'arm64','build-settings':json.dumps(rows)}
+                events=[]
+                def command(label,args,cap=38):
+                    events.append(label)
+                    if label=='runtime-cache-readiness':
+                        self.assertIn('runtimes',events)
+                        self.assertEqual(p.report['runtime_selection']['build'],'23C54')
+                        self.assertIsNone(p.current);self.assertIsNone(p.commands.owned)
+                        if fail:raise RuntimeError('cache failed')
+                    return replies.get(label,'')
+                def sim(label,*args,**kwargs):
+                    events.append(label)
+                    return json.dumps({'runtimes':[{'identifier':m.RUNTIME,'version':'26.2','buildversion':'23C54',
+                        'isAvailable':True,'supportedArchitectures':['arm64'],'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
+                p.commands.command=command;p.commands.sim=sim
+                with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':[]}), \
+                        mock.patch.object(q,'shared_product_paths',return_value={}):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError,'cache failed'):p.prepare()
+                        self.assertNotIn('generate-project',events);self.assertNotIn('build-for-testing',events)
+                    else:
+                        p.prepare()
+                        self.assertLess(events.index('runtime-cache-readiness'),events.index('generate-project'))
+                        self.assertLess(events.index('runtime-cache-readiness'),events.index('build-for-testing'))
+                self.assertEqual(events.count('runtime-cache-readiness'),1)
+
+
 if __name__=='__main__':unittest.main()
