@@ -61,7 +61,8 @@ class FolderControlTests(unittest.TestCase):
     def test_normal_mode_selects_folder_without_changing_biometric_profile(self):
         for mode in ("batch", "biometrics"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
-                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")):
+                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")), \
+                 patch.object(q.time, "monotonic", return_value=1000.0):
                 run = q.Qualification(directory, mode, fixtures.ENV)
                 self.assertEqual(run.native_folder_control, mode == "batch")
                 self.assertEqual(run.driver_budget(), 1440 if mode == "batch" else 1200)
