@@ -821,6 +821,25 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('host_capability',r.report)
         self.assertFalse((r.out/'host-capability.json').exists());self.assertEqual(r.limit,1380)
 
+    def test_base_recovery_nonzero_exit_is_strict_and_reaps_owned_group(self):
+        ops=Ops({'exit':65});ops.env={};ops.cwd=self.root
+        r=hosted.core.Recovery(ops,self.root/'base-output',{'runtime':'synthetic','device_type':'synthetic'}, {},'strict-nonzero',0,
+                              candidate=self.root,source_manifest={})
+        with patch.object(ops,'close',wraps=ops.close) as close:
+            with self.assertRaisesRegex(RuntimeError,'rejected failed') as caught:
+                r.command('rejected',['synthetic-only'],38)
+        self.assertIsInstance(caught.exception.__cause__,RuntimeError)
+        self.assertEqual(str(caught.exception.__cause__),'Nonzero command exit: 65')
+        row=r.report['commands'][0]
+        self.assertEqual((row['returncode'],row['outcome']),(65,'failed'))
+        self.assertEqual(row['error'],"RuntimeError('Nonzero command exit: 65')")
+        self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertEqual(len(ops.processes),1);close.assert_called_once_with(ops.processes[0])
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(38,30,38))
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertIs(hosted.core.Recovery.accept_nonzero_exit,hosted.core.base.Smoke.accept_nonzero_exit)
+
     def test_existing_core_process_and_recovery_methods_are_reused(self):
         for name in ['take_snapshot','authorize_restore','copy_tree','preserve_result','read_result','cleanup']:
             self.assertIs(getattr(hosted.HostedRecovery,name),getattr(hosted.core.Recovery,name))

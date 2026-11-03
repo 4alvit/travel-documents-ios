@@ -358,6 +358,7 @@ def live_sizes(root, root_id, now, deadline, checkpoint=lambda: None, *, observa
 class Recovery:
     # Shared owned-process primitives, including bounded operation diagnostics.
     command = base.Smoke.command
+    accept_nonzero_exit = base.Smoke.accept_nonzero_exit
     pump = base.Smoke.pump
     stop = base.Smoke.stop
     save = base.Smoke.save
