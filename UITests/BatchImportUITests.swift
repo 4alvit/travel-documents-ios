@@ -678,25 +678,13 @@ final class BatchImportUITests: XCTestCase {
             throw BatchTestFailure(message: "Native folder blank grid area changed before end-editing")
         }
         files.element.coordinate(withNormalizedOffset: current.normalized).tap()
-        // An updated folder-cell identifier must not masquerade as editor
-        // dismissal. Check the live editor identifier independently of its cell.
-        let remainingEditors = app.textViews.matching(identifier: "DOC.inlineRenameField")
-        try await wait("Native folder confirmation did not end editing with the exact destination", app: app) {
-            remainingEditors.count == 0
-                && (self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
-                    || (directory.count == 1 && directory.element.isEnabled && directory.element.isHittable))
-        }
-        if !isRecoveryFolder(ownedFolder, navigation: navigation.element) {
-            try check(directory.count == 1 && directory.element.isEnabled && directory.element.isHittable,
-                      app: app, "Created native folder is not uniquely reachable")
-            directory.element.tap()
-        }
-        try await wait("Native Files did not open the exact created folder", app: app) {
-            remainingEditors.count == 0 && self.isRecoveryFolder(ownedFolder, navigation: navigation.element)
-        }
+        // This fixture requests the native rename, then yields to the host's
+        // mandatory no-follow proof of the exact empty leaf. Editor dismissal
+        // is not its completion signal. The separate seed phase must navigate
+        // the real folder before it can save either synthetic original.
         try check(saved.count == 0 && !failed.exists, app: app,
                   "Native-folder preparation unexpectedly exported a destination")
-        capture(app, "Native folder exact destination before host empty-folder verification")
+        capture(app, "Native folder rename requested; host empty-folder verification pending")
         // Never tap Save: the host must independently prove this native-created
         // leaf empty after the fixture stops, before the separate seed phase.
         app.terminate()

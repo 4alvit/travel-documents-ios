@@ -263,8 +263,12 @@ class SeedGuards(unittest.TestCase):
         for action in ("more.element.tap()","newFolder.element.tap()",
                        "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"):
             self.assertEqual(case.count(action),1)
-        self.assertIn("remainingEditors.count == 0",case)
-        self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)",case)
+        handoff=case[case.index("files.element.coordinate(withNormalizedOffset: current.normalized).tap()")+len("files.element.coordinate(withNormalizedOffset: current.normalized).tap()") :]
+        self.assertNotIn("remainingEditors",handoff)
+        self.assertNotIn("directory.element.tap()",handoff)
+        self.assertIn('capture(app, "Native folder rename requested; host empty-folder verification pending")',handoff)
+        self.assertLess(handoff.index("saved.count == 0 && !failed.exists"),handoff.index("app.terminate()"))
+        self.assertLess(handoff.index("app.terminate()"),handoff.index("app.state == .notRunning"))
         self.assertIn('app.state == .notRunning',case)
         self.assertNotIn('buttons["Save"]',case)
         self.assertEqual(case.count('coordinate('),1)

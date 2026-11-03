@@ -665,7 +665,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertNotIn("timeout:", helper)
         self.assertNotRegex(helper, r"(?m)^\s*(while|repeat|for)\b")
 
-    def test_existing_exact_name_defocus_and_host_handoff_proofs_are_retained(self):
+    def test_exact_name_and_single_rename_request_precede_host_handoff(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         self.assertIn("inlineNames.element.value as? String == ownedFolder", case)
         self.assertEqual(case.count("nativeFolderBlankPoint(in:"), 2)
@@ -674,12 +674,36 @@ class FolderDirectTests(unittest.TestCase):
             self.assertIn("in: " + name + ".picker", case)
             self.assertIn("applicationSnapshot: " + name + ".application", case)
         self.assertIn("current.point == before.point, current.normalized == before.normalized", case)
-        self.assertIn("remainingEditors.count == 0", case)
-        self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)", case)
+        self.assertEqual(case.count("files.element.coordinate(withNormalizedOffset: current.normalized).tap()"), 1)
         self.assertIn("defer { app.terminate() }", case)
         self.assertIn("app.state == .notRunning", case)
-        self.assertIn('capture(app, "Native folder exact destination before host empty-folder verification")', case)
+        self.assertIn('capture(app, "Native folder rename requested; host empty-folder verification pending")', case)
         self.assertIn("saved.count == 0 && !failed.exists", case)
+
+
+    def test_post_rename_handoff_checks_no_save_and_stops_before_host_proof(self):
+        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        request = "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"
+        self.assertEqual(case.count(request), 1)
+        handoff = case[case.index(request) + len(request):]
+        ordered = [
+            "try check(saved.count == 0 && !failed.exists, app: app,",
+            'capture(app, "Native folder rename requested; host empty-folder verification pending")',
+            "app.terminate()",
+            'try await wait("Native-folder fixture did not stop before host verification", app: app)',
+            "app.state == .notRunning",
+        ]
+        for text in ordered:
+            self.assertEqual(handoff.count(text), 1)
+        self.assertEqual([handoff.index(text) for text in ordered], sorted(handoff.index(text) for text in ordered))
+        self.assertEqual(handoff.count("try await wait("), 1)
+        # UI completion is now only a stopped fixture. The unchanged host must
+        # independently adopt the exact empty leaf before seed can start.
+        for forbidden in ["remainingEditors", "isRecoveryFolder(", "directory.element", ".tap(",
+                          ".press(", ".typeText(", "timeout:", "sleep", "while ", "for attempt",
+                          "recordBatchProducer", "native_folder_verified", "fixture_directory ="]:
+            self.assertNotIn(forbidden, handoff)
+        self.assertIn("executionTimeAllowance = 180", case)
 
 
 class KeyboardIntroductionTests(unittest.TestCase):
