@@ -323,8 +323,11 @@ class Driver:
 
     def run_test(self):
         combined = getattr(self.args, "combined_batch", False)
+        native_root = bool(getattr(self.args, "native_root", False))
+        native_folder = bool(getattr(self.args, "native_folder", False))
+        native_destination = native_root != native_folder
         if combined:
-            if (not getattr(self.args, "native_root", False) or not getattr(self.args, "native_seed", False)
+            if (not native_destination or not getattr(self.args, "native_seed", False)
                     or not callable(getattr(self, "checkpoint_callback", None))
                     or not hasattr(self, "combined_protocol")):
                 raise RuntimeError("Combined batch requires qualifier-owned checkpoint")
@@ -335,7 +338,7 @@ class Driver:
             self.expected_tests, self.expected_cases = TESTS, CASES
         derived = getattr(self, "qualified_build", None)
         if derived is not None:
-            if (not getattr(self.args, "native_root", False) or not derived.is_absolute()
+            if (not native_destination or not derived.is_absolute()
                     or not derived.is_dir() or derived.resolve(strict=True) != derived
                     or not derived.is_relative_to(self.root / "build")):
                 raise RuntimeError("Invalid qualified shared build")
@@ -367,6 +370,11 @@ class Driver:
             self.native_root_identity()
             overrides.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
                               "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": self.token})
+        elif native_folder:
+            if self.fixture_directory != self.native_folder_destination or self.fixture_identity is None:
+                raise RuntimeError("Combined folder requires the adopted native-created destination")
+            overrides.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_FOLDER_TOKEN": self.token})
         if combined:
             overrides.update({"TEST_RUNNER_TRIPDOCKET_COMBINED_BATCH_UI": "1",
                               "TEST_RUNNER_TRIPDOCKET_BATCH_CHECKPOINT_SESSION": self.checkpoint_session,
@@ -505,6 +513,14 @@ class Driver:
                 or (owned.stat().st_dev, owned.stat().st_ino) != self.fixture_identity):
             raise RuntimeError("Owned fixture folder identity changed; refusing unsafe cleanup")
         shutil.rmtree(owned)
+        if getattr(self.args, "native_folder", False):
+            after = parent.lstat()
+            if (not stat.S_ISDIR(after.st_mode)
+                    or (after.st_dev, after.st_ino) != self.provider_identity
+                    or owned.exists() or owned.is_symlink()):
+                raise RuntimeError("Native folder cleanup or provider identity is unconfirmed")
+            self.summary["native_folder_cleanup"] = {
+                "leaf_absent": True, "provider_identity": list(self.provider_identity)}
         self.summary["fixture_cleanup"] = "removed only the uniquely created fixture folder"
         self.record("removed_owned_folder", path=str(owned))
 

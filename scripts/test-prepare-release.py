@@ -208,9 +208,11 @@ class ReleaseTests(unittest.TestCase):
         receipt = self.f.receipt("release-smoke"); receipt["tested_product"]["configuration"] = "Debug"
         with self.assertRaises(m.InvalidRelease): m.validate_receipt(m.encode_json(receipt), "release-smoke", self.f.commit, self.f.tree, m.digest(self.f.app))
 
-    def test_batch_receipt_accepts_three_exact_passing_methods_in_any_order(self):
+    def test_batch_receipt_accepts_five_exact_passing_methods_in_any_order(self):
         tests = [
             {"name": "testVerifiedPurchaseAndRestoreFromLocalHistory", "result": "passed"},
+            {"name": "testBatchPrepareFilesProviderDirectly", "result": "passed"},
+            {"name": "testNativeCreateOwnedFilesFolder", "result": "passed"},
             {"name": "testNativeSaveSeedsBothSyntheticOriginals", "result": "passed"},
             {"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals", "result": "passed"},
         ]
@@ -226,12 +228,22 @@ class ReleaseTests(unittest.TestCase):
         purchase = {"name": "testVerifiedPurchaseAndRestoreFromLocalHistory", "result": "passed"}
         batch = {"name": "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals", "result": "passed"}
         seed = {"name": "testNativeSaveSeedsBothSyntheticOriginals", "result": "passed"}
-        complete = [purchase, seed, batch]
+        preparation = {"name": "testBatchPrepareFilesProviderDirectly", "result": "passed"}
+        folder = {"name": "testNativeCreateOwnedFilesFolder", "result": "passed"}
+        complete = [purchase, preparation, folder, seed, batch]
         invalid = [[], [batch], [purchase], [seed], [purchase, batch],
                    [purchase, seed], [seed, batch], [purchase, batch, batch],
                    [purchase, seed, {"name": "testOtherBatchCase", "result": "passed"}],
+                   [purchase, seed, batch], [purchase, preparation, seed, batch],
                    complete + [seed]]
-        for index in range(3):
+        for index in range(len(complete)):
+            invalid.append(complete[:index] + complete[index + 1:])
+            duplicate = copy.deepcopy(complete)
+            duplicate[index] = copy.deepcopy(complete[(index + 1) % len(complete)])
+            invalid.append(duplicate)
+            wrong = copy.deepcopy(complete)
+            wrong[index]["name"] = "testOtherBatchCase"
+            invalid.append(wrong)
             for result in ("failed", "skipped", "expected failure", "Passed"):
                 tests = copy.deepcopy(complete)
                 tests[index]["result"] = result
@@ -243,10 +255,26 @@ class ReleaseTests(unittest.TestCase):
                 m.validate_receipt(m.encode_json(receipt), "batch-import",
                                    self.f.commit, self.f.tree, m.digest(self.f.app))
 
+    def test_three_or_four_case_batch_cannot_reach_output_with_updated_hash(self):
+        original = self.f.receipt("batch-import")
+        for omitted in (("testBatchPrepareFilesProviderDirectly", "testNativeCreateOwnedFilesFolder"),
+                        ("testNativeCreateOwnedFilesFolder",)):
+            receipt = copy.deepcopy(original)
+            receipt["tests"] = [case for case in receipt["tests"] if case["name"] not in omitted]
+            data = m.encode_json(receipt)
+            (self.root / "batch-import.json").write_bytes(data)
+            evidence = m.decode_json(self.f.evidence.read_bytes())
+            evidence["receipts"]["batch-import"]["sha256"] = m.digest(data)
+            self.f.evidence.write_bytes(m.encode_json(evidence))
+            with self.subTest(omitted=omitted), self.assertRaisesRegex(m.InvalidRelease, "execution receipt test count mismatch"):
+                m.prepare(self.f.args(), FakeGitHub(self.f))
+            self.assertFalse(self.f.args().output.exists())
+
     def test_old_two_case_batch_receipt_cannot_reach_output_with_updated_hash(self):
         receipt = self.f.receipt("batch-import")
         receipt["tests"] = [case for case in receipt["tests"]
-                            if case["name"] != "testNativeSaveSeedsBothSyntheticOriginals"]
+                            if case["name"] in {"testVerifiedPurchaseAndRestoreFromLocalHistory",
+                                                "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals"}]
         data = m.encode_json(receipt)
         (self.root / "batch-import.json").write_bytes(data)
         evidence = m.decode_json(self.f.evidence.read_bytes())
@@ -262,7 +290,8 @@ class ReleaseTests(unittest.TestCase):
         acceptance = m.decode_json(files["acceptance.json"])
         receipt = m.decode_json(files["batch-import-receipt.json"])
         receipt["tests"] = [case for case in receipt["tests"]
-                            if case["name"] != "testNativeSaveSeedsBothSyntheticOriginals"]
+                            if case["name"] in {"testVerifiedPurchaseAndRestoreFromLocalHistory",
+                                                "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals"}]
         files["batch-import-receipt.json"] = m.encode_json(receipt)
         acceptance["execution_receipts"]["batch-import"]["sha256"] = m.digest(files["batch-import-receipt.json"])
         files["acceptance.json"] = m.encode_json(acceptance)

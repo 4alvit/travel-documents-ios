@@ -11,6 +11,18 @@ attached to their original runs.
 
 ## Source/Simulator integration and qualification evidence
 
+The current normal batch contract requires five exact passes in three original
+bundles: hosted purchase/restore plus direct Files preparation, native folder
+setup, then native seeding plus real two-file import. Folder setup requests
+the exact UUID name and terminates the fixture app; it does not assert editor
+dismissal. The host must adopt the exact empty native-created leaf before
+seeding, prove both saved PDF bytes before the import checkpoint response,
+and verify originals and owned cleanup afterward. See the
+[current qualification contract](github-releases.md#prepare-without-publishing).
+This contract is not a passing result; final acceptance requires fresh normal
+evidence for the exact integrated source. All earlier controls below retain
+their original case counts, scope and outcomes.
+
 The matched Xcode 26.2 workflow and its native fixture-preparation phases define
 a candidate validation path, not an acceptance record. Release acceptance still
 requires complete CI and the ordinary Release smoke at the exact integrated

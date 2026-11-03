@@ -40,6 +40,8 @@ TESTS = {
     "release-smoke": {"ordinary-release-launch"},
     "batch-import": {
         "testVerifiedPurchaseAndRestoreFromLocalHistory",
+        "testBatchPrepareFilesProviderDirectly",
+        "testNativeCreateOwnedFilesFolder",
         "testNativeSaveSeedsBothSyntheticOriginals",
         "testRealFilesBatchRequiresEveryReviewAndPreservesOriginals",
     },
