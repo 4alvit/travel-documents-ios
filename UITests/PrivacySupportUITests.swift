@@ -338,11 +338,12 @@ final class PrivacySupportUITests: XCTestCase {
             // index, firstMatch or coordinate substitutes for the actual action.
             return (action.element, leaf.node.isSelected, navigationVisible)
         }
+        // The bounded snapshot already verifies the exact leaf is enabled.
+        // Resolve the same unique live action for hittability without another enabled RPC.
         let readinessDeadline = clock.now.advanced(by: .seconds(5))
         var target: XCUIElement?
         while clock.now < readinessDeadline {
             if let current = try observation(until: readinessDeadline),
-               clock.now < readinessDeadline && current.element.isEnabled,
                clock.now < readinessDeadline && current.element.isHittable,
                clock.now < readinessDeadline {
                 target = current.element

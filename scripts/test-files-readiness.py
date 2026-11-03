@@ -522,7 +522,13 @@ class OpenFolderTests(unittest.TestCase):
         start = source.index('    private func openLocalFilesFolder(')
         end = source.index('    private func selectRealFiles(', start)
         path = Path(cls.directory.name) / 'OpenFolder.swift'
-        path.write_text(OPEN_FOLDER_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        helper = source[start:end]
+        # These existing route cases use the default false opt-in. Keep their
+        # original single-tap/wait branch exact; the new full opt-in loop is
+        # compiled and executed by RestoreFolderNavigation below.
+        boundary = helper.index('        // Preserve the original post-tap destination budget.')
+        helper = helper[:boundary] + '        throw FixtureFailure()\n    }\n'
+        path.write_text(OPEN_FOLDER_FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = Path(cls.directory.name) / 'open-folder-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
                        capture_output=True, check=True, timeout=30)
@@ -1404,6 +1410,8 @@ enum ElementType { case other, button, navigationBar }
 @MainActor final class World {
     let name: String
     var taps = 0
+    var enabledReads = 0
+    var hittableReads = 0
     var snapshots = 0
     var navigationQueries = 0
     var liveRoot: XCUIElementSnapshot?
@@ -1422,6 +1430,7 @@ enum ElementType { case other, button, navigationBar }
         let frame = CGRect(x: 545, y: 41, width: 97, height: 32.5)
         let initialIdentifier = name.contains("empty-id") && name != "nonempty-id-changed" && taps == 0 ? "" : "gearshape"
         let leaf = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
+        leaf.isEnabled = name != "disabled-snapshot"
         leaf.isSelected = taps > 0 && name != "unselected"
         if name == "single-button" || (name.contains("empty-id") && !name.contains("pair")) || name == "nonempty-id-changed" { root.storedChildren = [leaf] }
         else {
@@ -1475,8 +1484,14 @@ enum ElementType { case other, button, navigationBar }
     let query: XCUIElementQuery
     var world: World { query.world }
     init(_ query: XCUIElementQuery) { self.query = query }
-    var isEnabled: Bool { query.nodes().count == 1 && query.nodes()[0].isEnabled }
+    var isEnabled: Bool {
+        world.enabledReads += 1
+        if world.name == "redundant-enabled-cost" { ContinuousClock.elapsed += .seconds(5) }
+        return query.nodes().count == 1 && query.nodes()[0].isEnabled
+    }
     var isHittable: Bool {
+        world.hittableReads += 1
+        if world.name == "late-live-hittable" { ContinuousClock.elapsed += .seconds(5) }
         guard query.nodes().count == 1, world.name != "unhittable-tab" else { return false }
         if world.name.contains("before-tap") { world.identifierChanged = true }
         return true
@@ -1508,7 +1523,12 @@ enum ElementType { case other, button, navigationBar }
     func children(matching type: ElementType) -> XCUIElementQuery {
         XCUIElementQuery(world) { self.nodes().flatMap(\.storedChildren).filter { $0.elementType == type } }
     }
-    var element: XCUIElement { XCUIElement(self) }
+    var element: XCUIElement {
+        // Retain an unavoidable initial identity-resolution cost in this scenario.
+        if world.name == "redundant-enabled-cost" { ContinuousClock.elapsed += .milliseconds(500) }
+        if world.name == "late-identity-resolution" { ContinuousClock.elapsed += .seconds(5) }
+        return XCUIElement(self)
+    }
     subscript(_ identifier: String) -> XCUIElement { XCUIElement(self) }
 }
 @MainActor final class XCUIApplication {
@@ -1531,12 +1551,15 @@ struct FixtureFailure: Error {}
 @main struct Main {
     @MainActor static func main() async {
         let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
-        let success = ["ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
-        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
+        let success = ["redundant-enabled-cost", "ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
+        let beforeTapFailure = ["disabled-snapshot", "late-live-hittable", "late-identity-resolution", "ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
         var failed = false
         do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
         precondition(failed != success)
         precondition(world.taps == (beforeTapFailure ? 0 : 1))
+        precondition(world.enabledReads == 0)
+        if name == "redundant-enabled-cost" || name == "late-live-hittable" { precondition(world.hittableReads == 1) }
+        if name == "disabled-snapshot" || name == "late-identity-resolution" { precondition(world.hittableReads == 0) }
         precondition(world.navigationQueries == 0)
         precondition(world.rejectedTapResolutions == 0)
         precondition(world.failures == (success ? 0 : 1))
@@ -1583,6 +1606,285 @@ class TabNavigationTests(unittest.TestCase):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_snapshot_enabled_and_one_live_hit_check_preserve_original_deadline(self):
+        for name in ['redundant-enabled-cost', 'disabled-snapshot',
+                     'late-live-hittable', 'late-identity-resolution']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
+UI = SOURCE.read_text()
+
+RESTORE_NAVIGATION_SWIFT = r'''
+import Foundation
+import CoreGraphics
+enum Kind { case application, window, other, collectionView, navigationBar, keyboard, cell, button, textView, textField, staticText, menu, menuItem, alert, sheet, popover }
+@MainActor final class XCUIElementSnapshot {
+    var elementType: Kind; var identifier: String; var label: String; var frame: CGRect
+    var children: [XCUIElementSnapshot] = []; var isEnabled = true
+    init(_ type: Kind, _ id: String = "", _ label: String = "", _ frame: CGRect = .zero) {
+        elementType = type; identifier = id; self.label = label; self.frame = frame
+    }
+}
+@MainActor final class Tree {
+    let cell: XCUIElementSnapshot
+    let title: XCUIElementSnapshot
+    let grid = XCUIElementSnapshot(.collectionView, "File View", "", CGRect(x: 0, y: 72, width: 402, height: 802))
+    let nav = XCUIElementSnapshot(.navigationBar, "FullDocumentManagerViewControllerNavigationBar", "", CGRect(x: 0, y: 88, width: 402, height: 114))
+    let root: XCUIElementSnapshot
+    let picker = XCUIElementSnapshot(.other, "Browse View (Picker)", "", CGRect(x: 0, y: 72, width: 402, height: 802))
+    let window = XCUIElementSnapshot(.window, "", "", CGRect(x: 0, y: 0, width: 402, height: 874))
+    let app = XCUIElementSnapshot(.application)
+    init(_ folder: String, _ local: String = "On My iPhone") {
+        cell = XCUIElementSnapshot(.cell, folder + ", Folder", folder + ", 1 item", CGRect(x: 10, y: 212, width: 122, height: 189.7))
+        title = XCUIElementSnapshot(.staticText, "", local, CGRect(x: 146, y: 99.7, width: 109.7, height: 20.7))
+        root = XCUIElementSnapshot(.other, "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + local, "", picker.frame)
+        grid.children = [cell]; nav.children = [title]; root.children = [nav, grid]
+        picker.children = [root]; app.children = [window]
+    }
+    func mutate(_ shape: String) {
+        switch shape {
+        case "duplicate-cell": grid.children.append(cell)
+        case "duplicate-title": nav.children.append(title)
+        case "duplicate-grid": root.children.append(grid)
+        case "duplicate-root": picker.children.append(root)
+        case "foreign-root": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
+        case "extra-root": picker.children.append(XCUIElementSnapshot(.other, "DOC.browsingRoot Source: foreign"))
+        case "outside-root": root.children = [nav]; picker.children.append(grid)
+        case "wrong-cell": cell.identifier = "foreign, Folder"
+        case "wrong-label": cell.label = "foreign, 1 item"
+        case "changed-contents": cell.label = cell.label.replacingOccurrences(of: "1 item", with: "2 items")
+        case "disabled": cell.isEnabled = false
+        case "wrong-title": title.label = "foreign"
+        case "frame": cell.frame.origin.x += 1
+        case "root-frame": root.frame.size.width -= 1
+        case "window-frame": window.frame.size.width -= 1
+        case "outside": cell.frame.origin.y = 900
+        case "empty": cell.frame.size.width = 0
+        case "nan": cell.frame.origin.x = .nan
+        case "no-window": app.children = []
+        case "conflicting-window": app.children.append(XCUIElementSnapshot(.window, "", "", CGRect(x: 0, y: 0, width: 100, height: 100)))
+        case "editor": window.children.append(XCUIElementSnapshot(.other, "DOC.inlineRenameField"))
+        case "introduction": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "keyboard": window.children.append(XCUIElementSnapshot(.keyboard))
+        case "menu": window.children.append(XCUIElementSnapshot(.menu))
+        case "alert": window.children.append(XCUIElementSnapshot(.alert))
+        case "sheet": window.children.append(XCUIElementSnapshot(.sheet))
+        case "popover": window.children.append(XCUIElementSnapshot(.popover))
+        case "text-field": window.children.append(XCUIElementSnapshot(.textField))
+        case "over-count": picker.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "over-depth":
+            var node = root
+            for _ in 0..<98 { let child = XCUIElementSnapshot(.other); node.children.append(child); node = child }
+        default: break
+        }
+    }
+}
+struct Duration { let value: Double; static func seconds(_ x: Double) -> Self { Self(value: x) }; static func milliseconds(_ x: Double) -> Self { Self(value: x / 1000) } }
+struct ContinuousClock: Comparable {
+    let value: Double
+    @MainActor static var now: Self { Self(value: State.time) }
+    func advanced(by duration: Duration) -> Self { Self(value: value + duration.value) }
+    static func < (a: Self, b: Self) -> Bool { a.value < b.value }
+}
+enum Task { @MainActor static func sleep(for duration: Duration) async throws { State.time += duration.value } }
+enum Idiom { case phone, pad }
+struct UIDevice { static var current: Self { Self() }; var userInterfaceIdiom: Idiom { .phone } }
+struct Failure: Error {}
+@MainActor enum State {
+    static var mode = "", time = 100.0, taps = [Double](), samples = 0, destination = false, destinations = 0
+    static var stages = [(String, Double)](), oldWaits = 0
+    static let folder = "TripDocket-Recovery-5862688f-b5ba-58df-9831-cb8796c62d6f"
+    static func stage(_ name: String) { stages.append((name, time)) }
+}
+enum AppState { case runningForeground, background }
+@MainActor final class Element {
+    let kind: String
+    init(_ kind: String) { self.kind = kind }
+    var cells: Query { Query("cell") }; var otherElements: Query { Query("root") }; var collectionViews: Query { Query("grid") }
+    var exists: Bool { State.mode != "live-missing" }
+    var isEnabled: Bool { State.mode != "live-disabled" }
+    var isHittable: Bool {
+        if State.mode == "destination-during-live" { State.destination = true }
+        if State.mode == "expiry-during-live" { State.time = 116 }
+        return State.mode != "live-hidden"
+    }
+    var frame: CGRect {
+        let tree = Tree(State.folder)
+        if kind == "cell" && State.mode == "live-frame" { tree.cell.frame.origin.x += 1 }
+        return ["picker": tree.picker.frame, "root": tree.root.frame, "grid": tree.grid.frame,
+                "nav": tree.nav.frame, "cell": tree.cell.frame][kind]!
+    }
+    func tap() {
+        State.taps.append(State.time)
+        if State.mode == "first-opens" || State.taps.count == 2 && State.mode != "persistent" { State.destination = true }
+    }
+}
+@MainActor struct Query {
+    let kind: String
+    init(_ kind: String) { self.kind = kind }
+    func matching(identifier: String) -> Self { self }
+    var element: Element { Element(kind) }
+    var count: Int {
+        if kind == "cell" && State.mode == "live-duplicate" { return 2 }
+        if kind == "root" && State.mode == "live-root" { return 0 }
+        return 1
+    }
+}
+@MainActor final class App { var state: AppState { State.mode == "background" ? .background : .runningForeground } }
+@MainActor final class Harness {
+    // ACTUAL_HELPER
+    func nativeFolderSnapshots(_ app: App) throws -> (picker: XCUIElementSnapshot, application: XCUIElementSnapshot) {
+        State.stage("snapshot"); State.samples += 1
+        let tree = Tree(State.folder)
+        let n = State.samples, mode = State.mode
+        if mode == "snapshot-error" { throw Failure() }
+        if mode == "destination-during-final" && n == 3 { State.destination = true }
+        if mode == "expiry-during-first" && n == 1 || mode == "expiry-during-final" && n == 3 { State.time = 116 }
+        if mode.hasPrefix("reject-") { tree.mutate(String(mode.dropFirst(7))) }
+        if mode.hasPrefix("second-") && n == 2 { tree.mutate(String(mode.dropFirst(7))) }
+        if mode.hasPrefix("final-") && n == 3 { tree.mutate(String(mode.dropFirst(6))) }
+        return (tree.picker, tree.app)
+    }
+    func isRecoveryFolder(_ value: String, navigation: Element) -> Bool { State.mode != "live-title" }
+    func failure(_ message: String, app: App) -> Failure { Failure() }
+    func wait(_ message: String, app: App, condition: () -> Bool) async throws {
+        State.oldWaits += 1
+        guard condition() else { throw Failure() }
+    }
+    func run(_ retryRecoveryFolderEntry: Bool, folder: String) async throws -> Element {
+        let app = App(), picker = Element("picker"), directory = Element("cell"), navigation = Element("nav")
+        let navigations = Query("nav"), pickers = Query("picker")
+        let atDestination = {
+            State.stage("destination"); State.destinations += 1
+            if State.mode == "already-destination" { return true }
+            if State.mode == "expiry-during-destination" && State.destinations == 2 { State.time = 116 }
+            return State.destination
+        }
+        // ACTUAL_LOOP
+    }
+    static func proof(_ shape: String, folder: String, local: String) -> Bool {
+        let tree = Tree(folder, local); tree.mutate(shape)
+        return recoveryFolderParentGeometry(in: tree.picker, applicationSnapshot: tree.app, folder: folder, localTitle: local) != nil
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let args = Array(CommandLine.arguments.dropFirst())
+        if args[0] == "proof" { print(Harness.proof(args[1], folder: args[2], local: args[3])); return }
+        State.mode = args[0]
+        var result = "passed"
+        do { _ = try await Harness().run(args[0] != "disabled", folder: args.count > 1 ? args[1] : State.folder) }
+        catch { result = "failed" }
+        let lateStages = State.stages.filter { $0.1 >= 115 }.count
+        let object: [String: Any] = ["result": result, "taps": State.taps, "samples": State.samples,
+                                   "now": State.time, "lateStages": lateStages, "oldWaits": State.oldWaits]
+        print(String(data: try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), encoding: .utf8)!)
+    }
+}
+'''
+
+
+class RestoreFolderNavigation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix='restore-folder-navigation-')
+        cls.addClassCleanup(cls.scratch.cleanup)
+        path = Path(cls.scratch.name)
+        start = UI.index('    @MainActor\n    private static func recoveryFolderParentGeometry(')
+        helper = UI[start:UI.index('    private func openLocalFilesFolder(', start)]
+        start = UI.index('        if !atDestination() { directory.tap() }', UI.index('    private func openLocalFilesFolder('))
+        end = UI.index('\n    }\n', start)
+        loop = UI[start:end]
+        swift = path / 'Navigation.swift'
+        swift.write_text(RESTORE_NAVIGATION_SWIFT.replace('    // ACTUAL_HELPER', helper).replace('        // ACTUAL_LOOP', loop))
+        cls.binary = path / 'navigation'
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-strict-concurrency=complete',
+                                 '-parse-as-library', str(swift), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode: raise AssertionError(result.stdout + result.stderr)
+
+    def probe(self, *args):
+        import json
+        result = subprocess.run([str(self.binary), *args], check=True, capture_output=True, text=True, timeout=5)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_persistent_parent_permits_only_one_second_tap(self):
+        result = self.probe('persistent')
+        self.assertEqual(result['result'], 'failed')
+        self.assertEqual(len(result['taps']), 2)
+        self.assertEqual(result['samples'], 3)
+        self.assertLess(result['taps'][1], 115)
+        self.assertLess(result['now'], 115.11)
+        self.assertEqual(result['lateStages'], 0)
+
+    def test_retry_can_reach_destination(self):
+        result = self.probe('opens-on-retry')
+        self.assertEqual((result['result'], len(result['taps']), result['samples']), ('passed', 2, 3))
+
+    def test_destination_first_at_every_boundary_prevents_second_tap(self):
+        for mode, count in [('already-destination', 0), ('first-opens', 1),
+                            ('destination-during-final', 1), ('destination-during-live', 1)]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual(result['result'], 'passed')
+                self.assertEqual(len(result['taps']), count)
+
+    def test_changed_second_state_never_rearms_on_later_valid_state(self):
+        for shape in ['frame', 'root-frame', 'window-frame', 'changed-contents', 'duplicate-cell', 'editor', 'menu', 'foreign-root']:
+            with self.subTest(shape=shape):
+                result = self.probe('second-' + shape)
+                self.assertEqual((len(result['taps']), result['samples'], result['result']), (1, 2, 'failed'))
+
+    def test_final_snapshot_or_live_guard_changes_forbid_retry(self):
+        for mode in ['final-frame', 'final-root-frame', 'final-editor', 'final-menu', 'final-foreign-root',
+                     'live-root', 'live-title', 'live-frame', 'live-duplicate', 'live-disabled', 'live-hidden',
+                     'live-missing', 'background']:
+            with self.subTest(mode=mode): self.assertEqual(len(self.probe(mode)['taps']), 1)
+
+    def test_expiry_during_any_observation_starts_no_later_stage_or_tap(self):
+        for mode in ['expiry-during-destination', 'expiry-during-first', 'expiry-during-final', 'expiry-during-live']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['result'], len(result['taps']), result['lateStages']), ('failed', 1, 0))
+
+    def test_invalid_or_failed_first_snapshot_disables_retry(self):
+        for mode in ['snapshot-error', 'reject-duplicate-cell', 'reject-alert', 'reject-sheet', 'reject-popover',
+                     'reject-editor', 'reject-keyboard', 'reject-introduction', 'reject-text-field']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((len(result['taps']), result['samples']), (1, 1))
+
+    def test_real_proof_rejects_structural_and_geometry_ambiguity(self):
+        folder = 'TripDocket-Recovery-5862688f-b5ba-58df-9831-cb8796c62d6f'
+        for shape in ['duplicate-cell', 'duplicate-title', 'duplicate-grid', 'duplicate-root', 'extra-root',
+                      'foreign-root', 'outside-root', 'wrong-cell', 'wrong-label', 'changed-contents', 'disabled', 'wrong-title',
+                      'outside', 'empty', 'nan', 'no-window', 'conflicting-window', 'over-count', 'over-depth']:
+            with self.subTest(shape=shape): self.assertFalse(self.probe('proof', shape, folder, 'On My iPhone'))
+
+    def test_proof_requires_canonical_owned_name_and_explicit_local_title(self):
+        folder = 'TripDocket-Recovery-5862688f-b5ba-58df-9831-cb8796c62d6f'
+        for local in ['On My iPhone', 'On My iPad']:
+            self.assertTrue(self.probe('proof', 'exact', folder, local))
+        for bad in [folder.upper(), folder + '-extra', 'TripDocket-Recovery-any', 'Documents',
+                    folder.replace('Recovery', 'Batch-QA')]:
+            self.assertFalse(self.probe('proof', 'exact', bad, 'On My iPhone'))
+        self.assertFalse(self.probe('proof', 'exact', folder, 'iCloud Drive'))
+
+    def test_default_path_retains_original_single_tap_wait_without_sampling(self):
+        result = self.probe('disabled')
+        self.assertEqual((len(result['taps']), result['samples'], result['oldWaits']), (1, 0, 1))
+
+    def test_only_restore_explicitly_opts_in_and_original_actions_remain(self):
+        self.assertEqual(UI.count('retryRecoveryFolderEntry: true'), 1)
+        restore = UI[UI.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal()'):UI.index('    private func isRecoveryFolder(')]
+        self.assertIn('openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)', restore)
+        self.assertIn('let recoveryFolder = try recoveryConfiguration(phase: "restore")', restore)
+        self.assertIn('retryRecoveryFolderEntry: Bool = false', UI)
+
 
 
 if __name__ == '__main__':
