@@ -1863,7 +1863,8 @@ class SharedBuildGuards(unittest.TestCase):
         self.run.observe_shared_build(self.driver,"after_main")
         proof=self.run.report["shared_build"]
         self.assertEqual(set(proof["observations"]),{"before_seed","after_seed","after_main"})
-        self.assertEqual(len(self.calls),7);self.assertTrue(all(c[2]==30 for c in self.calls))
+        self.assertEqual(len(self.calls),7)
+        self.assertEqual([c[2] for c in self.calls], [40, 30, 30, 30, 30, 30, 30])
         self.assertIn("-showBuildSettings",self.calls[0][1])
         self.assertEqual(self.calls[0][1][-1],"build-for-testing")
         query = self.calls[0][1]
@@ -1926,7 +1927,7 @@ class SharedBuildGuards(unittest.TestCase):
     def test_symlink_product_or_inactive_budget_never_starts_seed(self):
         p=self.paths["TripfolioTests"];moved=p.with_name("Original.xctest");p.rename(moved);p.symlink_to(moved)
         with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
-        self.driver.remaining=lambda:1174
+        self.driver.remaining=lambda:1184
         with self.assertRaisesRegex(RuntimeError,"budget"):self.run.prepare_shared_build(self.driver)
         self.assertEqual(self.calls,[])
         self.driver.remaining=lambda:1200;self.run.commands.active[999]=object()
@@ -1942,12 +1943,71 @@ class SharedBuildGuards(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"deadline"):self.run.observe_shared_build(self.driver,"after_seed")
 
     def test_shared_command_preserves_stop_reserve_inside_driver_deadline(self):
-        self.driver.remaining=lambda:19
-        self.run.shared_build_command(self.driver,"observation",["query"])
-        self.assertEqual(self.calls[-1][2],11)
-        self.driver.remaining=lambda:8
-        with self.assertRaisesRegex(RuntimeError,"budget"):
-            self.run.shared_build_command(self.driver,"observation",["query"])
+        # Exercise the real Qualification.command adapter as well as the shared
+        # helper; only the process runner is replaced, so no child is spawned.
+        self.run.command = q.Qualification.command.__get__(self.run)
+        self.driver.deadline = self.run.started + 1440
+        clocks = (self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                  self.driver.deadline, self.run.commands.limit)
+        with patch.object(self.run.commands, "command", return_value="complete") as command:
+            for remaining, label, total_cap in (
+                (1200, "shared-build-settings", 48),
+                (1200, "shared-before_seed-app", 38),
+                (1200, "shared-after_main-data", 38),
+                (1200, "shared-build-settings-extra", 38),
+                (19, "shared-build-settings", 19),
+                (19, "observation", 19),
+            ):
+                with self.subTest(remaining=remaining, label=label):
+                    self.driver.remaining = lambda value=remaining: value
+                    self.assertEqual(self.run.shared_build_command(self.driver, label, ["query"]), "complete")
+                    command.assert_called_with(label, ["query"], total_cap)
+            for remaining in (8, 0):
+                for label in ("shared-build-settings", "observation"):
+                    self.driver.remaining = lambda value=remaining: value
+                    before_calls = command.call_count
+                    with self.subTest(remaining=remaining, label=label), self.assertRaisesRegex(RuntimeError, "budget"):
+                        self.run.shared_build_command(self.driver, label, ["query"])
+                    self.assertEqual(command.call_count, before_calls)
+        self.assertEqual((self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                          self.driver.deadline, self.run.commands.limit), clocks)
+
+    def test_shared_build_admission_reserves_only_one_larger_settings_rpc(self):
+        self.driver.deadline = self.run.started + 1440
+        clocks = self.run.started, self.run.work_deadline, self.run.cleanup_deadline, self.driver.deadline
+        for combined, admission in ((True, 1108), (False, 1184)):
+            self.run.native_folder_control = combined
+            self.run.report["native_folder_verified"] = combined
+            self.driver.args = SimpleNamespace(native_root=not combined, native_folder=combined,
+                                               combined_batch=combined)
+            for remaining in (admission - 1, admission):
+                self.driver.remaining = lambda value=remaining: value
+                with self.subTest(combined=combined, remaining=remaining), \
+                     patch.object(self.run, "require_no_build_writer") as writer, \
+                     self.assertRaisesRegex(RuntimeError, "Insufficient shared-build"):
+                    self.run.prepare_shared_build(self.driver)
+                writer.assert_not_called()
+                self.assertEqual(self.calls, [])
+            self.driver.remaining = lambda value=admission + 1: value
+            with self.subTest(combined=combined, admission_passes=True), \
+                 patch.object(self.run, "require_no_build_writer", side_effect=RuntimeError("admission reached")) as writer, \
+                 self.assertRaisesRegex(RuntimeError, "admission reached"):
+                self.run.prepare_shared_build(self.driver)
+            writer.assert_called_once_with()
+            self.assertEqual(self.calls, [])
+        self.assertEqual((self.run.started, self.run.work_deadline, self.run.cleanup_deadline,
+                          self.driver.deadline), clocks)
+
+    def test_incomplete_or_timed_out_settings_never_install_shared_product_proof(self):
+        for outcome in (RuntimeError("Command timeout"), '[{"target":"Tripfolio'):
+            replacement = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+            with self.subTest(outcome=outcome), patch.object(self.run, "shared_build_command", **replacement), \
+                 self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                self.run.prepare_shared_build(self.driver)
+            self.assertFalse(hasattr(self.run, "shared_products"))
+            self.assertFalse(hasattr(self.driver, "qualified_build"))
+            self.assertNotIn("shared_build", self.run.report)
+            self.assertEqual(self.calls, [])
 
     def test_shared_settings_require_same_symroot_and_real_bundle_identifier(self):
         different=self.derived/"other";different.mkdir()

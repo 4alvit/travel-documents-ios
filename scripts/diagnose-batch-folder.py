@@ -8,7 +8,7 @@ import stat
 import sys
 
 HERE = Path(__file__).resolve().parent
-PROVIDER_SHA256 = "b0e2b78e5336e4027257ffde1ff30cc83f6dde3e182319c92d6fa318cf521d2c"
+PROVIDER_SHA256 = "5d0919001f3d0116dff195115c9632224a46999315600f91600f01793f848897"
 
 
 def verify_provider():

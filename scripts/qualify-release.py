@@ -30,6 +30,7 @@ SEED_SECONDS = 300
 SEED_CASE_SECONDS = 180
 FOLDER_CASE = "BatchImportUITests/testNativeCreateOwnedFilesFolder()"
 FOLDER_SECONDS = 240
+SHARED_SETTINGS_SECONDS = 40
 FOLDER_CASE_SECONDS = 180
 APP_ID = "com.4alvit.tripfolio"
 RUNNER_ID = APP_ID + ".uitests.xctrunner"
@@ -1013,10 +1014,11 @@ class Qualification:
                          and self.report.get("native_folder_verified") is True))
                 and self.report.get("files_preparation_verified") is True
                 and not hasattr(self, "shared_products"), "Shared build requires one owned preparation")
-        # Combined mode removes one invocation; five settings/container RPCs
-        # surround it. The checkpoint is inside the unchanged main600 allowance.
-        admission = (SEED_SECONDS + 600 + 5 * 38 + 8 if getattr(driver.args, "combined_batch", False)
-                     else SEED_SECONDS + 600 + 7 * 38 + 8)
+        # Reserve one settings query and four (or six) container reads,
+        # including each original eight-second stop reserve. The checkpoint
+        # remains inside the unchanged main600 allowance.
+        container_queries = 4 if getattr(driver.args, "combined_batch", False) else 6
+        admission = SEED_SECONDS + 600 + SHARED_SETTINGS_SECONDS + 8 + container_queries * 38 + 8
         require(driver.remaining() > admission,
                 "Insufficient shared-build observation and native budget")
         derived = self.root / self.report["files_preparation"]["derived_data"]
@@ -1044,7 +1046,11 @@ class Qualification:
         self.observe_shared_build(driver, "before_seed")
 
     def shared_build_command(self, driver, label, argv):
-        seconds = min(30, driver.remaining() - 8)
+        # A retained settings-query leader exit was observed just after its former
+        # 30-second work boundary. Only that query receives the measured margin;
+        # container reads and the original driver/global clocks are unchanged.
+        work_seconds = SHARED_SETTINGS_SECONDS if label == "shared-build-settings" else 30
+        seconds = min(work_seconds, driver.remaining() - 8)
         require(seconds > 0, "No bounded shared-build command budget")
         return self.command(label, argv, seconds)
 

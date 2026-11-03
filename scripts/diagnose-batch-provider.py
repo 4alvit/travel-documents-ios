@@ -11,7 +11,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 PINS = {
-    "qualify-release.py": "0309e419f45ebe62d996be748099f7ce95b46134e4d49cf86d833950de658b6b",
+    "qualify-release.py": "536f7b6110c32d0a149b12516da8bffb558323971106b113367c76a45caa4f73",
     "recovery_process.py": "5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc",
     "recovery_core.py": "d7cae59562ba7aeee9e02a98d429fe7592c8bad61302efe7d1fd92e5e1bd18c3",
     "batch_checkpoint.py": "aa66e1bfedb89d7becb7985bee735cafbaec447bea2061cb392880a2be17f185",
