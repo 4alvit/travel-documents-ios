@@ -40,8 +40,8 @@ The [matched native Save control](https://github.com/4alvit/travel-documents-ios
 also failed at that boundary, so native saving and matching the SDK alone did not
 establish successful import.
 
-The subsequent four-phase control replaces the remaining host-created fixture
-folder with native New Folder, followed by native Save. Its required evidence is
+A subsequent four-phase control replaced the remaining host-created fixture
+folder with native New Folder, followed by native Save. Its required evidence was
 **one Files preparation case + one native folder case + one native seed case +
 two main cases**, in four separate original result bundles. Every phase needs
 exact-source/device, result, immutable-manifest and independent warning review;
@@ -58,10 +58,142 @@ acknowledged only that exact introduction once and verified its dismissal and
 the unchanged folder name. The [following run](https://github.com/4alvit/travel-documents-ios/actions/runs/41400000817)
 delivered the single Done key event, but the editor and keyboard remained
 active. Neither failed run executed native seeding or the main import tests.
-The next control replaces Done with one tap in a verified empty part of the
-Files grid. It retains the editor-dismissal, exact-destination and host
-empty-folder checks. Its offline geometry checks do not establish native
-folder creation or completed import.
+The next control replaced Done with one tap in a verified empty part of the
+Files grid, retaining the editor-dismissal, exact-destination and host
+empty-folder checks. Its [first run](https://github.com/4alvit/travel-documents-ios/actions/runs/41403200979)
+failed before typing: a remote Files snapshot took about 29 seconds, and the
+retained state showed an untitled folder without an editor. The [same-source
+repeat](https://github.com/4alvit/travel-documents-ios/actions/runs/41405086602)
+failed earlier, with the export share sheet still visible after Save to Files.
+Neither run reached the new end-editing action, native seed or main import.
+
+A later control removed that extra fixture-folder creation. After real
+Files preparation, native Save places two synthetic PDFs directly in the
+verified empty provider root of an exclusively owned Simulator. It requires
+three distinct bundles: one preparation case, one native-seed case, and the
+two main purchase/import cases. Exact provider identity, complete source and
+imported bytes, visual review, and deletion of only the owned Simulator remain
+required. The driver never removes the provider root itself. This simplifies
+the fixture setup; it does not establish the cause of earlier Files errors or
+assert that the new control has passed.
+
+The [native-root control](https://github.com/4alvit/travel-documents-ios/actions/runs/41408007587)
+at `7cb01f1` passed Files preparation, native saving of both PDFs and the hosted
+purchase prerequisite. The batch case failed after Open: retained system output
+again reported a FileProvider resolution failure and an empty URL array. Both
+source PDFs remained intact and owned-device cleanup passed. Seed and main used
+different build directories and installed app bundle paths. The next control uses the same prepared
+products for both phases, retaining all three result bundles and all byte,
+identity, deadline and cleanup checks. This tests a remaining lifecycle boundary;
+it does not establish that the boundary caused the failure.
+
+In the same candidate's [CI](https://github.com/4alvit/travel-documents-ios/actions/runs/41408003034),
+Recovery passed all three phases and independent original-byte and cleanup checks.
+Core passed 129 of 130 cases. The no-diagnostics purchase test stopped before its
+first purchase because the open Pro screen still showed a disabled price button
+and a loading indicator. Retained logs did not identify the suspended StoreKit
+operation. Bounded Debug Simulator stdout observations now distinguish load
+invocations and their entitlement/catalog await boundaries. They add no retries,
+UI diagnostic values or Release behavior, and do not relax the 15-second test
+condition. The [subsequent Core run](https://github.com/4alvit/travel-documents-ios/actions/runs/41411424834/job/125165114095)
+at `3b467b8` passed all 130 iOS cases, including that purchase test, and 38 package
+cases. This successful observation does not establish that diagnostic logging
+fixed the earlier load stall.
+
+The [same-product batch control](https://github.com/4alvit/travel-documents-ios/actions/runs/41411434684)
+at `3b467b8` passed Files preparation, native saving of both PDFs and the hosted
+purchase prerequisite. All four compiled products retained identical bytes and
+Unix modes across the three observations; installed app content matched them.
+Xcode still changed the installed app and data container paths, so using the
+same products did not eliminate that lifecycle boundary. The data directory's
+recorded inode remained the same; path changes alone do not establish data loss.
+
+This attempt failed before Files selection: after the sole Unlock tap, Xcode's
+payment service returned `AMSErrorDomain` code 10, `Presentation failed`, wrapped
+in `ASDErrorDomain` code 5115. The app displayed its purchase-failure alert.
+Both catalog loads had completed; no purchase transaction or batch import was
+accepted. The original PDFs remained intact and all owned processes and the
+Simulator were cleaned up.
+
+The next candidate supplied StoreKit's SwiftUI environment `PurchaseAction`
+to the existing purchase manager. Its [Xcode 16.4 Recovery build](https://github.com/4alvit/travel-documents-ios/actions/runs/41415005661/job/125176604610)
+at `f507c1c` failed before XCTest: that SDK's nonisolated async method rejected
+the main-actor-isolated, non-Sendable action. No recovery case executed. All
+owned process groups stopped and the complete Simulator inventory was restored.
+A successful local compile with a newer SDK did not establish this compatibility.
+
+The Pro screen instead retains a weak reference to its own attached UIKit
+controller. Purchases use that controller on iOS 18.2 and later, or its attached
+window scene on iOS 17 through 18.1. These are Apple's
+[explicit-context purchase APIs](https://developer.apple.com/documentation/storekit/product/purchase(confirmin:options:)-6dj6y).
+Missing, inactive or dismissing presentation context fails through the existing
+purchase-error path; there is no global scene lookup or contextless fallback.
+The manager retains its busy guard, verified-entitlement checks, transaction
+finishing and error handling; non-UI hosted calls retain their existing default.
+No unsafe Sendable conformance or concurrency-check suppression is added.
+The earlier payment-service error did not establish a missing scene as its
+precise cause. This correction still requires fresh native validation; it adds
+no automatic purchase retry and does not relax payment or Files assertions.
+
+The [following batch run](https://github.com/4alvit/travel-documents-ios/actions/runs/41416599960)
+at `afd2dc1` passed preparation, native seeding and the hosted purchase prerequisite.
+The UI completed the local Xcode purchase and reached Files with both PDFs
+selected. After the single Open action, FileProvider again reported code -1005
+with resolver code -1012, then attempted an empty selected-URL callback. The
+app's retained importer state still recorded no callback. All source PDFs and
+compiled-product bytes remained unchanged; installed container paths changed
+between the separate invocations. This establishes the observed failure boundary,
+not a causal proof about installation or the opaque provider item identifier.
+
+The C3 control kept the hosted prerequisite, native seed and real import as
+three separate XCTest cases in one invocation, after separate Files preparation.
+A checkpoint at import entry requires the seed's actual pass marker, a record
+from the same UI test process, and a host comparison of both complete destination
+files before import actions begin. Its evidence layout was one preparation
+case plus one three-case bundle; no separate seed result was fabricated.
+
+The [C3 Arm run](https://github.com/4alvit/travel-documents-ios/actions/runs/41426202230)
+passed preparation and the hosted purchase prerequisite. The first native PDF
+seed then reached an incomplete Save to Files screen: On My iPhone and the
+filename were visible, but its provider root, file grid and Save action were
+absent. Application output recorded a SaveToFiles hosted-scene action timeout.
+The seed failed after 65.552 seconds; the import case correctly rejected the
+missing successful producer before requesting a checkpoint or importing files.
+This did not exercise the seed-to-import continuity hypothesis and does not
+establish the cause of the native scene timeout.
+
+The next controlled run moves the hosted prerequisite before Files preparation
+in the first invocation, followed by native seed and real import in one
+uninterrupted UI-test invocation. Both original bundles must contain exactly
+two passes, with all four cases, cross-phase order and the host checkpoint
+verified. The three functional methods in the public batch receipt span both
+bundles; preparation remains an additional required case. This ordering change
+preserves the native actions, case allowances, process ownership and work/cleanup
+budgets. It is not a demonstrated fix; a fresh complete capture and independent
+review are still required.
+
+The [C9 Arm capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41449915788)
+selected both synthetic PDFs, but Files remained visible after Open. Retained
+output records File Provider error -1005 with resolver error -1012 and an empty
+internal document selection before any accepted app result. The destination
+bytes were intact; that alone does not prove valid provider registration.
+
+The next seed control uses a direct document picker export in copy mode instead
+of the activity sheet. Each export must return one destination URL whose complete
+coordinated read matches the source, followed by the existing host verification
+of both files in the exact local root. The production importer, main assertions
+and time limits are unchanged. This adds evidence at the preparation boundary;
+it is not a demonstrated fix for the earlier File Provider failure. Native
+export access and the complete import sequence still require validation.
+
+An earlier main-branch CI stopped in its subprocess capability probe before
+creating a Simulator or running recovery tests. The command woke after its work
+deadline and entered another resource scan, so the expected command timeout was
+misclassified as a scan deadline failure. The loop now checks the unchanged work
+deadline before draining output or scanning resources. The eight-second stop
+reserve, genuine scan failures and complete process-cleanup requirements remain.
+Offline boundary tests cover both an exact-deadline wakeup and an oversleep; they
+do not substitute for a successful hosted recovery run.
 
 ## Release preparation — 1 November 2026
 
@@ -782,6 +914,274 @@ That report is context, not an explanation of the remaining local purchase behav
 cold-device CLI probes did not establish their local test environment. Later
 accepted historical hosted CI passed all seven StoreKit cases. No physical-device or
 live-store acceptance follows from that result.
+
+## Hosted candidate evidence and Intel contingency
+
+Candidate `cb6dbbb` completed [all six CI jobs](https://github.com/4alvit/travel-documents-ios/actions/runs/41456799658).
+Independent review confirmed 171 native Core tests and 38 Swift package tests,
+phone guidance, and all three recovery phases including complete backup and
+original-byte equality after restore. These are scoped candidate results; they
+do not substitute for final-main release evidence.
+
+Its [first batch capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41456805668)
+verified both native exports and their destination reads, then stopped on an
+empty presented Files panel before selection. One [same-source confirmation](https://github.com/4alvit/travel-documents-ios/actions/runs/41459579883)
+again verified both exports and reached selection of both originals. Open did
+not dismiss Files. The retained application log reported File Provider `-1005`
+with resolver `-1012`, followed by an empty system selection result. The opaque
+item identifier is not mapped to a filename. Neither capture qualifies batch
+import, and the confirmation does not establish the cause of the earlier empty
+panel.
+
+An [earlier Intel attempt](https://github.com/4alvit/travel-documents-ios/actions/runs/41453967728)
+never reached native tests because its initial boot exhausted 180 seconds.
+A separate [boot-only measurement](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
+completed boot in 279.406 seconds and verified all owned processes and complete
+non-owned device inventory. It performed no app tests. The Intel batch startup
+profile in [GitHub release guidance](github-releases.md) enables a bounded
+comparison on that environment without changing the import assertions or
+cleanup requirements. Native Intel acceptance remains pending until captured
+and independently reviewed.
+
+The subsequent [`70ca40a` Intel batch run](https://github.com/4alvit/travel-documents-ios/actions/runs/41464296256)
+completed boot readiness in 323.134 seconds, then exhausted the unchanged
+780-second preparation limit while compiling the test targets. No native test
+case started; seed, checkpoint and import were not reached. The capture
+retained compiler output and two empty result-staging logs, not a completed
+test result. All 22 owned process groups were stopped and reaped; the owned
+Simulator was deleted and all 127 other-device inventory records matched.
+Source-before matched the candidate, but source-after and product proofs were
+unavailable. This failure establishes neither a FileProvider failure nor
+successful import. Individual compiler tasks have no retained timestamps, so
+the elapsed time cannot be attributed to a particular source file.
+
+The subsequent Intel-only compilation selection kept the complete test source
+files containing the same four required methods and their StoreKit bootstrap,
+while excluding unrelated test files with a validated build argument. That change
+preserved production code, resources, the test plan and the existing deadlines.
+Full ordinary CI remains required. A successful compilation alone does not
+qualify this change; the full native capture still requires independent review.
+
+The [`9d8766d` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41470558345)
+completed boot readiness in 227.038 seconds and compiled the four retained test
+files. The hosted prerequisite passed in 8.419 seconds. Files preparation then
+reached the local provider and its final absent-folder query, but the enclosing
+780-second command limit expired at about 148.5 seconds of that case, before its
+180-second allowance. No preparation pass or native assertion failure was
+recorded; seed, checkpoint and import were not reached. The partial result has
+no complete summary or retained standalone PNG. All 22 owned process groups
+were stopped and reaped, the owned Simulator was deleted, and all 127 other
+device records matched. One post-TERM EPERM observation was followed by confirmed
+absence and reaping. Source-before matched; source-after, compiled-product and
+fixture-byte proofs were unavailable.
+
+The follow-up Intel-only preparation envelope is 1,200 seconds within the same
+3,000-second work deadline: 720 seconds for build/install/startup/finalization,
+plus the unchanged 300-second hosted and 180-second Files allowances. The
+approximately 624 seconds of observed non-case overhead supports this bounded
+allocation; it does not isolate compiler time or prove that the remaining test
+would pass. Admission also reserves the full driver and postcheck budgets;
+no retry, case limit, cleanup limit or workflow timeout is changed. This failed
+capture remains failed, and complete native qualification is still required.
+
+The [`1282c11` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41475328888)
+completed the hosted prerequisite in 3.696 seconds, then failed the native
+Files-preparation case after 170.818 seconds with “Share sheet action did not
+stabilize.” The enclosing command returned exit 65 after 1,022.058 seconds,
+with about 177.942 seconds of its 1,200-second budget remaining. Neither the
+command envelope nor the 180-second native allowance caused this failure.
+No Save to Files tap, native seeding, checkpoint or main import occurred.
+
+The final original screenshot and accessibility tree show the populated share
+sheet and its uniquely named Save to Files action within the app bounds. The
+log reaches the complete attribute-reading path only twice near the end of the
+40-second readiness window; each observation issues several separate remote
+queries. Two observations cannot satisfy the required three confirmations,
+even if their geometry agrees. The final screenshot alone cannot establish
+that the action had stable geometry throughout that earlier window.
+
+All 215 extracted artifact files matched the archive, the 176-file source
+snapshot matched the candidate, and all 24 owned process groups were reaped.
+The owned Simulator was deleted and the full 127-device baseline matched.
+Source-after, compiled-product and fixture-byte evidence was not produced;
+this failed capture remains unqualified.
+
+The follow-up share-readiness helper obtains action and header geometry from one
+complete application snapshot per observation. It rejects missing or duplicate
+targets, invalid geometry, incomplete traversal (more than 4,096 nodes or depth
+64), and results arriving after the existing 40-second deadline. It then checks
+live hittability using the exact snapshot type, identifier and label. Three
+consecutive matching observations with the existing 0.5-point tolerance remain
+required. Native case, preparation, global-work and cleanup limits are unchanged.
+
+The revised helper passed 44 extracted-code scenarios, including traversal,
+identity changes and late results; an independent review also checked the depth
+boundary. The complete test file typechecked against the installed iOS SDK.
+These local checks do not establish a hosted speedup or native acceptance;
+a new complete capture remains required.
+
+The same [`1282c11` CI run](https://github.com/4alvit/travel-documents-ios/actions/runs/41475308705)
+failed the Russian maximum-text-size backup-warning case at its 120-second
+allowance. The independent result contains eight passed phone cases, one failed
+case and twelve intended opt-in skips; the separate Files preparation passed.
+The warning needed 19 text observations and 18 short drags. In the observed
+538-point viewport, a 160-point drag usually advanced the text about 150 points,
+so much of each captured slice repeated earlier text. The retained slice 17
+still clips the final word. Later completion and cancellation appear in the log,
+but their screenshots are absent from the ordinary attachment export and do
+not establish a passing result.
+
+The follow-up gesture uses the measured text viewport with overlapping slices
+and keeps both endpoints inside the current text pane. Actual captured interval
+coverage, reflow and horizontal-clipping checks, every slice screenshot and
+hierarchy, complete Export-action visibility and cancellation remain required.
+The 19-observation bound, 120-second case allowance and outer limits are unchanged.
+Local geometry and counterexample checks passed; fewer native observations and
+a successful native run remain to be demonstrated.
+
+
+The [`e385cd5` Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41481366981)
+passed the hosted prerequisite in 6.000 seconds. The revised share helper
+completed three live readiness observations and tapped Save to Files at
+152.72 seconds, but the preparation case exhausted its unchanged 180-second
+allowance while entering Files. The enclosing command finished after
+1,163.664 seconds, within its 1,200-second limit. Later root queries and
+attachment log events do not establish timely completion: the ordinary
+attachment export contains only the earlier disclosure screenshot and its
+hierarchy, with no final-root screenshot or hierarchy. No native seed,
+checkpoint or main import ran.
+
+All 219 extracted files matched the artifact, source-before matched all 176
+candidate files, and the original result remained unchanged. All 24 owned
+process groups were reaped, the owned Simulator was deleted, and the complete
+127-device baseline matched. Source-after, product and fixture-byte evidence
+was not produced. The failed capture remains unqualified.
+
+The next batch-only preparation case opens the existing Debug Simulator
+synthetic-PDF exporter directly. It verifies the native local Files root and
+an absent probe folder, then terminates before tapping Save. Its preparation
+UUID is recorded and must differ from the subsequent native-seed UUID. This
+removes the backup-disclosure and share-sheet detour from batch initialization;
+the separate Recovery and phone preparation path is unchanged. The two
+required preparation cases (hosted prerequisite and direct Files preparation)
+and two driver cases (native seed and full import) remain mandatory. The
+180-second native case, 1,200-second Intel preparation, 3,000-second global work
+and 180-second cleanup limits are unchanged. This source change still requires
+a complete native capture before acceptance.
+
+A supporting local run at `e0a4d92` passed the revised Russian maximum-type
+backup-warning case in 55.381 seconds. Seven actual overlapping captures
+covered the full text, the Export action remained visible before and after,
+and dismissing the warning returned to Settings. All ten screenshots and
+paired hierarchies were reviewed. Source and original result bytes remained
+unchanged, the owned Simulator was deleted and the complete local device
+baseline matched. This used Xcode/SDK 27.1 with iOS Simulator 27.0; it validates
+the gesture locally and does not substitute for the hosted qualification.
+
+## Generic destination for shared-build metadata
+
+The [`61dc730` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41492348354)
+passed its hosted prerequisite in 4.556 seconds and direct Files preparation in
+39.091 seconds. The retained pixels and hierarchy show the empty On My iPhone
+root. The subsequent `shared-build-settings` command produced no stdout or
+stderr and reached its 30-second work limit; its owned process group was
+terminated and reaped. Seed and import did not run, so this remains failed
+qualification evidence.
+
+The metadata query now targets the generic iOS Simulator platform while actual
+preparation and test execution retain the owned device. Its configuration,
+scheme action, derived-data path, source selection, product validation and
+30-second limit are unchanged. An earlier retained local generic query returned
+all three target paths in 2.552 seconds on Xcode 27.1; that supports the command
+form but does not establish Xcode 26.2 performance or the cause of this timeout.
+A new complete hosted capture remains required before acceptance.
+
+The subsequent [`99a05ef` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41497711833)
+stopped earlier at the 780-second preparation limit. Its hosted prerequisite
+passed in 5.387 seconds, but the direct Files case has no retained terminal
+result. The launch request alone took 327.693 seconds before launch confirmation;
+this interval cannot be attributed to compilation or StoreKit initialization.
+The incomplete result retained neither the logged screenshot nor a standalone
+hierarchy attachment. All 21 owned command groups were reaped, the owned
+Simulator was deleted, and the complete 132-device baseline matched. The generic
+metadata query was not reached, and this run remains failed.
+
+ARM batch now uses the same four complete test source files as the Intel batch
+profile, excluding only the sixteen unrelated test files. Production code,
+resources, selected native cases, full CI and biometric compilation are
+unchanged. This removes unnecessary compilation within the existing preparation
+and overall limits; neither a speedup nor a remedy for the launch delay is
+claimed before a new hosted measurement.
+
+## Observing the remaining purchase presentation failure
+
+The [`7939931` ARM capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41501749080)
+passed the hosted prerequisite, direct Files preparation and both native PDF
+exports. The byte checkpoint and cleanup checks passed. The main case failed
+after its single Unlock tap: the local Xcode service returned payment
+presentation errors before test teardown, and the screenshot shows the app's
+purchase-failure alert. No import or batch-review acceptance follows from this
+run. The retained response identifies the expected local product and price;
+it does not identify a faulty view controller or prove a timing remedy.
+
+The next capture enables existing purchase diagnostics and records the session's
+three presentation-related Boolean settings and allowlisted app state before
+the tap and after a missing-sheet failure. Opt-in Debug Simulator logs also
+record bounded controller ancestry, window/scene attachment and transition
+flags at purchase entry and return. They contain no object identifiers, class
+names, URLs, document contents or StoreKit response payloads. The purchase API,
+single-attempt rule, positive Xcode marker, transaction checks and deadlines are
+unchanged. These observations help diagnose a failure; they cannot satisfy a failed
+purchase assertion.
+
+## Declaring access to provider originals
+
+The [`21e0603` capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41505246211)
+completed the Xcode purchase and reached Files with both synthetic PDFs selected.
+After one Open action, Files remained visible; the extra passive observation
+also failed to observe dismissal. The application log reports File Provider
+item-resolution errors followed by an empty internal document selection, with
+no recorded app picker callback. This is failed batch evidence,
+not a completed import or proof of missing source bytes.
+
+The app now declares `LSSupportsOpeningDocumentsInPlace`, matching its existing
+`asCopy: false` picker and security-scoped, coordinated reads of original URLs.
+Apple [defines this key](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsopeningdocumentsinplace)
+as support for opening a provider's original document. File sharing and document
+type registration are not enabled by this change. The provider error does not
+prove that the missing declaration caused it; a new complete native capture
+must determine whether the corrected configuration resolves this boundary.
+Purchase handling, picker ownership, single Open action and all validation
+deadlines remain unchanged.
+
+## Native batch fixture callback and host proof
+
+The [retained array-export observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41551259620)
+failed before the product import case: the exporter received two source PDFs,
+but its one recorded callback returned only the insurance URL. The fixture's
+exact-two callback guard rejected that result before reading any returned URL.
+The host's post-failure check found both exact destination PDFs. This observation
+does not establish that another callback would arrive, or that the product's
+original-URL picker can import both files. It remains failed native evidence.
+
+Normal fixture creation now exports both PDFs with one native Save and validates
+the nonempty, unique expected subset of URLs UIKit actually returns. Every returned
+URL must be local, distinct from the sources, and read to its complete expected
+bytes through the existing coordinated reader. The app reports the source names
+and actual successfully read names/count; it never reports a readback for an
+unreturned file or synthesizes that file's URL. This explicitly replaces the
+fixture's assumption that the callback must contain one URL per source.
+
+Before any product main-case action, the existing host checkpoint still requires
+the seed pass, stopped app writer, unchanged owned provider identity, exactly two
+expected regular PDFs, and complete equality with both retained synthetic sources.
+An incomplete or changed destination prevents the ACK and blocks import. The
+production picker must then return and import both selected originals, preserve
+every review requirement, save both original byte streams and survive relaunch.
+Optional copy-reopen diagnostics are excluded from the normal workflow; if invoked
+separately, they require both actual app readbacks. No deadline, ownership or product
+assertion is relaxed, and no successful native qualification is claimed for this
+new fixture contract until its full capture is independently reviewed.
 
 ## Distribution and physical-device limits
 

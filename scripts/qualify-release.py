@@ -22,7 +22,9 @@ MODES = {"batch": ("test-batch-simulator.py", 1200),
 WORK_SECONDS = {"batch": 2400, "biometrics": 2400}
 CLEANUP_SECONDS = 180
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
-PREPARE_SECONDS = 600
+# Includes build and runner startup; a retained run spent about 532s before
+# its unchanged 180s case started. The original outer/driver budgets still apply.
+PREPARE_SECONDS = 780
 SEED_CASE = "BatchImportUITests/testNativeSaveSeedsBothSyntheticOriginals()"
 SEED_SECONDS = 300
 SEED_CASE_SECONDS = 180
@@ -34,6 +36,24 @@ RUNNER_ID = APP_ID + ".uitests.xctrunner"
 MIB = 1024 * 1024
 DEVELOPER_DIR = "/Applications/Xcode_26.2.app/Contents/Developer"
 XCODE_VERSION = "Xcode 26.2\nBuild version 17C52"
+INTEL_RUNTIME_BUILD = "23C54"
+
+# Complete source files, never extracted test bodies. LocalizationTests remains
+# included because its basename is shared with a TravelCore package test.
+BATCH_BUILD_RETAINED = (
+    "AppTests/LocalizationTests.swift", "AppTests/PlatformTests.swift",
+    "AppTests/StoreKitTestBootstrap.swift", "UITests/BatchImportUITests.swift",
+)
+BATCH_BUILD_EXCLUDED = (
+    "AppTests/AppModelTests.swift", "AppTests/BatchCopiedSelectionTests.swift",
+    "AppTests/BatchDocumentPickerTests.swift", "AppTests/BatchExternalSelectionTests.swift",
+    "AppTests/BatchImportTests.swift", "AppTests/BatchPickerRequestTests.swift",
+    "AppTests/ExternalReadCoordinationTests.swift", "AppTests/NotificationSystemTests.swift",
+    "AppTests/PrivacySupportTests.swift", "AppTests/ReminderLifecycleTests.swift",
+    "UITests/AccessibilityUITests.swift", "UITests/LocalizationUITests.swift",
+    "UITests/PrivacySupportUITests.swift", "UITests/PrivacyTransitionUITests.swift",
+    "UITests/PurchaseUITests.swift", "UITests/TripfolioUITests.swift",
+)
 
 
 def require(value, message):
@@ -48,6 +68,7 @@ def load_module(path, name):
     return module
 
 
+checkpoint = load_module(HERE / "batch_checkpoint.py", "qualification_batch_checkpoint")
 processes = load_module(HERE / "recovery_process.py", "qualification_processes")
 recovery = load_module(HERE / "recovery_core.py", "qualification_recovery_validation")
 
@@ -65,6 +86,42 @@ def context(mode, env):
         require(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")), "Invalid run identity")
     return {key: env[key] for key in ("GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID",
                                      "GITHUB_RUN_ATTEMPT", "GITHUB_EVENT_NAME", "GITHUB_WORKFLOW")}
+
+
+def execution_profile(mode, env, architecture):
+    """Select the explicit runner profile before allocating its work deadline."""
+    require(mode in MODES, "Select exactly batch or biometrics")
+    runner = env.get("QUALIFICATION_RUNNER")
+    runner_arch = env.get("QUALIFICATION_RUNNER_ARCH")
+    require((runner, runner_arch, architecture) in (
+        ("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")),
+        "Qualification runner label or host architecture mismatch")
+    intel_batch = mode == "batch" and runner == "macos-15-intel"
+    return {"name": "intel-batch" if intel_batch else "default", "runner": runner,
+            "runner_architecture": runner_arch, "architecture": architecture,
+            "work_seconds": 3000 if intel_batch else WORK_SECONDS[mode],
+            "boot_seconds": 600 if intel_batch else 180}
+
+def focused_build_selection(mode, profile, files):
+    """Bind batch-only literal exclusions to the verified runner and source set."""
+    if mode == "biometrics" and profile["name"] == "default":
+        return None
+    identity = tuple(profile.get(key) for key in ("name", "runner", "runner_architecture", "architecture"))
+    require(mode == "batch" and identity in (
+        ("default", "macos-15", "ARM64", "arm64"),
+        ("intel-batch", "macos-15-intel", "X64", "x86_64")),
+        "Focused build requires a verified batch profile")
+    require(isinstance(files, dict), "Focused build requires captured source files")
+    expected = set(BATCH_BUILD_RETAINED + BATCH_BUILD_EXCLUDED)
+    actual = {name for name in files if name.startswith(("AppTests/", "UITests/"))}
+    require(actual == expected, "Focused build test source set changed")
+    names = sorted(Path(name).name for name in BATCH_BUILD_EXCLUDED)
+    require(len(names) == len(set(names)) and all(re.fullmatch(r"[A-Za-z0-9_]+\.swift", name) for name in names),
+            "Focused build exclusions must be unique literal Swift basenames")
+    require({name for name in files if Path(name).name in names} == set(BATCH_BUILD_EXCLUDED),
+            "Focused build exclusion collides with another source or resource")
+    return {"retained_sources": list(BATCH_BUILD_RETAINED), "excluded_sources": list(BATCH_BUILD_EXCLUDED),
+            "build_settings": ["EXCLUDED_SOURCE_FILE_NAMES=" + " ".join(names)]}
 
 
 def device_map(data):
@@ -125,6 +182,77 @@ def tree_manifest(root, check):
                 == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode),
                 "Product changed while capturing identity")
     visit(root, ".")
+    return result
+
+
+def compiled_identity(path, check):
+    """Bounded bytes plus modes, with no traversal through product symlinks."""
+    content = tree_manifest(path, check)
+    modes = {}
+    for relative, entry in content.items():
+        check()
+        require(len(Path(relative).parts) <= 32, "Compiled product depth exceeded")
+        value = (path / relative).lstat()
+        modes[relative] = stat.S_IMODE(value.st_mode)
+        require((entry["kind"] == "directory" and stat.S_ISDIR(value.st_mode))
+                or (entry["kind"] == "file" and stat.S_ISREG(value.st_mode))
+                or (entry["kind"] == "link" and stat.S_ISLNK(value.st_mode)),
+                "Compiled product kind changed")
+    require(tree_manifest(path, check) == content, "Compiled product changed during mode capture")
+    return {"content": content, "modes": modes}
+
+
+def shared_product_paths(raw, derived, build_settings=()):
+    """Use the producer's actual target paths; never select a guessed output."""
+    require(len(raw.encode()) <= MIB, "Build settings output too large")
+    values = json.loads(raw)
+    require(isinstance(values, list) and len(values) <= 16, "Invalid build settings targets")
+    expected = {"Tripfolio": APP_ID, "TripfolioTests": APP_ID + ".tests",
+                "TripfolioUITests": APP_ID + ".uitests"}
+    result = {}; symroot = None
+    for target, identifier in expected.items():
+        matches = [item for item in values if isinstance(item, dict) and item.get("target") == target]
+        require(len(matches) == 1, "Missing or ambiguous compiled target: " + target)
+        settings = matches[0].get("buildSettings")
+        require(isinstance(settings, dict) and settings.get("CONFIGURATION") == "Debug"
+                and settings.get("PLATFORM_NAME") == "iphonesimulator"
+                and settings.get("PRODUCT_BUNDLE_IDENTIFIER") == identifier,
+                "Unexpected compiled target identity")
+        if build_settings:
+            require(settings.get("EXCLUDED_SOURCE_FILE_NAMES", "").split() == build_settings[0].split("=", 1)[1].split()
+                    and not settings.get("INCLUDED_SOURCE_FILE_NAMES", "").strip(),
+                    "Compiled target exclusion settings differ from the qualified build")
+        paths = {}
+        for key in ("SYMROOT", "BUILT_PRODUCTS_DIR", "TARGET_BUILD_DIR"):
+            value = settings.get(key)
+            require(isinstance(value, str), "Missing compiled target path")
+            path = Path(value)
+            require(path.is_absolute() and path.is_dir() and path.resolve(strict=True) == path,
+                    "Invalid compiled target path")
+            require(path.is_relative_to(derived) and path != derived, "Compiled target escaped owned build")
+            paths[key] = path
+        require(symroot is None or symroot == paths["SYMROOT"], "Compiled targets have different SYMROOTs")
+        symroot = paths["SYMROOT"]
+        require(paths["TARGET_BUILD_DIR"].is_relative_to(symroot)
+                and paths["BUILT_PRODUCTS_DIR"].is_relative_to(symroot), "Target is outside compiled SYMROOT")
+        name = settings.get("FULL_PRODUCT_NAME")
+        require(isinstance(name, str) and name and Path(name).name == name and name not in (".", ".."),
+                "Invalid compiled target name")
+        path = paths["TARGET_BUILD_DIR"] / name
+        require(path.is_dir() and not path.is_symlink() and path.resolve(strict=True) == path,
+                "Compiled target is missing or indirect")
+        require(plistlib.loads(bounded_read(path, "Info.plist", MIB, lambda: None)).get("CFBundleIdentifier") == identifier,
+                "Compiled target plist identity differs")
+        result[target] = path
+    require(len(set(result.values())) == 3, "Compiled targets alias each other")
+    require(result["TripfolioTests"].is_relative_to(result["Tripfolio"]), "Hosted test is outside its app")
+    runners = [p for p in result["TripfolioUITests"].parents if p.suffix == ".app"]
+    require(len(runners) == 1 and runners[0].is_relative_to(derived)
+            and runners[0].resolve(strict=True) == runners[0], "Ambiguous shared UI runner")
+    require(plistlib.loads(bounded_read(runners[0], "Info.plist", MIB, lambda: None)).get("CFBundleIdentifier") == RUNNER_ID,
+            "Wrong shared runner identity")
+    # The enclosing runner owns XCTest runtime frameworks outside its .xctest.
+    result["TripfolioUITestsRunner"] = runners[0]
     return result
 
 
@@ -231,8 +359,14 @@ def validate_driver(mode, summary, result, tree, expected_cases, owned, head):
     require(not before.get("dirty") and not before.get("status")
             and not before.get("status_porcelain_v1_z"), "Driver source was dirty")
     if mode == "batch":
-        require(summary.get("source_originals_unchanged") is True and summary.get("fixture_cleanup")
-                == "removed only the uniquely created fixture folder", "Batch originals/cleanup unverified")
+        cleanup = ("native root retained for verified owned Simulator teardown"
+                   if summary.get("fixture_destination_mode") == "native_root"
+                   else "removed only the uniquely created fixture folder")
+        require(summary.get("source_originals_unchanged") is True and summary.get("fixture_cleanup") == cleanup,
+                "Batch originals/cleanup unverified")
+        if summary.get("fixture_destination_mode") == "native_root":
+            require(summary.get("native_root_post_main_verified") is True,
+                    "Native root originals not verified after main flow")
     else:
         require(summary.get("selected_method") is None and all(summary.get("requests", {}).get(k, 0) > 0
                 for k in ("match", "nomatch")), "Full biometric sequence missing")
@@ -250,6 +384,8 @@ def validate_runtime_result(mode, selection, result):
             and selection["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
             and isinstance(selection["build"], str) and 0 < len(selection["build"]) <= 100
             and selection["architecture"] in ("arm64", "x86_64"), "Wrong runtime selection evidence")
+    if selection["architecture"] == "x86_64":
+        require(selection["build"] == INTEL_RUNTIME_BUILD, "Intel qualification requires runtime build 23C54")
     configurations = result.get("devicesAndConfigurations", [])
     require(len(configurations) == 1, "Wrong runtime result configuration")
     device = configurations[0].get("device", {})
@@ -288,6 +424,36 @@ def validate_files_preparation(summary, tree, owned, selection, expected_case=PR
             "Files preparation requires Simulator result")
 
 
+def validate_preparation_pair(summary, tree, owned, selection):
+    """Require both real first-invocation cases, retaining explicit issue evidence."""
+    require(isinstance(summary, dict) and isinstance(tree, dict), "Invalid hosted/Files preparation result")
+    expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0,
+                "skippedTests": 0, "expectedFailures": 0}
+    require(summary.get("result") == "Passed" and all(type(summary.get(key)) is int
+            and summary[key] == value for key, value in expected.items()), "Unexpected preparation pair counts")
+    pending = [(node, 0) for node in tree.get("testNodes", [])]; cases = []; count = 0
+    while pending:
+        node, depth = pending.pop(); count += 1
+        require(isinstance(node, dict) and count <= 10000 and depth <= 100,
+                "Preparation pair tree bounds exceeded")
+        require(node.get("nodeType") != "Runtime Warning", "Preparation pair runtime warning")
+        children = node.get("children", [])
+        require(isinstance(children, list), "Invalid preparation pair children")
+        pending.extend((child, depth + 1) for child in children)
+        if node.get("nodeType") == "Test Case": cases.append((node.get("nodeIdentifier"), node.get("result")))
+    require(sorted(cases) == sorted((case, "Passed") for case in checkpoint.PREPARATION_CASES),
+            "Wrong, duplicated, failed or missing preparation pair case")
+    require([(d.get("deviceId", "").upper(), d.get("platform")) for d in tree.get("devices", [])]
+            == [(owned, "iOS Simulator")], "Preparation pair device mismatch")
+    require(summary.get("testFailures") == [], "Preparation pair failures missing or nonempty")
+    require("runtimeWarnings" not in summary or summary["runtimeWarnings"] == [],
+            "Preparation pair runtime warnings")
+    validate_runtime_result("batch", selection, summary)
+    device = summary["devicesAndConfigurations"][0]["device"]
+    require(device.get("deviceId", "").upper() == owned and device.get("platform") == "iOS Simulator",
+            "Preparation pair configuration mismatch")
+
+
 class Commands(processes.Smoke):
     def __init__(self, owner, name):
         self.owner = owner
@@ -307,18 +473,32 @@ class Commands(processes.Smoke):
 class Qualification:
     def __init__(self, root, mode, env):
         self.job = context(mode, env); self.root = Path(root).resolve(); self.mode = mode
-        self.started = time.monotonic(); self.work_deadline = self.started + WORK_SECONDS[mode]
+        reopen_control = env.get("TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL", "")
+        require(reopen_control in ("", "1") and (not reopen_control or mode == "batch"),
+                "Invalid native reopen diagnostic selection")
+        self.native_reopen_control = reopen_control == "1"
+        self.started = time.monotonic()
+        self.profile = execution_profile(mode, env, os.uname().machine)
+        self.work_deadline = self.started + self.profile["work_seconds"]
         self.cleanup_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = self.interrupted = self.acquiring = self.finalizing_driver = False
         self.owned = self.intent = self.baseline = None; self.driver_calls = self.preparation_calls = 0
+        self.build_settings = ()
         self.out = self.root / "build" / ("ReleaseQualification-" + mode + "-" + self.job["GITHUB_RUN_ID"]
                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not self.out.parent.is_symlink() and (not self.out.parent.exists()
                 or self.out.parent.resolve() == self.out.parent), "Unsafe build output parent")
         self.out.mkdir(parents=True, exist_ok=False)
         self.report = {"status": "running", "mode": mode, "job": self.job,
-                       "limits": {"work_seconds": WORK_SECONDS[mode], "cleanup_seconds": CLEANUP_SECONDS},
+                       "execution_profile": self.profile,
+                       "limits": {"work_seconds": self.profile["work_seconds"], "cleanup_seconds": CLEANUP_SECONDS},
                        "errors": [], "cleanup_verified": False}
+        if self.native_reopen_control:
+            self.report["diagnostic_native_reopen"] = {
+                "enabled": True, "release_acceptance": False,
+                "transport": "copy",
+                "seed_export": "single-presentation-two-files",
+                "scope": "Same AUT process exports and reopens both originals before the unchanged main relaunch"}
         self.commands = Commands(self, "commands"); self.xcode = Commands(self, "xcode-process")
         self.save()
 
@@ -396,11 +576,18 @@ class Qualification:
             toolchain[name] = self.command(name, argv).strip()
         toolchain["developer_environment"] = os.environ.get("DEVELOPER_DIR")
         self.report["toolchain"] = toolchain
+        require(toolchain["architecture"] == self.profile["architecture"],
+                "Captured host architecture differs from qualification profile")
         profile = toolchain_profile(self.mode)
         require(toolchain["developer_environment"] == profile["developer_dir"]
                 and toolchain["xcode"] == profile["xcode_version"]
                 and toolchain["sdk"] == profile["sdk_version"],
                 "Qualification requires its mode's pinned Xcode, developer directory and SDK")
+        selection = focused_build_selection(self.mode, self.profile, self.before.get("files"))
+        if selection is not None:
+            self.build_settings = tuple(selection["build_settings"])
+            self.report["focused_build"] = selection
+            self.save()
         self.preflight_schemas()
         self.command("generate-project", ["xcodegen", "generate"], 120)
         original = self.commands.limit
@@ -412,6 +599,9 @@ class Qualification:
                             if item["identifier"] == runtime and item.get("version") == profile["runtime_version"])
             require(isinstance(selected.get("buildversion"), str) and selected["buildversion"],
                     "Selected runtime is missing its observed build")
+            if toolchain["architecture"] == "x86_64":
+                require(selected["buildversion"] == INTEL_RUNTIME_BUILD,
+                        "Intel qualification requires runtime build 23C54")
             self.report["runtime_selection"] = {
                 "identifier": runtime, "version": selected["version"], "build": selected["buildversion"],
                 "architecture": toolchain["architecture"], "sdk_version": toolchain["sdk"],
@@ -431,7 +621,7 @@ class Qualification:
         finally:
             self.acquiring = False; self.commands.limit = original
         self.command("boot", ["xcrun", "simctl", "boot", self.owned], 60)
-        self.command("boot-ready", ["xcrun", "simctl", "bootstatus", self.owned, "-b"], 180)
+        self.command("boot-ready", ["xcrun", "simctl", "bootstatus", self.owned, "-b"], self.profile["boot_seconds"])
         if self.mode == "batch":
             self.prepare_files_ui()
             # The separate real UI case initializes the provider. These reads
@@ -447,8 +637,11 @@ class Qualification:
                 self.check(); require(time.monotonic() < end, "Files provider not ready"); time.sleep(0.1)
             require(provider.is_dir() and not provider.is_symlink(), "Invalid Files provider")
 
-    def preparation_manifest(self, path):
-        manifest = recovery.tree_manifest(path, self.check, max_bytes=256 * MIB)
+    def preparation_manifest(self, path, check=None):
+        check = self.check if check is None else check
+        check()
+        manifest = recovery.tree_manifest(path, check, max_bytes=256 * MIB)
+        check()
         require(len(manifest) <= 10000 and manifest.get("Info.plist", {}).get("kind") == "file"
                 and manifest.get("Data", {}).get("kind") == "directory",
                 "Incomplete or oversized Files preparation result")
@@ -494,10 +687,17 @@ class Qualification:
                 raw = bounded_read(self.commands.out, name, 16 * MIB, self.check)
                 (self.out / (prefix + "-" + kind + ".json")).write_bytes(raw)
                 parsed[kind] = json.loads(raw)
-            validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
-                                       self.report.get("runtime_selection"), expected_case)
+            if native_seed or native_folder:
+                validate_files_preparation(parsed["summary"], parsed["tests"], self.owned,
+                                           self.report.get("runtime_selection"), expected_case)
+                cases = [expected_case]
+            else:
+                validate_preparation_pair(parsed["summary"], parsed["tests"], self.owned,
+                                          self.report.get("runtime_selection"))
+                cases = list(checkpoint.PREPARATION_CASES)
+                self.report["files_preparation_order"] = checkpoint.preparation_order(self.preparation_log())
             self.report[key + "_result"] = {
-                "functional_status": "passed", "cases": [expected_case],
+                "functional_status": "passed", "cases": cases,
                 "runtimeWarnings": parsed["summary"].get("runtimeWarnings", "not_reported"),
                 "runtimeWarnings_reported": "runtimeWarnings" in parsed["summary"],
                 "independent_warning_and_pixel_review": "pending",
@@ -507,6 +707,58 @@ class Qualification:
                     "Original Files preparation result mutated during reading")
             self.report[key + "_original"]["unchanged_after_reader"] = True
 
+    def preparation_log(self, check=None):
+        check = self.check if check is None else check
+        check()
+        rows = [row for row in self.commands.report["commands"] if row.get("id") == "files-prepare-ui"]
+        require(len(rows) == 1 and rows[0].get("returncode") == 0, "First preparation command did not pass exactly once")
+        row = rows[0]; argv = row.get("argv", [])
+        require([arg for arg in argv if arg.startswith("-only-testing:")]
+                == ["-only-testing:" + case for case in checkpoint.PREPARATION_TESTS],
+                "Wrong first preparation selectors")
+        for flag, value in (("-default-test-execution-time-allowance", "300"),
+                            ("-maximum-test-execution-time-allowance", "600"),
+                            ("-destination", "platform=iOS Simulator,id=" + self.owned)):
+            require(argv.count(flag) == 1 and argv.index(flag) + 1 < len(argv)
+                    and argv[argv.index(flag) + 1] == value, "Wrong first preparation bounds or destination")
+        path = Path(row.get("logs", {}).get("stdout", ""))
+        require(path.parent == self.commands.out and re.fullmatch(r"[1-9][0-9]*-stdout\.log", path.name),
+                "Invalid first preparation log reference")
+        return bounded_read(self.commands.out, path.name, 16 * MIB, check)
+
+    def verify_preparation_prerequisite(self, check=None):
+        """Recheck durable first-bundle evidence before UI launch, ACK and capture."""
+        check = self.check if check is None else check
+        check()
+        require(self.report.get("files_preparation_verified") is True
+                and self.report.get("files_preparation_result", {}).get("functional_status") == "passed"
+                and self.report.get("files_preparation_result", {}).get("cases") == list(checkpoint.PREPARATION_CASES),
+                "Missing verified hosted/Files preparation pair")
+        proof = self.report.get("files_preparation_original", {})
+        require(proof.get("path") == "files-prepare.xcresult"
+                and proof.get("manifest") == "files-prepare-original-manifest.json"
+                and proof.get("unchanged_after_reader") is True, "Missing original preparation pair proof")
+        raw = bounded_read(self.out, proof["manifest"], 16 * MIB, check)
+        require(hashlib.sha256(raw).hexdigest() == proof.get("sha256")
+                and self.preparation_manifest(self.out / proof["path"], check=check) == json.loads(raw),
+                "Original preparation pair changed")
+        check()
+        parsed = {}; hashes = {}
+        for kind in ("summary", "tests"):
+            raw = bounded_read(self.out, "files-prepare-" + kind + ".json", 16 * MIB, check)
+            check()
+            parsed[kind] = json.loads(raw); hashes[kind + "_sha256"] = hashlib.sha256(raw).hexdigest()
+            check()
+        validate_preparation_pair(parsed["summary"], parsed["tests"], self.owned,
+                                  self.report.get("runtime_selection"))
+        check()
+        raw_log = self.preparation_log(check=check)
+        check()
+        order = checkpoint.preparation_order(raw_log)
+        check()
+        require(order == self.report.get("files_preparation_order"), "First preparation order or bytes changed")
+        return {"order": order, "original_manifest_sha256": proof["sha256"], **hashes}
+
     def prepare_files_ui(self):
         require(self.mode == "batch" and self.preparation_calls == 0, "Files preparation may run once in batch mode")
         require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline
@@ -514,33 +766,38 @@ class Qualification:
         require(not self.commands.active and not self.commands.unknown_spawn
                 and not self.xcode.active and not self.xcode.unknown_spawn,
                 "Files preparation writer ownership unresolved")
-        require(time.monotonic() + PREPARE_SECONDS + MODES["batch"][1] + 120 < self.work_deadline,
+        phase_seconds = 1200 if self.profile["name"] == "intel-batch" else PREPARE_SECONDS
+        require(time.monotonic() + phase_seconds + MODES["batch"][1] + 120 < self.work_deadline,
                 "Insufficient Files preparation and full driver budget")
         self.preparation_calls += 1
-        # A separate owned build keeps the original driver and its DerivedData
-        # contract unchanged; the 2400s batch budget includes both builds.
+        # This owned preparation build supplies the verified seed/main products.
+        # Intel reserves 720s overhead plus the existing 300s/180s native cases.
+        # Other profiles retain 780s; the original global deadline is unchanged.
         # Keep compiler intermediates outside the evidence upload glob.
         derived = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(not derived.exists() and not derived.is_symlink(), "Files preparation output already exists")
-        folder = "TripDocket-Recovery-" + str(uuid.uuid4())
-        self.report["files_preparation"] = {"calls": self.preparation_calls, "case": PREPARE_CASE,
-            "phase_seconds": PREPARE_SECONDS, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
+        preparation_token = str(uuid.uuid4())
+        folder = "TripDocket-Batch-Prepare-" + preparation_token
+        self.report["files_preparation"] = {"calls": self.preparation_calls, "cases": list(checkpoint.PREPARATION_CASES),
+            "hosted_case_seconds": 300,
+            "phase_seconds": phase_seconds, "case_seconds": recovery.PREPARE_CASE_SECONDS, "absent_folder_probe": folder,
+            "fixture_token": preparation_token, "ingress": "direct-native-export-no-save",
             "derived_data": str(derived.relative_to(self.root)), "shared_build": False}
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "30",
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS),
-            "-maximum-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS), "-derivedDataPath", derived,
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "300",
+            "-maximum-test-execution-time-allowance", "600", "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "files-prepare.xcresult",
-            "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+            *("-only-testing:" + case for case in checkpoint.PREPARATION_TESTS), "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "test"]
         previous = self.commands.ops.env
-        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
-            "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
+        self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_UI": "1",
+            "TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_TOKEN": preparation_token,
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         failure = None
         try:
-            self.command("files-prepare-ui", argv, PREPARE_SECONDS)
+            self.command("files-prepare-ui", argv, phase_seconds)
         except BaseException as error:
             failure = error
         finally:
@@ -668,11 +925,27 @@ class Qualification:
 
     def native_seed_files(self, driver, *, empty=False):
         """Verify the exclusive destination; never create provider file bytes."""
+        preparation = self.report.get("files_preparation", {})
+        token = preparation.get("fixture_token")
+        require(isinstance(token, str) and str(uuid.UUID(token)) == token and token != driver.token
+                and preparation.get("absent_folder_probe") == "TripDocket-Batch-Prepare-" + token
+                and preparation.get("ingress") == "direct-native-export-no-save",
+                "Native seed requires a distinct recorded direct preparation token")
         owned = driver.fixture_directory
+        root_mode = getattr(getattr(driver, "args", None), "native_root", False)
         require(owned is not None and str(uuid.UUID(driver.token)) == driver.token
-                and owned.name == "TripDocket-Batch-QA-" + driver.token,
-                "Invalid native seed folder")
-        provider = owned.parent
+                and driver.folder_name == "TripDocket-Batch-QA-" + driver.token,
+                "Invalid native seed destination")
+        if root_mode:
+            require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline
+                    and driver.args.device == self.owned and getattr(driver.args, "native_seed", False)
+                    and not getattr(driver.args, "native_folder", False)
+                    and owned == driver.native_root_provider, "Native root lacks exclusive device ownership")
+            driver.native_root_identity()
+            provider = owned
+        else:
+            require(owned.name == "TripDocket-Batch-QA-" + driver.token, "Invalid native seed folder")
+            provider = owned.parent
         self.container_path(str(provider.parent), "Shared", "AppGroup")
         def identity(path):
             value = path.lstat()
@@ -701,12 +974,231 @@ class Qualification:
                         "Native Save to Files changed original bytes")
         require(identity(provider) == driver.provider_identity and identity(owned) == driver.fixture_identity,
                 "Native seed directory changed during verification")
+        if root_mode: driver.native_root_identity()
+
+    def prepare_native_root(self, driver):
+        """Pin a truly empty provider root on this qualification's new device."""
+        require(self.mode == "batch" and "native_root" not in self.report
+                and getattr(getattr(driver, "args", None), "native_root", False) is True
+                and self.report.get("files_preparation_verified") is True,
+                "Native root requires one verified Files preparation")
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Native root writer unresolved")
+        self.native_seed_files(driver, empty=True)
+        self.report["native_root"] = {"verified_empty_before_seed": True,
+            "device": self.owned, "provider": str(driver.fixture_directory),
+            "provider_identity": list(driver.provider_identity),
+            "group_identity": list(driver.native_root_group_identity),
+            "cleanup": "deferred to exclusive owned Simulator teardown"}
+        self.save()
+
+    def prepare_shared_build(self, driver):
+        require(self.mode == "batch" and getattr(driver.args, "native_root", False)
+                and self.report.get("files_preparation_verified") is True
+                and not hasattr(self, "shared_products"), "Shared build requires one owned preparation")
+        # Combined mode removes one invocation; five settings/container RPCs
+        # surround it. The checkpoint is inside the unchanged main600 allowance.
+        admission = (SEED_SECONDS + 600 + 5 * 38 + 8 if getattr(driver.args, "combined_batch", False)
+                     else SEED_SECONDS + 600 + 7 * 38 + 8)
+        require(driver.remaining() > admission,
+                "Insufficient shared-build observation and native budget")
+        derived = self.root / self.report["files_preparation"]["derived_data"]
+        expected = self.root / "build" / ("QualificationPreparationDerivedData-" + self.job["GITHUB_RUN_ID"]
+                                          + "-" + self.job["GITHUB_RUN_ATTEMPT"])
+        require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
+                "Invalid shared preparation build")
+        self.require_no_build_writer()
+        # This query reads target metadata; it does not run tests or need a live device.
+        # Actual preparation and test invocations still target the owned Simulator.
+        argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
+                "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", derived,
+                "CODE_SIGNING_ALLOWED=NO", *self.build_settings, "-showBuildSettings", "-json", "build-for-testing"]
+        raw = self.shared_build_command(driver, "shared-build-settings", argv)
+        self.shared_products = shared_product_paths(raw, derived, self.build_settings)
+        (self.out / "shared-build-settings.json").write_text(raw)
+        self.report["shared_build"] = {"derived_data": str(derived.relative_to(self.root)),
+            "action": "test-without-building", "settings_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "products": {key: str(path.relative_to(self.root)) for key, path in self.shared_products.items()},
+            "observations": {}}
+        self.shared_derived_identity = (derived.stat().st_dev, derived.stat().st_ino)
+        driver.qualified_build = derived
+        driver.qualified_build_settings = self.build_settings
+        driver.summary["qualified_build"] = self.report["shared_build"]["derived_data"]
+        self.observe_shared_build(driver, "before_seed")
+
+    def shared_build_command(self, driver, label, argv):
+        seconds = min(30, driver.remaining() - 8)
+        require(seconds > 0, "No bounded shared-build command budget")
+        return self.command(label, argv, seconds)
+
+    def require_no_build_writer(self):
+        require(not self.commands.active and not self.commands.unknown_spawn
+                and not self.xcode.active and not self.xcode.unknown_spawn, "Shared build writer unresolved")
+
+    def observe_shared_build(self, driver, label):
+        require(label in ("before_seed", "after_seed", "after_main", "final_after_failure")
+                and label not in self.report["shared_build"]["observations"], "Invalid shared build observation")
+        self.require_no_build_writer()
+        def check():
+            self.check()
+            require(driver.remaining() > 0, "Shared build observation exceeded driver deadline")
+        check()
+        derived = driver.qualified_build
+        require(derived.resolve(strict=True) == derived
+                and (derived.stat().st_dev, derived.stat().st_ino) == self.shared_derived_identity,
+                "Shared derived data identity changed")
+        for path in self.shared_products.values():
+            require(path.resolve(strict=True) == path and path.is_relative_to(derived), "Shared product path changed")
+        products = {key: compiled_identity(path, check) for key, path in self.shared_products.items()}
+        if hasattr(self, "shared_product_identity"):
+            require(products == self.shared_product_identity, "Compiled products changed between phases")
+        else:
+            self.shared_product_identity = products
+        installed = {}
+        for kind in ("app", "data"):
+            value = self.shared_build_command(driver, "shared-" + label + "-" + kind,
+                ["xcrun", "simctl", "get_app_container", self.owned, APP_ID, kind]).strip()
+            path = self.container_path(value, "Bundle" if kind == "app" else "Data", "Application")
+            check(); info = path.lstat()
+            installed[kind] = {"path": str(path), "identity": [info.st_dev, info.st_ino],
+                               "mode": stat.S_IMODE(info.st_mode)}
+            if kind == "app":
+                identity = compiled_identity(path, check)
+                require(identity["content"] == products["Tripfolio"]["content"],
+                        "Installed app differs from shared compiled bytes")
+                installed[kind]["manifest"] = identity
+        record = {"products": products, "installed": installed,
+                  "data_note": "Location only; synthetic library content intentionally changes during tests."}
+        name = "shared-build-" + label + ".json"
+        raw = json.dumps(record, sort_keys=True, indent=2) + "\n"
+        (self.out / name).write_text(raw)
+        self.report["shared_build"]["observations"][label] = {"path": name,
+            "sha256": hashlib.sha256(raw.encode()).hexdigest()}
+        self.save()
+
+    def prepare_combined_batch(self, driver):
+        require(self.mode == "batch" and getattr(driver.args, "combined_batch", False)
+                and "combined_batch" not in self.report and self.report.get("files_preparation_verified") is True
+                and self.report.get("native_root", {}).get("verified_empty_before_seed") is True,
+                "Combined batch requires verified owned root and preparation")
+        self.require_no_build_writer()
+        require(getattr(driver, "qualified_build", None)
+                    == self.root / self.report.get("files_preparation", {}).get("derived_data", "")
+                and "before_seed" in self.report.get("shared_build", {}).get("observations", {}),
+                "Combined batch lacks verified shared products")
+        require(driver.remaining() > SEED_SECONDS + 600 + 8,
+                "Insufficient combined seed and main budget")
+        def check():
+            self.check()
+            require(driver.remaining() > 0, "Original driver deadline expired during preparation verification")
+        prerequisite = self.verify_preparation_prerequisite(check=check)
+        self.native_seed_files(driver, empty=True)
+        driver.combined_protocol = checkpoint
+        driver.checkpoint_session = str(uuid.uuid4()).upper()
+        driver.checkpoint_callback = lambda request, deadline: self.acknowledge_batch_seed(driver, request, deadline)
+        self.report["combined_batch"] = {"session": driver.checkpoint_session, "token": driver.token,
+            "cases": list(checkpoint.CASES), "preparation_cases": list(checkpoint.PREPARATION_CASES),
+            "preparation_prerequisite": prerequisite, "result_bundles": 2,
+            "driver_deadline": driver.deadline - self.started, "driver_seconds": 1200,
+            "seed_case_seconds": 180, "seed_observed_envelope_seconds": 300,
+            "seed_envelope_boundary": "second invocation start to observed seed PASS",
+            "main_case_seconds": 600, "checkpoint_seconds": 60,
+            "checkpoint_position": "main entry after observed seed PASS and deferred AUT termination"}
+        self.save()
+
+    def acknowledge_batch_seed(self, driver, request, deadline):
+        """One scoped auxiliary RPC group at a time while the owned primary waits."""
+        primary = driver.process
+        expected = {"session": driver.checkpoint_session, "token": driver.token,
+                    "nonce": checkpoint.upper_uuid(request.get("nonce")), "line": request.get("line"),
+                    "name": checkpoint.CHANNEL + "." + driver.checkpoint_session + "." + request.get("nonce"), "state": 1}
+        require(request == expected and type(request["line"]) is int and request["line"] > 0,
+                "Wrong checkpoint identity")
+        require("batch_checkpoint" not in self.report and self.driver_calls == 1
+                and driver.args.device == self.owned and self.owned not in self.baseline
+                and driver.summary.get("combined_batch") is True,
+                "Checkpoint is not exclusive or is repeated")
+        end = min(deadline, driver.deadline, self.work_deadline)
+        previous_limit = self.commands.limit
+        def active():
+            self.check()
+            require(time.monotonic() < end and self.xcode.active == {primary.pid: primary}
+                    and primary.poll() is None and not self.xcode.unknown_spawn
+                    and not self.commands.unknown_spawn, "Checkpoint primary/clock changed")
+        def idle():
+            active(); require(not self.commands.active, "Checkpoint auxiliary writer unresolved")
+        def command(label, argv):
+            idle()
+            seconds = min(10, end - time.monotonic() - 8)
+            require(seconds > 0, "Insufficient checkpoint RPC stop reserve")
+            raw = self.command(label, argv, seconds)
+            idle(); return raw
+        idle()
+        prerequisite = self.verify_preparation_prerequisite(check=active)
+        require(prerequisite == self.report.get("combined_batch", {}).get("preparation_prerequisite"),
+                "Preparation prerequisite changed before checkpoint")
+        self.report["batch_checkpoint"] = {"request": request, "status": "verifying",
+            "preparation_prerequisite": prerequisite,
+            "start": time.monotonic() - self.started, "deadline": end - self.started}
+        self.commands.limit = min(previous_limit, end)
+        try:
+            # Query only the owned AUT. A producer PASS is insufficient by itself:
+            # require its exact current executable absent from a complete ps output.
+            raw = command("checkpoint-app", ["xcrun", "simctl", "get_app_container", self.owned, APP_ID, "app"])
+            bundle = self.container_path(raw.strip(), "Bundle", "Application")
+            require(bundle.name == "Tripfolio.app", "Wrong checkpoint app bundle")
+            executable = bundle / "Tripfolio"
+            require(stat.S_ISREG(executable.lstat().st_mode) and executable.resolve(strict=True) == executable,
+                    "Invalid checkpoint app executable")
+            listing = command("checkpoint-app-stopped", ["/bin/ps", "-axww", "-o", "pid=,command="])
+            rows = [row for row in self.commands.report["commands"] if row["id"] == "checkpoint-app-stopped"]
+            require(len(rows) == 1 and rows[0]["returncode"] == 0, "Unbound checkpoint process listing")
+            reader = rows[0]["pgid"]; reader_seen = False
+            owned_apps = Path.home() / "Library/Developer/CoreSimulator/Devices" / self.owned / "data/Containers/Bundle/Application"
+            owned_executable = re.compile(re.escape(str(owned_apps))
+                + r"/[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/Tripfolio\.app/Tripfolio(?: |$)")
+            require(listing.strip(), "Empty process listing")
+            for line in listing.splitlines():
+                active(); match = re.fullmatch(r"\s*([0-9]+)\s+(.*)", line)
+                require(match is not None, "Malformed process listing")
+                pid, cmd = int(match[1]), match[2]
+                if pid == reader:
+                    require(cmd.startswith("/bin/ps ") or cmd.startswith("ps "), "Wrong process reader")
+                    reader_seen = True
+                require(cmd != str(executable) and not cmd.startswith(str(executable) + " ")
+                        and owned_executable.match(cmd) is None
+                        and cmd != "Tripfolio" and not cmd.startswith("Tripfolio "), "AUT still running or ambiguous")
+            require(reader_seen, "Process listing omitted its own reader")
+            self.native_seed_files(driver)
+            for name, identity in self.before["files"].items():
+                active(); file = self.root / name; metadata = file.lstat()
+                raw = bounded_read(self.root, name, 128 * MIB, active)
+                require({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                         "executable": bool(metadata.st_mode & 0o111)} == identity,
+                        "Source changed before seed ACK")
+            idle()
+            proof = self.report["batch_checkpoint"]
+            proof.update(aut_stopped=True, app_bundle=str(bundle), source_unchanged=True,
+                provider=str(driver.fixture_directory), provider_identity=list(driver.provider_identity),
+                fixtures=[{key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]])
+            # Persist the completed byte/source/stopped-AUT proof before the
+            # external ACK can release the consumer's destructive reset.
+            self.save()
+            command("checkpoint-ack", ["xcrun", "simctl", "notify_set_state", self.owned, request["name"], "1"])
+            proof.update(status="acknowledged", finish=time.monotonic() - self.started)
+            self.report["batch_checkpoint_verified"] = True
+            self.save()
+        finally:
+            self.commands.limit = previous_limit
 
     def prepare_native_seed(self, driver):
         require(self.mode == "batch" and "native_seed" not in self.report
                 and self.report.get("files_preparation_verified") is True
-                and self.report.get("native_folder_verified") is True,
-                "Native seed requires verified Files preparation and native folder")
+                and ((getattr(getattr(driver, "args", None), "native_root", False)
+                      and self.report.get("native_root", {}).get("verified_empty_before_seed") is True)
+                     or (not getattr(getattr(driver, "args", None), "native_root", False)
+                         and self.report.get("native_folder_verified") is True)),
+                "Native seed requires verified Files preparation and destination")
         require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline,
                 "Native seed requires exclusive device ownership")
         require(not self.commands.active and not self.commands.unknown_spawn
@@ -722,6 +1214,9 @@ class Qualification:
                                           + "-" + self.job["GITHUB_RUN_ATTEMPT"])
         require(derived == expected and derived.is_dir() and derived.resolve(strict=True) == derived,
                 "Invalid shared preparation build")
+        require(getattr(driver, "qualified_build", None) == derived
+                and "before_seed" in self.report.get("shared_build", {}).get("observations", {}),
+                "Native seed lacks verified shared products")
         self.report["native_seed"] = {"calls": 1, "case": SEED_CASE, "phase_seconds": SEED_SECONDS,
             "case_seconds": SEED_CASE_SECONDS, "token": driver.token, "ingress": "native Save to Files",
             "driver_deadline": driver.deadline - self.started, "driver_remaining_before": driver.remaining(),
@@ -733,12 +1228,15 @@ class Qualification:
             "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(SEED_CASE_SECONDS),
             "-maximum-test-execution-time-allowance", str(SEED_CASE_SECONDS), "-derivedDataPath", derived,
             "-resultBundlePath", self.out / "native-seed.xcresult",
-            "-only-testing:TripfolioUITests/" + SEED_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test"]
+            "-only-testing:TripfolioUITests/" + SEED_CASE.removesuffix("()"), "CODE_SIGNING_ALLOWED=NO", "test-without-building"]
         previous = self.commands.ops.env
         self.commands.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI": "1",
             "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": driver.token,
             "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": driver.folder_name,
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        if getattr(getattr(driver, "args", None), "native_root", False):
+            self.commands.ops.env.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
+                                          "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": driver.token})
         failure = None
         try:
             self.command("native-seed-ui", argv, min(SEED_SECONDS, driver.remaining()))
@@ -756,10 +1254,12 @@ class Qualification:
             self.report["native_seed_inspection_error"] = repr(error)
             if failure is None: failure = error
         if failure is not None: raise failure
+        self.observe_shared_build(driver, "after_seed")
         self.report["native_seed_verified"] = True
         self.report["native_seed"]["destination_fixtures"] = [
             {key: item[key] for key in ("name", "bytes", "sha256")} for item in driver.summary["fixtures"]]
-        driver.record("native_saved_owned_folder", fixtures=driver.summary["fixtures"])
+        driver.record("native_saved_provider_root" if getattr(getattr(driver, "args", None), "native_root", False)
+                      else "native_saved_owned_folder", fixtures=driver.summary["fixtures"])
         self.save()
 
     def container_path(self, value, *kind):
@@ -792,6 +1292,9 @@ class Qualification:
                     "Driver may launch exactly one owned xcodebuild")
             require("platform=iOS Simulator,id=" + self.owned in argv,
                     "Driver selected another destination")
+            require([arg for arg in argv if isinstance(arg, str) and arg.startswith(
+                ("EXCLUDED_SOURCE_FILE_NAMES=", "INCLUDED_SOURCE_FILE_NAMES="))] == list(self.build_settings),
+                "Driver changed the qualified build settings")
             self.check(); self.driver_calls += 1
             record = {"id": "driver-xcodebuild", "argv": argv, "start": time.monotonic() - self.started}
             self.xcode.report["commands"].append(record); self.save()
@@ -814,14 +1317,16 @@ class Qualification:
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
         args = SimpleNamespace(device=self.owned, timeout=timeout, only_test=None,
-                               native_seed=self.mode == "batch", native_folder=self.mode == "batch")
+                               native_seed=self.mode == "batch", native_folder=False,
+                               native_root=self.mode == "batch", combined_batch=self.mode == "batch")
         driver = module.Driver(args); failure = None
         self.report["driver_directory"] = str(driver.directory.relative_to(self.root))
         try:
             driver.prepare()
             if self.mode == "batch":
-                self.prepare_native_folder(driver)
-                self.prepare_native_seed(driver)
+                self.prepare_native_root(driver)
+                self.prepare_shared_build(driver)
+                self.prepare_combined_batch(driver)
             remaining = driver.remaining() if self.mode == "batch" else timeout
             require(time.monotonic() + remaining + 8 < self.work_deadline,
                     "Insufficient full test and owned-stop budget after driver preparation")
@@ -845,10 +1350,25 @@ class Qualification:
                     record.update(error=repr(error), outcome="failed")
                     failure = failure or error
             if not self.xcode.active and not self.xcode.unknown_spawn:
+                if self.mode == "batch" and hasattr(self, "shared_products"):
+                    try:
+                        label = "after_main" if self.xcode.report["commands"] else "final_after_failure"
+                        self.observe_shared_build(driver, label)
+                    except BaseException as error:
+                        self.report.setdefault("shared_build_errors", []).append(repr(error))
+                        failure = failure or error
                 try:
                     if self.mode == "batch":
                         if driver.fixture_directory is not None:
-                            driver.verify_fixtures(); driver.remove_fixtures()
+                            driver.verify_fixtures()
+                            if getattr(getattr(driver, "args", None), "native_root", False):
+                                # Recheck the complete directory, not just the two
+                                # expected files, after the last native writer stops.
+                                self.native_seed_files(driver)
+                                if failure is None:
+                                    driver.summary["native_root_post_main_verified"] = True
+                                    self.report["native_root"]["verified_after_main"] = True
+                            driver.remove_fixtures()
                         else:
                             driver.summary["fixture_cleanup"] = "Unadopted native folder intent; owned Simulator teardown only"
                         driver.summary["source_after"] = driver.source_snapshot()
@@ -877,26 +1397,42 @@ class Qualification:
         if failure: raise failure
         require(self.driver_calls == 1, "Driver did not launch exactly once")
         require(result is not None, "Missing xcresult summary")
-        expected = list(module.CASES) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
+        expected = list(driver.expected_cases) if self.mode == "batch" else ["PrivacyTransitionUITests/" + name + "()" for name in module.EXPECTED_METHODS]
         tree = json.loads(bounded_read(driver.directory, "xcresult-tests.json", 16 * MIB, self.check))
         validate_driver(self.mode, driver.summary, result, tree, expected, self.owned, self.job["GITHUB_SHA"])
         validate_runtime_result(self.mode, self.report.get("runtime_selection"), result)
         if self.mode == "batch":
-            self.report["batch_execution_order"] = validate_batch_order(
-                bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
-                driver.summary.get("execution_order"),
-            )
+            order = checkpoint.execution_order(bounded_read(driver.directory, "xcodebuild.log", 16 * MIB, self.check),
+                                               driver.checkpoint_session, driver.token)
+            require(order == driver.summary.get("execution_order")
+                    and self.report.get("batch_checkpoint_verified") is True
+                    and order["request"] == self.report["batch_checkpoint"]["request"],
+                    "Combined checkpoint/order proof mismatch")
+            monitor = driver.summary.get("combined_monitor", {})
+            elapsed = monitor.get("seed_observed_seconds")
+            require(monitor.get("returncode") == 0 and type(elapsed) in (int, float)
+                    and 0 <= elapsed <= 300 and monitor.get("seed_envelope_seconds") == 300
+                    and monitor.get("seed_envelope_boundary") == "second invocation start to observed seed PASS",
+                    "Missing combined seed-envelope evidence")
+            self.report["batch_execution_order"] = order
+            self.report["combined_monitor"] = monitor
         self.products(driver)
         if self.mode == "batch": self.batch_snapshot(driver)
         self.report["driver_capture_verified"] = True
-        self.report["selected_cases"] = expected
+        self.report["selected_cases"] = ([checkpoint.PREPARATION_CASES[0], *expected]
+                                         if self.mode == "batch" else expected)
 
     def products(self, driver):
-        derived = driver.directory / "DerivedData" if self.mode == "batch" else self.root / "build/DerivedData"
-        directory = derived / "Build/Products/Debug-iphonesimulator"
-        runners = list(directory.glob("*-Runner.app")); require(len(runners) == 1, "Ambiguous built test runner")
+        if self.mode == "batch" and hasattr(self, "shared_products"):
+            app = self.shared_products["Tripfolio"]
+            runner = self.shared_products["TripfolioUITestsRunner"]
+        else:
+            derived = driver.directory / "DerivedData" if self.mode == "batch" else self.root / "build/DerivedData"
+            directory = derived / "Build/Products/Debug-iphonesimulator"
+            runners = list(directory.glob("*-Runner.app")); require(len(runners) == 1, "Ambiguous built test runner")
+            app, runner = directory / "Tripfolio.app", runners[0]
         manifests = {}
-        for identifier, built in ((APP_ID, directory / "Tripfolio.app"), (RUNNER_ID, runners[0])):
+        for identifier, built in ((APP_ID, app), (RUNNER_ID, runner)):
             built_manifest = tree_manifest(built, self.check)
             require(plistlib.loads((built / "Info.plist").read_bytes()).get("CFBundleIdentifier") == identifier,
                     "Wrong built bundle identifier")
@@ -1021,8 +1557,38 @@ class Qualification:
                 and not self.commands.active and not self.commands.unknown_spawn,
                 "Original result capture requires complete owned cleanup")
         if self.mode == "batch":
-            for key, prefix in (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
-                                ("native_seed", "native-seed")):
+            root = self.report.get("native_root")
+            if root is not None:
+                require(root.get("verified_empty_before_seed") is True
+                        and root.get("verified_after_main") is True and root.get("device") == self.owned
+                        and self.baseline is not None and self.owned not in self.baseline
+                        and self.report.get("final_inventory") == self.baseline,
+                        "Native root lacks original-byte or owned-device cleanup proof")
+                if "combined_batch" in self.report:
+                    prerequisite = self.verify_preparation_prerequisite()
+                    require(prerequisite == self.report["combined_batch"].get("preparation_prerequisite")
+                            == self.report.get("batch_checkpoint", {}).get("preparation_prerequisite"),
+                            "Preparation prerequisite changed before final capture")
+                    require(self.report["combined_batch"].get("preparation_cases") == list(checkpoint.PREPARATION_CASES),
+                            "Combined capture lacks first preparation pair")
+                    require(self.report.get("batch_checkpoint_verified") is True
+                            and self.report["combined_batch"].get("result_bundles") == 2
+                            and self.report["combined_batch"].get("cases") == list(checkpoint.CASES)
+                            and self.report.get("batch_execution_order", {}).get("request")
+                                == self.report.get("batch_checkpoint", {}).get("request"),
+                            "Combined capture lacks verified checkpoint and exact two UI cases")
+                    require(not any(key.startswith("native_seed") or key.startswith("native_folder")
+                                    for key in self.report)
+                            and not (self.out / "native-seed.xcresult").exists()
+                            and not (self.out / "native-folder.xcresult").exists(),
+                            "Combined capture cannot claim separate seed/folder result bundles")
+                    prerequisites = (("files_preparation", "files-prepare"),)
+                else:
+                    prerequisites = (("files_preparation", "files-prepare"), ("native_seed", "native-seed"))
+            else:
+                prerequisites = (("files_preparation", "files-prepare"), ("native_folder", "native-folder"),
+                                 ("native_seed", "native-seed"))
+            for key, prefix in prerequisites:
                 proof = self.report.get(key + "_original", {})
                 require(self.report.get(key + "_verified") is True
                         and proof.get("path") == prefix + ".xcresult"
@@ -1066,14 +1632,18 @@ class Qualification:
             capture_ready = (not self.report["errors"] and self.report.get("driver_capture_verified")
                              and self.report.get("products_verified") and self.report["cleanup_verified"]
                              and (self.mode != "batch" or (self.report.get("batch_snapshot", {}).get("verified")
-                                  and self.report.get("files_preparation_verified") is True)))
+                                  and self.report.get("files_preparation_verified") is True
+                                  and self.report.get("batch_checkpoint_verified") is True
+                                  and self.report.get("combined_batch", {}).get("result_bundles") == 2)))
             if capture_ready:
                 try: self.capture_original_result()
                 except BaseException as error: self.report["errors"].append("Original result capture: " + repr(error))
             self.report["status"] = ("captured_pending_review" if capture_ready and not self.report["errors"]
                                      and self.report.get("original_xcresult") else "failed")
+            if self.native_reopen_control and self.report["status"] == "captured_pending_review":
+                self.report["status"] = "diagnostic_captured_pending_review"
             self.save()
-        return 0 if self.report["status"] == "captured_pending_review" else 1
+        return 0 if self.report["status"] in {"captured_pending_review", "diagnostic_captured_pending_review"} else 1
 
 
 def main():

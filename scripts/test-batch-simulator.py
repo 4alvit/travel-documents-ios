@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Opt-in real Files / local StoreKit batch UI test on one already booted UUID.
 
-Run xcodegen generate first. This driver creates only synthetic PDFs in its own
-unique Files folder, runs one hosted purchase precondition and one batch test
-in a single invocation, and removes only that folder afterward.
-It neither boots simulators nor changes Apple accounts. Authentication is bypassed
+Run xcodegen generate first. The default driver writes synthetic PDFs into its
+unique Files folder and removes only that folder afterward. Qualification alone
+can select native Save into its fresh owned Simulator's empty provider root;
+that mode neither writes provider files nor removes the root or individual files,
+and defers cleanup to the qualification's verified whole-device teardown.
+The standalone modes run one hosted purchase precondition and one batch test.
+Qualification instead runs native seed and main together after a separate
+verified hosted/Files preparation, with one host byte-check checkpoint before
+the main case begins its actions. This driver neither boots simulators nor
+changes Apple accounts.
+Authentication is bypassed
 by this functional UI test; its result is not privacy or rendered-PDF proof.
 """
 
@@ -74,7 +81,7 @@ def execution_order(data):
             "cases": cases, "hosted_pass_before_batch_start": True}
 
 
-def read_execution_order(path, check):
+def read_execution_order(path, check, parse=execution_order):
     """Read only one stable, bounded regular log; never follow its symlink."""
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_LOG_BYTES:
@@ -97,7 +104,7 @@ def read_execution_order(path, check):
         if (size != before.st_size or identity(os.fstat(descriptor)) != identity(before)
                 or identity(path.lstat()) != identity(before)):
             raise RuntimeError("Execution log changed during read")
-        return execution_order(b"".join(chunks))
+        return parse(b"".join(chunks))
     finally:
         os.close(descriptor)
 
@@ -154,6 +161,8 @@ class Driver:
         self.fixture_directory = None
         self.native_folder_destination = None
         self.fixture_identity = None
+        self.native_root_provider = None
+        self.native_root_group_identity = None
         self.provider_identity = None
         self.summary = {"status": "running", "started_at": timestamp(), "device": args.device,
                         "folder": self.folder_name, "tests": list(TESTS), "timeout_seconds": args.timeout,
@@ -252,7 +261,25 @@ class Driver:
         self.provider_identity = (provider.stat().st_dev, provider.stat().st_ino)
         owned = provider / self.folder_name
         native_folder = getattr(self.args, "native_folder", False)
-        if native_folder:
+        native_root = getattr(self.args, "native_root", False)
+        if native_root:
+            if native_folder or not getattr(self.args, "native_seed", False):
+                raise RuntimeError("Native root requires native seeding without folder creation")
+            # Only the qualification owner supplies this internal mode; no CLI
+            # option adopts a caller's existing simulator root.
+            self.native_root_provider = provider
+            value = group.lstat()
+            self.native_root_group_identity = (value.st_dev, value.st_ino)
+            self.native_root_identity()
+            with os.scandir(provider) as entries:
+                if next(entries, None) is not None:
+                    raise RuntimeError("Native seed provider root is not empty")
+            self.native_root_identity()
+            owned = provider
+            self.fixture_directory = provider
+            self.fixture_identity = self.provider_identity
+            self.summary["fixture_destination_mode"] = "native_root"
+        elif native_folder:
             if not getattr(self.args, "native_seed", False):
                 raise RuntimeError("Native folder creation requires native file seeding")
             try:
@@ -286,33 +313,82 @@ class Driver:
         (self.directory / "fixture-manifest.json").write_text(json.dumps({
             "device": self.args.device, "folder": self.folder_name, "directory": str(owned),
             "group_identifier": GROUP, "fixtures": fixtures,
+            "destination_mode": "native_root" if native_root else "owned_folder",
         }, indent=2) + "\n", encoding="utf-8")
-        self.record("native_folder_absence_verified" if native_folder else
+        self.record("native_root_empty_verified" if native_root else
+                    "native_folder_absence_verified" if native_folder else
                     "prepared_empty_owned_folder" if getattr(self.args, "native_seed", False)
                     else "seeded_owned_folder", path=str(owned), fixtures=fixtures)
         self.save()
 
     def run_test(self):
+        combined = getattr(self.args, "combined_batch", False)
+        if combined:
+            if (not getattr(self.args, "native_root", False) or not getattr(self.args, "native_seed", False)
+                    or not callable(getattr(self, "checkpoint_callback", None))
+                    or not hasattr(self, "combined_protocol")):
+                raise RuntimeError("Combined batch requires qualifier-owned checkpoint")
+            self.combined_protocol.upper_uuid(self.checkpoint_session)
+            self.expected_tests = self.combined_protocol.TESTS
+            self.expected_cases = self.combined_protocol.CASES
+        else:
+            self.expected_tests, self.expected_cases = TESTS, CASES
+        derived = getattr(self, "qualified_build", None)
+        if derived is not None:
+            if (not getattr(self.args, "native_root", False) or not derived.is_absolute()
+                    or not derived.is_dir() or derived.resolve(strict=True) != derived
+                    or not derived.is_relative_to(self.root / "build")):
+                raise RuntimeError("Invalid qualified shared build")
+        build_settings = getattr(self, "qualified_build_settings", ())
+        if type(build_settings) is not tuple:
+            raise RuntimeError("Qualified build settings must be an immutable tuple")
+        if build_settings:
+            if (not combined or derived is None or len(build_settings) != 1
+                    or not isinstance(build_settings[0], str)
+                    or re.fullmatch(r"EXCLUDED_SOURCE_FILE_NAMES=[A-Za-z0-9_]+\.swift(?: [A-Za-z0-9_]+\.swift)*",
+                                    build_settings[0]) is None):
+                raise RuntimeError("Build exclusions require the qualified combined batch")
+            names = build_settings[0].split("=", 1)[1].split()
+            if len(names) != len(set(names)):
+                raise RuntimeError("Qualified build exclusions must be unique")
         command = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio",
                    "-configuration", "Debug", "-destination", f"platform=iOS Simulator,id={self.args.device}",
                    "-destination-timeout", "30", "-parallel-testing-enabled", "NO",
                    "-maximum-concurrent-test-simulator-destinations", "1", "-collect-test-diagnostics", "never",
                    "-default-test-execution-time-allowance", "300", "-maximum-test-execution-time-allowance", "600",
-                   "-derivedDataPath", str(self.directory / "DerivedData"),
+                   "-derivedDataPath", str(derived if derived is not None else self.directory / "DerivedData"),
                    "-resultBundlePath", self.summary["result_bundle"],
-                   *("-only-testing:" + test for test in TESTS),
-                   "CODE_SIGNING_ALLOWED=NO", "test"]
+                   *("-only-testing:" + test for test in self.expected_tests),
+                   "CODE_SIGNING_ALLOWED=NO", *build_settings, "test-without-building" if derived is not None else "test"]
         overrides = {"TEST_RUNNER_TRIPDOCKET_BATCH_UI": "1",
                      "TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER": self.folder_name,
                      "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
-        self.summary.update({"command": command, "environment_overrides": overrides})
+        if getattr(self.args, "native_root", False):
+            self.native_root_identity()
+            overrides.update({"TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN": self.token})
+        if combined:
+            overrides.update({"TEST_RUNNER_TRIPDOCKET_COMBINED_BATCH_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_BATCH_CHECKPOINT_SESSION": self.checkpoint_session,
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_UI": "1",
+                              "TEST_RUNNER_TRIPDOCKET_NATIVE_SEED_TOKEN": self.token})
+        self.summary.update({"command": command, "environment_overrides": overrides,
+                             "tests": list(self.expected_tests), "combined_batch": combined})
         self.save()
         self.record("xcodebuild_started", argv=command, environment_overrides=overrides)
-        print(f"Hosted precondition and batch test; follow {self.directory / 'xcodebuild.log'}", flush=True)
+        print(f"Selected batch cases; follow {self.directory / 'xcodebuild.log'}", flush=True)
         with (self.directory / "xcodebuild.log").open("wb") as log:
+            started = time.monotonic()
             self.process = subprocess.Popen(command, cwd=self.root, env={**os.environ, **overrides},
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            self.summary["xcodebuild_returncode"] = self.process.wait(timeout=self.remaining())
+            if combined:
+                observed = self.combined_protocol.monitor(
+                    self.process, self.directory / "xcodebuild.log", self.deadline,
+                    self.checkpoint_session, self.token, self.checkpoint_callback, started=started)
+                self.summary["combined_monitor"] = observed
+                self.summary["xcodebuild_returncode"] = observed["returncode"]
+            else:
+                self.summary["xcodebuild_returncode"] = self.process.wait(timeout=self.remaining())
         self.save()
         self.validate_result()
         if self.summary["xcodebuild_returncode"] != 0:
@@ -326,7 +402,8 @@ class Driver:
             (self.directory / f"xcresult-{kind}.json").write_bytes(data)
             results[kind] = json.loads(data)
         summary, tree = results["summary"], results["tests"]
-        expected_counts = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0,
+        expected_cases = getattr(self, "expected_cases", CASES)
+        expected_counts = {"totalTestCount": len(expected_cases), "passedTests": len(expected_cases), "failedTests": 0,
                            "skippedTests": 0, "expectedFailures": 0}
         self.summary["test_counts"] = {key: summary.get(key) for key in expected_counts}
         cases, nodes = [], list(tree["testNodes"])
@@ -342,16 +419,20 @@ class Driver:
         self.save()
         if (summary.get("result") != "Passed" or any(type(summary.get(key)) is not int or summary[key] != value
                 for key, value in expected_counts.items())
-                or len(cases) != len(CASES)
-                or any(cases.count({"identifier": identifier, "result": "Passed"}) != 1 for identifier in CASES)):
-            raise RuntimeError("xcresult must contain both exact selected cases: 2 passed, 0 failed, 0 skipped")
+                or len(cases) != len(expected_cases)
+                or any(cases.count({"identifier": identifier, "result": "Passed"}) != 1 for identifier in expected_cases)):
+            raise RuntimeError("xcresult must contain both exact selected cases: 2 passed, 0 failed, 0 skipped" if len(expected_cases) == 2 else "xcresult must contain all three exact selected cases: 3 passed, 0 failed, 0 skipped")
         if devices != [{"id": self.args.device, "platform": "iOS Simulator"}]:
             raise RuntimeError("xcresult did not run on exactly the requested device UUID")
         configurations = summary.get("devicesAndConfigurations", [])
         if (len(configurations) != 1
                 or configurations[0].get("device", {}).get("deviceId", "").upper() != self.args.device):
             raise RuntimeError("xcresult summary has an unexpected device configuration")
-        self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining)
+        if getattr(self.args, "combined_batch", False):
+            parse = lambda raw: self.combined_protocol.execution_order(raw, self.checkpoint_session, self.token)
+            self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining, parse)
+        else:
+            self.summary["execution_order"] = read_execution_order(self.directory / "xcodebuild.log", self.remaining)
         self.save()
 
     def stop_process(self):
@@ -388,7 +469,33 @@ class Driver:
         self.summary["source_originals_unchanged"] = True
         self.record("verified_source_originals_unchanged", files=[fixture["name"] for fixture in fixtures])
 
+    def native_root_identity(self):
+        """Read-only pin check; this directory is never a recursive cleanup target."""
+        provider = self.native_root_provider
+        if (not getattr(self.args, "native_root", False) or provider is None
+                or not getattr(self.args, "native_seed", False)
+                or getattr(self.args, "native_folder", False)
+                or not provider.is_absolute() or provider.resolve(strict=True) != provider
+                or provider.name != "File Provider Storage"):
+            raise RuntimeError("Invalid native provider root mode")
+        group = provider.parent
+        if (tuple(group.parts[-6:-1]) != (self.args.device, "data", "Containers", "Shared", "AppGroup")
+                or str(uuid.UUID(group.name)).upper() != group.name.upper()):
+            raise RuntimeError("Native provider root belongs to another simulator")
+        for path, expected in ((provider, self.provider_identity), (group, self.native_root_group_identity)):
+            value = path.lstat()
+            if not stat.S_ISDIR(value.st_mode) or (value.st_dev, value.st_ino) != expected:
+                raise RuntimeError("Native provider root identity changed")
+        return self.provider_identity
+
     def remove_fixtures(self):
+        if getattr(self.args, "native_root", False):
+            self.native_root_identity()
+            # Ownership belongs to the outer qualification's fresh device, not
+            # to this pre-existing provider directory. Never remove its tree.
+            self.summary["fixture_cleanup"] = "native root retained for verified owned Simulator teardown"
+            self.record("native_root_cleanup_deferred_to_owned_simulator")
+            return
         owned = self.fixture_directory
         if owned is None:
             return

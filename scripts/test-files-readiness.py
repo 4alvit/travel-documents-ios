@@ -629,8 +629,11 @@ class PresentationWaitTests(unittest.TestCase):
         call = 'wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40))'
         self.assertEqual(source.count('timeout: .seconds(40)'), 1)
         self.assertIn(call, source)
-        self.assertIn('if actions.count == 1, header.count == 1', source)
-        self.assertIn('if action.isEnabled, action.isHittable', source)
+        self.assertIn('matchingActions.count == 1, matchingHeaders.count == 1', source)
+        self.assertIn('if action.isEnabled', source)
+        self.assertIn('liveAction.isHittable', source)
+        self.assertEqual(source.count('app.snapshot()'), 1)
+        self.assertNotIn('actions.count', source)
         self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', SOURCE.read_text())
 
 
@@ -655,6 +658,19 @@ SHARE_FIXTURE = r'''
 import Foundation
 import CoreGraphics
 
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static func sleep(for value: Duration) async throws { ContinuousClock.elapsed += value }
+}
+struct BatchTestFailure: Error { let message: String }
 struct ShareFrame {
     var actions = 1
     var headers = 1
@@ -665,60 +681,126 @@ struct ShareFrame {
     var header = CGRect(x: 0, y: 78, width: 402, height: 95)
     var identifier = "actionGroupCell"
     var label = "Save to Files"
-    var type = 75
+    var type = XCUIElement.ElementType.cell
+    var liveIdentifier: String?
+    var liveLabel: String?
+    var liveType: XCUIElement.ElementType?
+    var snapshotFails = false
+    var snapshotCost: Duration = .zero
+    var hittableCost: Duration = .zero
+    var traversalCost: Duration = .zero
+    var fillers = 0
+    var depth = 0
+    var staticTextDecoy = false
+    var lateOverflow: String?
 }
-final class ShareWorld {
+@MainActor final class XCUIElementSnapshot {
+    let elementType: XCUIElement.ElementType
+    let identifier: String
+    let label: String
+    let frame: CGRect
+    let isEnabled: Bool
+    let nodes: [XCUIElementSnapshot]
+    let traversalCost: Duration
+    init(_ type: XCUIElement.ElementType = .other, identifier: String = "", label: String = "",
+         frame: CGRect = .zero, enabled: Bool = true, children: [XCUIElementSnapshot] = [],
+         traversalCost: Duration = .zero) {
+        self.elementType = type; self.identifier = identifier; self.label = label
+        self.frame = frame; self.isEnabled = enabled; nodes = children; self.traversalCost = traversalCost
+    }
+    var children: [XCUIElementSnapshot] {
+        ContinuousClock.elapsed += traversalCost
+        return nodes
+    }
+}
+@MainActor final class ShareWorld {
     var frames: [ShareFrame]
     var index = 0
     var polls = 0
     var taps = 0
+    var captures = 0
+    var current = ShareFrame()
+    var reads: [String] = []
+    var lateReady: Duration?
     init(_ frames: [ShareFrame]) { self.frames = frames }
-    var current: ShareFrame { frames[min(index, frames.count - 1)] }
-}
-final class XCUIElement {
-    struct ElementType { let rawValue: Int }
-    let world: ShareWorld
-    let header: Bool
-    init(_ world: ShareWorld, header: Bool) { self.world = world; self.header = header }
-    var isEnabled: Bool { world.current.enabled }
-    var isHittable: Bool { world.current.hittable }
-    var frame: CGRect { header ? world.current.header : world.current.action }
-    var identifier: String { world.current.identifier }
-    var label: String { world.current.label }
-    var elementType: ElementType { ElementType(rawValue: world.current.type) }
-    func tap() { world.taps += 1 }
-}
-final class XCUIElementQuery {
-    let world: ShareWorld
-    let header: Bool
-    init(_ world: ShareWorld, header: Bool = false) { self.world = world; self.header = header }
-    var count: Int { header ? world.current.headers : world.current.actions }
-    var element: XCUIElement { XCUIElement(world, header: header) }
-    func matching(identifier: String) -> XCUIElementQuery {
-        precondition(header && identifier == "UIActivityContentView")
-        return self
+    func snapshot() throws -> XCUIElementSnapshot {
+        reads.append("snapshot"); polls += 1
+        current = frames[min(index, frames.count - 1)]; index += 1
+        if let lateReady, ContinuousClock.elapsed < lateReady { current.actions = 0 }
+        ContinuousClock.elapsed += current.snapshotCost
+        if current.snapshotFails { throw BatchTestFailure(message: "snapshot failed") }
+        let f = current
+        var children: [XCUIElementSnapshot] = []
+        // First action is visited last by the LIFO traversal. A duplicate cannot
+        // be missed by stopping once an earlier action and header were found.
+        for _ in 0..<f.actions {
+            children.append(XCUIElementSnapshot(f.type, identifier: f.identifier, label: f.label,
+                                               frame: f.action, enabled: f.enabled, traversalCost: f.traversalCost))
+        }
+        children += (0..<f.fillers).map { _ in XCUIElementSnapshot(traversalCost: f.traversalCost) }
+        for _ in 0..<f.headers {
+            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", frame: f.header))
+        }
+        if f.staticTextDecoy { children.append(XCUIElementSnapshot(.staticText, label: "Save to Files", frame: f.action)) }
+        if let lateOverflow = f.lateOverflow {
+            var tail = XCUIElementSnapshot(f.type, identifier: f.identifier, label: f.label, frame: f.action)
+            if lateOverflow == "depth" {
+                for _ in 0..<65 { tail = XCUIElementSnapshot(children: [tail]) }
+            } else {
+                tail = XCUIElementSnapshot(children: (0..<4_094).map { _ in XCUIElementSnapshot() })
+            }
+            children.insert(tail, at: 0)
+        }
+        if f.depth > 0 {
+            for _ in 0..<f.depth { children = [XCUIElementSnapshot(children: children)] }
+        }
+        return XCUIElementSnapshot(.application, frame: f.bounds, children: children)
     }
 }
-final class XCUIApplication {
+@MainActor final class XCUIElement {
+    enum ElementType: Int { case application = 2, navigationBar = 4, button = 9, cell = 75, staticText = 48, other = 1 }
+    let world: ShareWorld
+    let predicate: NSPredicate?
+    init(_ world: ShareWorld, predicate: NSPredicate?) { self.world = world; self.predicate = predicate }
+    var isHittable: Bool {
+        world.reads.append("hittable")
+        ContinuousClock.elapsed += world.current.hittableCost
+        guard let predicate else { fatalError("Live query must constrain the snapshot identity") }
+        let f = world.current
+        return f.hittable && predicate.evaluate(with: ["elementType": (f.liveType ?? f.type).rawValue,
+                                                        "identifier": f.liveIdentifier ?? f.identifier,
+                                                        "label": f.liveLabel ?? f.label])
+    }
+    var isEnabled: Bool { fatalError("Forbidden extra live isEnabled RPC") }
+    var frame: CGRect { fatalError("Forbidden extra live frame RPC") }
+    var identifier: String { fatalError("Forbidden extra live identifier RPC") }
+    var label: String { fatalError("Forbidden extra live label RPC") }
+    var elementType: ElementType { fatalError("Forbidden extra live type RPC") }
+    func tap() {
+        precondition(ContinuousClock.elapsed < .seconds(40), "No late tap")
+        precondition(world.polls >= 3, "No premature tap")
+        world.taps += 1
+    }
+}
+@MainActor final class XCUIElementQuery {
+    let world: ShareWorld
+    let predicate: NSPredicate?
+    init(_ world: ShareWorld, predicate: NSPredicate? = nil) { self.world = world; self.predicate = predicate }
+    var count: Int { fatalError("Forbidden extra live count RPC") }
+    var element: XCUIElement { XCUIElement(world, predicate: predicate) }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery { XCUIElementQuery(world, predicate: predicate) }
+}
+@MainActor final class XCUIApplication {
     let world: ShareWorld
     init(_ world: ShareWorld) { self.world = world }
-    var navigationBars: XCUIElementQuery { XCUIElementQuery(world, header: true) }
-    var frame: CGRect { world.current.bounds }
+    func snapshot() throws -> XCUIElementSnapshot { try world.snapshot() }
+    var frame: CGRect { fatalError("Forbidden extra live app frame RPC") }
 }
-struct ShareFailure: Error {}
 @MainActor final class ShareHarness {
     let world: ShareWorld
     init(_ world: ShareWorld) { self.world = world }
-    func wait(_ message: String, app: XCUIApplication, timeout: Duration,
-              condition: @MainActor () -> Bool) async throws {
-        precondition(timeout == .seconds(40))
-        for _ in 0..<12 {
-            world.polls += 1
-            if condition() { return }
-            world.index += 1
-        }
-        throw ShareFailure()
-    }
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication? = nil, batchDiagnostic: Bool = false) { world.captures += 1 }
+    // ACTUAL_WAIT
     // ACTUAL_HELPER
     func run() async throws {
         let actions = XCUIElementQuery(world)
@@ -734,38 +816,74 @@ struct ShareFailure: Error {}
         var moved = ready
         moved.action.origin.y += 5
         var otherIdentity = ready
-        otherIdentity.identifier = "system-action"
-        otherIdentity.type = 9
+        otherIdentity.identifier = "system-action"; otherIdentity.type = .button
         var expectedPolls = 0
         var frames: [ShareFrame]
+        var expectedHittable: Int?
         switch name {
         case "ready": frames = [ready]; expectedPolls = 3
         case "late-ready": invalid.actions = 0; frames = [invalid, invalid, ready]; expectedPolls = 5
         case "movement-resets": frames = [ready, ready, moved]; expectedPolls = 5
+        case "tolerance-boundary": moved.action.origin.y = ready.action.origin.y + 0.5; frames = [ready, moved]; expectedPolls = 3
+        case "tolerance-exceeded": moved.action.origin.y = ready.action.origin.y + 0.5001; frames = [ready, ready, moved]; expectedPolls = 5
         case "header-resets": moved = ready; moved.header.origin.y += 5; frames = [ready, ready, moved]; expectedPolls = 5
         case "identity-resets": frames = [ready, ready, otherIdentity]; expectedPolls = 5
         case "unavailable-resets": invalid.actions = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
         case "disabled-resets": invalid.enabled = false; frames = [ready, ready, invalid, ready]; expectedPolls = 6
         case "invalid-resets": invalid.action.size.width = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
-        case "moving": frames = (0..<12).map { i in var f = ready; f.action.origin.y += Double(i); return f }
-        case "absent": invalid.actions = 0; frames = [invalid]
-        case "ambiguous": invalid.actions = 2; frames = [invalid]
-        case "missing-header": invalid.headers = 0; frames = [invalid]
-        case "ambiguous-header": invalid.headers = 2; frames = [invalid]
-        case "disabled": invalid.enabled = false; frames = [invalid]
+        case "moving": frames = (0..<512).map { i in var f = ready; f.action.origin.y += Double(i % 50); return f }
+        case "absent": invalid.actions = 0; frames = [invalid]; expectedHittable = 0
+        case "ambiguous": invalid.actions = 2; frames = [invalid]; expectedHittable = 0
+        case "missing-header": invalid.headers = 0; frames = [invalid]; expectedHittable = 0
+        case "ambiguous-header": invalid.headers = 2; frames = [invalid]; expectedHittable = 0
+        case "disabled": invalid.enabled = false; frames = [invalid]; expectedHittable = 0
         case "hidden": invalid.hittable = false; frames = [invalid]
-        case "zero-area": invalid.action.size.width = 0; frames = [invalid]
-        case "offscreen": invalid.action.origin.x = -10; frames = [invalid]
-        case "invalid-header": invalid.header.size.height = 0; frames = [invalid]
-        case "nonfinite": invalid.action.origin.x = .infinity; frames = [invalid]
+        case "zero-area": invalid.action.size.width = 0; frames = [invalid]; expectedHittable = 0
+        case "offscreen": invalid.action.origin.x = -10; frames = [invalid]; expectedHittable = 0
+        case "invalid-header": invalid.header.size.height = 0; frames = [invalid]; expectedHittable = 0
+        case "nonfinite": invalid.action.origin.x = .infinity; frames = [invalid]; expectedHittable = 0
+        case "invalid-bounds": invalid.bounds.size.width = .nan; frames = [invalid]; expectedHittable = 0
+        case "snapshot-errors": invalid.snapshotFails = true; frames = [invalid]; expectedHittable = 0
+        case "snapshot-error-resets": invalid.snapshotFails = true; frames = [ready, ready, invalid, ready]; expectedPolls = 6
+        case "static-text-decoy": invalid.staticTextDecoy = true; frames = [invalid]; expectedPolls = 3
+        case "static-text-only": invalid.type = .staticText; frames = [invalid]; expectedHittable = 0
+        case "wrong-cell-id": invalid.identifier = "otherCell"; frames = [invalid]; expectedHittable = 0
+        case "wrong-label": invalid.label = "Save to Files later"; frames = [invalid]; expectedHittable = 0
+        case "live-identifier-mismatch": invalid.liveIdentifier = "newAction"; frames = [invalid]
+        case "live-type-mismatch": invalid.liveType = .button; frames = [invalid]
+        case "live-label-mismatch": invalid.liveLabel = "Copy"; frames = [invalid]
+        case "late-duplicate": invalid.actions = 2; invalid.fillers = 200; frames = [invalid]; expectedHittable = 0
+        case "node-limit": invalid.fillers = 4_094; frames = [invalid]; expectedHittable = 0
+        case "node-limit-boundary": invalid.fillers = 4_093; frames = [invalid]; expectedPolls = 3
+        case "depth-limit": invalid.depth = 65; frames = [invalid]; expectedHittable = 0
+        case "late-depth-overflow": invalid.lateOverflow = "depth"; frames = [invalid]; expectedHittable = 0
+        case "late-node-overflow": invalid.lateOverflow = "nodes"; frames = [invalid]; expectedHittable = 0
+        case "late-snapshot": invalid.snapshotCost = .seconds(41); frames = [invalid]; expectedHittable = 0
+        case "late-hittable": invalid.hittableCost = .seconds(41); frames = [invalid]; expectedHittable = 1
+        case "late-third-snapshot": invalid.snapshotCost = .milliseconds(13_500); frames = [invalid]; expectedHittable = 2
+        case "late-third-hittable": invalid.hittableCost = .milliseconds(13_500); frames = [invalid]; expectedHittable = 3
+        case "exact-deadline": invalid.snapshotCost = .milliseconds(39_800); frames = [ready, ready, invalid]; expectedHittable = 2
+        case "traversal-deadline": invalid.fillers = 3_000; invalid.traversalCost = .milliseconds(20); frames = [invalid]; expectedHittable = 0
+        case "slow-late-ready": invalid.snapshotCost = .milliseconds(700); invalid.hittableCost = .milliseconds(700); frames = [invalid]; expectedPolls = -1
         default: fatalError("Unknown fixture")
         }
         let world = ShareWorld(frames)
+        if name == "slow-late-ready" { world.lateReady = .seconds(30) }
         var failed = false
         do { try await ShareHarness(world).run() } catch { failed = true }
-        precondition(failed == (expectedPolls == 0))
-        precondition(world.taps == (expectedPolls == 0 ? 0 : 1))
-        precondition(world.polls == (expectedPolls == 0 ? 12 : expectedPolls))
+        let shouldFail = expectedPolls == 0
+        precondition(failed == shouldFail, "Unexpected outcome: " + name)
+        precondition(world.taps == (shouldFail ? 0 : 1), "Wrong tap count")
+        precondition(world.captures == (shouldFail ? 1 : 0), "Failure capture changed")
+        if expectedPolls > 0 { precondition(world.polls == expectedPolls, "Wrong convergence count") }
+        if let expectedHittable { precondition(world.reads.filter { $0 == "hittable" }.count == expectedHittable) }
+        precondition(world.reads.filter { $0 == "snapshot" }.count == world.polls)
+        precondition(world.reads.filter { $0 == "hittable" }.count <= world.polls)
+        precondition(world.reads.allSatisfy { $0 == "snapshot" || $0 == "hittable" })
+        if name == "slow-late-ready" {
+            precondition(!failed && ContinuousClock.elapsed > .seconds(30) && ContinuousClock.elapsed < .seconds(40))
+            precondition(world.reads.filter { $0 == "hittable" }.count == 3)
+        }
         print("PASS " + name)
     }
 }
@@ -782,7 +900,10 @@ class ShareReadinessTests(unittest.TestCase):
         end = source.index('    func testRecoveryExportFullBackupThroughFiles(', start)
         root = Path(cls.directory.name)
         path = root / 'ShareReadiness.swift'
-        path.write_text(SHARE_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
+        wait_start = source.index('    private func wait(')
+        wait_end = source.index('    private func check(', wait_start)
+        path.write_text(SHARE_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end])
+                        .replace('    // ACTUAL_WAIT', source[wait_start:wait_end]))
         cls.binary = root / 'share-readiness-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
                                 capture_output=True, text=True, timeout=30)
@@ -794,6 +915,19 @@ class ShareReadinessTests(unittest.TestCase):
                      'unavailable-resets', 'disabled-resets', 'invalid-resets', 'moving',
                      'absent', 'ambiguous', 'missing-header', 'ambiguous-header', 'disabled',
                      'hidden', 'zero-area', 'offscreen', 'invalid-header', 'nonfinite']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_snapshot_completeness_identity_and_observation_deadline(self):
+        for name in ['invalid-bounds', 'snapshot-errors', 'snapshot-error-resets',
+                     'tolerance-boundary', 'tolerance-exceeded', 'late-depth-overflow', 'late-node-overflow',
+                     'static-text-decoy', 'static-text-only', 'wrong-cell-id', 'wrong-label',
+                     'live-identifier-mismatch', 'live-type-mismatch', 'live-label-mismatch',
+                     'late-duplicate', 'node-limit', 'node-limit-boundary', 'depth-limit',
+                     'late-snapshot', 'late-hittable', 'late-third-snapshot', 'late-third-hittable',
+                     'exact-deadline', 'traversal-deadline', 'slow-late-ready']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
@@ -1270,6 +1404,10 @@ enum ElementType { case other, button, navigationBar }
     var taps = 0
     var snapshots = 0
     var navigationQueries = 0
+    var liveRoot: XCUIElementSnapshot?
+    var identifierChanged = false
+    var rejectedTapResolutions = 0
+    var title: String { name.hasPrefix("russian-") ? "Настройки" : "Settings" }
     var failures = 0
     var tappedAt: Duration = .zero
     init(_ name: String) { self.name = name }
@@ -1280,16 +1418,17 @@ enum ElementType { case other, button, navigationBar }
         let bounds = CGRect(x: 0, y: 0, width: 1032, height: 1376)
         let root = XCUIElementSnapshot(.other, "", "", bounds)
         let frame = CGRect(x: 545, y: 41, width: 97, height: 32.5)
-        let leaf = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+        let initialIdentifier = name.contains("empty-id") && name != "nonempty-id-changed" && taps == 0 ? "" : "gearshape"
+        let leaf = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
         leaf.isSelected = taps > 0 && name != "unselected"
-        if name == "single-button" { root.storedChildren = [leaf] }
+        if name == "single-button" || (name.contains("empty-id") && !name.contains("pair")) || name == "nonempty-id-changed" { root.storedChildren = [leaf] }
         else {
-            let parent = XCUIElementSnapshot(.button, "Settings", "gearshape", frame)
+            let parent = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
             parent.storedChildren = [leaf]; root.storedChildren = [parent]
         }
         if name == "ambiguous-tab" { root.storedChildren.append(XCUIElementSnapshot(.button, "Settings", "gearshape", frame)) }
         if taps > 0 {
-            let nav = XCUIElementSnapshot(.navigationBar, "", name == "wrong-navigation" ? "Trips" : "Settings",
+            let nav = XCUIElementSnapshot(.navigationBar, "", name == "wrong-navigation" ? "Trips" : title,
                                          CGRect(x: 0, y: 32, width: 1032, height: 116))
             if name == "label-navigation" { nav.identifier = ""; nav.label = "Settings" }
             if name == "offscreen-navigation" { nav.frame.origin.x = -20 }
@@ -1309,30 +1448,66 @@ enum ElementType { case other, button, navigationBar }
                 root.storedChildren += (0..<1000).map { _ in XCUIElementSnapshot(.other, "", "", .zero) }
             }
         }
+        liveRoot = root
         return root
+    }
+    func liveButtons() -> [XCUIElementSnapshot] {
+        func flatten(_ node: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+            (node.elementType == .button ? [node] : []) + node.storedChildren.flatMap(flatten)
+        }
+        var nodes = liveRoot.map(flatten) ?? []
+        if name == "empty-id-live-duplicate", let first = nodes.first {
+            nodes.append(XCUIElementSnapshot(.button, title, "another-action", first.frame))
+        }
+        return nodes
+    }
+    func identifier(_ node: XCUIElementSnapshot) -> String {
+        if name == "nonempty-id-changed" { return "another-identifier" }
+        if name == "empty-id-before-hit" || (name.contains("before-tap") && identifierChanged) {
+            return "gearshape"
+        }
+        return node.identifier
     }
 }
 @MainActor final class XCUIElement {
-    let world: World
-    init(_ world: World) { self.world = world }
-    var isEnabled: Bool { true }
-    var isHittable: Bool { world.name != "unhittable-tab" }
-    // The old second remote navbar query consumed 8.2s after a ready snapshot.
-    // Keep it available so this fixture fails if that query is reintroduced.
+    let query: XCUIElementQuery
+    var world: World { query.world }
+    init(_ query: XCUIElementQuery) { self.query = query }
+    var isEnabled: Bool { query.nodes().count == 1 && query.nodes()[0].isEnabled }
+    var isHittable: Bool {
+        guard query.nodes().count == 1, world.name != "unhittable-tab" else { return false }
+        if world.name.contains("before-tap") { world.identifierChanged = true }
+        return true
+    }
+    // A repeated live navigation query must still be caught by the fixture.
     var exists: Bool {
         world.navigationQueries += 1
         ContinuousClock.elapsed += .milliseconds(8200)
         return true
     }
-    func tap() { world.taps += 1; world.tappedAt = ContinuousClock.elapsed }
+    func tap() {
+        // Model .element's unique live resolution: no action is delivered
+        // if the query has become empty or ambiguous after readiness.
+        guard query.nodes().count == 1 else { world.rejectedTapResolutions += 1; return }
+        world.taps += 1; world.tappedAt = ContinuousClock.elapsed
+    }
 }
 @MainActor final class XCUIElementQuery {
     let world: World
-    init(_ world: World) { self.world = world }
-    func matching(_ predicate: NSPredicate) -> XCUIElementQuery { self }
-    func children(matching type: ElementType) -> XCUIElementQuery { self }
-    var element: XCUIElement { XCUIElement(world) }
-    subscript(_ identifier: String) -> XCUIElement { XCUIElement(world) }
+    let nodes: () -> [XCUIElementSnapshot]
+    init(_ world: World, nodes: (() -> [XCUIElementSnapshot])? = nil) {
+        self.world = world; self.nodes = nodes ?? { world.liveButtons() }
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        XCUIElementQuery(world) {
+            self.nodes().filter { predicate.evaluate(with: ["label": $0.label, "identifier": self.world.identifier($0)]) }
+        }
+    }
+    func children(matching type: ElementType) -> XCUIElementQuery {
+        XCUIElementQuery(world) { self.nodes().flatMap(\.storedChildren).filter { $0.elementType == type } }
+    }
+    var element: XCUIElement { XCUIElement(self) }
+    subscript(_ identifier: String) -> XCUIElement { XCUIElement(self) }
 }
 @MainActor final class XCUIApplication {
     let world: World
@@ -1348,19 +1523,20 @@ struct FixtureFailure: Error {}
     }
     // ACTUAL_HELPER
     func run(_ app: XCUIApplication) async throws {
-        try await selectTab("Settings", navigationTitle: "Settings", failure: "Settings did not open", in: app)
+        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app)
     }
 }
 @main struct Main {
     @MainActor static func main() async {
         let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
-        let success = ["ready", "single-button", "label-navigation"].contains(name)
-        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab"].contains(name)
+        let success = ["ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
+        let beforeTapFailure = ["ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
         var failed = false
         do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
         precondition(failed != success)
         precondition(world.taps == (beforeTapFailure ? 0 : 1))
         precondition(world.navigationQueries == 0)
+        precondition(world.rejectedTapResolutions == 0)
         precondition(world.failures == (success ? 0 : 1))
         if success { precondition(world.snapshots == 2 && ContinuousClock.elapsed < .seconds(5)) }
         if name == "late-snapshot" || name == "late-traversal" { precondition(world.snapshots == 2) }
@@ -1391,6 +1567,16 @@ class TabNavigationTests(unittest.TestCase):
                      'wrong-navigation', 'ambiguous-navigation', 'offscreen-navigation', 'empty-navigation',
                      'infinite-navigation', 'late-snapshot', 'late-traversal', 'too-deep', 'too-many-nodes',
                      'ambiguous-tab', 'unhittable-tab']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+
+    def test_live_query_keeps_unique_tab_when_initial_identifier_is_empty(self):
+        for name in ['empty-id-stable', 'empty-id-before-hit', 'empty-id-before-tap',
+                     'empty-id-pair-before-tap', 'russian-empty-id-before-tap',
+                     'empty-id-live-duplicate', 'nonempty-id-changed']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
