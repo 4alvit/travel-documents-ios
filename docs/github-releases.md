@@ -52,6 +52,17 @@ share sheet. Batch qualification covers a preinitialized provider, not cold
 first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
+Only the direct preparation case uses a 30-second initial readiness polling
+deadline for the supported Files browser or Recents screen. An in-flight
+synchronous XCTest query can return after that deadline; the existing outer
+case and command bounds still apply. In a retained
+[Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41634849458),
+native navigation lifecycle events arrived about 18 seconds after polling
+started, beyond the former 15-second window; the retained screen was still
+blank and did not prove a usable root. This scoped startup allowance preserves
+the readiness predicates, one exporter tap, subsequent 15-second waits, and
+the 180-second case allowance. It neither retries presentation nor establishes
+that the native service or full import scenario has been repaired.
 Default Arm preparation has a 780-second build/test cap and an unchanged
 180-second case allowance. The Intel envelope is described below.
 A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
@@ -64,7 +75,7 @@ seconds for postchecks. After actual preparation, batch requires room for
 the 1,440-second folder-inclusive driver and those same postchecks; it can
 still fail closed before allocating that driver. Result inspection shares
 the remaining budget and may still
-fail. The 180-second cleanup budget and all UI waits remain unchanged. This is
+fail. The 180-second cleanup budget and other UI waits remain unchanged. This is
 not a claim that startup delay or native Files behavior has been repaired.
 The qualification driver next verifies the exact local provider root on that
 exclusively owned Simulator and the absence of its UUID-named target folder.

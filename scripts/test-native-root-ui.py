@@ -230,7 +230,7 @@ typealias XCUIApplication = Node
         precondition(batchDiagnostic); script.captures += 1
     }
     // ACTUAL_WAIT
-    func run(oldBranching: Bool) async throws {
+    func run(oldBranching: Bool, initialTimeout: Duration) async throws {
         let app = Node(script, "app")
         let navigations = Node(script, "navigation")
         let pickers = Node(script, "picker")
@@ -253,7 +253,9 @@ typealias XCUIApplication = Node
         let samples = try JSONDecoder().decode([String: [Sample]].self, from: Data(args[0].utf8))
         let script = Script(samples)
         var accepted = false
-        do { try await Harness(script).run(oldBranching: args[1] == "old"); accepted = true }
+        let initialTimeout = Duration.seconds(Int(args[2])!)
+        do { try await Harness(script).run(oldBranching: args[1] == "old",
+                                          initialTimeout: initialTimeout); accepted = true }
         catch {}
         let result: [String: Any] = ["accepted": accepted, "milliseconds": ContinuousClock.now.milliseconds,
                                     "calls": script.calls, "captures": script.captures]
@@ -281,10 +283,10 @@ class InitialNativeRootReadiness(unittest.TestCase):
         subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(cls.binary)],
                        check=True, capture_output=True, text=True, timeout=60)
 
-    def run_predicate(self, samples, old=False):
+    def run_predicate(self, samples, old=False, timeout=15):
         encoded = {key: [{"value": value, "milliseconds": cost} for value, cost in values]
                    for key, values in samples.items()}
-        result = subprocess.run([str(self.binary), json.dumps(encoded), "old" if old else "current"],
+        result = subprocess.run([str(self.binary), json.dumps(encoded), "old" if old else "current", str(timeout)],
                                 check=True, capture_output=True, text=True, timeout=5)
         return json.loads(result.stdout)
 
@@ -304,6 +306,33 @@ class InitialNativeRootReadiness(unittest.TestCase):
         # An in-flight synchronous query may finish after the existing 15s
         # deadline. The unchanged wait already accepts a true result then.
         self.assertGreater(current["milliseconds"], 15000)
+
+    def test_cold_initial_wait_observes_ready_picker_after_default_budget(self):
+        # A true predicate arrives at18s; service lifecycle alone is not modeled
+        # as readiness. Execute the extracted wait and full initial predicate.
+        samples = {"navigation.count": [(0, 900)] * 18 + [(1, 1)],
+                   "picker.count": [(1, 1)], "picker.exists": [(1, 1)]}
+        normal = self.run_predicate(samples)
+        cold = self.run_predicate(samples, timeout=30)
+        self.assertFalse(normal["accepted"])
+        self.assertEqual(normal["captures"], 1)
+        self.assertNotIn("picker.count", normal["calls"])
+        self.assertTrue(cold["accepted"])
+        self.assertEqual(cold["captures"], 0)
+        self.assertGreater(cold["milliseconds"], 18000)
+        self.assertLess(cold["milliseconds"], 19000)
+        self.assertEqual(cold["calls"][-2:], ["picker.count", "picker.exists"])
+
+    def test_cold_initial_wait_does_not_poll_again_at_its_deadline(self):
+        # A valid next observation must remain unread once the same fixed
+        # deadline expires; no rolling retry or indefinite cold-start wait.
+        samples = {"navigation.count": [(0, 0)] * 300 + [(1, 0)],
+                   "picker.count": [(1, 0)], "picker.exists": [(1, 0)]}
+        result = self.run_predicate(samples, timeout=30)
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["captures"], 1)
+        self.assertEqual(result["milliseconds"], 30000)
+        self.assertEqual(result["calls"], ["navigation.count"] * 300)
 
     def test_browser_branch_reads_each_count_once_and_requires_existence(self):
         samples = {"navigation.count": [(1, 1)], "picker.count": [(1, 1)], "picker.exists": [(1, 1)]}

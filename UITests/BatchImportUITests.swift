@@ -493,7 +493,8 @@ final class BatchImportUITests: XCTestCase {
                   app: app, "Direct preparation has no unique live native export source")
         capture(app, "Batch preparation — native exporter before opening Files; no Save performed")
         source.element.tap()
-        let picker = try await openNativeFilesRoot(app)
+        // Cold Files service navigation appeared after the default 15s wait on Intel.
+        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
         let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
         try check(isNativeFilesRoot(app) && picker.cells.matching(identifier: absentFolder + ", Folder").count == 0
                   && saved.count == 0 && !failed.exists,
@@ -1835,7 +1836,8 @@ final class BatchImportUITests: XCTestCase {
             && isRecoveryFolder("On My iPhone", navigation: rootNavigation.element)
     }
 
-    private func openNativeFilesRoot(_ app: XCUIApplication) async throws -> XCUIElement {
+    private func openNativeFilesRoot(_ app: XCUIApplication,
+                                     initialTimeout: Duration = .seconds(15)) async throws -> XCUIElement {
         try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
                   "Native root fixture requires its selected iPhone")
         let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
@@ -1850,7 +1852,8 @@ final class BatchImportUITests: XCTestCase {
             navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
-        try await wait("Native root Files browser or supported Recents screen is missing", app: app) {
+        try await wait("Native root Files browser or supported Recents screen is missing", app: app,
+                       timeout: initialTimeout) {
             // Classify one observation instead of rereading a changing browser
             // as Recents after an earlier navigation query found no match.
             guard navigations.count == 1 else { return false }
