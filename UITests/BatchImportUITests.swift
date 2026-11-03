@@ -668,41 +668,46 @@ final class BatchImportUITests: XCTestCase {
             recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
             throw error
         }
-        try await acknowledgeNativeFolderKeyboardIntroduction(
-            app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
-        )
         if let before = renameFrame {
-            // Some Files versions create the default folder without entering
-            // inline editing. Use only that newly created, otherwise empty root.
+            // The editor can appear after the initial observation selected the
+            // unedited-folder route. Reclassify the existing fresh pair before
+            // choosing any action; an unknown state still fails closed.
             let created = files.element.cells.matching(NSPredicate(
                 format: "identifier == %@ AND label == %@",
                 "untitled folder, Folder", "untitled folder, 0 items"
             ))
-            capture(app, "Native folder — unique untitled folder before one Rename request")
+            capture(app, "Native folder initial Rename candidate before fresh state validation")
             let snapshots = try nativeFolderSnapshots(app)
-            try check(Self.nativeFolderRenameFrame(in: snapshots.picker,
-                                                   applicationSnapshot: snapshots.application,
-                                                   localTitle: localTitle) == before
-                      && isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
-                      && created.count == 1 && created.element.frame == before
-                      && created.element.isEnabled && created.element.isHittable,
-                      app: app, "New native folder changed before Rename request")
-            try Task.checkCancellation()
-            created.element.press(forDuration: 1)
-            let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
-            try await wait("Native folder context menu has no unique Rename action", app: app) {
-                rename.count == 1 && rename.element.isEnabled && rename.element.isHittable
-            }
-            try Task.checkCancellation()
-            rename.element.tap()
-            try await wait("Native folder Rename did not expose its real editor", app: app) {
-                keyboardIntroduction.count != 0 || (files.count == 1 && inlineNames.count == 1
-                    && inlineNames.element.isEnabled && inlineNames.element.isHittable)
-            }
-            try await acknowledgeNativeFolderKeyboardIntroduction(
-                app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+            let currentState = Self.nativeFolderInitialState(
+                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
+            try check(currentState.ready
+                      && (currentState.renameFrame == nil || currentState.renameFrame == before),
+                      app: app, "New native folder changed before Rename request")
+            if currentState.renameFrame != nil {
+                try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                          && created.count == 1 && created.element.frame == before
+                          && created.element.isEnabled && created.element.isHittable,
+                          app: app, "New native folder changed before Rename request")
+                try Task.checkCancellation()
+                created.element.press(forDuration: 1)
+                let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
+                try await wait("Native folder context menu has no unique Rename action", app: app) {
+                    rename.count == 1 && rename.element.isEnabled && rename.element.isHittable
+                }
+                try Task.checkCancellation()
+                rename.element.tap()
+                try await wait("Native folder Rename did not expose its real editor", app: app) {
+                    keyboardIntroduction.count != 0 || (files.count == 1 && inlineNames.count == 1
+                        && inlineNames.element.isEnabled && inlineNames.element.isHittable)
+                }
+            }
         }
+        // One shared acknowledgement covers an initial editor, a late editor,
+        // and an editor opened by Rename, before the unchanged pretype checks.
+        try await acknowledgeNativeFolderKeyboardIntroduction(
+            app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+        )
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
         let pretypeLiveReady = files.count == 1 && files.element.cells.count == 1

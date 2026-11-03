@@ -288,9 +288,20 @@ class SeedGuards(unittest.TestCase):
         self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
         self.assertEqual(case.count('press(forDuration'),1)
         self.assertIn('created.element.press(forDuration: 1)',case)
-        self.assertIn('Self.nativeFolderRenameFrame(in: snapshots.picker,',case)
-        self.assertIn('applicationSnapshot: snapshots.application,',case)
-        self.assertIn('localTitle: localTitle) == before',case)
+        before_rename=case[case.index('if let before = renameFrame {'):
+                           case.index('// One shared acknowledgement covers')]
+        self.assertEqual(before_rename.count('let snapshots = try nativeFolderSnapshots(app)'),1)
+        self.assertIn('let currentState = Self.nativeFolderInitialState(\n'
+                      '                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle\n'
+                      '            )',before_rename)
+        self.assertIn('try check(currentState.ready\n'
+                      '                      && (currentState.renameFrame == nil || currentState.renameFrame == before),',before_rename)
+        self.assertLess(before_rename.index('let snapshots = try nativeFolderSnapshots(app)'),
+                        before_rename.index('let currentState = Self.nativeFolderInitialState('))
+        self.assertLess(before_rename.index('try check(currentState.ready'),
+                        before_rename.index('if currentState.renameFrame != nil {'))
+        self.assertLess(before_rename.index('if currentState.renameFrame != nil {'),
+                        before_rename.index('created.element.press(forDuration: 1)'))
         self.assertIn('created.count == 1 && created.element.frame == before',case)
         self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',case)
 
