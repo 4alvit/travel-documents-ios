@@ -37,6 +37,64 @@ class FolderQualification(provider.ProviderLogQualification):
                   "Select the explicit native-created-folder batch control")
         super().__init__(root, mode, env)
 
+    def prepare_native_folder(self, driver):
+        try:
+            return super().prepare_native_folder(driver)
+        except Exception:
+            observation = {"status": "skipped", "release_acceptance": False,
+                "scope": "Exact unadopted target after failed native folder invocation; no editor-closure proof"}
+            self.report["diagnostic_native_folder_after_failure"] = observation
+            probing = False
+            try:
+                folder = self.report.get("native_folder", {})
+                rows = [row for row in self.commands.report["commands"] if row.get("id") == "native-folder-ui"]
+                q.require(not (self.interrupted or self.cleaning or self.acquiring or self.finalizing_driver)
+                          and self.quiet(), "Interrupted phase or unresolved writer")
+                q.require(self.mode == "batch" and self.owned is not None
+                          and isinstance(self.baseline, dict) and self.owned not in self.baseline,
+                          "No exclusive owned-device context")
+                q.require(folder.get("absent_before") is True and folder.get("adopted") is False
+                          and type(folder.get("calls")) is int and folder["calls"] == 1
+                          and folder.get("case") == q.FOLDER_CASE
+                          and folder.get("token") == driver.token
+                          and folder.get("destination") == str(driver.native_folder_destination)
+                          and folder.get("provider_identity") == list(driver.provider_identity)
+                          and self.report.get("native_folder_verified") is not True
+                          and driver.fixture_directory is None and driver.fixture_identity is None,
+                          "No exact unadopted folder intent")
+                q.require(len(rows) == 1 and rows[0].get("outcome") == "failed"
+                          and type(rows[0].get("returncode")) is int and rows[0]["returncode"] != 0
+                          and rows[0].get("stop", {}).get("group_absent") is True
+                          and rows[0].get("stop", {}).get("leader_reaped") is True,
+                          "No completed failed native folder invocation")
+                self.check()
+                q.require(q.time.monotonic() < driver.deadline
+                          and q.time.monotonic() + provider.FINALIZER_SECONDS < self.work_deadline,
+                          "Insufficient original driver/work budget")
+                probing = True
+                observation.update(start_seconds=q.time.monotonic() - self.started,
+                                   target=str(driver.native_folder_destination),
+                                   native_command_finish_seconds=rows[0].get("finish"))
+                # This later post-test/inspection observation is not the state at
+                # assertion time. Even after AUT termination it cannot prove editor closure.
+                try:
+                    identity = self.native_folder_leaf(driver)
+                    self.check()
+                    q.require(q.time.monotonic() < driver.deadline
+                              and q.time.monotonic() + provider.FINALIZER_SECONDS < self.work_deadline
+                              and self.quiet() and driver.fixture_directory is None
+                              and driver.fixture_identity is None, "Observation context or clock changed")
+                    observation.update(status="observed_empty_target", identity=list(identity))
+                finally:
+                    observation["finish_seconds"] = q.time.monotonic() - self.started
+            except Exception as error:
+                observation.update(status="rejected" if probing else "skipped", reason=repr(error))
+            try:
+                self.save()
+            except Exception as error:
+                observation["save_error"] = repr(error)
+            raise
+
     def save(self):
         self.report.setdefault("diagnostic_native_folder", {
             "enabled": True, "release_acceptance": False,

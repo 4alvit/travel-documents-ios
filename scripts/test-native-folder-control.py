@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline regressions for the explicit native-created-folder diagnostic."""
+import copy
 import importlib.util
 import os
 from pathlib import Path
@@ -347,6 +348,166 @@ class FolderControlTests(unittest.TestCase):
         self.assertTrue(sibling.is_dir())
         self.assertEqual(run.summary["native_folder_cleanup"],
                          {"leaf_absent": True, "provider_identity": list(run.provider_identity)})
+
+    def failure_observation_fixture(self):
+        owner = self.fixture_owner()
+        base, driver = owner.folder_fixture()
+        run = object.__new__(control.FolderQualification)
+        run.__dict__.update(base.__dict__)
+        run.started, run.work_deadline, run.cleanup_deadline = 900.0, 3300.0, 3480.0
+        driver.deadline = 2440.0
+        run.save = Mock()
+        run.report["native_folder"] = {"calls": 1, "case": control.q.FOLDER_CASE,
+            "absent_before": True, "adopted": False, "token": driver.token,
+            "destination": str(driver.native_folder_destination),
+            "provider_identity": list(driver.provider_identity)}
+        run.commands.report["commands"] = [{"id": "native-folder-ui", "outcome": "failed",
+            "returncode": 65, "finish": 90.0,
+            "stop": {"group_absent": True, "leader_reaped": True}}]
+        return run, driver
+
+    def observe_failure(self, run, driver, error=None):
+        error = error if error is not None else RuntimeError("original native failure")
+        before = copy.deepcopy(run.report["native_folder"])
+        state = (driver.fixture_directory, driver.fixture_identity, driver.deadline,
+                 run.started, run.work_deadline, run.cleanup_deadline, run.report["status"])
+        with patch.object(control.provider.BaseQualification, "prepare_native_folder", side_effect=error) as original, \
+             patch.object(control.q.time, "monotonic", return_value=1000.0), \
+             self.assertRaises(type(error)) as caught:
+            run.prepare_native_folder(driver)
+        self.assertIs(caught.exception, error)
+        original.assert_called_once_with(driver)
+        self.assertEqual(run.report["native_folder"], before)
+        self.assertEqual((driver.fixture_directory, driver.fixture_identity, driver.deadline,
+                          run.started, run.work_deadline, run.cleanup_deadline, run.report["status"]), state)
+        return run.report.get("diagnostic_native_folder_after_failure")
+
+    def test_failure_probe_success_path_and_base_exceptions_do_not_observe(self):
+        for result in (object(), KeyboardInterrupt(), SystemExit(7)):
+            run, driver = self.failure_observation_fixture()
+            run.native_folder_leaf = Mock(side_effect=AssertionError("must not probe"))
+            with patch.object(control.provider.BaseQualification, "prepare_native_folder") as original:
+                if isinstance(result, BaseException):
+                    original.side_effect = result
+                    with self.assertRaises(type(result)) as caught:
+                        run.prepare_native_folder(driver)
+                    self.assertIs(caught.exception, result)
+                else:
+                    original.return_value = result
+                    self.assertIs(run.prepare_native_folder(driver), result)
+                original.assert_called_once_with(driver)
+            run.native_folder_leaf.assert_not_called()
+            run.save.assert_not_called()
+            self.assertNotIn("diagnostic_native_folder_after_failure", run.report)
+
+    def test_failed_native_invocation_observes_exact_empty_target_without_adoption(self):
+        run, driver = self.failure_observation_fixture()
+        run.report.pop("native_folder")
+        run.commands.report["commands"].clear()
+        error = RuntimeError("native UI still editing")
+        def command(label, argv, seconds):
+            self.assertEqual(label, "native-folder-ui")
+            driver.native_folder_destination.mkdir()
+            run.commands.report["commands"].append({"id": label, "outcome": "failed", "returncode": 65,
+                "finish": 90.0, "stop": {"group_absent": True, "leader_reaped": True}})
+            raise error
+        run.command = Mock(side_effect=command)
+        run.inspect_files_preparation = Mock()
+        with patch.object(run, "native_folder_leaf", wraps=run.native_folder_leaf) as leaf, \
+             patch.object(control.q.time, "monotonic", return_value=1000.0), \
+             self.assertRaises(RuntimeError) as caught:
+            run.prepare_native_folder(driver)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(leaf.call_args_list, [unittest.mock.call(driver, absent=True), unittest.mock.call(driver)])
+        run.command.assert_called_once()
+        self.assertIsNone(driver.fixture_directory)
+        self.assertIsNone(driver.fixture_identity)
+        self.assertFalse(run.report["native_folder"]["adopted"])
+        self.assertNotIn("native_folder_verified", run.report)
+        proof = run.report["diagnostic_native_folder_after_failure"]
+        self.assertEqual(proof["status"], "observed_empty_target")
+        metadata = driver.native_folder_destination.stat()
+        self.assertEqual(proof["identity"], [metadata.st_dev, metadata.st_ino])
+        self.assertEqual((proof["start_seconds"], proof["finish_seconds"], proof["native_command_finish_seconds"]),
+                         (100.0, 100.0, 90.0))
+        self.assertIs(proof["release_acceptance"], False)
+
+    def test_failure_probe_rejects_missing_nonempty_symlink_and_changed_provider(self):
+        for fault in ("missing", "nonempty", "symlink", "provider"):
+            run, driver = self.failure_observation_fixture()
+            target = driver.native_folder_destination
+            if fault == "nonempty":
+                target.mkdir(); (target / "keep").write_bytes(b"untouched")
+            elif fault == "symlink": target.symlink_to(target.parent, target_is_directory=True)
+            elif fault == "provider":
+                target.mkdir(); driver.provider_identity = (1, 2)
+                run.report["native_folder"]["provider_identity"] = [1, 2]
+            with self.subTest(fault=fault), patch.object(run, "native_folder_leaf", wraps=run.native_folder_leaf) as leaf:
+                proof = self.observe_failure(run, driver)
+            leaf.assert_called_once_with(driver)
+            self.assertEqual(proof["status"], "rejected")
+            self.assertIn("finish_seconds", proof)
+            self.assertNotIn("identity", proof)
+            if fault == "nonempty": self.assertEqual((target / "keep").read_bytes(), b"untouched")
+            if fault == "symlink": self.assertTrue(target.is_symlink())
+
+    def test_failure_probe_skips_unresolved_writer_expired_clock_and_unowned_context(self):
+        faults = ("command-active", "command-unknown", "xcode-active", "xcode-unknown", "interrupted", "cleaning",
+                  "acquiring", "finalizing", "driver-expired", "work-reserve", "owner", "absent", "calls",
+                  "adopted", "fixture-path", "fixture-inode", "verified", "target", "case", "no-command",
+                  "duplicate-command", "successful-command", "unreaped", "group-present")
+        for fault in faults:
+            run, driver = self.failure_observation_fixture()
+            folder = run.report["native_folder"]; rows = run.commands.report["commands"]
+            if fault == "command-active": run.commands.active[99] = object()
+            elif fault == "command-unknown": run.commands.unknown_spawn = True
+            elif fault == "xcode-active": run.xcode.active[99] = object()
+            elif fault == "xcode-unknown": run.xcode.unknown_spawn = True
+            elif fault in ("interrupted", "cleaning", "acquiring"): setattr(run, fault, True)
+            elif fault == "finalizing": run.finalizing_driver = True
+            elif fault == "driver-expired": driver.deadline = 1000.0
+            elif fault == "work-reserve": run.work_deadline = 1120.0
+            elif fault == "owner": run.baseline[run.owned] = {}
+            elif fault == "absent": folder["absent_before"] = False
+            elif fault == "calls": folder["calls"] = True
+            elif fault == "adopted": folder["adopted"] = True
+            elif fault == "fixture-path": driver.fixture_directory = driver.native_folder_destination
+            elif fault == "fixture-inode": driver.fixture_identity = (1, 2)
+            elif fault == "verified": run.report["native_folder_verified"] = True
+            elif fault == "target": folder["destination"] += "-other"
+            elif fault == "case": folder["case"] = "Other/test()"
+            elif fault == "no-command": rows.clear()
+            elif fault == "duplicate-command": rows.append(copy.deepcopy(rows[0]))
+            elif fault == "successful-command": rows[0].update(outcome="completed", returncode=0)
+            elif fault == "unreaped": rows[0]["stop"]["leader_reaped"] = False
+            elif fault == "group-present": rows[0]["stop"]["group_absent"] = False
+            run.native_folder_leaf = Mock(side_effect=AssertionError("must not probe"))
+            with self.subTest(fault=fault): proof = self.observe_failure(run, driver)
+            run.native_folder_leaf.assert_not_called()
+            self.assertEqual(proof["status"], "skipped")
+            self.assertNotIn("start_seconds", proof)
+
+    def test_failure_probe_and_save_errors_never_replace_original_failure(self):
+        for fault in ("probe-error", "save-error", "clock-after-probe"):
+            run, driver = self.failure_observation_fixture()
+            def probe(_):
+                if fault == "probe-error": raise OSError("measurement failed")
+                if fault == "clock-after-probe": run.work_deadline = 1000.0
+                return (1, 2)
+            run.native_folder_leaf = Mock(side_effect=probe)
+            run.save.side_effect = OSError("save failed")
+            error = RuntimeError("original retained")
+            with patch.object(control.provider.BaseQualification, "prepare_native_folder", side_effect=error), \
+                 patch.object(control.q.time, "monotonic", return_value=1000.0), \
+                 self.assertRaises(RuntimeError) as caught:
+                run.prepare_native_folder(driver)
+            self.assertIs(caught.exception, error)
+            run.native_folder_leaf.assert_called_once_with(driver)
+            self.assertIsNone(driver.fixture_directory)
+            self.assertIsNone(driver.fixture_identity)
+            proof = run.report["diagnostic_native_folder_after_failure"]
+            self.assertEqual(proof["status"], "observed_empty_target" if fault == "save-error" else "rejected")
+            self.assertIn("save failed", proof["save_error"])
 
 
 if __name__ == "__main__":
