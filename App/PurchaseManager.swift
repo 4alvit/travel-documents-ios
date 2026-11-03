@@ -69,7 +69,11 @@ final class PurchaseManager {
     }
 
     @discardableResult
-    func purchase() async -> PurchaseFailure? {
+    func purchase(
+        using purchaseAction: @MainActor (Product) async throws -> Product.PurchaseResult = { product in
+            try await product.purchase()
+        }
+    ) async -> PurchaseFailure? {
         guard !isBusy else { return nil }
         isBusy = true
         statusMessage = nil
@@ -96,7 +100,7 @@ final class PurchaseManager {
             purchasePhase = .purchase
             purchaseDiagnostics.observe(.purchase, stage: .purchase)
             #endif
-            switch try await product.purchase() {
+            switch try await purchaseAction(product) {
             case .success(let result):
                 guard case .verified(let transaction) = result,
                       transaction.productID == Self.productID,
