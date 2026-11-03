@@ -159,38 +159,47 @@ def make_runner(q, core):
                 and coordinator is not None and not coordinator.active and not coordinator.unknown_spawn)
             boundary=getattr(self,'_boot_boundary',None)
             post=bool(boundary and boundary.get('post'))
+            kind=boundary.get('kind','boot') if boundary else 'boot'
+            proof_key='boot_accounting' if kind=='boot' else 'install_accounting'
+            phase='Boot' if kind=='boot' else 'AUT install'
+            postbuild_install=(unfinished and boundary is not None and kind=='install'
+                and ((child is not None and child.pid==pending.get('pgid'))
+                     or ('pgid' not in pending and not self.active and not self.unknown_spawn))
+                and self.install_boundary_eligible(pending['id'],args,child))
+            bounded_phase=postbuild_boot or postbuild_install
             if boundary and boundary.get('record') is not None:
-                require(pending is boundary['record'],'Boot accounting record changed')
-                settled=(self.boot_boundary_eligible(pending['id'],pending['argv'])
+                require(pending is boundary['record'],f'{phase} accounting record changed')
+                settled=((self.boot_boundary_eligible(pending['id'],pending['argv']) if kind=='boot'
+                          else self.install_boundary_eligible(pending['id'],pending['argv']))
                          and pending.get('returncode')==0 and 'error' not in pending
                          and pending.get('stop',{}).get('group_absent') is True
                          and pending.get('stop',{}).get('leader_reaped') is True)
                 if post:
-                    require(settled and 'finish' in pending,'Boot postcheck ownership incomplete')
+                    require(settled and 'finish' in pending,f'{phase} postcheck ownership incomplete')
                 else:
                     # Base command checkpoints after stop/close but before setting
                     # finish. Only its proven successful closure may bridge that gap.
-                    require(postbuild_boot or settled,'Boot accounting ownership or build proof changed')
+                    require(bounded_phase or settled,f'{phase} accounting ownership or build proof changed')
             if boundary and boundary.get('record') is not None and boundary['record'] is pending and not post:
                 # Deliberate phase policy: unexpected subtree writes/peak size are
-                # checked at full boundaries, not recursively on every boot pump.
+                # checked at full boundaries, not recursively on every exact boot/install pump.
                 deadline=min(self.limit,self.t0+pending['work_deadline'])
-                self.timecheck();require(self.ops.now()<deadline,'Boot phase deadline exceeded')
-                require(core.identity_of(self.pair.out)==self.pair.output_id,'Boot output root changed')
+                self.timecheck();require(self.ops.now()<deadline,f'{phase} phase deadline exceeded')
+                require(core.identity_of(self.pair.out)==self.pair.output_id,f'{phase} output root changed')
                 free=shutil.disk_usage(self.pair.out).free
                 require(free>=core.CAPS['work_free_bytes'],'Work free-space floor reached')
                 require(self.log_total<=core.base.ALL_LOG
                         and set(pending['bytes'])=={'stdout','stderr'}
-                        and all(0<=n<=core.base.PER_LOG for n in pending['bytes'].values()),'Boot log cap exceeded')
-                require(core.identity_of(self.pair.out)==self.pair.output_id,'Boot output root changed')
-                self.timecheck();require(self.ops.now()<deadline,'Boot phase deadline exceeded')
-                proof=pending['boot_accounting']
+                        and all(0<=n<=core.base.PER_LOG for n in pending['bytes'].values()),f'{phase} log cap exceeded')
+                require(core.identity_of(self.pair.out)==self.pair.output_id,f'{phase} output root changed')
+                self.timecheck();require(self.ops.now()<deadline,f'{phase} phase deadline exceeded')
+                proof=pending[proof_key]
                 proof['interim_checks']+=1
                 proof['last_interim']={'elapsed':self.ops.now()-self.t0,'free_bytes':free,
                                        'scope':'root_free_log_ownership_deadlines_no_recursive_scan'}
                 self.next_scan=self.ops.now()+core.CAPS['scan_interval_seconds']
                 return
-            allowance=(core.CAPS['phase_scan_seconds'] if writer or postbuild_boot else core.CAPS['boot_scan_seconds']
+            allowance=(core.CAPS['phase_scan_seconds'] if writer or bounded_phase else core.CAPS['boot_scan_seconds']
                        if boot else core.CAPS['scan_seconds'])
             if post: allowance=core.CAPS['phase_scan_seconds']
             deadline=min(self.limit,started+allowance)
@@ -215,14 +224,14 @@ def make_runner(q, core):
                        deadline_elapsed=deadline-self.t0,requested_scan_seconds=allowance)
             self.report['resources'].append(row)
             self.next_scan=self.ops.now()+core.CAPS['scan_interval_seconds']
-            if boundary and postbuild_boot and boundary.get('record') is None:
-                require('pgid' not in pending and not self.active,'Boot full precheck must precede spawn')
+            if boundary and bounded_phase and boundary.get('record') is None:
+                require('pgid' not in pending and not self.active,f'{phase} full precheck must precede spawn')
                 boundary['record']=pending
-                pending['boot_accounting']={'policy':'full_pre_and_post; interim root/free/log/ownership/deadline checks; transient subtree size/writes unobserved; boundary violations checked at postcheck',
+                pending[proof_key]={'policy':'full_pre_and_post; interim root/free/log/ownership/deadline checks; transient subtree size/writes unobserved; boundary violations checked at postcheck',
                     'full_pre_verified':True,'full_post_verified':False,'interim_checks':0,
                     'pre_elapsed':row['elapsed'],'post_status':'not_completed'}
             elif post:
-                pending['boot_accounting'].update(full_post_verified=True,post_status='verified',post_elapsed=row['elapsed'])
+                pending[proof_key].update(full_post_verified=True,post_status='verified',post_elapsed=row['elapsed'])
 
         def pump(self,p,record,handles):
             self.log_total=getattr(self.pair,'log_total',0)
@@ -237,22 +246,48 @@ def make_runner(q, core):
                 and not self.active and not self.unknown_spawn and coordinator is not None
                 and not coordinator.active and not coordinator.unknown_spawn)
 
+        def install_boundary_eligible(self,label,argv,child=None):
+            if label!='install-aut': return False
+            coordinator=getattr(self.pair,'commands',None)
+            products=getattr(self.pair,'product_paths',None) or {}
+            product=products.get('Tripfolio')
+            boot=[row for row in self.report['commands'] if row['id']=='boot-ready']
+            if len(boot)!=1: return False
+            row=boot[0];proof=row.get('boot_accounting',{})
+            ownership=(not self.active if child is None else
+                       len(self.active)==1 and self.active.get(child.pid) is child)
+            return (not self.cleaning and label=='install-aut' and self.owned is not None
+                and product is not None and argv==['/usr/bin/xcrun','simctl','install',self.owned,str(product)]
+                and self.pair.current is self and self.pair.report.get('shared_build_verified') is True
+                and ownership and not self.unknown_spawn and coordinator is not None
+                and not coordinator.active and not coordinator.unknown_spawn
+                and row.get('argv')==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+                and row.get('returncode')==0 and row.get('outcome')=='completed' and 'error' not in row
+                and 'finish' in row and row.get('stop',{}).get('group_absent') is True
+                and row.get('stop',{}).get('leader_reaped') is True
+                and proof.get('full_pre_verified') is True and proof.get('full_post_verified') is True
+                and proof.get('post_status')=='verified'
+                and row['finish']<=proof.get('post_elapsed',-1)<=row.get('work_deadline',-1))
+
         def command(self, label, argv, cap=38):
             argv=[str(x) for x in argv]
-            if not self.boot_boundary_eligible(label,argv):
+            kind='boot' if self.boot_boundary_eligible(label,argv) else 'install' if self.install_boundary_eligible(label,argv) else None
+            if kind is None:
                 return super().command(label,argv,cap)
             require(getattr(self,'_boot_boundary',None) is None,'Nested boot accounting')
-            boundary={'record':None,'post':False};self._boot_boundary=boundary
+            boundary={'record':None,'post':False,'kind':kind};self._boot_boundary=boundary
+            proof_key='boot_accounting' if kind=='boot' else 'install_accounting'
+            phase='Boot' if kind=='boot' else 'AUT install'
             try:
                 result=super().command(label,argv,cap)
-                require(boundary['record'] is not None,'Boot full precheck missing')
+                require(boundary['record'] is not None,f'{phase} full precheck missing')
                 boundary['post']=True
                 self.monitor()
                 self.save()
                 return result
             except BaseException as error:
                 if boundary['record'] is not None:
-                    boundary['record']['boot_accounting'].update(post_status='failed' if boundary['post'] else 'not_completed',
+                    boundary['record'][proof_key].update(post_status='failed' if boundary['post'] else 'not_completed',
                         boundary_error=repr(error)[:512])
                 raise
             finally:

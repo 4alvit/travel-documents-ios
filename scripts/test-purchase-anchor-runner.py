@@ -886,4 +886,105 @@ class Guards(unittest.TestCase):
                 m.validate_index_store_disabled(json.dumps(changed))
 
 
+    def install_command_fixture(self,root):
+        p,arm,now,child,polls,scans,scan=self.boot_command_fixture(root)
+        p.product_paths={'Tripfolio':root/'shared'/'Tripfolio.app'}
+        arm.report['commands'].append({'id':'boot-ready','argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b'],
+            'returncode':0,'outcome':'completed','finish':0,'work_deadline':180,
+            'stop':{'group_absent':True,'leader_reaped':True},
+            'boot_accounting':{'full_pre_verified':True,'full_post_verified':True,'post_status':'verified','post_elapsed':0}})
+        return p,arm,now,child,polls,scans,scan
+
+    def test_install_command_has_full_boundaries_without_recursive_pump_scans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,polls,scans,scan=self.install_command_fixture(Path(tmp))
+            def bounded_scan(*args,**kwargs):
+                result=scan(*args,**kwargs)
+                if arm.report['commands'][-1]['id']=='install-aut':now[0]+=6
+                return result
+            arm.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+4)
+            with mock.patch.object(core,'live_sizes',side_effect=bounded_scan), \
+                    mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                self.assertEqual(arm.sim('install-aut','install','ABC',p.product_paths['Tripfolio']),'')
+            row=arm.report['commands'][-1];proof=row['install_accounting']
+            self.assertEqual([s[0] for s in scans],['post','pre','post'])
+            self.assertGreaterEqual(proof['interim_checks'],3)
+            self.assertTrue(proof['full_pre_verified']);self.assertTrue(proof['full_post_verified'])
+            self.assertEqual(row['requested_cap_seconds'],38)
+            self.assertAlmostEqual(row['work_deadline']-row['start'],30)
+            self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+            self.assertIn('transient subtree size/writes unobserved',proof['policy'])
+            self.assertLessEqual(proof['post_elapsed'],row['work_deadline'])
+            for _,args,kwargs in scans[-2:]:
+                self.assertLessEqual(args[3],p.started+row['work_deadline'])
+                self.assertFalse(kwargs['allow_products_restart']);self.assertFalse(kwargs['allow_xcresult_restart'])
+            self.assertFalse(arm.active);self.assertIsNone(arm._boot_boundary)
+
+    def test_install_boundary_requires_exact_owned_product_and_completed_boot_proof(self):
+        for case in ('label','argv','device','product','no-products','unverified-build','other-context',
+                     'unknown','foreign-active','coordinator-active','coordinator-unknown','cleaning',
+                     'no-boot','duplicate-boot','failed-boot','wrong-boot-device','missing-pre','missing-post',
+                     'boot-post-late','boot-group-unclosed','boot-leader-unreaped'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.install_command_fixture(Path(tmp))
+                label='install-aut';args=['/usr/bin/xcrun','simctl','install','ABC',str(p.product_paths['Tripfolio'])]
+                row=arm.report['commands'][0]
+                if case=='label':label='other'
+                elif case=='argv':args.insert(2,'--other')
+                elif case=='device':args[3]='OTHER'
+                elif case=='product':args[4]+='-other'
+                elif case=='no-products':p.product_paths=None
+                elif case=='unverified-build':p.report['shared_build_verified']=False
+                elif case=='other-context':p.current=None
+                elif case=='unknown':arm.unknown_spawn=True
+                elif case=='foreign-active':arm.active[999]=SimpleNamespace(pid=999)
+                elif case=='coordinator-active':p.commands.active[999]=SimpleNamespace(pid=999)
+                elif case=='coordinator-unknown':p.commands.unknown_spawn=True
+                elif case=='cleaning':arm.cleaning=True
+                elif case=='no-boot':arm.report['commands']=[]
+                elif case=='duplicate-boot':arm.report['commands'].append(dict(row))
+                elif case=='failed-boot':row['returncode']=1
+                elif case=='wrong-boot-device':row['argv'][3]='OTHER'
+                elif case=='missing-pre':row['boot_accounting']['full_pre_verified']=False
+                elif case=='missing-post':row['boot_accounting']['full_post_verified']=False
+                elif case=='boot-post-late':row['boot_accounting']['post_elapsed']=181
+                elif case=='boot-group-unclosed':row['stop']['group_absent']=False
+                elif case=='boot-leader-unreaped':row['stop']['leader_reaped']=False
+                self.assertFalse(arm.install_boundary_eligible(label,args))
+
+    def test_install_postcheck_failure_preserves_returncode_and_prevents_success(self):
+        for case in ('scan-error','deadline'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.install_command_fixture(Path(tmp))
+                def post_failure(*args,**kwargs):
+                    row=arm.report['commands'][-1]
+                    result=scan(*args,**kwargs)
+                    if row['id']=='install-aut' and 'finish' in row:
+                        if case=='scan-error':raise RuntimeError('synthetic full post failure')
+                        now[0]=p.started+row['work_deadline']+0.01
+                    return result
+                with mock.patch.object(core,'live_sizes',side_effect=post_failure), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.sim('install-aut','install','ABC',p.product_paths['Tripfolio'])
+                row=arm.report['commands'][-1]
+                self.assertEqual(row['returncode'],0)
+                self.assertTrue(row['install_accounting']['full_pre_verified'])
+                self.assertFalse(row['install_accounting']['full_post_verified'])
+                self.assertEqual(row['install_accounting']['post_status'],'failed')
+                self.assertFalse(arm.active);self.assertIsNone(arm._boot_boundary)
+                self.assertNotIn('pretest_installed_aut_verified',arm.report)
+
+    def test_install_slow_close_requires_settled_ownership_then_full_postcheck(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,polls,scans,scan=self.install_command_fixture(Path(tmp))
+            arm.ops.close=lambda proc:now.__setitem__(0,now[0]+2)
+            with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                    mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                arm.sim('install-aut','install','ABC',p.product_paths['Tripfolio'])
+            row=arm.report['commands'][-1]
+            self.assertTrue(row['install_accounting']['full_post_verified'])
+            self.assertTrue(row['stop']['leader_reaped']);self.assertTrue(row['stop']['group_absent'])
+            self.assertEqual([s[0] for s in scans],['post','pre','post'])
+
+
 if __name__=='__main__':unittest.main()
