@@ -1,7 +1,16 @@
 name: Purchase anchor diagnostic
-run-name: "Purchase anchor pair: child then ownedAncestor"
+run-name: "Purchase anchor pair (${{ inputs.runner }}): child then ownedAncestor"
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Explicit diagnostic host profile
+        type: choice
+        required: true
+        default: macos-15
+        options:
+          - macos-15
+          - macos-15-intel
 permissions:
   contents: read
 concurrency:
@@ -9,9 +18,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   anchor:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
     env:
+      PURCHASE_ANCHOR_RUNNER: ${{ inputs.runner }}
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

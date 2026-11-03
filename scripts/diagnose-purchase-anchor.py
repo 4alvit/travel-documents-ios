@@ -35,8 +35,14 @@ def require(value, message):
 
 
 def context(env, machine):
+    profiles = {
+        'macos-15': {'name':'default','runner':'macos-15','runner_architecture':'ARM64','architecture':'arm64'},
+        'macos-15-intel': {'name':'intel-batch','runner':'macos-15-intel','runner_architecture':'X64','architecture':'x86_64'},
+    }
+    profile = profiles.get(env.get('PURCHASE_ANCHOR_RUNNER'))
     require(env.get('GITHUB_ACTIONS') == 'true' and env.get('RUNNER_OS') == 'macOS'
-            and env.get('RUNNER_ARCH') == 'ARM64' and machine == 'arm64', 'Hosted ARM macOS required')
+            and profile is not None and env.get('RUNNER_ARCH') == profile['runner_architecture']
+            and machine == profile['architecture'], 'Hosted diagnostic runner identity mismatch')
     require(env.get('GITHUB_REPOSITORY') == '4alvit/travel-documents-ios'
             and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
             and env.get('GITHUB_WORKFLOW') == 'Purchase anchor diagnostic'
@@ -46,8 +52,10 @@ def context(env, machine):
     for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
         require(re.fullmatch('[1-9][0-9]*', env.get(key, '')), 'Invalid run identity')
     require(env.get('DEVELOPER_DIR') == '/Applications/Xcode_26.2.app/Contents/Developer', 'Wrong developer path')
-    return {key:env[key] for key in ('GITHUB_REPOSITORY','GITHUB_SHA','GITHUB_REF',
+    job = {key:env[key] for key in ('GITHUB_REPOSITORY','GITHUB_SHA','GITHUB_REF',
             'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_EVENT_NAME','GITHUB_WORKFLOW')}
+    job['runner_profile'] = profile
+    return job
 
 
 def load_helpers(root):
@@ -114,7 +122,7 @@ def make_runner(q, core):
             self.pair, self.out, self.candidate = pair, out, pair.root
             self.ops = core.base.RealOps(dict(os.environ), str(pair.root))
             self.plan = {'runtime':RUNTIME,'device_type':DEVICE}
-            self.host = {'machine':'arm64'}
+            self.host = {'machine':pair.profile['architecture']}
             self.t0, self.final = pair.started, final
             self.limit, self.write_deadline, self.phase = pair.work_end, pair.final, 'work'
             self.active, self.absent_groups = {}, set()
@@ -200,6 +208,7 @@ def make_runner(q, core):
     class Pair:
         def __init__(self, root, job):
             self.root, self.job = root, job
+            self.profile = dict(job['runner_profile'])
             self.started = time.monotonic()
             self.work_end, self.final = self.started+WORK_SECONDS, self.started+WORK_SECONDS+CLEANUP_SECONDS
             self.out = root/'build'/('PurchaseAnchor-'+job['GITHUB_RUN_ID']+'-'+job['GITHUB_RUN_ATTEMPT'])
@@ -207,6 +216,7 @@ def make_runner(q, core):
             self.current = None
             self.report = {'status':'running','source':{'commit':job['GITHUB_SHA']},'job':job,
                            'diagnostic':'same-build-purchase-anchor-pair','release_acceptance':False,
+                           'runner_profile':self.profile,
                            'limits':{'work_seconds':WORK_SECONDS,'cleanup_seconds':CLEANUP_SECONDS,
                            'build_total_cap':BUILD_CAP,'test_total_cap':TEST_CAP,'stop_reserve':8,'case_seconds':CASE_SECONDS},
                            'arm_order':list(MODES),'arms':{},'errors':[]}
@@ -258,19 +268,18 @@ def make_runner(q, core):
             for name,args in [('xcode',['xcodebuild','-version']),('developer',['xcode-select','-p']),
                               ('sdk',['xcrun','--sdk','iphonesimulator','--show-sdk-version']),('architecture',['uname','-m'])]:
                 values[name] = c.command(name,args).strip()
-            require(values == {'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2','architecture':'arm64'},
+            require(values == {'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2','architecture':self.profile['architecture']},
                     'Unexpected actual toolchain')
             self.report['toolchain'] = values
             raw = json.loads(c.sim('runtimes','list','runtimes','--json',cap=158))
             matches = [x for x in raw.get('runtimes',[]) if x.get('identifier')==RUNTIME]
             require(len(matches)==1 and matches[0].get('version')=='26.2' and matches[0].get('buildversion')=='23C54'
-                    and matches[0].get('isAvailable') is True and 'arm64' in matches[0].get('supportedArchitectures',[])
+                    and matches[0].get('isAvailable') is True and self.profile['architecture'] in matches[0].get('supportedArchitectures',[])
                     and sum(x.get('identifier')==DEVICE for x in matches[0].get('supportedDeviceTypes',[]))==1,
                     'Wrong actual runtime/device')
-            self.selection = {'identifier':RUNTIME,'version':'26.2','build':'23C54','architecture':'arm64','sdk_version':'26.2','sdk_matched':True}
+            self.selection = {'identifier':RUNTIME,'version':'26.2','build':'23C54','architecture':self.profile['architecture'],'sdk_version':'26.2','sdk_matched':True}
             self.report['runtime_selection'] = self.selection
-            profile = {'name':'default','runner':'macos-15','runner_architecture':'ARM64','architecture':'arm64'}
-            selection = q.focused_build_selection('batch',profile,self.before['files'])
+            selection = q.focused_build_selection('batch',self.profile,self.before['files'])
             self.settings = [*selection['build_settings'],'COMPILER_INDEX_STORE_ENABLE=NO']
             self.report['focused_build'] = selection
             self.report['diagnostic_build_settings'] = list(self.settings)

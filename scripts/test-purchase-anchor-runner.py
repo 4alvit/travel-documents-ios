@@ -24,7 +24,7 @@ Context=inspect.getclosurevars(Pair.run_arm).nonlocals['Context']
 
 class Guards(unittest.TestCase):
     def env(self):
-        return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',
+        return dict(GITHUB_ACTIONS='true',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',PURCHASE_ANCHOR_RUNNER='macos-15',
                     GITHUB_REPOSITORY='4alvit/travel-documents-ios',GITHUB_EVENT_NAME='workflow_dispatch',
                     GITHUB_WORKFLOW='Purchase anchor diagnostic',GITHUB_JOB='anchor',
                     GITHUB_REF='refs/heads/diagnostic/purchase-anchor',GITHUB_SHA='a'*40,
@@ -37,6 +37,89 @@ class Guards(unittest.TestCase):
                         ('GITHUB_SHA','x'*40),('GITHUB_RUN_ATTEMPT','0')]:
             with self.subTest(key=key),self.assertRaises(RuntimeError):
                 m.context({**self.env(),key:bad},'arm64')
+
+    def test_profile_context_exact_mapping_and_original_caps(self):
+        for runner,arch,machine,name in (('macos-15-intel','X64','x86_64','intel-batch'),
+                                         ('macos-15','ARM64','arm64','default')):
+            env={**self.env(),'PURCHASE_ANCHOR_RUNNER':runner,'RUNNER_ARCH':arch}
+            job=m.context(env,machine)
+            self.assertEqual(job['runner_profile'],{'runner':runner,'runner_architecture':arch,
+                                                   'architecture':machine,'name':name})
+            for bad_env,bad_machine in (({**env,'PURCHASE_ANCHOR_RUNNER':'other'},machine),
+                                        ({k:v for k,v in env.items() if k!='PURCHASE_ANCHOR_RUNNER'},machine),
+                                        ({**env,'RUNNER_ARCH':'wrong'},machine),
+                                        (env,'x86_64' if machine=='arm64' else 'arm64')):
+                with self.subTest(runner=runner,bad_env=bad_env,bad_machine=bad_machine),self.assertRaises(RuntimeError):
+                    m.context(bad_env,bad_machine)
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(m.time,'monotonic',return_value=1000.0), \
+                    mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
+                root=Path(tmp).resolve();(root/'build').mkdir();p=Pair(root,job)
+                self.assertEqual(p.work_end,2800.0);self.assertEqual(p.final,2980.0)
+                self.assertEqual(p.report['runner_profile'],job['runner_profile'])
+                self.assertEqual(p.commands.host['machine'],machine)
+                with mock.patch.object(Context,'command',return_value='') as command:
+                    p.commands.sim('boot-ready','bootstatus','ABC','-b')
+                self.assertEqual(command.call_args.args[-1],188)
+        workflow=(HERE.parent/'.github/workflows/release-qualification.yml').read_text()
+        self.assertIn('runs-on: ${{ inputs.runner }}',workflow)
+        self.assertIn('PURCHASE_ANCHOR_RUNNER: ${{ inputs.runner }}',workflow)
+        self.assertIn('default: macos-15',workflow)
+        self.assertIn('- macos-15-intel',workflow)
+
+    def test_intel_profile_reaches_actual_prepare_and_contexts(self):
+        for fault in (None,'machine','runtime-architecture','runtime-build'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp))
+                p.profile=m.context({**self.env(),'PURCHASE_ANCHOR_RUNNER':'macos-15-intel',
+                                     'RUNNER_ARCH':'X64'},'x86_64')['runner_profile']
+                p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
+                rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}}
+                      for name in ('Tripfolio','TripfolioTests','TripfolioUITests')]
+                replies={'xcode':q.XCODE_VERSION,'developer':q.DEVELOPER_DIR,'sdk':'26.2',
+                         'architecture':'arm64' if fault=='machine' else 'x86_64',
+                         'build-settings':json.dumps(rows)}
+                commands=[]
+                def command(label,args,cap=38):
+                    commands.append((label,args,cap));return replies.get(label,'')
+                p.commands.command=command
+                p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
+                    'version':'26.2','buildversion':'wrong' if fault=='runtime-build' else '23C54',
+                    'isAvailable':True,'supportedArchitectures':['arm64' if fault=='runtime-architecture' else 'x86_64'],
+                    'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
+                with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}) as selected, \
+                        mock.patch.object(q,'shared_product_paths',return_value={}):
+                    if fault:
+                        with self.assertRaises(RuntimeError):p.prepare()
+                        self.assertFalse(any(c[0]=='build-for-testing' for c in commands));continue
+                    p.prepare()
+                self.assertEqual(selected.call_args.args[1],p.profile)
+                self.assertEqual(p.selection['architecture'],'x86_64')
+                self.assertEqual(p.report['toolchain']['architecture'],'x86_64')
+                hosts=[]
+                def setup(arm):hosts.append(arm.host['machine']);self.setup_arm(arm)
+                def native(arm,label,args,cap=38):commands.append((arm.out.name,args,cap));return ''
+                with mock.patch.object(Context,'setup',setup),mock.patch.object(Context,'command',native), \
+                        mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
+                    p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+                self.assertEqual(hosts,['x86_64','x86_64'])
+                selected=[c for c in commands if c[0] in ('build-for-testing','build-settings','child','ownedAncestor')]
+                self.assertEqual([c[0] for c in selected],['build-for-testing','build-settings','child','ownedAncestor'])
+                self.assertEqual([c[2] for c in selected],[420,48,780,780])
+                for _,args,_ in selected:self.assertEqual(args.count('COMPILER_INDEX_STORE_ENABLE=NO'),1)
+
+    def test_actual_result_architecture_matches_selected_profile(self):
+        for architecture in ('arm64','x86_64'):
+            selection={'identifier':m.RUNTIME,'version':'26.2','build':'23C54','architecture':architecture,
+                       'sdk_version':'26.2','sdk_matched':True}
+            summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,
+                     'expectedFailures':0,'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC',
+                     'osVersion':'26.2','osBuildNumber':'23C54','architecture':architecture}}]}
+            tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
+                  'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
+            m.validate_result(q,summary,tree,'ABC',selection)
+            summary['devicesAndConfigurations'][0]['device']['architecture']='x86_64' if architecture=='arm64' else 'arm64'
+            with self.assertRaises(RuntimeError):m.validate_result(q,summary,tree,'ABC',selection)
 
     def test_only_single_exact_case_and_fixed_bounds(self):
         for operation in ('build-for-testing','test-without-building'):
@@ -54,7 +137,7 @@ class Guards(unittest.TestCase):
     def fake_pair(self,root):
         root=root.resolve();p=object.__new__(Pair);p.root=root;p.out=root;p.started=time.monotonic()
         p.work_end=p.started+1800;p.final=p.work_end+180;p.current=None
-        p.job={};p.before={};p.products={};p.product_paths={};p.derived=root/'derived';p.settings=[]
+        p.job=m.context(self.env(),'arm64');p.profile=p.job['runner_profile'];p.before={};p.products={};p.product_paths={};p.derived=root/'derived';p.settings=[]
         p.baseline=None;p.used_devices=set();p.report={'arms':{},'errors':[]};p.selection={}
         p.commands=SimpleNamespace(active={},unknown_spawn=False,interrupted=False,checkpoint=lambda:None,save=lambda:None,
             create_attempted=False,owned=None,report={'commands':[]})
@@ -162,7 +245,7 @@ class Guards(unittest.TestCase):
                 mock.patch.object(m.time, "monotonic", return_value=1000.0), \
                 mock.patch.object(core.base.RealOps, "now", return_value=1000.0):
             root=Path(tmp).resolve();(root/'build').mkdir()
-            p=Pair(root,{'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','GITHUB_SHA':'a'*40})
+            p=Pair(root,m.context(self.env(),'arm64'))
             self.assertEqual(p.commands.t0,p.started)
             self.assertEqual(p.commands.limit,p.work_end)
             self.assertEqual(p.final-p.started,1980)
