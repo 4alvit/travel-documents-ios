@@ -16,7 +16,9 @@ import Vision
 @MainActor
 final class BatchImportUITests: XCTestCase {
     @MainActor
-    private static func nativeFolderRenameFrame(in snapshot: XCUIElementSnapshot, localTitle: String) -> CGRect? {
+    private static func nativeFolderRenameFrame(
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot, localTitle: String
+    ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
             var result: [XCUIElementSnapshot] = []
             var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
@@ -29,8 +31,11 @@ final class BatchImportUITests: XCTestCase {
             }
             return result
         }
-        guard let all = nodes(snapshot),
-              !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { return nil }
+        guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
+              applicationSnapshot.elementType == .application,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
+              !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }),
+              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { return nil }
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -46,7 +51,7 @@ final class BatchImportUITests: XCTestCase {
         guard cells.count == 1, cells[0].identifier == "untitled folder, Folder",
               cells[0].label == "untitled folder, 0 items", cells[0].isEnabled else { return nil }
         let frame = cells[0].frame
-        let windows = snapshot.children.filter { $0.elementType == .window }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }),
               !frame.isEmpty, grids[0].frame.contains(frame),
               windows.contains(where: { $0.frame.contains(frame) }) else { return nil }
@@ -58,7 +63,8 @@ final class BatchImportUITests: XCTestCase {
     // navigation and action checks retain their normal hittability requirement.
     @MainActor
     private static func nativeFolderEditorFrame(
-        in snapshot: XCUIElementSnapshot, expectedName: String, localTitle: String,
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
+        expectedName: String, localTitle: String,
         diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
@@ -77,16 +83,19 @@ final class BatchImportUITests: XCTestCase {
             [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
                 && frame.width > 0 && frame.height > 0
         }
-        guard let all = nodes(snapshot), !expectedName.isEmpty,
-              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { diagnostic?("empty-name-or-keyboard-introduction"); return nil }
+        guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
+              applicationSnapshot.elementType == .application,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot), !expectedName.isEmpty,
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }),
+              !environment.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { diagnostic?("snapshot-scope-or-empty-name-or-keyboard-introduction"); return nil }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
         let grids = all.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
         let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
         let editors = all.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
-        let keyboards = all.filter { $0.elementType == .keyboard }
-        let windows = snapshot.children.filter { $0.elementType == .window }
+        let keyboards = environment.filter { $0.elementType == .keyboard }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard pickers.count == 1, roots.count == 1, grids.count == 1, navigations.count == 1,
               editors.count == 1, keyboards.count == 1, !windows.isEmpty,
               let pickerNodes = nodes(pickers[0]), let rootNodes = nodes(roots[0]),
@@ -511,8 +520,10 @@ final class BatchImportUITests: XCTestCase {
             renameFrame = nil
             if files.count == 1 && inlineNames.count == 1
                 && inlineNames.element.isEnabled && inlineNames.element.isHittable { return true }
-            guard let snapshot = try? app.snapshot() else { return false }
-            renameFrame = Self.nativeFolderRenameFrame(in: snapshot, localTitle: localTitle)
+            guard let snapshots = try? self.nativeFolderSnapshots(app) else { return false }
+            renameFrame = Self.nativeFolderRenameFrame(
+                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
+            )
             return renameFrame != nil
         }
         if let before = renameFrame {
@@ -523,7 +534,10 @@ final class BatchImportUITests: XCTestCase {
                 "untitled folder, Folder", "untitled folder, 0 items"
             ))
             capture(app, "Native folder — unique untitled folder before one Rename request")
-            try check(Self.nativeFolderRenameFrame(in: try app.snapshot(), localTitle: localTitle) == before
+            let snapshots = try nativeFolderSnapshots(app)
+            try check(Self.nativeFolderRenameFrame(in: snapshots.picker,
+                                                   applicationSnapshot: snapshots.application,
+                                                   localTitle: localTitle) == before
                       && isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
                       && created.count == 1 && created.element.frame == before
                       && created.element.isEnabled && created.element.isHittable,
@@ -546,15 +560,18 @@ final class BatchImportUITests: XCTestCase {
         let pretypeLiveReady = files.count == 1 && files.element.cells.count == 1
             && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable
         var pretypeSnapshot: XCUIElementSnapshot?
+        var pretypeApplicationSnapshot: XCUIElementSnapshot?
         var pretypeReturnedFrame: CGRect?
         var pretypeLiveFrame: CGRect?
         var pretypeReason: String?
         var pretypeFramesMatch = false
         if pretypeLiveReady {
-            let snapshot = try app.snapshot()
-            pretypeSnapshot = snapshot
+            let snapshots = try nativeFolderSnapshots(app)
+            pretypeSnapshot = snapshots.picker
+            pretypeApplicationSnapshot = snapshots.application
             pretypeReturnedFrame = Self.nativeFolderEditorFrame(
-                in: snapshot, expectedName: "untitled folder", localTitle: localTitle,
+                in: snapshots.picker, applicationSnapshot: snapshots.application,
+                expectedName: "untitled folder", localTitle: localTitle,
                 diagnostic: { if pretypeReason == nil { pretypeReason = $0 } }
             )
             let frame = inlineNames.element.frame
@@ -563,19 +580,14 @@ final class BatchImportUITests: XCTestCase {
         }
         if !pretypeLiveReady || !pretypeFramesMatch {
             recordNativeFolderSnapshot(
-                pretypeSnapshot, observation: "pretype-actual-helper-input", localTitle: localTitle,
+                pretypeSnapshot, observation: "pretype-actual-picker-input", localTitle: localTitle,
                 returnedFrame: pretypeReturnedFrame, liveFrame: pretypeLiveFrame,
                 reason: pretypeLiveReady ? (pretypeReason ?? "returned-frame-mismatch") : "live-precondition"
             )
-            // This later, read-only observation cannot replace the original
-            // helper input or change its result. No second action is attempted.
-            let scopedPickers = app.otherElements.matching(identifier: "Browse View (Picker)")
-            if scopedPickers.count == 1 {
-                recordNativeFolderSnapshot(
-                    try? scopedPickers.element.snapshot(), observation: "pretype-failure-later-scoped-picker",
-                    localTitle: localTitle, returnedFrame: nil, liveFrame: nil, reason: nil
-                )
-            }
+            recordNativeFolderSnapshot(
+                pretypeApplicationSnapshot, observation: "pretype-actual-application-input", localTitle: localTitle,
+                returnedFrame: pretypeReturnedFrame, liveFrame: pretypeLiveFrame, reason: pretypeReason
+            )
         }
         try check(pretypeLiveReady && pretypeFramesMatch,
                   app: app, "Native folder editor left the single newly created local folder")
@@ -599,18 +611,27 @@ final class BatchImportUITests: XCTestCase {
                     && inlineNames.element.value as? String == ownedFolder
             }
         }
+        let endEditingSnapshots = try nativeFolderSnapshots(app)
         try check(files.count == 1 && inlineNames.count == 1
                   && inlineNames.element.isEnabled && inlineNames.element.isHittable
                   && inlineNames.element.value as? String == ownedFolder
-                  && Self.nativeFolderEditorFrame(in: try app.snapshot(), expectedName: ownedFolder,
+                  && Self.nativeFolderEditorFrame(in: endEditingSnapshots.picker,
+                                                   applicationSnapshot: endEditingSnapshots.application,
+                                                   expectedName: ownedFolder,
                                                    localTitle: localTitle) == inlineNames.element.frame,
                   app: app, "Native folder editor is not ready for explicit end-editing")
-        guard let before = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle) else {
+        let beforeBlankSnapshots = try nativeFolderSnapshots(app)
+        guard let before = nativeFolderBlankPoint(in: beforeBlankSnapshots.picker,
+                                                  applicationSnapshot: beforeBlankSnapshots.application,
+                                                  ownedFolder: ownedFolder, localTitle: localTitle) else {
             capture(app, "Native folder has no verified blank grid area")
             throw BatchTestFailure(message: "Native folder has no verified blank grid area")
         }
         capture(app, "Native folder exact name before the single blank-grid end-editing tap")
-        guard let current = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle),
+        let currentBlankSnapshots = try nativeFolderSnapshots(app)
+        guard let current = nativeFolderBlankPoint(in: currentBlankSnapshots.picker,
+                                                   applicationSnapshot: currentBlankSnapshots.application,
+                                                   ownedFolder: ownedFolder, localTitle: localTitle),
               current.point == before.point, current.normalized == before.normalized,
               files.count == 1 && inlineNames.count == 1
                 && inlineNames.element.isEnabled && inlineNames.element.isHittable
@@ -906,7 +927,8 @@ final class BatchImportUITests: XCTestCase {
 
     @MainActor
     private func nativeFolderBlankPoint(
-        in snapshot: XCUIElementSnapshot, ownedFolder: String, localTitle: String
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
+        ownedFolder: String, localTitle: String
     ) -> (point: CGPoint, normalized: CGVector)? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
             var result: [XCUIElementSnapshot] = []
@@ -925,9 +947,13 @@ final class BatchImportUITests: XCTestCase {
                 && frame.width >= 0 && frame.height >= 0
         }
         let all = nodes(snapshot)
+        let environment = nodes(applicationSnapshot)
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
-        guard pickers.count == 1,
-              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
+        guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
+              applicationSnapshot.elementType == .application, !environment.isEmpty,
+              pickers.count == 1,
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }),
+              !environment.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
         let pickerNodes = nodes(pickers[0])
         let rootIdentifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let roots = pickerNodes.filter { $0.elementType == .other && $0.identifier == rootIdentifier }
@@ -939,8 +965,8 @@ final class BatchImportUITests: XCTestCase {
         let navigation = pickerNodes.filter {
             $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar"
         }
-        let keyboards = all.filter { $0.elementType == .keyboard }
-        let windows = snapshot.children.filter { $0.elementType == .window }
+        let keyboards = environment.filter { $0.elementType == .keyboard }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard files.count == 1, navigation.count == 1, keyboards.count == 1, !windows.isEmpty,
               windows.allSatisfy({ finite($0.frame) && !$0.frame.isEmpty }) else { return nil }
         let titles = nodes(navigation[0]).filter {
@@ -995,6 +1021,28 @@ final class BatchImportUITests: XCTestCase {
             }
         }
         return nil
+    }
+
+    // Files is a remote view service. The app snapshot can expose its keyboard
+    // and windows without exposing the picker subtree. Capture the two explicit
+    // scopes and bind the remote snapshot to the still-unique live picker.
+    // These are sequential observations, not an atomic combined hierarchy.
+    @MainActor
+    private func nativeFolderSnapshots(
+        _ app: XCUIApplication
+    ) throws -> (picker: XCUIElementSnapshot, application: XCUIElementSnapshot) {
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        guard app.state == .runningForeground, pickers.count == 1 else {
+            throw BatchTestFailure(message: "Native folder requires one foreground Files picker")
+        }
+        let picker = try pickers.element.snapshot()
+        let application = try app.snapshot()
+        guard picker.elementType == .other, picker.identifier == "Browse View (Picker)",
+              application.elementType == .application, app.state == .runningForeground,
+              pickers.count == 1, pickers.element.frame == picker.frame else {
+            throw BatchTestFailure(message: "Native folder picker changed while observing its environment")
+        }
+        return (picker, application)
     }
 
     private func presentRecoverySave(_ app: XCUIApplication) async throws {

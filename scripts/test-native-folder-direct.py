@@ -48,22 +48,22 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         guard let result = try combinedBatchConfiguration(env, debugSimulator: debug) else { return "none" }
         return result.session + ":" + result.token
     }
-    static func editor(_ snapshot: XCUIElementSnapshot, _ expected: String) -> CGRect? {
-        nativeFolderEditorFrame(in: snapshot, expectedName: expected, localTitle: "On My iPhone")
+    static func editor(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot, _ expected: String) -> CGRect? {
+        nativeFolderEditorFrame(in: snapshot, applicationSnapshot: application, expectedName: expected, localTitle: "On My iPhone")
     }
-    static func evidence(_ snapshot: XCUIElementSnapshot?) -> String {
+    static func evidence(_ snapshot: XCUIElementSnapshot?, _ application: XCUIElementSnapshot, environment: Bool = false) -> String {
         var reason: String?
         let result = snapshot.flatMap {
-            nativeFolderEditorFrame(in: $0, expectedName: "untitled folder", localTitle: "On My iPhone",
+            nativeFolderEditorFrame(in: $0, applicationSnapshot: application, expectedName: "untitled folder", localTitle: "On My iPhone",
                                     diagnostic: { if reason == nil { reason = $0 } })
         }
-        let data = nativeFolderSnapshotEvidence(snapshot, observation: "pretype-actual-helper-input",
+        let data = nativeFolderSnapshotEvidence(environment ? application : snapshot, observation: "pretype-actual-helper-input",
             expectedName: "untitled folder", localTitle: "On My iPhone", returnedFrame: result,
             liveFrame: CGRect(x: 0, y: 305, width: 169, height: 63), reason: reason)
         return String(decoding: data, as: UTF8.self)
     }
-    static func candidate(_ snapshot: XCUIElementSnapshot) -> CGRect? {
-        nativeFolderRenameFrame(in: snapshot, localTitle: "On My iPhone")
+    static func candidate(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot) -> CGRect? {
+        nativeFolderRenameFrame(in: snapshot, applicationSnapshot: application, localTitle: "On My iPhone")
     }
 }
 @MainActor final class Tree {
@@ -77,12 +77,14 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
     let app = XCUIElementSnapshot(.application)
     init() {
         grid.children = [cell]; root.children = [nav, grid]; picker.children = [root]
-        window.children = [picker]; app.children = [window]
+        window.children = []; app.children = [window]
         nav.children = [XCUIElementSnapshot(.button, "Save", "Save", CGRect(x: 316, y: 88, width: 70, height: 44))]
     }
     func mutate(_ name: String) {
         switch name {
-        case "exact": break
+        case "exact", "application-as-picker", "root-as-picker", "picker-as-application", "window-as-application": break
+        case "application-also-includes-picker": window.children.append(picker)
+        case "second-compatible-window": app.children.append(XCUIElementSnapshot(.window, "", "", window.frame))
         case "second-folder": grid.children.append(XCUIElementSnapshot(.cell, "other, Folder", "other, 0 items", cell.frame))
         case "duplicate-folder": grid.children.append(cell)
         case "wrong-name": cell.identifier = "foreign, Folder"
@@ -98,7 +100,7 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "wrong-provider": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
         case "wrong-root-title": root.identifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: Other"
         case "duplicate-root": picker.children.append(root)
-        case "duplicate-picker": window.children.append(picker)
+        case "duplicate-picker": picker.children.append(XCUIElementSnapshot(.other, "Browse View (Picker)"))
         case "duplicate-grid": root.children.append(grid)
         case "duplicate-navigation": root.children.append(nav)
         case "root-outside-picker": picker.children = []; window.children.append(root)
@@ -108,12 +110,17 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "empty-cell": cell.frame.size.width = 0
         case "outside-grid": cell.frame.origin.y = 900
         case "outside-window": window.frame.size.height = 200
-        case "missing-window": app.children = [picker]
-        case "oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
-        case "too-deep":
+        case "missing-window": app.children = []
+        case "oversized-tree": picker.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "environment-oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "environment-too-deep":
             let top = XCUIElementSnapshot(.other); var current = top
             for _ in 0..<100 { let next = XCUIElementSnapshot(.other); current.children = [next]; current = next }
             window.children.append(top)
+        case "too-deep":
+            let top = XCUIElementSnapshot(.other); var current = top
+            for _ in 0..<100 { let next = XCUIElementSnapshot(.other); current.children = [next]; current = next }
+            picker.children.append(top)
         default: fatalError("Unknown shape")
         }
     }
@@ -131,13 +138,15 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
     let app = XCUIElementSnapshot(.application)
     init(_ expected: String) {
         editor.value = expected; cell.children = [editor]; grid.children = [cell]; nav.children = [title]
-        root.children = [nav, grid]; picker.children = [root]; window.children = [picker, keyboard]; app.children = [window]
+        root.children = [nav, grid]; picker.children = [root]; window.children = [keyboard]; app.children = [window]
     }
     func mutate(_ name: String) {
         switch name {
-        case "exact": break
+        case "exact", "application-as-picker", "root-as-picker", "picker-as-application", "window-as-application": break
+        case "application-also-includes-picker": window.children.append(picker)
+        case "second-compatible-window": app.children.append(XCUIElementSnapshot(.window, "", "", window.frame))
         case "wrong-provider": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
-        case "duplicate-picker": window.children.append(picker)
+        case "duplicate-picker": picker.children.append(XCUIElementSnapshot(.other, "Browse View (Picker)"))
         case "duplicate-root": picker.children.append(root)
         case "duplicate-grid": root.children.append(grid)
         case "duplicate-nav": root.children.append(nav)
@@ -159,24 +168,30 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "nonfinite-editor": editor.frame.origin.x = .infinity
         case "second-cell": grid.children.append(XCUIElementSnapshot(.cell))
         case "cell-outside-grid": cell.frame.origin.y = 0
-        case "missing-keyboard": window.children = [picker]
+        case "missing-keyboard": window.children = []
+        case "missing-window": app.children = [keyboard]
         case "duplicate-keyboard": window.children.append(keyboard)
         case "root-outside-picker": picker.children = []; window.children.append(root)
         case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
         case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
         case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
-        case "remote-placeholder": window.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
+        case "remote-placeholder": picker.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
         case "non-string-value": editor.value = 5
         case "long-strings": editor.label = String(repeating: "x", count: 10000)
         case "byte-limit":
             let payload = String(repeating: "\u{0001}", count: 128)
-            window.children += (0..<3000).map { _ in XCUIElementSnapshot(.other, payload, payload) }
+            picker.children += (0..<3000).map { _ in XCUIElementSnapshot(.other, payload, payload) }
 
-        case "oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
-        case "too-deep":
+        case "oversized-tree": picker.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "environment-oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "environment-too-deep":
             let top = XCUIElementSnapshot(.other); var current = top
             for _ in 0..<100 { let next = XCUIElementSnapshot(.other); current.children = [next]; current = next }
             window.children.append(top)
+        case "too-deep":
+            let top = XCUIElementSnapshot(.other); var current = top
+            for _ in 0..<100 { let next = XCUIElementSnapshot(.other); current.children = [next]; current = next }
+            picker.children.append(top)
         default: fatalError("Unknown editor shape")
         }
     }
@@ -184,14 +199,17 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
 @main struct Main {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        if args[0] == "evidence" {
-            if args[1] == "missing" { print(Harness.evidence(nil)); return }
-            let tree = EditorTree("untitled folder"); tree.mutate(args[1])
-            print(Harness.evidence(tree.app)); return
+        if args[0] == "evidence" || args[0] == "environment-evidence" {
+            let tree = EditorTree("untitled folder")
+            if args[1] == "missing" { print(Harness.evidence(nil, tree.app)); return }
+            tree.mutate(args[1])
+            print(Harness.evidence(tree.picker, tree.app, environment: args[0] == "environment-evidence")); return
         }
         if args[0] == "editor" {
             let tree = EditorTree(args[2]); tree.mutate(args[1])
-            if let frame = Harness.editor(tree.app, args[2]) {
+            let scoped = args[1] == "application-as-picker" ? tree.app : (args[1] == "root-as-picker" ? tree.root : tree.picker)
+            let application = args[1] == "picker-as-application" ? tree.picker : (args[1] == "window-as-application" ? tree.window : tree.app)
+            if let frame = Harness.editor(scoped, application, args[2]) {
                 precondition(frame == tree.editor.frame)
                 precondition(!tree.cell.frame.contains(frame))
                 print("accepted")
@@ -200,7 +218,9 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         }
         if args[0] == "shape" {
             let tree = Tree(); tree.mutate(args[1])
-            if let rect = Harness.candidate(tree.app) {
+            let scoped = args[1] == "application-as-picker" ? tree.app : (args[1] == "root-as-picker" ? tree.root : tree.picker)
+            let application = args[1] == "picker-as-application" ? tree.picker : (args[1] == "window-as-application" ? tree.window : tree.app)
+            if let rect = Harness.candidate(scoped, application) {
                 precondition(rect == tree.cell.frame); print("accepted")
             } else { print("rejected") }
             return
@@ -293,57 +313,84 @@ class FolderDirectTests(unittest.TestCase):
                 self.assertEqual(self.config({**env, "TRIPDOCKET_BATCH_CHECKPOINT_SESSION": bad}, "combined"), "rejected")
 
     def test_actual_snapshot_accepts_only_exact_empty_native_folder(self):
-        self.assertEqual(self.probe("shape", "exact"), "accepted")
+        for case in ["exact", "application-also-includes-picker", "second-compatible-window"]:
+            self.assertEqual(self.probe("shape", case), "accepted")
         for case in ["second-folder", "duplicate-folder", "wrong-name", "nonempty-folder", "wrong-label",
                      "save-as-cell", "button-not-folder", "disabled-folder", "missing-folder", "editor-present",
                      "editor-outside-grid", "keyboard-present", "wrong-provider", "wrong-root-title",
                      "duplicate-root", "duplicate-picker", "duplicate-grid", "duplicate-navigation",
                      "root-outside-picker", "grid-outside-root", "navigation-outside-root",
                      "nonfinite-cell", "empty-cell", "outside-grid", "outside-window", "missing-window",
-                     "oversized-tree", "too-deep"]:
+                     "oversized-tree", "too-deep", "environment-oversized-tree", "environment-too-deep",
+                     "application-as-picker", "root-as-picker", "picker-as-application", "window-as-application"]:
             with self.subTest(case=case): self.assertEqual(self.probe("shape", case), "rejected")
 
     def test_actual_editing_hierarchy_accepts_visible_title_and_real_editor_geometry(self):
         # Current original AX: editor x0..169 extends beyond its cell x10..132.
         # Snapshot titles have no hittability API; actual live editor remains checked at both call sites.
         for expected in ["untitled folder", "TripDocket-Batch-QA-" + TOKEN]:
-            self.assertEqual(self.probe("editor", "exact", expected), "accepted")
+            for case in ["exact", "application-also-includes-picker", "second-compatible-window"]:
+                self.assertEqual(self.probe("editor", case, expected), "accepted")
             for case in ["wrong-provider", "duplicate-picker", "duplicate-root", "duplicate-grid", "duplicate-nav",
                          "duplicate-title", "wrong-title", "title-outside-nav", "title-outside-window", "empty-title",
                          "nonfinite-title", "missing-editor", "duplicate-editor", "wrong-value", "disabled-editor",
                          "editor-outside-cell-ancestry", "editor-outside-grid", "editor-outside-window",
                          "editor-under-keyboard", "empty-editor", "nonfinite-editor", "second-cell", "cell-outside-grid",
                          "missing-keyboard", "duplicate-keyboard", "root-outside-picker", "nav-outside-root",
-                         "grid-outside-root", "introduction-overlay", "oversized-tree", "too-deep"]:
+                         "grid-outside-root", "introduction-overlay", "oversized-tree", "too-deep", "missing-window",
+                         "environment-oversized-tree", "environment-too-deep", "application-as-picker",
+                         "root-as-picker", "picker-as-application", "window-as-application"]:
                 with self.subTest(expected=expected, case=case):
                     self.assertEqual(self.probe("editor", case, expected), "rejected")
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         self.assertEqual(case.count("Self.nativeFolderEditorFrame("), 2)
-        self.assertIn('in: snapshot, expectedName: "untitled folder"', case)
+        self.assertIn("in: snapshots.picker, applicationSnapshot: snapshots.application", case)
+        self.assertIn('expectedName: "untitled folder"', case)
         self.assertIn("expectedName: ownedFolder", case)
         pretype = case[case.index("let pretypeLiveReady"):case.index("inlineNames.element.typeText(ownedFolder)")]
         self.assertIn("files.count == 1 && files.element.cells.count == 1", pretype)
         self.assertIn("inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable", pretype)
-        self.assertEqual(pretype.count("try app.snapshot()"), 1)
-        self.assertIn("pretypeSnapshot = snapshot", pretype)
+        self.assertEqual(pretype.count("try nativeFolderSnapshots(app)"), 1)
+        self.assertNotIn("app.snapshot()", pretype)
+        self.assertIn("pretypeSnapshot = snapshots.picker", pretype)
+        self.assertIn("pretypeApplicationSnapshot = snapshots.application", pretype)
         self.assertIn("let frame = inlineNames.element.frame", pretype)
         self.assertIn("pretypeFramesMatch = pretypeReturnedFrame == frame", pretype)
         self.assertIn("try check(pretypeLiveReady && pretypeFramesMatch,", pretype)
-        self.assertLess(pretype.index("if pretypeLiveReady {"), pretype.index("try app.snapshot()"))
+        self.assertLess(pretype.index("if pretypeLiveReady {"), pretype.index("try nativeFolderSnapshots(app)"))
         self.assertLess(pretype.index("if !pretypeLiveReady || !pretypeFramesMatch"), pretype.index("recordNativeFolderSnapshot("))
-        self.assertIn('observation: "pretype-actual-helper-input"', pretype)
-        self.assertIn('observation: "pretype-failure-later-scoped-picker"', pretype)
-        self.assertIn("if scopedPickers.count == 1", pretype)
-        self.assertEqual(pretype.count("try? scopedPickers.element.snapshot()"), 1)
+        self.assertIn('pretypeSnapshot, observation: "pretype-actual-picker-input"', pretype)
+        self.assertIn('pretypeApplicationSnapshot, observation: "pretype-actual-application-input"', pretype)
+        self.assertEqual(pretype.count("recordNativeFolderSnapshot("), 2)
+        self.assertNotIn("pretype-failure-later-scoped-picker", pretype)
+        self.assertNotIn("scopedPickers", pretype)
         self.assertNotIn(".tap()", pretype)
         self.assertNotIn("sleep", pretype)
         end = case[case.index("try check(files.count == 1 && inlineNames.count == 1"):case.index("guard let before = nativeFolderBlankPoint")]
         self.assertIn("inlineNames.element.isEnabled && inlineNames.element.isHittable", end)
         self.assertIn("== inlineNames.element.frame", end)
+        self.assertIn("in: endEditingSnapshots.picker", end)
+        self.assertIn("applicationSnapshot: endEditingSnapshots.application", end)
         normal = UI[UI.index("    private func isRecoveryFolder"): ]
         self.assertIn("navigation.exists && titles.count == 1 && titles.element(boundBy: 0).isHittable", normal.split("\n    private func", 1)[0])
+
+    def test_live_sampler_binds_two_scopes_without_actions_or_replacement(self):
+        sampler = section("    @MainActor\n    private func nativeFolderSnapshots(", "    private func presentRecoverySave(")
+        self.assertEqual(sampler.count("app.state == .runningForeground"), 2)
+        self.assertEqual(sampler.count("pickers.count == 1"), 2)
+        self.assertEqual(sampler.count("try pickers.element.snapshot()"), 1)
+        self.assertEqual(sampler.count("try app.snapshot()"), 1)
+        self.assertLess(sampler.index("try pickers.element.snapshot()"), sampler.index("try app.snapshot()"))
+        self.assertLess(sampler.index("try app.snapshot()"), sampler.index("pickers.element.frame == picker.frame"))
+        self.assertIn('picker.identifier == "Browse View (Picker)"', sampler)
+        self.assertIn("picker.elementType == .other", sampler)
+        self.assertIn("application.elementType == .application", sampler)
+        self.assertIn("return (picker, application)", sampler)
+        self.assertNotRegex(sampler, r"(?m)^\s*while\s")
+        for forbidden in [".tap(", ".press(", "sleep", "children +", "children.append"]:
+            self.assertNotIn(forbidden, sampler)
 
     def test_actual_evidence_serializes_input_fields_and_returned_frame(self):
         evidence = json.loads(self.probe("evidence", "exact"))
@@ -361,7 +408,14 @@ class FolderDirectTests(unittest.TestCase):
         self.assertTrue(editor["enabled"])
         self.assertEqual(rows[editor["parent"]]["identifier"], "Folder")
         windows = [n for n in rows if n["type"] == 1]
-        self.assertEqual([n["frame"] for n in windows], [[0, 0, 402, 874]])
+        self.assertEqual(windows, [])
+        self.assertFalse(any(n["type"] == 5 for n in rows))
+        environment = json.loads(self.probe("environment-evidence", "exact"))
+        self.assertEqual(environment["helperReturnedFrame"], [0, 305, 169, 63])
+        self.assertEqual([n["frame"] for n in environment["nodes"] if n["type"] == 1], [[0, 0, 402, 874]])
+        self.assertEqual(sum(n["type"] == 5 for n in environment["nodes"]), 1)
+        self.assertFalse(any(n["identifier"] in ["Browse View (Picker)", "File View", "DOC.inlineRenameField"]
+                             for n in environment["nodes"]))
 
     def test_actual_evidence_retains_rejected_shape_without_manufacturing_acceptance(self):
         for case in ["duplicate-editor", "duplicate-root", "editor-outside-grid", "nonfinite-editor",
@@ -422,7 +476,11 @@ class FolderDirectTests(unittest.TestCase):
     def test_existing_exact_name_defocus_and_host_handoff_proofs_are_retained(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         self.assertIn("inlineNames.element.value as? String == ownedFolder", case)
-        self.assertEqual(case.count("nativeFolderBlankPoint(in: try app.snapshot()"), 2)
+        self.assertEqual(case.count("nativeFolderBlankPoint(in:"), 2)
+        for name in ["beforeBlankSnapshots", "currentBlankSnapshots"]:
+            self.assertIn(name + " = try nativeFolderSnapshots(app)", case)
+            self.assertIn("in: " + name + ".picker", case)
+            self.assertIn("applicationSnapshot: " + name + ".application", case)
         self.assertIn("current.point == before.point, current.normalized == before.normalized", case)
         self.assertIn("remainingEditors.count == 0", case)
         self.assertIn("self.isRecoveryFolder(ownedFolder, navigation: navigation.element)", case)
