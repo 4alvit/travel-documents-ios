@@ -450,9 +450,8 @@ final class BatchImportUITests: XCTestCase {
             save.tap()
             let verified = exportNames.map { app.staticTexts["nativeSeed.saved." + $0] }
             let failed = app.staticTexts["nativeSeed.failure"]
-            try await wait("Native seed export did not finish destination verification", app: app) {
-                failed.exists || (!navigation.exists && verified.allSatisfy { $0.exists })
-            }
+            try await waitForNativeSeedExport(app, navigation: navigation, verified: verified,
+                                              failed: failed, observeLateFailure: reopenControl)
             try check(!failed.exists && verified.allSatisfy { $0.exists }, app: app,
                       "Native seed export destination was not verified")
             capture(app, "Native seed returned after Save — " + exportNames.joined(separator: ", "))
@@ -484,6 +483,51 @@ final class BatchImportUITests: XCTestCase {
         }
         // Host compares both exact destination bytes; completion alone is not proof.
         if let checkpoint { try Self.recordBatchProducer(checkpoint) }
+    }
+
+    private func waitForNativeSeedExport(_ app: XCUIApplication, navigation: XCUIElement,
+                                         verified: [XCUIElement], failed: XCUIElement,
+                                         observeLateFailure: Bool) async throws {
+        let terminal: @MainActor () -> Bool = {
+            failed.exists || (!navigation.exists && verified.allSatisfy { $0.exists })
+        }
+        do {
+            try await wait("Native seed export did not finish destination verification", app: app,
+                           condition: terminal)
+        } catch let originalFailure as BatchTestFailure {
+            if observeLateFailure && !Task.isCancelled {
+                // Diagnostic only: the original criterion already failed and
+                // retained its evidence. Observe the same predicate without actions.
+                // This deadline cannot interrupt an in-flight XCTest query/capture;
+                // the unchanged 180-second case and outer limits still apply.
+                let started = ContinuousClock.now
+                let deadline = started.advanced(by: .seconds(45))
+                var terminalObserved = false
+                while ContinuousClock.now < deadline && !Task.isCancelled {
+                    if terminal() { terminalObserved = true; break }
+                    do { try await Task.sleep(for: .milliseconds(100)) }
+                    catch { break }
+                }
+                let timing = XCTAttachment(string: """
+                    originalExportCriterion=failed
+                    requestedObservationSeconds=45
+                    observedElapsed=\(started.duration(to: .now))
+                    terminalObserved=\(terminalObserved)
+                    cancelled=\(Task.isCancelled)
+                    acceptance=failed
+                    """)
+                timing.name = "Native seed passive late observation — original failure retained"
+                timing.lifetime = .keepAlways
+                add(timing)
+                if !Task.isCancelled {
+                    capture(app, "Native seed after passive late observation — original failure retained",
+                            batchDiagnostic: true)
+                }
+            }
+            // A late callback, failure or diagnostic cancellation cannot pass
+            // the original criterion or allow reopen/checkpoint/main to continue.
+            throw originalFailure
+        }
     }
 
     // Combined qualification preserves separate seed/main XCTest cases. This
