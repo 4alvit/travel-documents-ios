@@ -351,5 +351,102 @@ class SwiftTests(unittest.TestCase):
                 self.run_case(mode)
 
 
+# This is separate from the small require stub used by requireUnlocked above.
+# Compile the actual readiness wait, substituting only the clock/sleep and UI check.
+READINESS_SWIFT = r'''
+
+import Foundation
+
+struct Failure: Error {}
+struct XCUIApplication {}
+@MainActor
+enum Fake {
+    static var time = 0.0
+    static var steps: [(Double, Bool)] = []
+    static var sleeps = 0
+    static var cancelSleep = false
+    static func condition() -> Bool {
+        precondition(!steps.isEmpty, "Unexpected extra predicate call")
+        let (elapsed, result) = steps.removeFirst()
+        time += elapsed
+        return result
+    }
+    static func sleep(for duration: Duration) async throws {
+        sleeps += 1
+        if cancelSleep { throw CancellationError() }
+        time += 0.1
+    }
+}
+@MainActor
+struct FakeClock {
+    struct Instant: Comparable {
+        let value: Double
+        func advanced(by duration: Duration) -> Instant {
+            Instant(value: value + Double(duration.components.seconds))
+        }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.value < rhs.value }
+    }
+    var now: Instant { Instant(value: Fake.time) }
+}
+@MainActor
+final class Harness {
+    func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
+        if !condition { throw Failure() }
+    }
+    // ACTUAL_REQUIRE
+}
+@main
+struct Main {
+    @MainActor
+    static func main() async {
+        let scenarios: [(String, [(Double, Bool)], Bool, String, Int)] = [
+            ("before", [(14.9, true)], false, "accepted", 0),
+            ("at", [(15, true)], false, "rejected", 0),
+            ("after", [(15.1, true)], false, "rejected", 0),
+            ("false-crossing", [(15.1, false)], false, "rejected", 0),
+            ("delayed", [(0, false), (14, true)], false, "accepted", 1),
+            ("cancelled", [(0, false)], true, "cancelled", 1),
+        ]
+        for (name, steps, cancel, expected, sleeps) in scenarios {
+            Fake.time = 0; Fake.steps = steps; Fake.sleeps = 0; Fake.cancelSleep = cancel
+            var outcome = "accepted"
+            do {
+                try await Harness().require("deadline", app: XCUIApplication(), condition: Fake.condition)
+            } catch is CancellationError { outcome = "cancelled" }
+              catch is Failure { outcome = "rejected" }
+              catch { preconditionFailure("Unexpected error: \(error)") }
+            guard outcome == expected, Fake.steps.isEmpty, Fake.sleeps == sleeps else {
+                print("FAIL \(name): \(outcome), expected \(expected); sleeps=\(Fake.sleeps)")
+                exit(1)
+            }
+            print("PASS \(name)")
+        }
+    }
+}
+'''
+
+
+class ReadinessDeadlineTests(unittest.TestCase):
+    def test_actual_wait_enforces_post_predicate_deadline_and_preserves_cancellation(self):
+        text = (ROOT / "UITests/PrivacyTransitionUITests.swift").read_text()
+        start, end = "    private func require(", "\n    private func check("
+        self.assertEqual(text.count(start), 1)
+        self.assertEqual(text.count(end), 1)
+        method = text[text.index(start):text.index(end, text.index(start))]
+        method = method.replace("private func require", "func require")
+        method = method.replace("ContinuousClock", "FakeClock").replace("Task.sleep", "Fake.sleep")
+        with tempfile.TemporaryDirectory(prefix="tripdocket-readiness-deadline-") as directory:
+            source, executable = Path(directory) / "main.swift", Path(directory) / "readiness"
+            source.write_text(READINESS_SWIFT.replace("    // ACTUAL_REQUIRE", method))
+            compiled = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
+                                       str(source), "-o", str(executable)],
+                                      capture_output=True, text=True, timeout=60)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["PASS " + name for name in
+                             ("before", "at", "after", "false-crossing", "delayed", "cancelled")])
+
+
 if __name__ == "__main__":
     unittest.main()

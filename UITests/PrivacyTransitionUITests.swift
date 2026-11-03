@@ -522,7 +522,9 @@ final class PrivacyTransitionUITests: XCTestCase {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(15))
         repeat {
-            if condition() { return }
+            let satisfied = condition()
+            guard clock.now < deadline else { break }
+            if satisfied { return }
             try await Task.sleep(for: .milliseconds(100))
         } while clock.now < deadline
         try check(false, app: app, message)
