@@ -343,8 +343,14 @@ class Guards(unittest.TestCase):
             self.assertEqual(hashlib.sha256((HERE / name).read_bytes()).hexdigest(), digest)
         workflow = (HERE.parent / ".github/workflows/release-qualification.yml").read_text()
         self.assertIn('QUALIFICATION_PROVIDER_LOG: "1"', workflow)
-        self.assertIn('run: python3 -B scripts/diagnose-batch-provider.py --mode "$QUALIFICATION_MODE"', workflow)
-        self.assertIn('name: TripDocket-diagnostic-provider-log-', workflow)
+        if 'QUALIFICATION_RUNTIME_CONTROL:' in workflow:
+            self.assertIn('QUALIFICATION_RUNTIME_CONTROL: "ios18.5"', workflow)
+            self.assertIn('run: python3 -B scripts/diagnose-batch-runtime.py --mode "$QUALIFICATION_MODE"', workflow)
+            self.assertIn('name: TripDocket-diagnostic-runtime-185-', workflow)
+            self.assertIn('python3 -B scripts/test-runtime-diagnostic.py', workflow)
+        else:
+            self.assertIn('run: python3 -B scripts/diagnose-batch-provider.py --mode "$QUALIFICATION_MODE"', workflow)
+            self.assertIn('name: TripDocket-diagnostic-provider-log-', workflow)
         self.assertIn('python3 -B scripts/test-provider-log-diagnostic.py', workflow)
         self.assertIn('if: always()', workflow)
         self.assertNotIn('TEST_RUNNER_TRIPDOCKET_NATIVE_REOPEN_CONTROL:', workflow)
