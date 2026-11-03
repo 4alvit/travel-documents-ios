@@ -126,9 +126,10 @@ def make_runner(q, core):
             writer=(child is not None and child.pid==pending.get('pgid') and args[:1]==['xcodebuild']
                     and pending['id'] in ('build-for-testing','selected-tests')
                     and args[-1:] in (['build-for-testing'],['test-without-building']))
-            boot=(child is not None and child.pid==pending.get('pgid') and self.owned is not None
-                  and pending['id']=='boot-ready'
-                  and args==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b'])
+            boot=(unfinished and self.owned is not None and pending['id']=='boot-ready'
+                  and args==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+                  and ((child is not None and child.pid==pending.get('pgid'))
+                       or ('pgid' not in pending and not self.active and not self.unknown_spawn)))
             allowance=(core.CAPS['phase_scan_seconds'] if writer else core.CAPS['boot_scan_seconds']
                        if boot else core.CAPS['scan_seconds'])
             deadline=min(self.limit,started+allowance)

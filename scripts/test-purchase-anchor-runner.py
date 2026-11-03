@@ -328,6 +328,68 @@ class Guards(unittest.TestCase):
                 with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)),mock.patch.object(Context,'command',return_value=''),mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
                     with self.assertRaisesRegex(RuntimeError,'did not close'):p.run_arm('child',0)
 
+    def test_pending_owned_boot_scan_allows_six_seconds_without_writer_privileges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+            now=[p.started];arm.ops.now=lambda:now[0];arm.owned='ABC'
+            arm.report['commands'].append({'id':'boot-ready','work_deadline':100,
+                'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']})
+            def traverse(*args,**kwargs):
+                now[0]+=6
+                return {'allocated':0}
+            with mock.patch.object(core,'live_sizes',side_effect=traverse) as scan, \
+                    mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                arm.monitor()
+            self.assertEqual(arm.report['resources'][-1]['requested_scan_seconds'],15)
+            self.assertEqual(scan.call_args.args[0],p.out)
+            self.assertEqual(scan.call_args.args[3],p.started+15)
+            self.assertFalse(scan.call_args.kwargs['allow_xcresult_restart'])
+            self.assertFalse(scan.call_args.kwargs['allow_products_restart'])
+            self.assertEqual(arm.active,{})
+
+    def test_pending_boot_scan_wrong_identity_or_ownership_stays_five_seconds(self):
+        for fault in ('id','argv','device','no-device','finished','pgid-none','foreign-active','foreign-pgid','unknown'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+                arm.ops.now=lambda:p.started;arm.owned='ABC'
+                command={'id':'boot-ready','work_deadline':100,
+                    'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']}
+                arm.report['commands'].append(command)
+                if fault=='id':command['id']='other'
+                elif fault=='argv':command['argv'][-1]='-x'
+                elif fault=='device':command['argv'][3]='OTHER'
+                elif fault=='no-device':arm.owned=None
+                elif fault=='finished':command['finish']=0
+                elif fault=='pgid-none':command['pgid']=None
+                elif fault=='foreign-active':arm.active[123]=SimpleNamespace(pid=123)
+                elif fault=='foreign-pgid':
+                    command['pgid']=124;arm.active[123]=SimpleNamespace(pid=123)
+                elif fault=='unknown':arm.unknown_spawn=True
+                with mock.patch.object(core,'live_sizes',return_value={'allocated':0}) as scan, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    arm.monitor()
+                self.assertEqual(arm.report['resources'][-1]['requested_scan_seconds'],5)
+                self.assertFalse(scan.call_args.kwargs['allow_xcresult_restart'])
+                self.assertFalse(scan.call_args.kwargs['allow_products_restart'])
+
+    def test_pending_boot_scan_keeps_original_global_and_command_deadlines(self):
+        for global_remaining,command_remaining,expected in ((4,100,4),(100,3,3),(2,3,2)):
+            with self.subTest(global_remaining=global_remaining,command_remaining=command_remaining),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp));arm=Context(p,p.root/'child',p.final,'unused')
+                now=[p.started];arm.ops.now=lambda:now[0];arm.owned='ABC';arm.limit=p.started+global_remaining
+                arm.report['commands'].append({'id':'boot-ready','work_deadline':command_remaining,
+                    'argv':['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']})
+                def traverse(*args,**kwargs):
+                    now[0]+=6
+                    return {'allocated':0}
+                with mock.patch.object(core,'live_sizes',side_effect=traverse) as scan, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.monitor()
+                self.assertEqual(scan.call_args.args[3],p.started+expected)
+                self.assertEqual(arm.limit,p.started+global_remaining)
+                self.assertFalse(scan.call_args.kwargs['allow_xcresult_restart'])
+                self.assertFalse(scan.call_args.kwargs['allow_products_restart'])
+
     def test_log_accounting_is_shared_across_contexts(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=self.fake_pair(Path(tmp));a=Context(p,p.root/'child',p.final,'a');b=Context(p,p.root/'ancestor',p.final,'b')
