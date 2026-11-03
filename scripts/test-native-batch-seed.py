@@ -29,7 +29,7 @@ class SeedGuards(unittest.TestCase):
         helper = APP[APP.index("@MainActor\nprivate enum NativeBatchSeedFiles"):
                      APP.index("@MainActor\nprivate struct NativeBatchSeedView")]
         config = UI[UI.index("    private static func directPreparationToken"):
-                    UI.index("    func testNativeCreateOwnedFilesFolder")]
+                    UI.index("    private func acknowledgeNativeFolderKeyboardIntroduction(")]
         helper += "\n@MainActor private enum Preparation {\n" + \
             "struct BatchTestFailure: Error { let message: String }\n" + config + \
             "static func check(_ env: [String: String], _ debug: Bool) throws -> String { " + \

@@ -65,6 +65,7 @@ final class BatchImportUITests: XCTestCase {
     private static func nativeFolderEditorFrame(
         in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
         expectedName: String, localTitle: String,
+        keyboardIntroduction: Bool = false,
         diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
@@ -87,7 +88,9 @@ final class BatchImportUITests: XCTestCase {
               applicationSnapshot.elementType == .application,
               let all = nodes(snapshot), let environment = nodes(applicationSnapshot), !expectedName.isEmpty,
               !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }),
-              !environment.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { diagnostic?("snapshot-scope-or-empty-name-or-keyboard-introduction"); return nil }
+              environment.filter({ $0.elementType == .other && $0.identifier == "UIContinuousPathIntroductionView" }).count
+                == (keyboardIntroduction ? 1 : 0),
+              !environment.contains(where: { $0.elementType != .other && $0.identifier == "UIContinuousPathIntroductionView" }) else { diagnostic?("snapshot-scope-or-empty-name-or-keyboard-introduction"); return nil }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -463,6 +466,47 @@ final class BatchImportUITests: XCTestCase {
         return (token, sourceToken)
     }
 
+    // The first-use keyboard introduction may appear as soon as Files opens
+    // its inline editor, before any typing. Share one acknowledgement budget
+    // across initial editing, explicit Rename, and the post-typing check.
+    private func acknowledgeNativeFolderKeyboardIntroduction(
+        _ app: XCUIApplication, expectedName: String, acknowledged: inout Bool
+    ) async throws {
+        let introduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        guard introduction.count != 0 else { return }
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let files = pickers.element.collectionViews.matching(identifier: "File View")
+        let editors = files.element.textViews.matching(identifier: "DOC.inlineRenameField")
+        let explanation = introduction.element.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
+        ))
+        let acknowledge = introduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+        @MainActor func ready() throws -> Bool {
+            guard !acknowledged, introduction.count == 1,
+                  explanation.count == 1, explanation.element.isHittable,
+                  acknowledge.count == 1, acknowledge.element.isEnabled, acknowledge.element.isHittable,
+                  files.count == 1, files.element.cells.count == 1,
+                  editors.count == 1, editors.element.isEnabled,
+                  editors.element.value as? String == expectedName else { return false }
+            let snapshots = try self.nativeFolderSnapshots(app)
+            return Self.nativeFolderEditorFrame(
+                in: snapshots.picker, applicationSnapshot: snapshots.application,
+                expectedName: expectedName, localTitle: "On My iPhone", keyboardIntroduction: true
+            ) == editors.element.frame
+        }
+        try check(try ready(), app: app, "Native keyboard introduction has no unique expected folder editor")
+        capture(app, "Native keyboard introduction before the single Continue")
+        try check(try ready(), app: app, "Native keyboard introduction changed before Continue")
+        try Task.checkCancellation()
+        acknowledged = true
+        acknowledge.element.tap()
+        try await wait("Native keyboard introduction did not dismiss back to the exact folder editor", app: app) {
+            introduction.count == 0 && files.count == 1 && editors.count == 1
+                && editors.element.isEnabled && editors.element.isHittable
+                && editors.element.value as? String == expectedName
+        }
+    }
+
     func testNativeCreateOwnedFilesFolder() async throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
@@ -515,17 +559,23 @@ final class BatchImportUITests: XCTestCase {
         }
         newFolder.element.tap()
         let inlineNames = files.element.textViews.matching(identifier: "DOC.inlineRenameField")
+        let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        var keyboardIntroductionAcknowledged = false
         var renameFrame: CGRect?
         try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
             renameFrame = nil
             if files.count == 1 && inlineNames.count == 1
                 && inlineNames.element.isEnabled && inlineNames.element.isHittable { return true }
+            if keyboardIntroduction.count != 0 { return true }
             guard let snapshots = try? self.nativeFolderSnapshots(app) else { return false }
             renameFrame = Self.nativeFolderRenameFrame(
                 in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
             return renameFrame != nil
         }
+        try await acknowledgeNativeFolderKeyboardIntroduction(
+            app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+        )
         if let before = renameFrame {
             // Some Files versions create the default folder without entering
             // inline editing. Use only that newly created, otherwise empty root.
@@ -551,9 +601,12 @@ final class BatchImportUITests: XCTestCase {
             try Task.checkCancellation()
             rename.element.tap()
             try await wait("Native folder Rename did not expose its real editor", app: app) {
-                files.count == 1 && inlineNames.count == 1
-                    && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                keyboardIntroduction.count != 0 || (files.count == 1 && inlineNames.count == 1
+                    && inlineNames.element.isEnabled && inlineNames.element.isHittable)
             }
+            try await acknowledgeNativeFolderKeyboardIntroduction(
+                app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
+            )
         }
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
@@ -594,23 +647,9 @@ final class BatchImportUITests: XCTestCase {
         inlineNames.element.typeText(ownedFolder)
         try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
                   app: app, "Native folder name differs from the exact owned UUID name")
-        let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
-        if keyboardIntroduction.count != 0 {
-            let explanation = keyboardIntroduction.element.staticTexts.matching(NSPredicate(
-                format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
-            ))
-            let acknowledge = keyboardIntroduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
-            try check(keyboardIntroduction.count == 1 && explanation.count == 1 && explanation.element.isHittable
-                      && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable,
-                      app: app, "Native keyboard introduction is not uniquely identifiable and reachable")
-            capture(app, "Native keyboard introduction before the single Continue")
-            acknowledge.element.tap()
-            try await wait("Native keyboard introduction did not dismiss back to the exact folder editor", app: app) {
-                keyboardIntroduction.count == 0 && files.count == 1 && inlineNames.count == 1
-                    && inlineNames.element.isEnabled && inlineNames.element.isHittable
-                    && inlineNames.element.value as? String == ownedFolder
-            }
-        }
+        try await acknowledgeNativeFolderKeyboardIntroduction(
+            app, expectedName: ownedFolder, acknowledged: &keyboardIntroductionAcknowledged
+        )
         let endEditingSnapshots = try nativeFolderSnapshots(app)
         try check(files.count == 1 && inlineNames.count == 1
                   && inlineNames.element.isEnabled && inlineNames.element.isHittable

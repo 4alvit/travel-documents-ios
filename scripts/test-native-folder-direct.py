@@ -30,6 +30,7 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
     var frame: CGRect
     var children: [XCUIElementSnapshot]
     var isEnabled = true
+    var isHittable = true
     var value: Any? = nil
     init(_ kind: Kind, _ id: String = "", _ label: String = "", _ frame: CGRect = .zero,
          _ children: [XCUIElementSnapshot] = []) {
@@ -48,8 +49,8 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         guard let result = try combinedBatchConfiguration(env, debugSimulator: debug) else { return "none" }
         return result.session + ":" + result.token
     }
-    static func editor(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot, _ expected: String) -> CGRect? {
-        nativeFolderEditorFrame(in: snapshot, applicationSnapshot: application, expectedName: expected, localTitle: "On My iPhone")
+    static func editor(_ snapshot: XCUIElementSnapshot, _ application: XCUIElementSnapshot, _ expected: String, introduction: Bool = false) -> CGRect? {
+        nativeFolderEditorFrame(in: snapshot, applicationSnapshot: application, expectedName: expected, localTitle: "On My iPhone", keyboardIntroduction: introduction)
     }
     static func evidence(_ snapshot: XCUIElementSnapshot?, _ application: XCUIElementSnapshot, environment: Bool = false) -> String {
         var reason: String?
@@ -175,6 +176,8 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
         case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
         case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "introduction-in-picker": picker.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "wrong-introduction-type": window.children.last!.elementType = .button
         case "remote-placeholder": picker.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
         case "non-string-value": editor.value = 5
         case "long-strings": editor.label = String(repeating: "x", count: 10000)
@@ -205,11 +208,13 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
             tree.mutate(args[1])
             print(Harness.evidence(tree.picker, tree.app, environment: args[0] == "environment-evidence")); return
         }
-        if args[0] == "editor" {
-            let tree = EditorTree(args[2]); tree.mutate(args[1])
+        if ["editor", "introduction-editor", "introduction-editor-absent"].contains(args[0]) {
+            let tree = EditorTree(args[2])
+            if args[0] == "introduction-editor" { tree.mutate("introduction-overlay") }
+            tree.mutate(args[1])
             let scoped = args[1] == "application-as-picker" ? tree.app : (args[1] == "root-as-picker" ? tree.root : tree.picker)
             let application = args[1] == "picker-as-application" ? tree.picker : (args[1] == "window-as-application" ? tree.window : tree.app)
-            if let frame = Harness.editor(scoped, application, args[2]) {
+            if let frame = Harness.editor(scoped, application, args[2], introduction: args[0] != "editor") {
                 precondition(frame == tree.editor.frame)
                 precondition(!tree.cell.frame.contains(frame))
                 print("accepted")
@@ -234,6 +239,154 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
 '''
 
 
+INTRODUCTION_SWIFT = r'''
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws {
+        if cancelled { throw CancellationError() }
+    }
+}
+@MainActor func descendants(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+    [root] + root.children.flatMap(descendants)
+}
+@MainActor final class XCUIElementQuery {
+    let app: XCUIApplication
+    let nodes: () -> [XCUIElementSnapshot]
+    init(_ app: XCUIApplication, _ nodes: @escaping () -> [XCUIElementSnapshot]) {
+        self.app = app; self.nodes = nodes
+    }
+    var count: Int { nodes().count }
+    var element: XCUIElement { XCUIElement(app, nodes().first ?? XCUIElementSnapshot(.other)) }
+    func matching(identifier: String) -> XCUIElementQuery {
+        XCUIElementQuery(app) { self.nodes().filter { $0.identifier == identifier } }
+    }
+    func matching(_ predicate: NSPredicate) -> XCUIElementQuery {
+        XCUIElementQuery(app) { self.nodes().filter { predicate.evaluate(with: ["label": $0.label]) } }
+    }
+}
+@MainActor final class XCUIElement {
+    let app: XCUIApplication
+    let node: XCUIElementSnapshot
+    init(_ app: XCUIApplication, _ node: XCUIElementSnapshot) { self.app = app; self.node = node }
+    func query(_ kind: Kind) -> XCUIElementQuery {
+        XCUIElementQuery(app) { descendants(self.node).filter { $0.elementType == kind } }
+    }
+    var collectionViews: XCUIElementQuery { query(.collectionView) }
+    var textViews: XCUIElementQuery { query(.textView) }
+    var staticTexts: XCUIElementQuery { query(.staticText) }
+    var buttons: XCUIElementQuery { query(.button) }
+    var cells: XCUIElementQuery { query(.cell) }
+    var isEnabled: Bool { node.isEnabled }
+    var isHittable: Bool { node.isHittable }
+    var value: Any? { node.value }
+    var frame: CGRect { node.frame }
+    func tap() {
+        precondition(node.label == "Continue")
+        app.taps += 1
+        if app.mode != "dismissal-stalls" { app.tree.window.children.removeAll { $0 === app.introduction } }
+        app.tree.editor.isHittable = true
+        if app.mode == "wrong-value-after-tap" { app.tree.editor.value = "foreign" }
+    }
+}
+@MainActor final class XCUIApplication {
+    let tree = EditorTree("untitled folder")
+    let introduction = XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView")
+    let explanation = XCUIElementSnapshot(.staticText, "", "Speed up your typing by sliding your finger across the letters to compose a word.")
+    let button = XCUIElementSnapshot(.button, "", "Continue")
+    let mode: String
+    var taps = 0
+    var captures = 0
+    var waits = 0
+    var samples = 0
+    init(_ mode: String) {
+        self.mode = mode
+        introduction.children = [explanation, button]
+    }
+    var otherElements: XCUIElementQuery {
+        XCUIElementQuery(self) {
+            (descendants(self.tree.picker) + descendants(self.tree.app)).filter { $0.elementType == .other }
+        }
+    }
+    func showIntroduction() {
+        tree.window.children.append(introduction)
+        // The overlay blocks the editor; Continue, not the editor, must be hittable.
+        tree.editor.isHittable = false
+    }
+    func mutate() {
+        switch mode {
+        case "duplicate-introduction": tree.window.children.append(introduction)
+        case "wrong-explanation": explanation.label = "unrelated"
+        case "duplicate-explanation": introduction.children.append(explanation)
+        case "hidden-explanation": explanation.isHittable = false
+        case "wrong-button": button.label = "Other"
+        case "duplicate-button": introduction.children.append(button)
+        case "disabled-button": button.isEnabled = false
+        case "hidden-button": button.isHittable = false
+        case "wrong-value": tree.editor.value = "foreign"
+        case "disabled-editor": tree.editor.isEnabled = false
+        case "duplicate-editor": tree.cell.children.append(tree.editor)
+        case "missing-grid": tree.grid.identifier = "unrelated"
+        case "duplicate-cell": tree.grid.children.append(tree.cell)
+        case "wrong-provider": tree.mutate("wrong-provider")
+        case "bad-frame": tree.mutate("editor-under-keyboard")
+        case "initial-cancel": Task.cancelled = true
+        default: break
+        }
+    }
+}
+@MainActor final class IntroductionHarness {
+    static func nativeFolderEditorFrame(in snapshot: XCUIElementSnapshot,
+        applicationSnapshot: XCUIElementSnapshot, expectedName: String,
+        localTitle: String, keyboardIntroduction: Bool) -> CGRect? {
+        precondition(localTitle == "On My iPhone")
+        return Harness.editor(snapshot, applicationSnapshot, expectedName, introduction: keyboardIntroduction)
+    }
+    func nativeFolderSnapshots(_ app: XCUIApplication) throws -> (picker: XCUIElementSnapshot, application: XCUIElementSnapshot) {
+        app.samples += 1
+        return (app.tree.picker, app.tree.app)
+    }
+    func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
+        if !condition { throw BatchTestFailure(message: message) }
+    }
+    func capture(_ app: XCUIApplication, _ message: String) {
+        app.captures += 1
+        if app.mode == "change-after-capture" { app.tree.editor.value = "foreign" }
+        if app.mode == "cancel-after-capture" { Task.cancelled = true }
+    }
+    func wait(_ message: String, app: XCUIApplication, _ condition: () throws -> Bool) async throws {
+        app.waits += 1
+        // No fake time is advanced: evaluate the unchanged post-action predicate.
+        // Failure simulates its final unsatisfied observation, never a retry tap.
+        try check(try condition(), app: app, message)
+    }
+    // ACTUAL_INTRODUCTION_HELPER
+    func run(_ app: XCUIApplication) async -> [String: Any] {
+        var acknowledged = false
+        var outcome = "returned"
+        do {
+            for phase in 0..<3 {
+                let expected = phase == 2 ? "TripDocket-Batch-QA-12345678-1234-4234-8234-123456789abc" : "untitled folder"
+                app.tree.editor.value = expected
+                let show = app.mode == "posttype" ? phase == 2 : app.mode == "rename" ? phase == 1 : app.mode == "absent" ? false : phase == 0
+                if show || app.mode == "repeated" && phase == 2 { app.showIntroduction(); app.mutate() }
+                try await acknowledgeNativeFolderKeyboardIntroduction(app, expectedName: expected, acknowledged: &acknowledged)
+            }
+        } catch is CancellationError { outcome = "cancelled" }
+        catch { outcome = "rejected" }
+        return ["outcome": outcome, "acknowledged": acknowledged, "taps": app.taps,
+                "captures": app.captures, "waits": app.waits, "samples": app.samples]
+    }
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        let app = XCUIApplication(CommandLine.arguments[1])
+        let result = await IntroductionHarness().run(app)
+        print(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+'''
+
+
 class FolderDirectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -241,7 +394,7 @@ class FolderDirectTests(unittest.TestCase):
         cls.addClassCleanup(cls.scratch.cleanup)
         path = Path(cls.scratch.name)
         helpers = section("    @MainActor\n    private static func nativeFolderRenameFrame", "    private let productID")
-        helpers += section("    private static func nativeFolderConfiguration", "    func testNativeCreateOwnedFilesFolder")
+        helpers += section("    private static func nativeFolderConfiguration", "    private func acknowledgeNativeFolderKeyboardIntroduction(")
         helpers += section("    private static func combinedBatchConfiguration", "    private static func recordBatchProducer")
         swift = path / "Probe.swift"; cls.binary = path / "probe"
         swift.write_text(SWIFT.replace("    // ACTUAL_HELPERS", helpers))
@@ -342,6 +495,18 @@ class FolderDirectTests(unittest.TestCase):
                          "root-as-picker", "picker-as-application", "window-as-application"]:
                 with self.subTest(expected=expected, case=case):
                     self.assertEqual(self.probe("editor", case, expected), "rejected")
+
+    def test_introduction_opt_in_preserves_editor_identity_and_geometry(self):
+        for expected in ["untitled folder", "TripDocket-Batch-QA-" + TOKEN]:
+            self.assertEqual(self.probe("introduction-editor", "exact", expected), "accepted")
+            self.assertEqual(self.probe("introduction-editor-absent", "exact", expected), "rejected")
+            self.assertEqual(self.probe("editor", "introduction-overlay", expected), "rejected")
+            for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
+                         "wrong-provider", "duplicate-root", "duplicate-picker", "duplicate-editor",
+                         "missing-editor", "wrong-value", "disabled-editor", "editor-outside-cell-ancestry",
+                         "editor-outside-grid", "editor-under-keyboard", "duplicate-keyboard", "missing-keyboard"]:
+                with self.subTest(expected=expected, case=case):
+                    self.assertEqual(self.probe("introduction-editor", case, expected), "rejected")
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
@@ -473,6 +638,33 @@ class FolderDirectTests(unittest.TestCase):
                           "createDirectory", ".mkdir", "while ", "for attempt", "recordBatchProducer"]:
             self.assertNotIn(forbidden, case)
 
+    def test_introduction_uses_one_shared_action_budget_at_all_three_boundaries(self):
+        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        helper = section("    private func acknowledgeNativeFolderKeyboardIntroduction(", "    func testNativeCreateOwnedFilesFolder")
+        self.assertEqual(case.count("var keyboardIntroductionAcknowledged = false"), 1)
+        self.assertEqual(case.count("acknowledgeNativeFolderKeyboardIntroduction("), 3)
+        self.assertEqual(case.count("acknowledged: &keyboardIntroductionAcknowledged"), 3)
+        first = case.index("acknowledgeNativeFolderKeyboardIntroduction(")
+        second = case.index("acknowledgeNativeFolderKeyboardIntroduction(", first + 1)
+        third = case.index("acknowledgeNativeFolderKeyboardIntroduction(", second + 1)
+        self.assertLess(first, case.index("if let before = renameFrame"))
+        self.assertLess(case.index("rename.element.tap()"), second)
+        self.assertLess(second, case.index("let pretypeLiveReady"))
+        self.assertLess(case.index("inlineNames.element.typeText(ownedFolder)"), third)
+        self.assertLess(third, case.index("let endEditingSnapshots"))
+        initial_wait = case[case.index('try await wait("Native folder has neither'):first]
+        rename_wait = case[case.index('try await wait("Native folder Rename did not'):second]
+        self.assertIn("keyboardIntroduction.count != 0", initial_wait)
+        self.assertIn("keyboardIntroduction.count != 0", rename_wait)
+        self.assertEqual(helper.count("acknowledge.element.tap()"), 1)
+        self.assertEqual(helper.count("try ready()"), 2)
+        self.assertLess(helper.index("try Task.checkCancellation()"), helper.index("acknowledged = true"))
+        self.assertLess(helper.index("acknowledged = true"), helper.index("acknowledge.element.tap()"))
+        self.assertIn("guard !acknowledged, introduction.count == 1", helper)
+        self.assertIn("keyboardIntroduction: true", helper)
+        self.assertNotIn("timeout:", helper)
+        self.assertNotRegex(helper, r"(?m)^\s*(while|repeat|for)\b")
+
     def test_existing_exact_name_defocus_and_host_handoff_proofs_are_retained(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         self.assertIn("inlineNames.element.value as? String == ownedFolder", case)
@@ -488,6 +680,69 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("app.state == .notRunning", case)
         self.assertIn('capture(app, "Native folder exact destination before host empty-folder verification")', case)
         self.assertIn("saved.count == 0 && !failed.exists", case)
+
+
+class KeyboardIntroductionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="native-folder-introduction-")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        path = Path(cls.scratch.name)
+        helpers = section("    @MainActor\n    private static func nativeFolderRenameFrame", "    private let productID")
+        helpers += section("    private static func nativeFolderConfiguration", "    private func acknowledgeNativeFolderKeyboardIntroduction(")
+        helpers += section("    private static func combinedBatchConfiguration", "    private static func recordBatchProducer")
+        introduction = section("    private func acknowledgeNativeFolderKeyboardIntroduction(", "    func testNativeCreateOwnedFilesFolder")
+        source = SWIFT[:SWIFT.index("@main struct Main")].replace("    // ACTUAL_HELPERS", helpers)
+        source += INTRODUCTION_SWIFT.replace("    // ACTUAL_INTRODUCTION_HELPER", introduction)
+        swift = path / "Introduction.swift"
+        swift.write_text(source)
+        cls.binary = path / "introduction-tests"
+        compiled = subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-strict-concurrency=complete",
+                                   "-parse-as-library", str(swift), "-o", str(cls.binary)],
+                                  capture_output=True, text=True, timeout=60)
+        if compiled.returncode:
+            raise AssertionError(compiled.stderr)
+
+    def probe(self, mode):
+        result = subprocess.run([str(self.binary), mode], check=True, capture_output=True, text=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_absent_introduction_performs_no_actions_or_extra_observation(self):
+        self.assertEqual(self.probe("absent"), {"outcome": "returned", "acknowledged": False,
+                                             "taps": 0, "captures": 0, "waits": 0, "samples": 0})
+
+    def test_first_introduction_can_occur_at_each_of_three_boundaries(self):
+        for phase in ["pretype", "rename", "posttype"]:
+            with self.subTest(phase=phase):
+                self.assertEqual(self.probe(phase), {"outcome": "returned", "acknowledged": True,
+                                                   "taps": 1, "captures": 1, "waits": 1, "samples": 2})
+
+    def test_ambiguous_or_wrong_introduction_never_taps(self):
+        for mode in ["duplicate-introduction", "wrong-explanation", "duplicate-explanation", "hidden-explanation",
+                     "wrong-button", "duplicate-button", "disabled-button", "hidden-button", "wrong-value",
+                     "disabled-editor", "duplicate-editor", "missing-grid", "duplicate-cell", "wrong-provider", "bad-frame"]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual(result["outcome"], "rejected")
+                self.assertFalse(result["acknowledged"])
+                self.assertEqual((result["taps"], result["captures"], result["waits"]), (0, 0, 0))
+
+    def test_changed_target_and_cancellation_cannot_spend_the_action(self):
+        for mode, outcome in [("change-after-capture", "rejected"),
+                              ("initial-cancel", "cancelled"), ("cancel-after-capture", "cancelled")]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual(result["outcome"], outcome)
+                self.assertFalse(result["acknowledged"])
+                self.assertEqual((result["taps"], result["waits"]), (0, 0))
+
+    def test_reappearance_or_unsatisfied_dismissal_never_repeats_continue(self):
+        for mode in ["repeated", "dismissal-stalls", "wrong-value-after-tap"]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual(result["outcome"], "rejected")
+                self.assertTrue(result["acknowledged"])
+                self.assertEqual((result["taps"], result["captures"], result["waits"]), (1, 1, 1))
 
 
 if __name__ == "__main__":
