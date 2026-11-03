@@ -122,7 +122,13 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('"--ui-testing-native-batch-token", token',case)
         self.assertEqual(case.count(".tap()"),1)
         self.assertIn("source.element.tap()",case)
-        self.assertIn("let picker = try await openNativeFilesRoot(app)",case)
+        self.assertIn("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))",case)
+        self.assertEqual(UI.count("initialTimeout: .seconds(30)"),1)
+        self.assertIn("initialTimeout: Duration = .seconds(15)",UI)
+        route=UI[UI.index("    private func openNativeFilesRoot"):
+                 UI.index("    private func openLocalFilesFolder")]
+        self.assertEqual(route.count("timeout: initialTimeout"),1)
+        self.assertNotIn("timeout:",route[route.index("        if !browserReady()"):])
         self.assertIn("isNativeFilesRoot(app)",case)
         self.assertIn('picker.cells.matching(identifier: absentFolder + ", Folder").count == 0',case)
         self.assertIn("saved.count == 0 && !failed.exists",case)
