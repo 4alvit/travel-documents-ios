@@ -68,9 +68,10 @@ purchase tests may run in this attempt. Do not share the simulator with CI.
 The driver records original command deadlines, output and disk caps, ownership,
 reaping and cleanup. The prepare case uses a 180-second XCTest maximum, covering measured cold
 preparation that reached local Files checks at 132 seconds;
-export/restore retain 300 seconds each. Every xcodebuild invocation retains a
-600-second ceiling, clipped to the original remaining work deadline with an
-8-second owned stop reserve. Total time remains 1,500 seconds: 1,380 seconds of
+export/restore retain 300 seconds each. The prepare xcodebuild invocation has a
+780-second ceiling; export and restore retain 600 seconds each. Each ceiling is
+clipped to the original remaining work deadline and includes an eight-second
+owned stop reserve. Total time remains 1,500 seconds: 1,380 seconds of
 work and 120 seconds reserved for cleanup. These three command ceilings cannot
 all be consumed. No phase resets the clock; phase_budget records remaining
 work before/after the command and evidence handling.

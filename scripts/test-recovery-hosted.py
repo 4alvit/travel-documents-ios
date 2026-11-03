@@ -1773,8 +1773,10 @@ class BoundaryTests(unittest.TestCase):
             self.assertIsNone(hosted.core.Recovery.run_phase(r,'prepare'))
         state.assert_not_called();self.assertEqual(len(r.ops.processes),1)
         row=r.report['commands'][-1];budget=r.report['phase_budget']['prepare']
-        self.assertEqual(row['requested_cap_seconds'],600)
-        self.assertAlmostEqual(row['work_deadline'],747.9)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertAlmostEqual(row['work_deadline'],927.9)
+        self.assertEqual(budget['requested_command_cap_seconds'],row['requested_cap_seconds'])
+        self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
         self.assertEqual(row['stop_reserve_seconds'],8)
         self.assertEqual(budget['original_work_deadline_elapsed'],1380)
         self.assertEqual(budget['selected_case_max_seconds'],180)
@@ -1793,10 +1795,73 @@ class BoundaryTests(unittest.TestCase):
         preserve.assert_not_called();row=r.report['commands'][-1]
         self.assertEqual(row['error'],"RuntimeError('Command timeout')")
         self.assertEqual(row['command_deadline'],1380);self.assertEqual(row['work_deadline'],1372)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertEqual(r.report['phase_budget']['prepare']['command_deadline_ceiling_elapsed'],1380)
         self.assertEqual((r.limit,r.final),(1380,1500))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertNotIn('prepare',r.report.get('phase_passed',{}))
         self.assertEqual(len(r.ops.processes),1)
+
+    def test_ui_prepare_late_startup_and_full_case_fit_without_second_attempt(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.t=125.42;r.ops.plans=[{'delay':700}]
+        original_env,original_cwd=r.ops.env,r.ops.cwd
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
+             patch.object(r,'read_result',side_effect=read) as result:
+            self.assertIsNone(hosted.core.Recovery.run_phase(r,'prepare'))
+            with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_called_once_with('prepare')
+        result.assert_called_once_with('prepare',r.out/'copy.xcresult')
+        row=r.report['commands'][-1];budget=r.report['phase_budget']['prepare']
+        self.assertGreaterEqual(row['finish']-row['start'],700)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertAlmostEqual(row['work_deadline'],897.42)
+        self.assertAlmostEqual(row['command_deadline'],905.42)
+        self.assertEqual(budget['requested_command_cap_seconds'],row['requested_cap_seconds'])
+        self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
+        self.assertEqual(budget['selected_case_max_seconds'],180)
+        self.assertTrue(r.report['phase_passed']['prepare'])
+        self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual(r.report['attempts']['phase-prepare'],1)
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertIs(r.ops.env,original_env);self.assertIs(r.ops.cwd,original_cwd)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_ui_prepare_stop_reserve_only_starts_no_process(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.t=1372;original_env,original_cwd=r.ops.env,r.ops.cwd
+        with patch.object(r,'failure_evidence'),patch.object(r,'preserve_result') as preserve:
+            with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_not_called();self.assertEqual(r.ops.processes,[])
+        self.assertNotIn('prepare',r.report.get('phase_passed',{}))
+        self.assertIs(r.ops.env,original_env);self.assertIs(r.ops.cwd,original_cwd)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_ui_export_restore_actual_commands_keep600_and_case300(self):
+        r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.owned='10000000-0000-0000-0000-000000000001'
+        r.report['phase_passed']={'prepare':True};r.report['files_folder']={'fixture_verified':True}
+        r.ops.plans=[{'delay':1},{'delay':1}];r.ops.t=100
+        with patch.object(r,'verify_folder'),patch.object(r,'authorize_restore') as authorize, \
+             patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result'),patch.object(r,'app_state',return_value='validated library'):
+            for phase in ['export','restore']:
+                self.assertEqual(hosted.core.Recovery.run_phase(r,phase),'validated library')
+                row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
+                self.assertEqual(row['requested_cap_seconds'],600)
+                self.assertAlmostEqual(row['command_deadline']-row['start'],600)
+                self.assertAlmostEqual(row['work_deadline']-row['start'],592)
+                self.assertEqual(budget['requested_command_cap_seconds'],600)
+                self.assertEqual(budget['selected_case_max_seconds'],300)
+                self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
+                self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        authorize.assert_called_once_with();self.assertEqual(len(r.ops.processes),2)
+        self.assertEqual((r.limit,r.final),(1380,1500))
 
     def files_runner(self, group=None):
         home=self.root/'home'

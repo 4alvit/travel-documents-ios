@@ -14,7 +14,7 @@ import sys
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'a812765a5aeaa1a0292b0fa43cbc435123c7bc630f408ab50df8c8288902a73e'
+CORE_SHA = '97b24cd6254af03a6081e92f7f06f9e994ba65e809d8198418687b0ec25ab790'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Evidence helper changed before import')
 spec = importlib.util.spec_from_file_location('files_failure_core', HERE/'recovery_core.py')
