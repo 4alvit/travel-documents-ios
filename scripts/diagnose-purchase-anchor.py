@@ -20,7 +20,7 @@ CACHE_CAP = 300  # New prerequisite; includes stop reserve and shares the origin
 CASE = 'BatchImportUITests/testDiagnosticPurchasePresentationAnchor()'
 SELECTOR = 'TripfolioUITests/' + CASE.removesuffix('()')
 MODES = ('child', 'ownedAncestor')
-RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-5'
+RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-2'
 DEVICE = 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro'
 PINS = {
     'qualify-release.py': 'a117ccc89d70e4e9bf3180f882bd55abffba86a3895ddafe6f976dfe8a5220c4',
@@ -30,14 +30,15 @@ PINS = {
 }
 
 
-# Observed hosted26.5 metadata; activation remains stopped pending independent review.
+# Diagnostic runtime control: keep the reviewed Xcode/SDK26.5 host and reader,
+# and select the observed iOS26.2 runtime to isolate StoreKit session failures.
 PROFILE_METADATA_VERIFIED = True
 TOOLCHAIN = {
     'developer_dir': '/Applications/Xcode_26.5.app/Contents/Developer',
     'xcode_version': 'Xcode 26.5\nBuild version 17F42',
     'sdk_version': '26.5',
-    'runtime_version': '26.5',
-    'runtime_build': '23F77',
+    'runtime_version': '26.2',
+    'runtime_build': '23C54',
     'xcresulttool_version': 'xcresulttool version 24757, schema version: 0.1.0 (legacy commands format version: 3.58)',
     'schema_documents': {'summary':'b58076b9fd20285fba040974e56514ae6b5754cd28944939aa9eab6e636ddc59',
                          'tests':'18adcaa0c1bb43c466c0e0587816dbbe127c86e69e0f07fcde601ab7398d47da'},
@@ -502,7 +503,8 @@ def make_runner(q, core):
                     and matches[0].get('isAvailable') is True and self.profile['architecture'] in matches[0].get('supportedArchitectures',[])
                     and sum(x.get('identifier')==DEVICE for x in matches[0].get('supportedDeviceTypes',[]))==1,
                     'Wrong actual runtime/device')
-            self.selection = {'identifier':RUNTIME,'version':TOOLCHAIN['runtime_version'],'build':TOOLCHAIN['runtime_build'],'architecture':self.profile['architecture'],'sdk_version':TOOLCHAIN['sdk_version'],'sdk_matched':True}
+            self.selection = {'identifier':RUNTIME,'version':TOOLCHAIN['runtime_version'],'build':TOOLCHAIN['runtime_build'],'architecture':self.profile['architecture'],'sdk_version':TOOLCHAIN['sdk_version'],
+                              'sdk_matched':TOOLCHAIN['runtime_version']==TOOLCHAIN['sdk_version']}
             self.report['runtime_selection'] = self.selection
             selection = q.focused_build_selection('batch',self.profile,self.before['files'])
             self.settings = [*selection['build_settings'],'COMPILER_INDEX_STORE_ENABLE=NO']

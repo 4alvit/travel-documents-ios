@@ -25,8 +25,7 @@ Context=inspect.getclosurevars(Pair.run_arm).nonlocals['Context']
 
 class Guards(unittest.TestCase):
     def setUp(self):
-        # Synthetic profile completion only for offline behavior tests.
-        # The production draft's metadata gate remains false.
+        # Isolate offline tests from the production metadata gate and schema bytes.
         ready=mock.patch.object(m,'PROFILE_METADATA_VERIFIED',True);ready.start();self.addCleanup(ready.stop)
         schemas={'summary':hashlib.sha256(b'summary fixture').hexdigest(),
                  'tests':hashlib.sha256(b'tests fixture').hexdigest()}
@@ -87,7 +86,7 @@ class Guards(unittest.TestCase):
                     commands.append((label,args,cap));return replies.get(label,self.schema_reply(label))
                 p.commands.command=command
                 p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                    'version':'26.5','buildversion':'wrong' if fault=='runtime-build' else m.TOOLCHAIN['runtime_build'],
+                    'version':'26.2','buildversion':'wrong' if fault=='runtime-build' else m.TOOLCHAIN['runtime_build'],
                     'isAvailable':True,'supportedArchitectures':['x86_64' if fault=='runtime-architecture' else 'arm64'],
                     'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}) as selected, \
@@ -113,11 +112,11 @@ class Guards(unittest.TestCase):
 
     def test_actual_result_architecture_matches_selected_profile(self):
         for architecture in ('arm64',):
-            selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':architecture,
-                       'sdk_version':'26.5','sdk_matched':True}
+            selection={'identifier':m.RUNTIME,'version':'26.2','build':m.TOOLCHAIN['runtime_build'],'architecture':architecture,
+                       'sdk_version':'26.5','sdk_matched':False}
             summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,
                      'expectedFailures':0,'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC',
-                     'osVersion':'26.5','osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':architecture}}]}
+                     'osVersion':'26.2','osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':architecture}}]}
             tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
                   'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
             m.validate_result(q,summary,tree,'ABC',selection)
@@ -315,10 +314,10 @@ class Guards(unittest.TestCase):
             self.assertTrue(arm.report['cleanup_verified'])
 
     def test_actual_result_validator_binds_runtime_and_rejects_warning(self):
-        selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
-                   'sdk_version':'26.5','sdk_matched':True}
+        selection={'identifier':m.RUNTIME,'version':'26.2','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
+                   'sdk_version':'26.5','sdk_matched':False}
         summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0,
-                 'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.5',
+                 'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.2',
                  'osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':'arm64'}}]}
         tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
               'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
@@ -329,11 +328,11 @@ class Guards(unittest.TestCase):
 
     def capture_fixture(self, p, fail=False):
         arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
-        p.selection={'identifier':m.RUNTIME,'version':'26.5','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
-                     'sdk_version':'26.5','sdk_matched':True}
+        p.selection={'identifier':m.RUNTIME,'version':'26.2','build':m.TOOLCHAIN['runtime_build'],'architecture':'arm64',
+                     'sdk_version':'26.5','sdk_matched':False}
         raw=p.out/'child.xcresult';raw.mkdir();(raw/'Data').mkdir();(raw/'Info.plist').write_bytes(b'fixture')
         summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0,
-                 'testFailures':[],'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.5',
+                 'testFailures':[],'devicesAndConfigurations':[{'device':{'deviceId':'ABC','osVersion':'26.2',
                  'osBuildNumber':m.TOOLCHAIN['runtime_build'],'architecture':'arm64'}}]}
         tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
               'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
@@ -613,7 +612,7 @@ class Guards(unittest.TestCase):
                     if fault=='products':raise RuntimeError('product identity failed')
                 p.commands.command=command;p.source=source;p.product_snapshot=products
                 p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                    'version':'26.5','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
+                    'version':'26.2','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
                     'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}), \
                         mock.patch.object(q,'shared_product_paths',return_value={}):
@@ -851,7 +850,7 @@ class Guards(unittest.TestCase):
                 calls.append((label,args,cap));return replies.get(label,self.schema_reply(label))
             p.commands.command=command;p.commands.once=mock.Mock()
             p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':[{'identifier':m.RUNTIME,
-                'version':'26.5','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
+                'version':'26.2','buildversion':m.TOOLCHAIN['runtime_build'],'isAvailable':True,'supportedArchitectures':['arm64'],
                 'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
             selection={'build_settings':['EXCLUDED_SOURCE_FILE_NAMES=Other.swift']}
             with mock.patch.object(q,'focused_build_selection',return_value=selection), \
@@ -1268,7 +1267,7 @@ class Guards(unittest.TestCase):
                 def sim(label,*args,**kwargs):
                     events.append(label)
                     self.assertEqual(p.report['runtime_cache_readiness']['status'],'ready')
-                    return json.dumps({'runtimes':[{'identifier':m.RUNTIME,'version':'26.5','buildversion':'wrong' if fail=='runtime' else m.TOOLCHAIN['runtime_build'],
+                    return json.dumps({'runtimes':[{'identifier':m.RUNTIME,'version':'26.2','buildversion':'wrong' if fail=='runtime' else m.TOOLCHAIN['runtime_build'],
                         'isAvailable':True,'supportedArchitectures':['arm64'],'supportedDeviceTypes':[{'identifier':m.DEVICE}]}]})
                 p.commands.command=command;p.commands.sim=sim
                 with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':[]}), \
@@ -1297,5 +1296,62 @@ class Guards(unittest.TestCase):
         with self.assertRaises(RuntimeError):q.validate_schemas(b'summary fixture',b'tests fixture','batch')
         with self.assertRaises(RuntimeError):q.validate_schemas(b'changed',b'tests fixture','batch',profile=m.TOOLCHAIN)
 
+
+
+    def test_runtime_control_selects_26_2_beside_26_5_and_rejects_wrong_inventory(self):
+        for fault in (None,'missing','version','build'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p=self.fake_pair(Path(tmp));p.before={'files':{}};p.admit_build=mock.Mock();p.commands.once=mock.Mock()
+                rows=[{'target':name,'buildSettings':{'COMPILER_INDEX_STORE_ENABLE':'NO'}}
+                      for name in ('Tripfolio','TripfolioTests','TripfolioUITests')]
+                replies={'xcode':m.TOOLCHAIN['xcode_version'],'developer':m.TOOLCHAIN['developer_dir'],
+                         'sdk':'26.5','architecture':'arm64','build-settings':json.dumps(rows)}
+                commands=[]
+                def command(label,args,cap=38):
+                    commands.append((label,args,cap));return replies.get(label,self.schema_reply(label))
+                p.commands.command=command
+                selected={'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-26-2',
+                          'version':'26.5' if fault=='version' else '26.2',
+                          'buildversion':'23F77' if fault=='build' else '23C54',
+                          'isAvailable':True,'supportedArchitectures':['arm64'],
+                          'supportedDeviceTypes':[{'identifier':m.DEVICE}]}
+                newer={**selected,'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-26-5',
+                       'version':'26.5','buildversion':'23F77'}
+                runtimes=[newer] if fault=='missing' else [newer,selected]
+                p.commands.sim=lambda *args,**kwargs:json.dumps({'runtimes':runtimes})
+                with mock.patch.object(q,'focused_build_selection',return_value={'build_settings':[]}), \
+                        mock.patch.object(q,'shared_product_paths',return_value={}):
+                    if fault:
+                        with self.assertRaisesRegex(RuntimeError,'Wrong actual runtime/device'):p.prepare()
+                        self.assertFalse(any(c[0] in ('generate-project','build-for-testing') for c in commands))
+                        p.admit_build.assert_not_called()
+                    else:
+                        p.prepare()
+                        self.assertEqual(p.selection,{'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-26-2',
+                            'version':'26.2','build':'23C54','architecture':'arm64','sdk_version':'26.5','sdk_matched':False})
+                        self.assertEqual([c[0] for c in commands].count('build-for-testing'),1)
+                        self.assertEqual([c[0] for c in commands].count('runtime-cache-readiness'),1)
+                        self.assertEqual(p.report['toolchain']['sdk'],'26.5')
+                        self.assertEqual(p.report['toolchain']['xcode'],'Xcode 26.5\nBuild version 17F42')
+
+    def test_runtime_control_result_requires_26_2_and_honest_sdk_mismatch(self):
+        selection={'identifier':'com.apple.CoreSimulator.SimRuntime.iOS-26-2','version':'26.2',
+                   'build':'23C54','architecture':'arm64','sdk_version':'26.5','sdk_matched':False}
+        summary={'result':'Passed','totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,
+                 'expectedFailures':0,'testFailures':[], 'devicesAndConfigurations':[{'device':{'deviceId':'ABC',
+                 'osVersion':'26.2','osBuildNumber':'23C54','architecture':'arm64'}}]}
+        tree={'testNodes':[{'nodeType':'Test Case','nodeIdentifier':m.CASE,'result':'Passed'}],
+              'devices':[{'deviceId':'ABC','platform':'iOS Simulator'}]}
+        m.validate_result(q,summary,tree,'ABC',selection)
+        for key,bad in (('sdk_matched',True),('sdk_version','26.2'),('version','26.5')):
+            with self.subTest(selection=key),self.assertRaises(RuntimeError):
+                m.validate_result(q,summary,tree,'ABC',{**selection,key:bad})
+        for key,bad in (('osVersion','26.5'),('osBuildNumber','23F77')):
+            broken=json.loads(json.dumps(summary));broken['devicesAndConfigurations'][0]['device'][key]=bad
+            with self.subTest(device=key),self.assertRaises(RuntimeError):
+                m.validate_result(q,broken,tree,'ABC',selection)
+        with self.assertRaises(RuntimeError):q.validate_runtime_result('batch',selection,summary)
+        self.assertEqual(q.toolchain_profile('batch')['sdk_version'],'26.2')
+        self.assertEqual(q.toolchain_profile('batch')['runtime_version'],'26.2')
 
 if __name__=='__main__':unittest.main()
