@@ -345,7 +345,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(re.findall(r'^    ([a-z-]+)\)$',parser,re.MULTILINE),['core-purchase','ui-guidance'])
         self.assertIn('CODE_SIGNING_ALLOWED=NO "${TEST_ARGUMENTS[@]}"',driver)
         for bound in ['-parallel-testing-enabled NO','-maximum-concurrent-test-simulator-destinations 1',
-                      '-default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 480']:
+                      '-default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance "$MAXIMUM_TEST_SECONDS"']:
             self.assertIn(bound,driver)
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         self.assertEqual(workflow.count('bash scripts/verify.sh'),1)
