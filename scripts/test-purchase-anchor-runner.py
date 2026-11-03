@@ -566,6 +566,200 @@ class Guards(unittest.TestCase):
                     else:
                         p.prepare();self.assertIs(p.report['shared_build_verified'],True)
 
+    def boot_command_fixture(self,root):
+        p=self.fake_pair(root);p.report['shared_build_verified']=True
+        arm=Context(p,p.root/'child',p.final,'unused');p.current=arm;arm.owned='ABC'
+        now=[p.started];polls=[];scans=[]
+        child=SimpleNamespace(pid=77,returncode=None)
+        def poll():
+            polls.append(now[0])
+            if len(polls)>=4:child.returncode=0
+            return child.returncode
+        child.poll=poll
+        arm.ops=SimpleNamespace(now=lambda:now[0],spawn=lambda args:child,prepare=lambda proc:None,
+            read=lambda proc:[],absent=lambda proc:True,close=lambda proc:None,
+            sleep=lambda seconds:now.__setitem__(0,now[0]+seconds))
+        def scan(*args,**kwargs):
+            row=arm.report['commands'][-1] if arm.report['commands'] else None
+            scans.append(('before' if row is None else 'post' if 'finish' in row else 'pre',args,kwargs))
+            return {'logical':0,'allocated':0,'entries':1,'xcresults':{}}
+        return p,arm,now,child,polls,scans,scan
+
+    def test_actual_boot_command_has_full_boundaries_and_no_recursive_pump_scans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp))
+            def wait(seconds):now[0]+=10
+            arm.ops.sleep=wait
+            with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                    mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                self.assertEqual(arm.sim('boot-ready','bootstatus','ABC','-b'),'')
+            row=arm.report['commands'][0];proof=row['boot_accounting']
+            self.assertEqual([s[0] for s in scans],['before','pre','post'])
+            self.assertGreaterEqual(proof['interim_checks'],3)
+            self.assertTrue(proof['full_pre_verified']);self.assertTrue(proof['full_post_verified'])
+            self.assertIn('transient',proof['policy'])
+            self.assertEqual(row['returncode'],0);self.assertEqual(row['requested_cap_seconds'],188)
+            self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+            for _,args,kwargs in scans[-2:]:
+                self.assertLessEqual(args[3],p.started+row['work_deadline'])
+                self.assertFalse(kwargs['allow_products_restart']);self.assertFalse(kwargs['allow_xcresult_restart'])
+            self.assertFalse(arm.active);self.assertIsNone(arm._boot_boundary)
+
+    def test_boot_postcheck_failure_preserves_native_success_but_blocks_return(self):
+        for fault in ('scan','deadline','root'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp))
+                def walk(*args,**kwargs):
+                    result=scan(*args,**kwargs)
+                    if scans[-1][0]=='post':
+                        if fault=='scan':raise RuntimeError('post boundary changed')
+                        if fault=='deadline':now[0]=args[3]
+                        if fault=='root':raise RuntimeError('root changed')
+                    return result
+                with mock.patch.object(core,'live_sizes',side_effect=walk), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.sim('boot-ready','bootstatus','ABC','-b')
+                row=arm.report['commands'][0]
+                self.assertEqual(row['returncode'],0);self.assertEqual(row['outcome'],'completed')
+                self.assertFalse(row['boot_accounting']['full_post_verified'])
+                self.assertEqual(row['boot_accounting']['post_status'],'failed')
+                self.assertFalse(arm.active);self.assertIsNone(arm._boot_boundary)
+
+    def test_actual_boot_slow_close_requires_proven_closure_before_postcheck(self):
+        for broken in (False,True):
+            with self.subTest(broken=broken),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp))
+                def close(proc):
+                    now[0]+=core.CAPS['scan_interval_seconds']+1
+                    if broken:arm.report['commands'][-1]['stop']['group_absent']=False
+                arm.ops.close=close
+                with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    if broken:
+                        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                            arm.sim('boot-ready','bootstatus','ABC','-b')
+                    else:arm.sim('boot-ready','bootstatus','ABC','-b')
+                row=arm.report['commands'][0]
+                self.assertEqual(row['returncode'],0)
+                self.assertEqual(row['boot_accounting']['full_post_verified'],not broken)
+                self.assertEqual([s[0] for s in scans],['before','pre'] if broken else ['before','pre','post'])
+                self.assertIsNone(arm._boot_boundary)
+
+    def test_boot_interim_checks_fail_closed_without_recursive_scan(self):
+        faults=('root','space','log','deadline','proof','foreign','unknown','coordinator','record')
+        for fault in faults:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,row=self.postbuild_boot_context(Path(tmp),False)
+                row['bytes']={'stdout':0,'stderr':0};arm._boot_boundary={'record':None,'post':False}
+                with mock.patch.object(core,'live_sizes',return_value={'allocated':0}), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    arm.monitor()
+                child=SimpleNamespace(pid=123);arm.active[123]=child;row['pgid']=123
+                if fault=='root':p.output_id=('wrong',)
+                elif fault=='log':row['bytes']['stdout']=core.base.PER_LOG+1
+                elif fault=='deadline':now[0]=p.started+row['work_deadline']
+                elif fault=='proof':p.report['shared_build_verified']=False
+                elif fault=='foreign':arm.active[124]=SimpleNamespace(pid=124)
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='coordinator':p.commands.active[456]=SimpleNamespace(pid=456)
+                elif fault=='record':arm.report['commands'][-1]=dict(row)
+                free=0 if fault=='space' else core.CAPS['work_free_bytes']
+                with mock.patch.object(core,'live_sizes') as full, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=free)):
+                    with self.assertRaises(RuntimeError):arm.monitor()
+                full.assert_not_called()
+                self.assertFalse(row['boot_accounting']['full_post_verified'])
+
+    def test_boot_phase_only_exact_verified_owned_command(self):
+        for fault in ('id','argv','device','cleaning','proof','current','active','unknown','coordinator'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp))
+                label='boot-ready';args=['/usr/bin/xcrun','simctl','bootstatus','ABC','-b']
+                if fault=='id':label='other'
+                elif fault=='argv':args[-1]='wrong'
+                elif fault=='device':arm.owned='OTHER'
+                elif fault=='cleaning':arm.cleaning=True
+                elif fault=='proof':p.report['shared_build_verified']=False
+                elif fault=='current':p.current=None
+                elif fault=='active':arm.active[123]=SimpleNamespace(pid=123)
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='coordinator':p.commands.unknown_spawn=True
+                with mock.patch.object(core.Recovery,'command',return_value='base') as base:
+                    self.assertEqual(arm.command(label,args,188),'base')
+                base.assert_called_once_with(label,args,188)
+                self.assertIsNone(getattr(arm,'_boot_boundary',None))
+
+    def late_stop_fixture(self,root):
+        p=self.fake_pair(root);arm=Context(p,p.root/'child',p.final,'unused');p.current=arm
+        now=[p.started];arm.owned='ABC';arm.cleaning=True
+        arm.limit=p.started+110;arm.write_deadline=p.started+120
+        sent=[];child=SimpleNamespace(pid=77,returncode=None)
+        child.poll=lambda:child.returncode
+        def send(proc,sig):sent.append(sig);proc.returncode=-int(sig);return 'syscall_returned'
+        arm.ops=SimpleNamespace(now=lambda:now[0],spawn=lambda args:child,prepare=lambda proc:None,
+            read=lambda proc:[],absent=lambda proc:proc.returncode is not None,
+            close=lambda proc:None,send=send,sleep=lambda seconds:now.__setitem__(0,now[0]+seconds))
+        return p,arm,now,child,sent
+
+    def test_actual_late_cleanup_first_stop_retains_timeout_and_overrun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,sent=self.late_stop_fixture(Path(tmp))
+            # A real command loop loses scheduling before its work/stop boundaries.
+            arm.ops.sleep=lambda seconds:now.__setitem__(0,p.started+36)
+            with self.assertRaisesRegex(RuntimeError,'shutdown failed'):
+                arm.command('shutdown',['/usr/bin/xcrun','simctl','shutdown','ABC'],30)
+            row=arm.report['commands'][0]
+            self.assertEqual(sent,[m.signal.SIGTERM]);self.assertFalse(arm.active)
+            self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+            self.assertIn('exceeded cap',row['cap_error']);self.assertEqual(row['outcome'],'failed')
+            self.assertTrue(row['stop']['attempted']);self.assertTrue(row['stop']['leader_reaped'])
+            self.assertTrue(row['stop']['group_absent'])
+            self.assertEqual(row['late_first_stop']['original_deadline'],30)
+            self.assertEqual(row['late_first_stop']['deadline'],44)
+            self.assertEqual(arm.limit,p.started+110);self.assertEqual(arm.write_deadline,p.started+120)
+
+    def test_late_first_stop_clips_existing_parent_and_receipt_bounds(self):
+        for limit,write,final,expected in ((110,120,1980,44),(39,120,1980,39),(110,49,1980,39),(110,120,49,39)):
+            with self.subTest(limit=limit,write=write,final=final),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,sent=self.late_stop_fixture(Path(tmp));now[0]=p.started+36
+                arm.limit=p.started+limit;arm.write_deadline=p.started+write;p.final=p.started+final
+                row={'id':'shutdown','argv':['/usr/bin/xcrun','simctl','shutdown','ABC'],'pgid':77}
+                arm.report['commands'].append(row);arm.active[77]=child
+                arm.stop(child,p.started+30,row)
+                self.assertEqual(row['late_first_stop']['deadline'],expected)
+                self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+                self.assertEqual(sent,[m.signal.SIGTERM])
+
+    def test_late_stop_negative_conditions_preserve_original_exception_and_no_signals(self):
+        faults=('not-cleaning','current','id','argv','device','record','pgid','foreign','unknown','coordinator',
+                'coordinator-unknown','reaped','attempted','ambiguous-stop','parent-expired','receipt-expired','final-expired')
+        for fault in faults:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,sent=self.late_stop_fixture(Path(tmp));now[0]=p.started+36
+                row={'id':'shutdown','argv':['/usr/bin/xcrun','simctl','shutdown','ABC'],'pgid':77}
+                arm.report['commands'].append(row);arm.active[77]=child
+                if fault=='not-cleaning':arm.cleaning=False
+                elif fault=='current':p.current=None
+                elif fault=='id':row['id']='final-inventory'
+                elif fault=='argv':row['argv'][-1]='OTHER'
+                elif fault=='device':arm.owned='OTHER'
+                elif fault=='record':arm.report['commands'].append(dict(row))
+                elif fault=='pgid':row['pgid']=78
+                elif fault=='foreign':arm.active[78]=SimpleNamespace(pid=78)
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='coordinator':p.commands.active[78]=SimpleNamespace(pid=78)
+                elif fault=='coordinator-unknown':p.commands.unknown_spawn=True
+                elif fault=='reaped':child.returncode=0
+                elif fault=='attempted':row['stop']={'attempted':True}
+                elif fault=='ambiguous-stop':row['stop']={'attempted':False,'error':'unknown'}
+                elif fault=='parent-expired':arm.limit=now[0]
+                elif fault=='receipt-expired':arm.write_deadline=now[0]+10
+                elif fault=='final-expired':p.final=now[0]+10
+                expected='No repeated signalling' if fault=='attempted' else 'Stop deadline reached'
+                with self.assertRaisesRegex(RuntimeError,expected):arm.stop(child,p.started+30,row)
+                self.assertEqual(sent,[]);self.assertNotIn('late_first_stop',row)
+                self.assertTrue(row['stop']['attempted']);self.assertIs(arm.active[77],child)
+
     def test_log_accounting_is_shared_across_contexts(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=self.fake_pair(Path(tmp));a=Context(p,p.root/'child',p.final,'a');b=Context(p,p.root/'ancestor',p.final,'b')

@@ -157,10 +157,44 @@ def make_runner(q, core):
                 and self.pair.current is self and not self.unknown_spawn
                 and len(self.active)==(1 if child is not None else 0)
                 and coordinator is not None and not coordinator.active and not coordinator.unknown_spawn)
+            boundary=getattr(self,'_boot_boundary',None)
+            post=bool(boundary and boundary.get('post'))
+            if boundary and boundary.get('record') is not None:
+                require(pending is boundary['record'],'Boot accounting record changed')
+                settled=(self.boot_boundary_eligible(pending['id'],pending['argv'])
+                         and pending.get('returncode')==0 and 'error' not in pending
+                         and pending.get('stop',{}).get('group_absent') is True
+                         and pending.get('stop',{}).get('leader_reaped') is True)
+                if post:
+                    require(settled and 'finish' in pending,'Boot postcheck ownership incomplete')
+                else:
+                    # Base command checkpoints after stop/close but before setting
+                    # finish. Only its proven successful closure may bridge that gap.
+                    require(postbuild_boot or settled,'Boot accounting ownership or build proof changed')
+            if boundary and boundary.get('record') is not None and boundary['record'] is pending and not post:
+                # Deliberate phase policy: unexpected subtree writes/peak size are
+                # checked at full boundaries, not recursively on every boot pump.
+                deadline=min(self.limit,self.t0+pending['work_deadline'])
+                self.timecheck();require(self.ops.now()<deadline,'Boot phase deadline exceeded')
+                require(core.identity_of(self.pair.out)==self.pair.output_id,'Boot output root changed')
+                free=shutil.disk_usage(self.pair.out).free
+                require(free>=core.CAPS['work_free_bytes'],'Work free-space floor reached')
+                require(self.log_total<=core.base.ALL_LOG
+                        and set(pending['bytes'])=={'stdout','stderr'}
+                        and all(0<=n<=core.base.PER_LOG for n in pending['bytes'].values()),'Boot log cap exceeded')
+                require(core.identity_of(self.pair.out)==self.pair.output_id,'Boot output root changed')
+                self.timecheck();require(self.ops.now()<deadline,'Boot phase deadline exceeded')
+                proof=pending['boot_accounting']
+                proof['interim_checks']+=1
+                proof['last_interim']={'elapsed':self.ops.now()-self.t0,'free_bytes':free,
+                                       'scope':'root_free_log_ownership_deadlines_no_recursive_scan'}
+                self.next_scan=self.ops.now()+core.CAPS['scan_interval_seconds']
+                return
             allowance=(core.CAPS['phase_scan_seconds'] if writer or postbuild_boot else core.CAPS['boot_scan_seconds']
                        if boot else core.CAPS['scan_seconds'])
+            if post: allowance=core.CAPS['phase_scan_seconds']
             deadline=min(self.limit,started+allowance)
-            if unfinished: deadline=min(deadline,self.t0+pending['work_deadline'])
+            if unfinished or post: deadline=min(deadline,self.t0+pending['work_deadline'])
             observation={}
             def check():
                 self.timecheck()
@@ -181,14 +215,69 @@ def make_runner(q, core):
                        deadline_elapsed=deadline-self.t0,requested_scan_seconds=allowance)
             self.report['resources'].append(row)
             self.next_scan=self.ops.now()+core.CAPS['scan_interval_seconds']
+            if boundary and postbuild_boot and boundary.get('record') is None:
+                require('pgid' not in pending and not self.active,'Boot full precheck must precede spawn')
+                boundary['record']=pending
+                pending['boot_accounting']={'policy':'full_pre_and_post; interim root/free/log/ownership/deadline checks; transient subtree size/writes unobserved; boundary violations checked at postcheck',
+                    'full_pre_verified':True,'full_post_verified':False,'interim_checks':0,
+                    'pre_elapsed':row['elapsed'],'post_status':'not_completed'}
+            elif post:
+                pending['boot_accounting'].update(full_post_verified=True,post_status='verified',post_elapsed=row['elapsed'])
 
         def pump(self,p,record,handles):
             self.log_total=getattr(self.pair,'log_total',0)
             try: return super().pump(p,record,handles)
             finally: self.pair.log_total=self.log_total
 
+        def boot_boundary_eligible(self,label,argv):
+            coordinator=getattr(self.pair,'commands',None)
+            return (not self.cleaning and label=='boot-ready' and self.owned is not None
+                and argv==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+                and self.pair.current is self and self.pair.report.get('shared_build_verified') is True
+                and not self.active and not self.unknown_spawn and coordinator is not None
+                and not coordinator.active and not coordinator.unknown_spawn)
+
         def command(self, label, argv, cap=38):
-            return super().command(label,[str(x) for x in argv],cap)
+            argv=[str(x) for x in argv]
+            if not self.boot_boundary_eligible(label,argv):
+                return super().command(label,argv,cap)
+            require(getattr(self,'_boot_boundary',None) is None,'Nested boot accounting')
+            boundary={'record':None,'post':False};self._boot_boundary=boundary
+            try:
+                result=super().command(label,argv,cap)
+                require(boundary['record'] is not None,'Boot full precheck missing')
+                boundary['post']=True
+                self.monitor()
+                self.save()
+                return result
+            except BaseException as error:
+                if boundary['record'] is not None:
+                    boundary['record']['boot_accounting'].update(post_status='failed' if boundary['post'] else 'not_completed',
+                        boundary_error=repr(error)[:512])
+                raise
+            finally:
+                self._boot_boundary=None
+
+        def stop(self,p,deadline,record):
+            now=self.ops.now()
+            coordinator=getattr(self.pair,'commands',None)
+            if (self.cleaning and now>=deadline and self.owned is not None
+                and self.pair.current is self
+                and record.get('id') in ('shutdown','delete')
+                and record.get('argv')==['/usr/bin/xcrun','simctl',record['id'],self.owned]
+                and self.report['commands'] and record is self.report['commands'][-1]
+                and record.get('pgid')==p.pid and self.active.get(p.pid) is p and len(self.active)==1
+                and p.returncode is None and not self.unknown_spawn
+                and 'stop' not in record
+                and coordinator is not None and not coordinator.active and not coordinator.unknown_spawn):
+                end=min(self.limit,self.write_deadline-core.CAPS['receipt_seconds'],
+                        self.pair.final-core.CAPS['receipt_seconds'],now+8)
+                if now<end:
+                    record['late_first_stop']={'original_deadline':deadline-self.t0,
+                        'admitted_elapsed':now-self.t0,'deadline':end-self.t0,
+                        'policy':'first owned cleanup stop only; original command timeout and overrun remain failures'}
+                    deadline=end
+            return super().stop(p,deadline,record)
 
         def checkpoint(self, **kwargs):
             coordinator = getattr(self.pair, 'commands', None)
