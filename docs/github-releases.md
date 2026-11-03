@@ -52,7 +52,7 @@ share sheet. Batch qualification covers a preinitialized provider, not cold
 first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
-Only the direct preparation case uses a 30-second initial readiness polling
+The direct preparation case uses a 30-second initial readiness polling
 deadline for the supported Files browser or Recents screen. An in-flight
 synchronous XCTest query can return after that deadline; the existing outer
 case and command bounds still apply. In a retained
@@ -63,6 +63,18 @@ blank and did not prove a usable root. This scoped startup allowance preserves
 the readiness predicates, one exporter tap, subsequent 15-second waits, and
 the 180-second case allowance. It neither retries presentation nor establishes
 that the native service or full import scenario has been repaired.
+The normal folder-based native seed case also allows 30 seconds only for its
+initial Files navigation polling. In the retained
+[complete ARM flow](https://github.com/4alvit/travel-documents-ios/actions/runs/41598218571),
+the first positive navigation query began 14.54 seconds after polling started,
+close to the former 15-second allowance. A
+[later main capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41738390477)
+remained blank at that boundary. This scoped margin preserves the unique
+navigation predicate, subsequent 15-second waits, one exporter tap and the
+180-second case allowance; it does not establish that the blank presentation
+will recover or that its cause has been fixed. As above, an in-flight XCTest
+query can finish beyond the polling allowance; outer case and command bounds
+still apply.
 Default Arm preparation has a 780-second build/test cap and an unchanged
 180-second case allowance. The Intel envelope is described below.
 A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)

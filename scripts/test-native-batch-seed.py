@@ -139,6 +139,27 @@ class SeedGuards(unittest.TestCase):
             self.assertNotIn(forbidden,case)
         self.assertLess(case.index("saved.count == 0"),case.index("app.state == .notRunning"))
 
+    def test_only_seed_initial_folder_navigation_gets_the_larger_polling_allowance(self):
+        seed = UI[UI.index("    func testNativeSaveSeedsBothSyntheticOriginals()"):
+                  UI.index("    private func waitForNativeSeedExport(")]
+        route = UI[UI.index("    private func openLocalFilesFolder("):
+                   UI.index("    private func selectRealFiles(")]
+        call = "openLocalFilesFolder(folder, app: app, initialNavigationTimeout: .seconds(30))"
+        self.assertEqual(UI.count(call), 1)
+        self.assertIn(call, seed)
+        self.assertEqual(UI.count("initialNavigationTimeout: .seconds(30)"), 1)
+        self.assertIn("initialNavigationTimeout: Duration = .seconds(15)", route)
+        self.assertEqual(route.count("timeout: initialNavigationTimeout"), 1)
+        initial, rest = route.split('        let pickers =', 1)
+        self.assertIn('wait("Files did not present its navigation", app: app, timeout: initialNavigationTimeout)', initial)
+        self.assertIn("navigations.count == 1 && navigation.exists", initial)
+        self.assertNotIn("initialNavigationTimeout", rest)
+        self.assertIn("executionTimeAllowance = 180", seed)
+        self.assertIn("defer { app.terminate() }", seed)
+        self.assertEqual(seed.count("seed.tap()"), 1)
+        self.assertLess(seed.index("seed.tap()"), seed.index(call))
+        self.assertLess(seed.index(call), seed.index("save.tap()"))
+
     def test_gate_and_ui_keep_explicit_export_and_separate_opt_in_case(self):
         self.assertIn("#if DEBUG && targetEnvironment(simulator)\n// Diagnostic branch fixture",APP)
         self.assertIn("#if DEBUG && targetEnvironment(simulator)\n                if let token",APP)
