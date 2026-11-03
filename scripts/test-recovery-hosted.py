@@ -1122,6 +1122,75 @@ class BoundaryTests(unittest.TestCase):
         r.active = {p.pid: p}
         return r, p, {}
 
+    def test_short_stop_reserves_kill_confirmation_after_slow_initial_probe(self):
+        ops = PostKillOps()
+        r, p, row = self.owned_stop(ops)
+        def slow_first_probe():
+            if p.probe_calls == 1:
+                ops.t = 5.25
+        ops.after_probe = slow_first_probe
+        r.stop(p, 8., row)
+        self.assertEqual(row['stop']['signals'], [15, 9])
+        self.assertGreater(ops.kill_at, 5.25)
+        self.assertLess(ops.kill_at, 8.)
+        self.assertEqual(row['stop']['post_kill_confirmation'],
+                         {'deadline': 8., 'status': 'confirmed'})
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active)
+        self.assertLess(ops.t, 8.)
+        self.assertTrue(all(t < 8. for _, t in ops.events))
+
+    def test_short_stop_observes_after_term_and_escalates_with_remaining_budget(self):
+        for deadline, term_cost in ((.01, 0.), (.5, 0.), (1., 0.), (2., 0.),
+                                    (2.75, 1.5), (8., 6.5)):
+            with self.subTest(deadline=deadline, term_cost=term_cost):
+                ops = PostKillOps(reap_after=0., absent_after=0.)
+                r, p, row = self.owned_stop(ops)
+                def slow_term():
+                    if ops.kill_at is None:
+                        ops.t += term_cost
+                ops.after_send = slow_term
+                r.stop(p, deadline, row)
+                self.assertEqual(row['stop']['signals'], [15, 9])
+                first_signal = next(i for i, e in enumerate(ops.events) if e[0] == 'signal')
+                second_signal = next(i for i in range(first_signal + 1, len(ops.events))
+                                     if ops.events[i][0] == 'signal')
+                self.assertTrue(any(e[0] == 'probe' for e in ops.events[first_signal + 1:second_signal]))
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertEqual(row['stop']['post_kill_confirmation']['status'], 'confirmed')
+                self.assertFalse(r.active)
+                self.assertLess(ops.t, deadline)
+                self.assertTrue(all(t < deadline for _, t in ops.events))
+
+    def test_short_stop_retains_term_observation_when_unknown_settles_in_reserved_slice(self):
+        ops = PostTermOps(reap_after=1.5, absent_after=2.)
+        r, p, row = self.owned_stop(ops)
+        r.stop(p, 2.75, row)
+        self.assertEqual(row['stop']['signals'], [15])
+        self.assertEqual(row['stop']['post_term_confirmation'],
+                         {'deadline': 2.75, 'status': 'confirmed'})
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active)
+        self.assertGreaterEqual(ops.t, 2.)
+        self.assertLess(ops.t, 2.75)
+        self.assertTrue(all(t < 2.75 for _, t in ops.events))
+
+    def test_short_stop_permanent_term_unknown_keeps_original_observation_cap(self):
+        for deadline, observation_end in ((.5, .5), (2., 2.), (2.75, 2.75), (5.25, 5.)):
+            with self.subTest(deadline=deadline):
+                ops = PostTermOps(absent_after=float('inf'))
+                r, p, row = self.owned_stop(ops)
+                with self.assertRaisesRegex(RuntimeError, 'Stop deadline reached'):
+                    r.stop(p, deadline, row)
+                self.assertEqual(row['stop']['signals'], [15])
+                self.assertEqual(row['stop']['post_term_confirmation'],
+                                 {'deadline': observation_end, 'status': 'unconfirmed'})
+                self.assertEqual(ops.t, observation_end)
+                self.assertTrue(row['stop']['leader_reaped'])
+                self.assertFalse(row['stop']['group_absent'])
+                self.assertIs(r.active[p.pid], p)
+                self.assertTrue(all(t < observation_end for _, t in ops.events))
+
     def test_post_kill_unknown_can_settle_only_with_both_actual_proofs(self):
         ops = PostKillOps()
         r, p, row = self.owned_stop(ops)
