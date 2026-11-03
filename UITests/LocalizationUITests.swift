@@ -542,15 +542,17 @@ final class LocalizationUITests: XCTestCase {
 
             // Bring the first uncovered region toward the top, retaining an
             // overlap. Both endpoints stay in the text pane, above the actions.
-            let overlap = min(48, viewport.height * 0.25)
-            let correction = viewport.minY + overlap - (frame.minY + coveredThrough)
-            let distance = min(160, min(viewport.height * 0.4, max(24, abs(correction))))
-            let translation = correction > 0 ? distance : -distance
-            // Capture may take time, so read this frame after the attachment.
+            // Capture may take time, so bind both endpoints to a fresh body
+            // frame and reject any viewport that moved outside that text pane.
             let bodyFrame = body.frame
+            guard let drag = backupWarningDrag(viewport: viewport, frame: frame,
+                                               coveredThrough: coveredThrough, bodyFrame: bodyFrame) else {
+                throw LocalizationFailure(message: "Backup warning has no safe in-pane drag")
+            }
             let start = body.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-                .withOffset(CGVector(dx: viewport.midX - bodyFrame.minX,
-                                     dy: viewport.midY - bodyFrame.minY))
+                .withOffset(CGVector(dx: drag.start.x - bodyFrame.minX,
+                                     dy: drag.start.y - bodyFrame.minY))
+            let translation = drag.end.y - drag.start.y
             let end = start.withOffset(CGVector(dx: 0, dy: translation))
             print("WARNING_DRAG attempt=\(attempt) dy=\(translation)")
             start.press(forDuration: 0.05, thenDragTo: end,
@@ -558,6 +560,24 @@ final class LocalizationUITests: XCTestCase {
             try await Task.sleep(for: .milliseconds(150))
         }
         throw LocalizationFailure(message: "Complete backup warning text was not reachable after bounded in-pane scrolling")
+    }
+
+    private func backupWarningDrag(viewport: CGRect, frame: CGRect, coveredThrough: CGFloat,
+                                   bodyFrame: CGRect) -> (start: CGPoint, end: CGPoint)? {
+        guard finiteFrame(viewport), finiteFrame(frame), finiteFrame(bodyFrame),
+              viewport.width > 44, viewport.height > 80, bodyFrame.contains(viewport),
+              coveredThrough.isFinite, coveredThrough >= 0, coveredThrough < frame.height else { return nil }
+        let bounds = viewport.insetBy(dx: 2, dy: 2)
+        let overlap = min(48, viewport.height * 0.25)
+        let correction = viewport.minY + overlap - (frame.minY + coveredThrough)
+        guard correction.isFinite, correction != 0 else { return nil }
+        // Traverse the usable viewport rather than repeatedly recapturing most
+        // of it. Only measured slices above establish coverage, never a drag.
+        let distance = min(bounds.height - overlap, max(24, abs(correction)))
+        let start = CGPoint(x: bounds.midX, y: correction > 0 ? bounds.minY : bounds.maxY)
+        let end = CGPoint(x: start.x, y: start.y + (correction > 0 ? distance : -distance))
+        guard distance > 0, viewport.contains(start), viewport.contains(end) else { return nil }
+        return (start, end)
     }
 
     private struct BackupWarningObservation {

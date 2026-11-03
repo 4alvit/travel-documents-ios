@@ -91,6 +91,29 @@ class BatchDriverTests(unittest.TestCase):
         process.wait.assert_called_once_with(timeout=100)
         self.assertEqual(run.summary["execution_order"], driver.execution_order(log_bytes()))
 
+    def test_native_root_adds_only_explicit_destination_flags_to_same_single_pair(self):
+        run, _, _ = self.fixture()
+        run.args.native_root = True
+        run.token = "12345678-1234-4234-8234-123456789abc"
+        run.native_root_identity = Mock()
+        process = Mock(); process.wait.return_value = 0
+        def spawn(argv, **kwargs):
+            kwargs["stdout"].write(log_bytes()); kwargs["stdout"].flush()
+            return process
+        with patch.object(driver.subprocess, "Popen", side_effect=spawn) as call, patch("builtins.print"):
+            run.run_test()
+        call.assert_called_once(); run.native_root_identity.assert_called_once()
+        argv = call.call_args.args[0]; env = call.call_args.kwargs["env"]
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:" + x for x in SELECTORS])
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_UI"], "1")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_NATIVE_ROOT_TOKEN"], run.token)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_UI"], "1")
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_FOLDER"], run.folder_name)
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "600")
+        process.wait.assert_called_once_with(timeout=100)
+        self.assertEqual(run.summary["execution_order"], driver.execution_order(log_bytes()))
+
     def test_case_ceiling_does_not_extend_remaining_driver_deadline(self):
         run, _, _ = self.fixture()
         process = Mock()
@@ -254,6 +277,84 @@ class BatchDriverTests(unittest.TestCase):
             driver.read_execution_order(self.log, check)
         close.assert_called_once()
 
+
+    def test_qualified_root_uses_same_verified_build_without_rebuilding(self):
+        run,_,_=self.fixture();run.args.native_root=True;run.token="12345678-1234-4234-8234-123456789abc"
+        run.native_root_identity=Mock();run.root=self.root.resolve();run.qualified_build=run.root/"build/qualification-prepared"
+        run.qualified_build.mkdir(parents=True)
+        process=Mock();process.wait.return_value=0
+        def spawn(argv,**kwargs):
+            kwargs["stdout"].write(log_bytes());kwargs["stdout"].flush();return process
+        with patch.object(driver.subprocess,"Popen",side_effect=spawn) as call,patch("builtins.print"):
+            run.run_test()
+        call.assert_called_once();argv=call.call_args.args[0]
+        self.assertEqual(argv[-1],"test-without-building")
+        self.assertEqual(argv[argv.index("-derivedDataPath")+1],str(run.qualified_build))
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],["-only-testing:"+x for x in SELECTORS])
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1],"600")
+        process.wait.assert_called_once_with(timeout=100)
+
+    def test_prebuilt_path_cannot_be_used_by_default_or_redirected(self):
+        for bad in ("default","outside","link"):
+            run,_,_=self.fixture();run.args.native_root=bad!="default"
+            p=self.root/"build"/bad;p.mkdir(parents=True)
+            if bad=="outside":p=self.root
+            if bad=="link":
+                link=self.root/"build/alias";link.symlink_to(p);p=link
+            run.qualified_build=p
+            with patch.object(driver.subprocess,"Popen") as call,self.assertRaises(RuntimeError):run.run_test()
+            call.assert_not_called()
+
+    def focused_fixture(self):
+        run, _, _ = self.fixture(); run.root = self.root.resolve()
+        run.args.native_root = run.args.native_seed = run.args.combined_batch = True
+        run.qualified_build = run.root / "build/qualified"; run.qualified_build.mkdir(parents=True, exist_ok=True)
+        run.qualified_build_settings = ("EXCLUDED_SOURCE_FILE_NAMES=First.swift Second.swift",)
+        run.checkpoint_session = run.token = OWNED; run.checkpoint_callback = Mock()
+        run.deadline = 1200; run.native_root_identity = Mock(); run.validate_result = Mock()
+        run.combined_protocol = SimpleNamespace(upper_uuid=Mock(), TESTS=("TripfolioUITests/BatchImportUITests/seed",
+            "TripfolioUITests/BatchImportUITests/main"), CASES=("seed()", "main()"),
+            monitor=Mock(return_value={"returncode": 0}))
+        return run
+
+    def test_focused_build_argv_is_recorded_and_passed_once_without_changing_limits(self):
+        run = self.focused_fixture()
+        with patch.object(driver.subprocess, "Popen") as spawn, patch("builtins.print"):
+            run.run_test()
+        argv = spawn.call_args.args[0]
+        setting = run.qualified_build_settings[0]
+        self.assertEqual(argv.count(setting), 1)
+        self.assertEqual(argv[-3:], ["CODE_SIGNING_ALLOWED=NO", setting, "test-without-building"])
+        self.assertEqual(run.summary["command"], argv)
+        self.assertEqual(run.record.call_args.kwargs["argv"], argv)
+        self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
+                         ["-only-testing:" + x for x in run.combined_protocol.TESTS])
+        self.assertEqual(argv[argv.index("-default-test-execution-time-allowance")+1], "300")
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1], "600")
+        self.assertEqual(run.combined_protocol.monitor.call_args.args[2], 1200)
+        run.native_root_identity.assert_called_once(); run.validate_result.assert_called_once()
+
+    def test_focused_build_requires_qualified_combined_native_root(self):
+        for fault in ("ordinary", "not_combined", "no_build", "no_native_root", "no_checkpoint"):
+            run = self.focused_fixture()
+            if fault == "ordinary": run.args = SimpleNamespace(device=OWNED)
+            elif fault == "not_combined": run.args.combined_batch = False
+            elif fault == "no_build": del run.qualified_build
+            elif fault == "no_native_root": run.args.native_root = False
+            else: run.checkpoint_callback = None
+            with self.subTest(fault=fault), patch.object(driver.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+                run.run_test()
+            spawn.assert_not_called(); run.native_root_identity.assert_not_called()
+
+    def test_focused_build_setting_is_immutable_single_literal_and_unique(self):
+        for settings in ([], ["EXCLUDED_SOURCE_FILE_NAMES=First.swift"], ("OTHER=First.swift",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=*.swift",), ("EXCLUDED_SOURCE_FILE_NAMES=First.swift First.swift",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=../First.swift",), ("EXCLUDED_SOURCE_FILE_NAMES=First.swift\n",),
+                         ("EXCLUDED_SOURCE_FILE_NAMES=First.swift", "OTHER=NO")):
+            run = self.focused_fixture(); run.qualified_build_settings = settings
+            with self.subTest(settings=settings), patch.object(driver.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+                run.run_test()
+            spawn.assert_not_called(); run.native_root_identity.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

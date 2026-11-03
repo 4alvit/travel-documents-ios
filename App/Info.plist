@@ -12,6 +12,7 @@
 <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
 <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
 <key>LSRequiresIPhoneOS</key><true/>
+<key>LSSupportsOpeningDocumentsInPlace</key><true/>
 <key>UILaunchScreen</key><dict/>
 <key>NSCameraUsageDescription</key><string>Scan a document directly into your local travel library.</string>
 <key>NSFaceIDUsageDescription</key><string>Unlock access to your private travel documents.</string>

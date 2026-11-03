@@ -1,3 +1,5 @@
+import Darwin
+import notify
 import Foundation
 import StoreKit
 import StoreKitTest
@@ -20,13 +22,19 @@ final class BatchImportUITests: XCTestCase {
     private let filenames = ["synthetic-ticket.pdf", "synthetic-insurance.pdf"]
 
     func testRealFilesBatchRequiresEveryReviewAndPreservesOriginals() async throws {
+        let caseStart = ContinuousClock().now
+        let checkpoint = try combinedBatchMode(ProcessInfo.processInfo.environment)
         try XCTSkipUnless(ProcessInfo.processInfo.environment["TRIPDOCKET_BATCH_UI"] == "1",
                           "Opt in with TRIPDOCKET_BATCH_UI=1 on the dedicated, fixture-seeded simulator")
         guard !folder.isEmpty, !folder.contains("/"), !folder.contains("\\") else {
             throw BatchTestFailure(message: "TRIPDOCKET_BATCH_FOLDER must name a single nonempty Files folder")
         }
+        let nativeRoot = try nativeRootMode("batch")
         executionTimeAllowance = 600
         continueAfterFailure = false
+        if let checkpoint {
+            try await awaitBatchCheckpoint(checkpoint, until: caseStart.advanced(by: .seconds(600)))
+        }
         let app = XCUIApplication()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.terminate()
@@ -37,6 +45,7 @@ final class BatchImportUITests: XCTestCase {
             session.resetToDefaultState()
         }
         app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-batch-diagnostics",
+                               "--ui-testing-purchase-diagnostics",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         try await openTrip(app)
@@ -54,7 +63,7 @@ final class BatchImportUITests: XCTestCase {
         try await wait("The purchased batch entry did not open", app: app) { choose.exists && choose.isEnabled }
         try await reveal(choose, app: app, navigation: "Import files")
         choose.tap()
-        try await selectRealFiles(app)
+        try await selectRealFiles(app, nativeRoot: nativeRoot)
         try await wait("Both real files were not prepared for individual review", app: app) {
             self.reviewRow(self.filenames[0], in: app).exists
                 && self.reviewRow(self.filenames[1], in: app).exists
@@ -201,6 +210,65 @@ final class BatchImportUITests: XCTestCase {
     }
 
 
+    // Batch-only provider initialization. The temporary source UUID is not
+    // the later seed UUID; no destination Save or producer marker occurs here.
+    func testBatchPrepareFilesProviderDirectly() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TRIPDOCKET_BATCH_PREPARE_UI"] == "1",
+                          "Opt in only for the owned direct batch preparation")
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        let token = try Self.directPreparationToken(environment, debugSimulator: debugSimulator)
+        let absentFolder = "TripDocket-Batch-Prepare-" + token
+        executionTimeAllowance = 180
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        defer { app.terminate() }
+        app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
+                                                   "--ui-testing-native-batch-token", token]
+        app.launch()
+        let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+        let failed = app.staticTexts["nativeSeed.failure"]
+        try await wait("Direct preparation source is unavailable", app: app) {
+            failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
+        }
+        try check(!failed.exists && source.count == 1 && source.element.isEnabled && source.element.isHittable,
+                  app: app, "Direct preparation has no unique live native export source")
+        capture(app, "Batch preparation — native exporter before opening Files; no Save performed")
+        source.element.tap()
+        let picker = try await openNativeFilesRoot(app)
+        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+        try check(isNativeFilesRoot(app) && picker.cells.matching(identifier: absentFolder + ", Folder").count == 0
+                  && saved.count == 0 && !failed.exists,
+                  app: app, "Direct preparation lost its empty probe or exported a destination")
+        capture(app, "Batch preparation — exact local Files root; no Save performed")
+        app.terminate()
+        try await wait("Direct preparation fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
+    private static func directPreparationToken(_ environment: [String: String],
+                                               debugSimulator: Bool) throws -> String {
+        let token = environment["TRIPDOCKET_BATCH_PREPARE_TOKEN"] ?? ""
+        let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                           "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                           "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
+                           "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION"]
+        guard debugSimulator, environment["TRIPDOCKET_BATCH_PREPARE_UI"] == "1",
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              conflicting.allSatisfy({ environment[$0] == nil }) else {
+            throw BatchTestFailure(message: "Direct preparation requires its isolated Debug Simulator token")
+        }
+        return token
+    }
+
     func testNativeCreateOwnedFilesFolder() async throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_FOLDER_UI"] == "1",
@@ -324,6 +392,7 @@ final class BatchImportUITests: XCTestCase {
 
     func testNativeSaveSeedsBothSyntheticOriginals() async throws {
         let environment = ProcessInfo.processInfo.environment
+        let checkpoint = try combinedBatchMode(environment)
         try XCTSkipUnless(environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
                           "Opt in only for the owned native-Save fixture diagnostic")
         let token = environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] ?? ""
@@ -331,39 +400,247 @@ final class BatchImportUITests: XCTestCase {
               environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
             throw BatchTestFailure(message: "Native seed requires its exact canonical owned folder token")
         }
+        let nativeRoot = try nativeRootMode("seed")
+        let reopenValue = environment["TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
+        guard reopenValue == nil || reopenValue == "" || reopenValue == "1" else {
+            throw BatchTestFailure(message: "Invalid native reopen control")
+        }
+        let reopenControl = reopenValue == "1"
+        guard !reopenControl || (nativeRoot && checkpoint != nil) else {
+            throw BatchTestFailure(message: "Native reopen control requires the owned combined root")
+        }
         executionTimeAllowance = 180
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
         app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
-                                                   "--ui-testing-native-batch-token", token]
+                                                   "--ui-testing-native-batch-token", token,
+                                                   "--ui-testing-batch-diagnostics"]
+        if reopenControl {
+            app.launchArguments += ["--ui-testing-native-reopen"]
+        }
         app.launch()
-        for filename in filenames {
-            let seed = app.buttons["nativeSeed." + filename]
-            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isHittable }
+        // Native Save writes both fixtures in one presentation. The callback
+        // proves only returned URLs; the host must verify both files before main.
+        let exportGroups = [filenames]
+        for exportNames in exportGroups {
+            let sourceIdentifier = "nativeSeed.exportBoth"
+            let seed = app.buttons[sourceIdentifier]
+            try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isEnabled && seed.isHittable }
             seed.tap()
-            let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(
-                format: "(elementType == %@ AND label == %@) OR (elementType == %@ AND identifier == %@ AND label == %@)",
-                NSNumber(value: XCUIElement.ElementType.button.rawValue), "Save to Files",
-                NSNumber(value: XCUIElement.ElementType.cell.rawValue), "actionGroupCell", "Save to Files"
-            ))
-            try await waitForStableShareAction(saveToFiles, app: app)
-            saveToFiles.element.tap()
-            let picker = try await openLocalFilesFolder(folder, app: app)
-            let navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            let picker: XCUIElement
+            let navigation: XCUIElement
+            if nativeRoot {
+                picker = try await openNativeFilesRoot(app)
+                navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar").element
+            } else {
+                picker = try await openLocalFilesFolder(folder, app: app)
+                navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
+            }
             let save = navigation.buttons["Save"]
             try await wait("Native seed destination Save is unavailable", app: app) {
                 save.exists && save.isEnabled && save.isHittable
             }
-            capture(app, "Native seed exact destination before Save — " + filename)
-            save.tap()
-            try await wait("Native seed Save did not finish", app: app) {
-                !navigation.exists && seed.exists && seed.isHittable
+            capture(app, "Native seed exact destination before Save — " + exportNames.joined(separator: ", "))
+            if nativeRoot {
+                try check(isNativeFilesRoot(app)
+                          && navigation.buttons.matching(NSPredicate(format: "label == %@", "Save")).count == 1,
+                          app: app, "Native seed left its verified local root or unique Save action")
             }
-            capture(app, "Native seed returned after Save — " + filename)
+            save.tap()
+            let verified = [app.staticTexts["nativeSeed.callbackVerified"]]
+            let failed = app.staticTexts["nativeSeed.failure"]
+            try await waitForNativeSeedExport(app, navigation: navigation, verified: verified,
+                                              failed: failed, observeLateFailure: reopenControl)
+            try check(!failed.exists && verified.allSatisfy { $0.exists }, app: app,
+                      "Native seed export destination was not verified")
+            let sourceNames = exportNames.sorted()
+            let subsets = sourceNames.map { [$0] } + [sourceNames]
+            let expectedValues = subsets.map {
+                "sourceCount=\(sourceNames.count) sourceNames=\(sourceNames.joined(separator: ",")) "
+                    + "verifiedCount=\($0.count) verifiedNames=\($0.joined(separator: ","))"
+            }
+            let callbackValue = verified[0].value as? String ?? ""
+            try check(expectedValues.contains(callbackValue), app: app,
+                      "Native seed callback verification evidence is invalid")
+            print("BATCH_NATIVE_SEED_CALLBACK \(callbackValue)")
+            capture(app, "Native seed returned URLs verified after Save — " + exportNames.joined(separator: ", "))
+        }
+        if reopenControl {
+            // Diagnostic only: keep this AUT process alive after both exports.
+            // The ordinary main case still runs after its normal termination.
+            let reopen = app.buttons["nativeSeed.reopen"]
+            try await wait("Same-process reopen control is unavailable", app: app) {
+                reopen.exists && reopen.isEnabled && reopen.isHittable
+            }
+            capture(app, "Same-process native reopen before selection")
+            reopen.tap()
+            do {
+                try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)
+                let verified = app.staticTexts["nativeSeed.reopenVerified"]
+                let failed = app.staticTexts["nativeSeed.reopenFailure"]
+                try await wait("Same-process reopen did not verify both originals", app: app) {
+                    verified.exists || failed.exists
+                }
+                try check(verified.exists && !failed.exists, app: app,
+                          "Same-process reopen rejected the returned original bytes")
+                capture(app, "Same-process native reopen verified both originals")
+                print("BATCH_NATIVE_REOPEN result=verified")
+            } catch {
+                capture(app, "Same-process native reopen failed")
+                throw error
+            }
         }
         // Host compares both exact destination bytes; completion alone is not proof.
+        if let checkpoint { try Self.recordBatchProducer(checkpoint) }
+    }
+
+    private func waitForNativeSeedExport(_ app: XCUIApplication, navigation: XCUIElement,
+                                         verified: [XCUIElement], failed: XCUIElement,
+                                         observeLateFailure: Bool) async throws {
+        let terminal: @MainActor () -> Bool = {
+            failed.exists || (!navigation.exists && verified.allSatisfy { $0.exists })
+        }
+        do {
+            try await wait("Native seed export did not finish destination verification", app: app,
+                           condition: terminal)
+        } catch let originalFailure as BatchTestFailure {
+            if observeLateFailure && !Task.isCancelled {
+                // Diagnostic only: the original criterion already failed and
+                // retained its evidence. Observe the same predicate without actions.
+                // This deadline cannot interrupt an in-flight XCTest query/capture;
+                // the unchanged 180-second case and outer limits still apply.
+                let started = ContinuousClock.now
+                let deadline = started.advanced(by: .seconds(45))
+                var terminalObserved = false
+                while ContinuousClock.now < deadline && !Task.isCancelled {
+                    if terminal() { terminalObserved = true; break }
+                    do { try await Task.sleep(for: .milliseconds(100)) }
+                    catch { break }
+                }
+                let timing = XCTAttachment(string: """
+                    originalExportCriterion=failed
+                    requestedObservationSeconds=45
+                    observedElapsed=\(started.duration(to: .now))
+                    terminalObserved=\(terminalObserved)
+                    cancelled=\(Task.isCancelled)
+                    acceptance=failed
+                    """)
+                timing.name = "Native seed passive late observation — original failure retained"
+                timing.lifetime = .keepAlways
+                add(timing)
+                if !Task.isCancelled {
+                    capture(app, "Native seed after passive late observation — original failure retained",
+                            batchDiagnostic: true)
+                }
+            }
+            // A late callback, failure or diagnostic cancellation cannot pass
+            // the original criterion or allow reopen/checkpoint/main to continue.
+            throw originalFailure
+        }
+    }
+
+    // Combined qualification preserves separate seed/main XCTest cases. This
+    // process-local record is never a substitute for the host's real seed PASS.
+    private struct BatchCheckpointIdentity: Equatable {
+        let session: String
+        let token: String
+    }
+
+    private enum BatchCheckpointState {
+        case empty
+        case produced(BatchCheckpointIdentity)
+        case consumed
+    }
+
+    private static var batchCheckpointState: BatchCheckpointState = .empty
+
+    private func combinedBatchMode(_ environment: [String: String]) throws -> BatchCheckpointIdentity? {
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        return try Self.combinedBatchConfiguration(environment, debugSimulator: debugSimulator)
+    }
+
+    private static func combinedBatchConfiguration(
+        _ environment: [String: String], debugSimulator: Bool
+    ) throws -> BatchCheckpointIdentity? {
+        guard environment["TRIPDOCKET_COMBINED_BATCH_UI"] != nil
+                || environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] != nil else { return nil }
+        let session = environment["TRIPDOCKET_BATCH_CHECKPOINT_SESSION"] ?? ""
+        let token = environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] ?? ""
+        guard debugSimulator, environment["TRIPDOCKET_COMBINED_BATCH_UI"] == "1",
+              let sessionID = UUID(uuidString: session), sessionID.uuidString == session,
+              sessionID.uuid.6 & 0xf0 == 0x40, sessionID.uuid.8 & 0xc0 == 0x80,
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_NATIVE_ROOT_UI"] == "1",
+              environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1",
+              environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] == token,
+              environment["TRIPDOCKET_BATCH_UI"] == "1",
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token else {
+            throw BatchTestFailure(message: "Combined batch requires its exact Debug Simulator session and owned fixture")
+        }
+        return BatchCheckpointIdentity(session: session, token: token)
+    }
+
+    private static func recordBatchProducer(_ identity: BatchCheckpointIdentity) throws {
+        guard case .empty = batchCheckpointState else {
+            throw BatchTestFailure(message: "Combined batch producer was already recorded or consumed")
+        }
+        batchCheckpointState = .produced(identity)
+    }
+
+    private static func consumeBatchProducer(_ identity: BatchCheckpointIdentity) throws {
+        guard case .produced(let actual) = batchCheckpointState, actual == identity else {
+            throw BatchTestFailure(message: "Combined batch requires its matching producer in this test process")
+        }
+        batchCheckpointState = .consumed
+    }
+
+    private func awaitBatchCheckpoint(
+        _ identity: BatchCheckpointIdentity, until caseDeadline: ContinuousClock.Instant
+    ) async throws {
+        try Task.checkCancellation()
+        try Self.consumeBatchProducer(identity)
+        let clock = ContinuousClock()
+        let deadline = min(caseDeadline, clock.now.advanced(by: .seconds(60)))
+        guard clock.now < deadline else {
+            throw BatchTestFailure(message: "Combined batch checkpoint has no remaining case budget")
+        }
+        let nonce = UUID().uuidString
+        let name = "com.4alvit.tripfolio.batch-checkpoint.\(identity.session).\(nonce)"
+        var notificationToken: Int32 = 0
+        guard notify_register_check(name, &notificationToken) == NOTIFY_STATUS_OK else {
+            throw BatchTestFailure(message: "Cannot register combined batch checkpoint acknowledgement")
+        }
+        defer { _ = notify_cancel(notificationToken) }
+        var state: UInt64 = 0
+        guard notify_get_state(notificationToken, &state) == NOTIFY_STATUS_OK, state == 0 else {
+            throw BatchTestFailure(message: "Combined batch checkpoint acknowledgement was not initially empty")
+        }
+        try Task.checkCancellation()
+        guard clock.now < deadline else {
+            throw BatchTestFailure(message: "Combined batch checkpoint setup exhausted its deadline")
+        }
+        print("TRIPDOCKET_BATCH_CHECKPOINT \(identity.session) \(identity.token) \(nonce)")
+        fflush(nil)
+        repeat {
+            guard notify_get_state(notificationToken, &state) == NOTIFY_STATUS_OK else {
+                throw BatchTestFailure(message: "Cannot read combined batch checkpoint acknowledgement")
+            }
+            try Task.checkCancellation()
+            if clock.now >= deadline { break }
+            if state == 1 { return }
+            guard state == 0 else {
+                throw BatchTestFailure(message: "Unexpected combined batch checkpoint acknowledgement")
+            }
+            let remaining = clock.now.duration(to: deadline)
+            if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
+        } while clock.now < deadline
+        throw BatchTestFailure(message: "Host did not acknowledge the combined batch checkpoint within its deadline")
     }
 
     @MainActor
@@ -486,27 +763,61 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func waitForStableShareAction(_ actions: XCUIElementQuery, app: XCUIApplication) async throws {
-        let header = app.navigationBars.matching(identifier: "UIActivityContentView")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
         var previousFrames: [CGRect]?
         var previousIdentity: String?
         var stableObservations = 0
-        // Remote share actions become hittable before the presentation finishes.
-        // Require the same action and native header geometry on successive polls;
-        // any unavailable, invalid, or changing state restarts convergence.
+        // A single snapshot supplies a coherent action/header observation without
+        // repeating remote attribute queries. Hittability still uses the live
+        // query, constrained to that snapshot's exact action identity.
         try await wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40)) {
             var frames: [CGRect]?
             var identity: String?
-            if actions.count == 1, header.count == 1 {
-                let action = actions.element
-                if action.isEnabled, action.isHittable {
-                    let bounds = app.frame
-                    let candidate = [action.frame, header.element.frame]
-                    if candidate.allSatisfy({ frame in
+            if ContinuousClock.now < deadline, let snapshot = try? app.snapshot(),
+               ContinuousClock.now < deadline {
+                var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
+                var visited = 0
+                var complete = true
+                var matchingActions: [XCUIElementSnapshot] = []
+                var matchingHeaders: [XCUIElementSnapshot] = []
+                while let (node, depth) = pending.popLast() {
+                    guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else {
+                        complete = false
+                        break
+                    }
+                    visited += 1
+                    if node.label == "Save to Files",
+                       node.elementType == .button
+                        || (node.elementType == .cell && node.identifier == "actionGroupCell") {
+                        matchingActions.append(node)
+                    }
+                    if node.elementType == .navigationBar, node.identifier == "UIActivityContentView" {
+                        matchingHeaders.append(node)
+                    }
+                    let children = node.children
+                    // Never accept a truncated tree: a later node may be a duplicate.
+                    guard children.count <= 4_096 - visited - pending.count else {
+                        complete = false
+                        break
+                    }
+                    pending.append(contentsOf: children.map { ($0, depth + 1) })
+                }
+                if complete, matchingActions.count == 1, matchingHeaders.count == 1 {
+                    let action = matchingActions[0]
+                    let bounds = snapshot.frame
+                    let candidate = [action.frame, matchingHeaders[0].frame]
+                    if action.isEnabled, ([bounds] + candidate).allSatisfy({ frame in
                         frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite
                             && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
                     }) {
-                        frames = candidate
-                        identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                        let liveAction = actions.matching(NSPredicate(
+                            format: "elementType == %@ AND identifier == %@ AND label == %@",
+                            NSNumber(value: action.elementType.rawValue), action.identifier, action.label
+                        )).element
+                        if ContinuousClock.now < deadline, liveAction.isHittable, ContinuousClock.now < deadline {
+                            frames = candidate
+                            identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                        }
                     }
                 }
             }
@@ -935,9 +1246,15 @@ final class BatchImportUITests: XCTestCase {
         let buy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Unlock Pro ·")).firstMatch
         try await wait("The local product did not load; no purchase retry is allowed", app: app) { buy.exists && buy.isEnabled }
         try await reveal(buy, app: app, navigation: "TripDocket Pro")
+        recordPurchaseObservation(app, session: session, point: .beforeTap)
         buy.tap()
-        try await wait("No positively identified Xcode payment sheet appeared", app: app, springboard: springboard) {
-            self.xcodeMarker(app).exists || self.xcodeMarker(springboard).exists
+        do {
+            try await wait("No positively identified Xcode payment sheet appeared", app: app, springboard: springboard) {
+                self.xcodeMarker(app).exists || self.xcodeMarker(springboard).exists
+            }
+        } catch {
+            recordPurchaseObservation(app, session: session, point: .missingSheet)
+            throw error
         }
         let surface = xcodeMarker(app).exists ? app : springboard
         // The saved iOS 27 Xcode sheet labels its confirmation "Purchase".
@@ -979,6 +1296,28 @@ final class BatchImportUITests: XCTestCase {
         capture(app, "Actual local StoreKit Pro entitlement")
     }
 
+    private enum PurchaseObservationPoint: String { case beforeTap, missingSheet }
+
+    private func recordPurchaseObservation(_ app: XCUIApplication, session: SKTestSession,
+                                           point: PurchaseObservationPoint) {
+        let elements = app.buttons.matching(identifier: "purchase.state")
+        var state = "unknown-missing-or-unrecognized"
+        if elements.count == 1, let value = elements.element(boundBy: 0).value as? String,
+           value.utf8.count <= 192 {
+            let stage = "(?:notStarted|entitlements|catalog|purchase|finish|sync|returned)"
+            let pattern = "^purchase-state isPro=(?:true|false) isBusy=(?:true|false) load=" + stage
+                + " purchase=" + stage + " restore=" + stage + "\\z"
+            if value.range(of: pattern, options: .regularExpression) != nil { state = value }
+        }
+        let text = "purchase-observation observationOnly=true point=\(point.rawValue)\n"
+            + "disableDialogs=\(session.disableDialogs) askToBuyEnabled=\(session.askToBuyEnabled) interruptedPurchasesEnabled=\(session.interruptedPurchasesEnabled)\n"
+            + state
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "Batch purchase state \(point.rawValue)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func xcodeMarker(_ app: XCUIApplication) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Xcode")).firstMatch
     }
@@ -1013,6 +1352,85 @@ final class BatchImportUITests: XCTestCase {
         let batch = app.buttons["Import multiple files · Pro"]
         try await wait("Trip actions did not expose multiple-file import", app: app) { batch.isHittable }
         batch.tap()
+    }
+
+    private func nativeRootMode(_ mode: String) throws -> Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        return try Self.nativeRootConfiguration(ProcessInfo.processInfo.environment,
+                                                mode: mode, debugSimulator: debugSimulator)
+    }
+
+    private static func nativeRootConfiguration(_ environment: [String: String], mode: String,
+                                                debugSimulator: Bool) throws -> Bool {
+        guard environment["TRIPDOCKET_NATIVE_ROOT_UI"] != nil
+                || environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] != nil else { return false }
+        let token = environment["TRIPDOCKET_NATIVE_ROOT_TOKEN"] ?? ""
+        guard debugSimulator, environment["TRIPDOCKET_NATIVE_ROOT_UI"] == "1",
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token,
+              (mode == "seed" && environment["TRIPDOCKET_NATIVE_SEED_UI"] == "1"
+                && environment["TRIPDOCKET_NATIVE_SEED_TOKEN"] == token)
+                || (mode == "batch" && environment["TRIPDOCKET_BATCH_UI"] == "1") else {
+            throw BatchTestFailure(message: "Native root fixture requires its exact Debug Simulator opt-in and owned token")
+        }
+        return true
+    }
+
+    private func isNativeFilesRoot(_ app: XCUIApplication) -> Bool {
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        guard navigations.count == 1, pickers.count == 1, pickers.element.exists else { return false }
+        let roots = pickers.element.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: On My iPhone")
+        guard roots.count == 1, roots.element.exists,
+              pickers.element.collectionViews.matching(identifier: "File View").count == 1 else { return false }
+        let rootNavigation = roots.element.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let grids = roots.element.collectionViews.matching(identifier: "File View")
+        return rootNavigation.count == 1 && grids.count == 1 && grids.element.exists
+            && isRecoveryFolder("On My iPhone", navigation: rootNavigation.element)
+    }
+
+    private func openNativeFilesRoot(_ app: XCUIApplication) async throws -> XCUIElement {
+        try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
+                  "Native root fixture requires its selected iPhone")
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let recents = app.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.DocumentManager.RecentDocuments, Title: Recents")
+        let tabs = app.tabBars.matching(identifier: "DOC.browsingModeTabBar")
+        let browse = tabs.element.buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+        let browseReady = { tabs.count == 1 && browse.count == 1 && browse.element.isEnabled && browse.element.isHittable }
+        let browserReady = { navigations.count == 1 && pickers.count == 1 && pickers.element.exists }
+        let recentsReady = {
+            navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
+                && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
+        }
+        try await wait("Native root Files browser or supported Recents screen is missing", app: app) {
+            // Classify one observation instead of rereading a changing browser
+            // as Recents after an earlier navigation query found no match.
+            guard navigations.count == 1 else { return false }
+            let pickerCount = pickers.count
+            if pickerCount == 1 { return pickers.element.exists }
+            guard pickerCount == 0 else { return false }
+            return recents.count == 1 && recents.element.exists
+                && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
+        }
+        if !browserReady() {
+            try check(recentsReady(), app: app, "Native root Files Recents route changed")
+            browse.element.tap()
+        }
+        try await wait("Native root Files browser is missing", app: app) { browserReady() }
+        let location = app.cells.matching(identifier: "DOC.sidebar.item.On My iPhone")
+        try await reachRecoveryLocalRoot("On My iPhone", navigation: navigations,
+                                         location: location, browse: browse, app: app)
+        try await wait("Native Files did not identify the exact local provider root", app: app) {
+            self.isNativeFilesRoot(app)
+        }
+        return pickers.element
     }
 
     private func openLocalFilesFolder(_ folder: String, app: XCUIApplication) async throws -> XCUIElement {
@@ -1089,28 +1507,49 @@ final class BatchImportUITests: XCTestCase {
         return picker
     }
 
-    private func selectRealFiles(_ app: XCUIApplication) async throws {
+    private func selectRealFiles(_ app: XCUIApplication, nativeRoot: Bool,
+                                 observeLateFailure: Bool = true) async throws {
         let navigation = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"].firstMatch
-        let picker = try await openLocalFilesFolder(folder, app: app)
+        let picker: XCUIElement
+        if nativeRoot {
+            picker = try await openNativeFilesRoot(app)
+        } else {
+            picker = try await openLocalFilesFolder(folder, app: app)
+        }
         for filename in filenames {
             let basename = (filename as NSString).deletingPathExtension
-            let file = picker.cells.matching(NSPredicate(format: "label BEGINSWITH %@", basename)).firstMatch
+            let matchingFiles = picker.cells.matching(NSPredicate(format: "label BEGINSWITH %@", basename))
+            let file = matchingFiles.firstMatch
             try await wait("Missing selectable real Files original: \(filename)", app: app) { file.exists && file.isHittable }
+            if nativeRoot {
+                try check(isNativeFilesRoot(app) && matchingFiles.count == 1,
+                          app: app, "Batch selection left its verified local root or unique original")
+            }
             file.tap()
             try check(navigation.exists, app: app, "Files closed before both originals could be selected")
         }
-        let open = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open (")).firstMatch
+        let openActions = picker.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Open", "Open ("))
+        let open = openActions.firstMatch
         try await wait("Files did not expose Open after selecting both originals", app: app) { open.exists && open.isEnabled && open.isHittable }
         capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)
+        if nativeRoot {
+            try check(isNativeFilesRoot(app) && openActions.count == 1,
+                      app: app, "Batch selection left its verified local root or unique Open action")
+        }
         open.tap()
-        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now)
+        try await requireFilesDismissal(app, navigation: navigation, openedAt: .now,
+                                        observeLateFailure: observeLateFailure)
     }
 
     private func requireFilesDismissal(_ app: XCUIApplication, navigation: XCUIElement,
-                                      openedAt: ContinuousClock.Instant) async throws {
+                                      openedAt: ContinuousClock.Instant,
+                                      observeLateFailure: Bool = true) async throws {
         do {
             try await wait("Files remained after opening the selection", app: app) { !navigation.exists }
         } catch let originalFailure as BatchTestFailure {
+            // The seed control keeps its original 180-second allowance. Its
+            // failed 15-second criterion already retained the current PNG/AX.
+            guard observeLateFailure else { throw originalFailure }
             // Diagnostic branch only: the original 15-second criterion already
             // failed and captured its PNG/AX. Observe once, with no further action.
             // The 30-second request cannot cap an in-flight XCTest RPC; the

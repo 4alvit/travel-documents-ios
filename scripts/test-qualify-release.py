@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,17 +23,33 @@ Test Case '-[TripfolioTests.PlatformTests testVerifiedPurchaseAndRestoreFromLoca
 Test Case '-[TripfolioUITests.BatchImportUITests testRealFilesBatchRequiresEveryReviewAndPreservesOriginals]' started.
 Test Case '-[TripfolioUITests.BatchImportUITests testRealFilesBatchRequiresEveryReviewAndPreservesOriginals]' passed (2.000 seconds).
 """
+SESSION = "11111111-1111-4111-8111-111111111111"
+TOKEN = "22222222-2222-4222-8222-222222222222"
+NONCE = "33333333-3333-4333-8333-333333333333"
+def combined_log():
+    lines=[]
+    for n,test in enumerate(q.checkpoint.TESTS):
+        target,cls,method=test.split("/");prefix=f"Test Case '-[{target}.{cls} {method}]' "
+        lines.append(prefix+"started.")
+        if n==1:lines.append(f"{q.checkpoint.PREFIX} {SESSION} {TOKEN} {NONCE}")
+        lines.append(prefix+"passed (1.000 seconds).")
+    return ("\n".join(lines)+"\n").encode()
+COMBINED_LOG = combined_log()
+COMBINED_ORDER = q.checkpoint.execution_order(COMBINED_LOG, SESSION, TOKEN)
+
 HEAD = "a" * 40
 OWNED = "11111111-1111-4111-8111-111111111111"
 EXISTING = "22222222-2222-4222-8222-222222222222"
 ENV = {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS", "GITHUB_EVENT_NAME": "workflow_dispatch",
        "GITHUB_WORKFLOW": "Release qualification", "GITHUB_JOB": "qualify",
        "GITHUB_REPOSITORY": "4alvit/travel-documents-ios", "GITHUB_SHA": HEAD,
-       "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+       "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+       "QUALIFICATION_RUNNER": "macos-15", "QUALIFICATION_RUNNER_ARCH": "ARM64"}
 
 
 class Guards(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")))
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -70,6 +88,125 @@ class Guards(unittest.TestCase):
                            ("GITHUB_SHA", "main"), ("GITHUB_RUN_ID", "../123"), ("GITHUB_RUN_ATTEMPT", "0")]:
             with self.subTest(key=key), self.assertRaises(RuntimeError): q.context("batch", {**ENV, key: value})
 
+    def test_execution_profiles_change_only_explicit_intel_batch_startup_limits(self):
+        for mode in q.MODES:
+            for runner, arch, machine in (("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")):
+                env = {**ENV, "QUALIFICATION_RUNNER": runner, "QUALIFICATION_RUNNER_ARCH": arch}
+                profile = q.execution_profile(mode, env, machine)
+                intel_batch = mode == "batch" and machine == "x86_64"
+                self.assertEqual(profile, {"name": "intel-batch" if intel_batch else "default",
+                    "runner": runner, "runner_architecture": arch, "architecture": machine,
+                    "work_seconds": 3000 if intel_batch else 2400, "boot_seconds": 600 if intel_batch else 180})
+        self.assertEqual(q.WORK_SECONDS, {"batch": 2400, "biometrics": 2400})
+        self.assertEqual((q.PREPARE_SECONDS, q.MODES["batch"][1], q.MODES["biometrics"][1],
+                          q.SEED_SECONDS, q.SEED_CASE_SECONDS, q.CLEANUP_SECONDS), (780, 1200, 1200, 300, 180, 180))
+
+    def test_execution_profile_rejects_missing_unknown_or_mismatched_runner_before_output(self):
+        for runner in (None, "macos-15", "macos-15-intel", "self-hosted"):
+            for arch in (None, "ARM64", "X64"):
+                for machine in ("arm64", "x86_64", "unknown"):
+                    if (runner, arch, machine) in (("macos-15", "ARM64", "arm64"), ("macos-15-intel", "X64", "x86_64")):
+                        continue
+                    env = {**ENV, "QUALIFICATION_RUNNER": runner, "QUALIFICATION_RUNNER_ARCH": arch}
+                    with self.subTest(runner=runner, arch=arch, machine=machine), \
+                         patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                        with self.assertRaisesRegex(RuntimeError, "runner label or host architecture"):
+                            q.Qualification(self.root, "batch", env)
+                    self.assertFalse((self.root / "build").exists())
+
+    def test_profile_deadlines_are_anchored_before_host_observation_and_never_renewed(self):
+        clock = [100.0]
+        def observe_host():
+            clock[0] = 175.0
+            return SimpleNamespace(machine="x86_64")
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(q.os, "uname", side_effect=observe_host):
+            run = q.Qualification(self.root, "batch", env)
+            self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline), (100.0, 3100.0, 3280.0))
+            self.assertEqual((run.commands.limit, run.xcode.limit, run.commands.write_deadline), (3100.0, 3100.0, 3290.0))
+            saved = json.loads((run.out / "receipt.json").read_text())
+            self.assertEqual(saved["limits"], {"work_seconds": 3000, "cleanup_seconds": 180})
+            self.assertEqual(saved["execution_profile"], run.profile)
+            clock[0] = 3100.0
+            with self.assertRaisesRegex(RuntimeError, "deadline expired"): run.check()
+            run.cleaning = True; run.check()
+            clock[0] = 3280.0
+            with self.assertRaisesRegex(RuntimeError, "deadline expired"): run.check()
+
+    def test_captured_architecture_must_match_initial_profile_before_any_device_or_project_action(self):
+        for machine, captured in (("arm64", "x86_64"), ("x86_64", "arm64")):
+            env = {**ENV, "QUALIFICATION_RUNNER": "macos-15" if machine == "arm64" else "macos-15-intel",
+                   "QUALIFICATION_RUNNER_ARCH": "ARM64" if machine == "arm64" else "X64"}
+            with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                run = q.Qualification(directory, "batch", env)
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2", "architecture": captured}
+            calls = []
+            run.command = lambda label, argv, seconds=30: calls.append(label) or outputs[label]
+            with self.assertRaisesRegex(RuntimeError, "Captured host architecture"):
+                run.prepare()
+            self.assertEqual(calls, ["xcode", "developer", "sdk", "architecture"])
+            self.assertIsNone(run.owned); self.assertIsNone(run.baseline)
+
+    def test_real_prepare_uses_only_selected_boot_cap_without_renewing_the_work_deadline(self):
+        for mode in q.MODES:
+            for machine in ("arm64", "x86_64"):
+                env = {**ENV, "QUALIFICATION_RUNNER": "macos-15" if machine == "arm64" else "macos-15-intel",
+                       "QUALIFICATION_RUNNER_ARCH": "ARM64" if machine == "arm64" else "X64"}
+                with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                     patch.object(q.os, "uname", return_value=SimpleNamespace(machine=machine)):
+                    run = q.Qualification(directory, mode, env)
+                    deadline = run.work_deadline
+                    run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                        "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
+                    run.preflight_schemas = lambda: None
+                    runtime = {"version": "26.2", "buildversion": "23C54", "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                        "isAvailable": True, "supportedArchitectures": [machine],
+                        "supportedDeviceTypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+                    outputs = {"xcode": q.XCODE_VERSION, "developer": q.DEVELOPER_DIR, "sdk": "26.2",
+                               "architecture": machine, "generate-project": "", "runtimes": json.dumps({"runtimes": [runtime]}),
+                               "create": OWNED, "boot": ""}
+                    calls = []
+                    def command(label, argv, seconds=30):
+                        calls.append((label, seconds))
+                        if label == "boot-ready": raise RuntimeError("Stopped at boot observation")
+                        return outputs[label]
+                    run.command = command
+                    run.inventory = lambda label: {} if label == "baseline" else {OWNED: dict(run.intent)}
+                    with patch.dict(q.os.environ, {"DEVELOPER_DIR": q.DEVELOPER_DIR}), \
+                         self.assertRaisesRegex(RuntimeError, "Stopped at boot observation"):
+                        run.prepare()
+                    self.assertEqual(calls[-2:], [("boot", 60), ("boot-ready", 600 if mode == "batch" and machine == "x86_64" else 180)])
+                    self.assertEqual((run.work_deadline, run.commands.limit), (deadline, deadline))
+                    selected = mode == "batch"
+                    self.assertEqual(bool(run.build_settings), selected)
+                    self.assertEqual(type(run.build_settings), tuple)
+                    saved = json.loads((run.out / "receipt.json").read_text())
+                    self.assertEqual("focused_build" in saved, selected)
+                    if selected:
+                        self.assertEqual(saved["focused_build"]["build_settings"], list(run.build_settings))
+
+    def test_intel_boot_command_keeps_global_clip_and_existing_eight_second_stop_reserve(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        for now, expected_end in ((2200.0, 2808.0), (2700.0, 3100.0)):
+            with tempfile.TemporaryDirectory(dir=self.root) as directory, \
+                 patch.object(q.time, "monotonic", return_value=100.0), \
+                 patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                run = q.Qualification(directory, "batch", env)
+                with patch.object(q.time, "monotonic", return_value=now), \
+                     patch.object(run.commands.ops, "now", return_value=now), \
+                     patch.object(run.commands.ops, "spawn", side_effect=RuntimeError("No native execution")):
+                    with self.assertRaisesRegex(RuntimeError, "boot-ready failed"):
+                        run.command("boot-ready", ["synthetic-command"], run.profile["boot_seconds"])
+                record = run.commands.report["commands"][0]
+                self.assertEqual(record["requested_cap_seconds"], 608)
+                self.assertEqual(record["stop_reserve_seconds"], 8)
+                self.assertEqual(record["command_deadline"], expected_end - run.started)
+                self.assertEqual(record["work_deadline"], expected_end - run.started - 8)
+                self.assertEqual((run.work_deadline, run.cleanup_deadline), (3100.0, 3280.0))
+
     def test_output_never_reuses_existing_or_symlinked_location(self):
         self.run_object()
         with self.assertRaises(FileExistsError): self.run_object()
@@ -102,6 +239,74 @@ class Guards(unittest.TestCase):
                                ("sdk_matched", 1), ("build", "wrong"), ("architecture", "x86_64")]:
                 with self.subTest(mode=mode, key=key), self.assertRaises(RuntimeError):
                     q.validate_runtime_result(mode, {**selection, key: value}, result)
+
+    def test_intel_runtime_requires_matching_native_architecture_and_exact_build(self):
+        runtime = {"version": "26.2", "buildversion": "23C54", "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                   "isAvailable": True, "supportedArchitectures": ["x86_64"],
+                   "supportedDeviceTypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+        self.assertEqual(q.choose_runtime({"runtimes":[runtime]}, "26.2", "x86_64")[0], runtime["identifier"])
+        with self.assertRaises(RuntimeError): q.choose_runtime({"runtimes":[runtime]}, "26.2", "arm64")
+        for mode in q.MODES:
+            selection = {"identifier":runtime["identifier"], "version":"26.2", "build":"23C54",
+                         "architecture":"x86_64", "sdk_version":"26.2", "sdk_matched":True}
+            result = self.fixture(mode)[1]
+            result["devicesAndConfigurations"][0]["device"]["architecture"] = "x86_64"
+            q.validate_runtime_result(mode, selection, result)
+            for key,value in [("architecture","arm64"), ("osBuildNumber","other")]:
+                bad = copy.deepcopy(result); bad["devicesAndConfigurations"][0]["device"][key] = value
+                with self.assertRaises(RuntimeError): q.validate_runtime_result(mode, selection, bad)
+            result["devicesAndConfigurations"][0]["device"]["osBuildNumber"] = "other"
+            with self.assertRaises(RuntimeError): q.validate_runtime_result(mode, {**selection,"build":"other"}, result)
+
+    def test_intel_preflight_checks_runtime_build_before_any_device_inventory_or_creation(self):
+        for mode in q.MODES:
+            for build in ("23C54", "other"):
+                with tempfile.TemporaryDirectory() as directory:
+                    env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+                    with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                        run = q.Qualification(Path(directory), mode, env)
+                    run.source = lambda label: {"head":HEAD,"tree":"b"*40,
+                        "files":dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED,{})}
+                    run.preflight_schemas = lambda: None
+                    runtime = {"version":"26.2", "buildversion":build, "identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                               "isAvailable":True, "supportedArchitectures":["x86_64"],
+                               "supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"}]}
+                    outputs = {"xcode":q.XCODE_VERSION, "developer":q.DEVELOPER_DIR, "sdk":"26.2",
+                               "architecture":"x86_64", "generate-project":"", "runtimes":json.dumps({"runtimes":[runtime]})}
+                    calls=[]
+                    run.command=lambda label,argv,seconds=30: calls.append(label) or outputs[label]
+                    with patch.object(run,"inventory",side_effect=RuntimeError("Inventory boundary")) as inventory, \
+                         patch.dict(q.os.environ,{"DEVELOPER_DIR":q.DEVELOPER_DIR}):
+                        with self.assertRaisesRegex(RuntimeError,"Inventory boundary" if build=="23C54" else "runtime build 23C54"):
+                            run.prepare()
+                    self.assertEqual(inventory.call_count, 1 if build=="23C54" else 0)
+                    self.assertIsNone(run.owned)
+                    self.assertNotIn("create", calls)
+
+    def test_manual_runner_choice_is_closed_and_architecture_check_runs_before_capture(self):
+        workflow=(Path(__file__).parent.parent/".github/workflows/release-qualification.yml").read_text()
+        self.assertIn("default: macos-15\n        options: [macos-15, macos-15-intel]", workflow)
+        match=re.search(r"runs-on: \$\{\{ fromJSON\('([^']+)'\)\[inputs.runner \|\| 'macos-15'\] \}\}",workflow)
+        self.assertIsNotNone(match)
+        self.assertEqual(json.loads(match[1]),{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"})
+        for invalid in ("self-hosted", "macos-26", "", "$(touch injected)"):
+            self.assertNotIn(invalid,json.loads(match[1]))
+        block=workflow.split("      - name: Verify selected runner architecture\n",1)[1].split("      - name:",1)[0]
+        self.assertIn("QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}",block)
+        shell=block.split("        run: |\n",1)[1]
+        shell="\n".join(line[10:] for line in shell.splitlines())
+        for label,arch,machine,ok in [("macos-15","ARM64","arm64",True), ("macos-15-intel","X64","x86_64",True),
+                                     ("macos-15","X64","x86_64",False), ("macos-15-intel","ARM64","arm64",False),
+                                     ("macos-15-intel","X64","arm64",False), ("self-hosted","X64","x86_64",False)]:
+            env={**os.environ,"QUALIFICATION_RUNNER":label,"QUALIFICATION_RUNNER_ARCH":arch,"SYNTHETIC_MACHINE":machine}
+            result=subprocess.run(["/bin/bash","-euo","pipefail","-c",'uname() { printf \'%s\\n\' "$SYNTHETIC_MACHINE"; }\n'+shell],env=env,capture_output=True,timeout=5)
+            self.assertEqual(result.returncode==0,ok,(label,arch,machine,result.stderr))
+        self.assertLess(workflow.index("Verify selected runner architecture"),workflow.index("Capture selected suite"))
+        capture=workflow.split("      - name: Capture selected suite for review\n",1)[1].split("      - name:",1)[0]
+        for declaration in ("QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}", "QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}"):
+            self.assertIn(declaration,capture)
+        self.assertIn("    timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 65 || 55 }}",workflow)
+        self.assertIn("        timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 54 || 44 }}",capture)
 
     def test_batch_order_must_match_the_original_bounded_log(self):
         proof = batch.execution_order(BATCH_LOG)
@@ -343,11 +548,15 @@ class Guards(unittest.TestCase):
         (app/"payload").write_bytes(b"changed")
         self.assertNotEqual(q.tree_manifest(app,lambda:None),manifest)
 
-    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False):
-        run=self.run_object();run.owned=OWNED
+    def exercise_driver(self, *, skipped=False, runtime_warning=False, missing_warnings=False, root_extra=False, shared_failure=False):
+        run=self.run_object();run.owned=OWNED;run.baseline={}
         run.report["runtime_selection"] = {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
             "version": "26.2", "build": "23C54", "architecture": "arm64", "sdk_version": "26.2", "sdk_matched": True}
         summary,result,tree,cases=self.fixture()
+        cases=list(q.checkpoint.CASES);result.update(totalTestCount=2,passedTests=2)
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
+        summary["execution_order"]=copy.deepcopy(COMBINED_ORDER)
+        summary["combined_monitor"]={"returncode":0,"seed_observed_seconds":1.0,"seed_envelope_seconds":300,"seed_envelope_boundary":"second invocation start to observed seed PASS"}
         if skipped:result.update(passedTests=0,skippedTests=1)
         if runtime_warning:result["runtimeWarnings"]=[{"message":"Runtime issue"}]
         if missing_warnings:result.pop("runtimeWarnings")
@@ -357,10 +566,11 @@ class Guards(unittest.TestCase):
         module=SimpleNamespace(CASES=cases,execution_order=batch.execution_order,timestamp=lambda:"recorded")
         class Driver:
             def __init__(self,args):
+                self.args=args;self.expected_cases=cases;self.checkpoint_session=SESSION;self.token=TOKEN
                 self.directory=run.root/"build/BatchSimulator-fixture";self.directory.mkdir()
                 self.fixture_directory=self.directory/"owned-fixtures"
                 self.summary=copy.deepcopy(summary);self.actions=(self.directory/"actions.jsonl").open("w")
-                (self.directory/"xcodebuild.log").write_bytes(BATCH_LOG)
+                (self.directory/"xcodebuild.log").write_bytes(COMBINED_LOG)
             def prepare(self):events.append("prepare")
             def remaining(self):return 100
             def run_test(self):
@@ -369,8 +579,12 @@ class Guards(unittest.TestCase):
                                         cwd=run.root,start_new_session=True)
                 (self.directory/"xcresult-summary.json").write_text(json.dumps(result))
                 (self.directory/"xcresult-tests.json").write_text(json.dumps(tree))
+                if shared_failure: raise RuntimeError("original native failure")
             def verify_fixtures(self):events.append("verify-fixtures")
-            def remove_fixtures(self):events.append("remove-fixtures")
+            def remove_fixtures(self):
+                events.append("defer-root-cleanup")
+                self.summary["fixture_destination_mode"]="native_root"
+                self.summary["fixture_cleanup"]="native root retained for verified owned Simulator teardown"
             def source_snapshot(self):return copy.deepcopy(source)
             def save(self):(self.directory/"summary.json").write_text(json.dumps(self.summary))
         module.Driver=Driver
@@ -378,11 +592,31 @@ class Guards(unittest.TestCase):
                                      send=lambda *_:self.fail("Completed process needs no signal"))
         run.products=lambda driver:events.append("products")
         run.batch_snapshot=lambda driver:events.append("batch-snapshot")
-        run.prepare_native_seed=lambda driver:events.append("native-seed")
-        run.prepare_native_folder=lambda driver:events.append("native-folder")
+        def prepare_combined(driver):
+            events.append("combined-checkpoint-setup")
+            run.report["batch_checkpoint_verified"]=True
+            run.report["batch_checkpoint"]={"request":copy.deepcopy(COMBINED_ORDER["request"])}
+        run.prepare_combined_batch=prepare_combined
+        run.prepare_shared_build=lambda driver:events.append("shared-build")
+        if shared_failure:
+            run.shared_products={}
+            def changed(*args):raise RuntimeError("shared product changed")
+            run.observe_shared_build=changed
+        def prepare_root(driver):
+            self.assertTrue(driver.args.native_root)
+            self.assertTrue(driver.args.native_seed)
+            self.assertFalse(driver.args.native_folder)
+            events.append("native-root")
+            run.report["native_root"]={"verified_empty_before_seed":True}
+        run.prepare_native_root=prepare_root
+        def verify_root(driver):
+            events.append("verify-complete-root")
+            if root_extra: raise RuntimeError("Unexpected native seed destination entries")
+        run.native_seed_files=verify_root
+        run.prepare_native_folder=lambda driver:self.fail("Native root must not create a folder")
         with patch.object(q,"load_module",return_value=module),patch.object(q.subprocess,"Popen",return_value=child):
-            if skipped or runtime_warning:
-                with self.assertRaises(RuntimeError):run.run_driver()
+            if skipped or runtime_warning or root_extra or shared_failure:
+                with self.assertRaisesRegex(RuntimeError,"original native failure" if shared_failure else ".*"):run.run_driver()
             else:run.run_driver()
         self.assertFalse(run.xcode.active)
         stop=run.xcode.report["commands"][0]["stop"]
@@ -390,10 +624,30 @@ class Guards(unittest.TestCase):
         self.assertEqual(events.count("test"),1)
         return run,events
 
+    def test_shared_postcheck_cannot_mask_native_failure_or_skip_fixture_cleanup(self):
+        run,events=self.exercise_driver(shared_failure=True)
+        self.assertEqual(run.report["shared_build_errors"],["RuntimeError('shared product changed')"])
+        self.assertIn("verify-complete-root",events)
+        self.assertIn("defer-root-cleanup",events)
+        self.assertNotIn("products",events)
+
     def test_original_driver_adapter_finishes_one_owned_process_before_product_acceptance(self):
         run,events=self.exercise_driver()
-        self.assertEqual(events,["prepare","native-folder","native-seed","test","verify-fixtures","remove-fixtures","products","batch-snapshot"])
+        self.assertEqual(events,["prepare","native-root","shared-build","combined-checkpoint-setup","test","verify-fixtures","verify-complete-root","defer-root-cleanup","products","batch-snapshot"])
         self.assertTrue(run.report["driver_capture_verified"])
+        self.assertEqual(run.report["selected_cases"],
+                         [q.checkpoint.PREPARATION_CASES[0], *q.checkpoint.CASES])
+
+    def test_post_main_extra_root_entry_prevents_capture_after_owned_process_stop(self):
+        run,events=self.exercise_driver(root_extra=True)
+        self.assertIn("verify-complete-root",events)
+        self.assertNotIn("products",events)
+        self.assertNotIn("driver_capture_verified",run.report)
+        self.assertNotIn("verified_after_main",run.report["native_root"])
+        summary=json.loads((run.root/run.report["driver_directory"]/"summary.json").read_text())
+        self.assertEqual(summary["status"],"failed")
+        self.assertIn("Unexpected native seed destination entries",summary["error"])
+        self.assertNotIn("native_root_post_main_verified",summary)
 
     def test_skipped_driver_result_never_reaches_product_acceptance(self):
         run,events=self.exercise_driver(skipped=True)
@@ -427,7 +681,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(run.execute(),1)
         self.assertEqual(run.report["status"],"failed")
 
-    def prepared_capture(self, mode="batch"):
+    def prepared_capture(self, mode="batch", combined=True):
         run=self.run_object(mode);run.before={"head":HEAD}
         result=self.root/"build/OriginalDriver/Tests.xcresult"
         (result/"Data").mkdir(parents=True);(result/"Data/result").write_bytes(b"original result bytes")
@@ -441,12 +695,22 @@ class Guards(unittest.TestCase):
             self.preparation_fixture(run)
             run.inspect_files_preparation()
             run.report["files_preparation_verified"] = True
-            self.preparation_fixture(run, native_folder=True)
-            run.inspect_files_preparation(native_folder=True)
-            run.report["native_folder_verified"] = True
-            self.preparation_fixture(run, native_seed=True)
-            run.inspect_files_preparation(native_seed=True)
-            run.report["native_seed_verified"] = True
+            if combined:
+                run.report.update(native_root={"verified_empty_before_seed":True,"verified_after_main":True,"device":OWNED},
+                    final_inventory={},batch_checkpoint_verified=True,
+                    batch_checkpoint={"request":copy.deepcopy(COMBINED_ORDER["request"])},
+                    combined_batch={"result_bundles":2,"cases":list(q.checkpoint.CASES),
+                                    "preparation_cases":list(q.checkpoint.PREPARATION_CASES),
+                                    "preparation_prerequisite":run.verify_preparation_prerequisite()},
+                    batch_execution_order=copy.deepcopy(COMBINED_ORDER))
+                run.report["batch_checkpoint"]["preparation_prerequisite"]=run.verify_preparation_prerequisite()
+            else:
+                self.preparation_fixture(run, native_folder=True)
+                run.inspect_files_preparation(native_folder=True)
+                run.report["native_folder_verified"] = True
+                self.preparation_fixture(run, native_seed=True)
+                run.inspect_files_preparation(native_seed=True)
+                run.report["native_seed_verified"] = True
         return run,result
 
     def preparation_fixture(self, run, native_seed=False, native_folder=False):
@@ -458,10 +722,24 @@ class Guards(unittest.TestCase):
         (original/"Data").mkdir(parents=True);(original/"Data/result").write_bytes(b"original preparation")
         (original/"Info.plist").write_bytes(b"preparation metadata")
         _,summary,tree,_=self.fixture()
-        summary.update(totalTestCount=1,passedTests=1)
+        cases=([q.FOLDER_CASE] if native_folder else [q.SEED_CASE] if native_seed
+               else list(q.checkpoint.PREPARATION_CASES))
+        summary.update(totalTestCount=len(cases),passedTests=len(cases))
         summary["devicesAndConfigurations"][0]["device"]["platform"]="iOS Simulator"
-        case=q.FOLDER_CASE if native_folder else q.SEED_CASE if native_seed else q.PREPARE_CASE
-        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"}]
+        tree["testNodes"]=[{"nodeType":"Test Case","nodeIdentifier":case,"result":"Passed"} for case in cases]
+        if not (native_seed or native_folder):
+            log=run.commands.out/"1-stdout.log"
+            lines=[]
+            for test in q.checkpoint.PREPARATION_TESTS:
+                target,cls,method=test.split("/");prefix_line=f"Test Case '-[{target}.{cls} {method}]' "
+                lines.extend([prefix_line+"started.",prefix_line+"passed (1.000 seconds)."])
+            log.write_text("\n".join(lines)+"\n")
+            run.commands.report["commands"].append({"id":"files-prepare-ui","returncode":0,
+                "argv":["xcodebuild","-default-test-execution-time-allowance","300",
+                        "-maximum-test-execution-time-allowance","600",
+                        "-destination","platform=iOS Simulator,id="+OWNED,
+                        *["-only-testing:"+case for case in q.checkpoint.PREPARATION_TESTS]],
+                "logs":{"stdout":str(log)}})
         def command(label, argv, seconds=30):
             kind=label.removeprefix(prefix+"-")
             self.assertIn(kind,("summary","tests"));self.assertEqual(seconds,60)
@@ -480,7 +758,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(before,run.preparation_manifest(original))
         self.assertEqual(before,run.preparation_manifest(run.out/"files-prepare-inspection.xcresult"))
         self.assertTrue(run.report["files_preparation_original"]["unchanged_after_reader"])
-        self.assertEqual(run.report["files_preparation_result"]["cases"],[q.PREPARE_CASE])
+        self.assertEqual(run.report["files_preparation_result"]["cases"],list(q.checkpoint.PREPARATION_CASES))
         for mutate in [lambda s,t:s.update(skippedTests=1),lambda s,t:s.pop("testFailures"),
                 lambda s,t:s.update(runtimeWarnings=[{}]),lambda s,t:s.update(runtimeWarnings=None),
                 lambda s,t:t["testNodes"].append({"nodeType":"Runtime Warning"}),
@@ -491,7 +769,94 @@ class Guards(unittest.TestCase):
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(osVersion="18.5"),
                 lambda s,t:s["devicesAndConfigurations"][0]["device"].update(architecture="x86_64")]:
             s,t=copy.deepcopy(summary),copy.deepcopy(tree);mutate(s,t)
-            with self.assertRaises(RuntimeError):q.validate_files_preparation(s,t,OWNED,run.report["runtime_selection"])
+            with self.assertRaises(RuntimeError):q.validate_preparation_pair(s,t,OWNED,run.report["runtime_selection"])
+
+    def test_preparation_prerequisite_rechecks_original_result_and_order(self):
+        run=self.run_object();original,summary,tree=self.preparation_fixture(run)
+        run.inspect_files_preparation();run.report["files_preparation_verified"]=True
+        expected=run.verify_preparation_prerequisite()
+        self.assertEqual(expected["order"]["schema_version"],2)
+        self.assertEqual(len(expected["order"]["events"]),4)
+        self.assertEqual(len(expected["summary_sha256"]),64)
+        self.assertEqual(expected,run.verify_preparation_prerequisite())
+        (original/"Data/result").write_bytes(b"mutated")
+        with self.assertRaisesRegex(RuntimeError,"Original preparation pair changed"):
+            run.verify_preparation_prerequisite()
+
+    def test_preparation_prerequisite_honors_checkpoint_expiry_inside_actual_manifest(self):
+        run=self.run_object();self.preparation_fixture(run)
+        run.inspect_files_preparation();run.report["files_preparation_verified"]=True
+        clock=[0.0];checks=[];original=q.recovery.tree_manifest
+        def budget():
+            checks.append(clock[0])
+            if clock[0]>=60:raise RuntimeError("checkpoint expired")
+        def traversing(path,check,**kwargs):
+            count=[0]
+            def at_entry():
+                count[0]+=1
+                if count[0]==2:clock[0]=60.0
+                check()
+            return original(path,at_entry,**kwargs)
+        with patch.object(q.recovery,"tree_manifest",side_effect=traversing), \
+             patch.object(run,"preparation_log",side_effect=AssertionError("must stop before log parse")):
+            with self.assertRaisesRegex(RuntimeError,"checkpoint expired"):
+                run.verify_preparation_prerequisite(check=budget)
+        self.assertIn(60.0,checks)
+        self.assertNotIn("batch_checkpoint_verified",run.report)
+
+    def test_combined_setup_stops_at_driver_deadline_inside_preparation_manifest(self):
+        run=self.run_object();self.preparation_fixture(run);run.inspect_files_preparation()
+        run.report["files_preparation_verified"]=True
+        run.report["files_preparation"]={"derived_data":"build/shared"}
+        run.report["native_root"]={"verified_empty_before_seed":True}
+        run.report["shared_build"]={"observations":{"before_seed":{}}}
+        remaining=[1200.0]
+        driver=SimpleNamespace(args=SimpleNamespace(combined_batch=True),
+            qualified_build=run.root/"build/shared",remaining=lambda:remaining[0])
+        original=q.recovery.tree_manifest
+        def traversing(path,check,**kwargs):
+            count=[0]
+            def at_entry():
+                count[0]+=1
+                if count[0]==2:remaining[0]=0.0
+                check()
+            return original(path,at_entry,**kwargs)
+        with patch.object(q.recovery,"tree_manifest",side_effect=traversing), \
+             patch.object(run,"native_seed_files",side_effect=AssertionError("must stop before seed setup")):
+            with self.assertRaisesRegex(RuntimeError,"Original driver deadline expired"):
+                run.prepare_combined_batch(driver)
+        self.assertNotIn("combined_batch",run.report)
+
+    def test_preparation_prerequisite_rejects_stale_flags_order_log_and_saved_cases(self):
+        for fault in ("flag","selector","log","order","summary","tree","one_case","source_record"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(dir=self.root) as folder:
+                run=q.Qualification(folder,"batch",ENV)
+                self.preparation_fixture(run);run.inspect_files_preparation()
+                run.report["files_preparation_verified"]=True
+                if fault=="flag":run.report["files_preparation_verified"]=False
+                elif fault=="selector":run.commands.report["commands"][0]["argv"][-1]="-only-testing:Wrong/case"
+                elif fault=="log":(run.commands.out/"1-stdout.log").write_bytes(BATCH_LOG)
+                elif fault=="order":run.report["files_preparation_order"]["events"][0]["case"]="Wrong/case()"
+                elif fault=="source_record":run.report["files_preparation_result"]["cases"]=[q.PREPARE_CASE]
+                else:
+                    path=run.out/("files-prepare-tests.json" if fault=="tree" else "files-prepare-summary.json")
+                    saved=json.loads(path.read_text())
+                    if fault=="tree":saved["testNodes"][0]["nodeIdentifier"]="Wrong/case()"
+                    elif fault=="one_case":saved.update(totalTestCount=1,passedTests=1)
+                    else:saved["testFailures"]=[{"message":"failure"}]
+                    path.write_text(json.dumps(saved))
+                with self.assertRaises(RuntimeError):run.verify_preparation_prerequisite()
+
+    def test_final_capture_rejects_forged_or_changed_first_bundle_proof(self):
+        for fault in ("combined","checkpoint","case_set"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(dir=self.root) as directory:
+                old=self.root;self.root=Path(directory)
+                try:
+                    run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+                    if fault=="case_set":run.report["combined_batch"]["preparation_cases"]=[q.PREPARE_CASE]
+                    else:run.report["combined_batch" if fault=="combined" else "batch_checkpoint"]["preparation_prerequisite"]={}
+                    with self.assertRaises(RuntimeError):run.capture_original_result()
+                finally:self.root=old
 
     def test_files_preparation_absent_warnings_are_pending_not_an_empty_array(self):
         run=self.run_object();_,summary,_=self.preparation_fixture(run);summary.pop("runtimeWarnings")
@@ -531,20 +896,140 @@ class Guards(unittest.TestCase):
         run.prepare_files_ui()
         self.assertIs(run.commands.ops.env,original_env);self.assertTrue(run.report["files_preparation_verified"])
         self.assertEqual(len(calls),1);label,argv,seconds,env=calls[0]
-        self.assertEqual((label,seconds),("files-prepare-ui",600));self.assertEqual(argv[-1],"test")
+        self.assertEqual((label,seconds),("files-prepare-ui",780));self.assertEqual(argv[-1],"test")
         self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
         self.assertEqual(argv[argv.index("-derivedDataPath")+1],
                          str(run.root/"build/QualificationPreparationDerivedData-123-1"))
         self.assertFalse(Path(argv[argv.index("-derivedDataPath")+1]).is_relative_to(run.out))
         self.assertEqual([v for v in argv if v.startswith("-only-testing:")],
-                         ["-only-testing:TripfolioUITests/"+q.PREPARE_CASE.removesuffix("()")])
-        for key in ["-default-test-execution-time-allowance","-maximum-test-execution-time-allowance"]:
-            self.assertEqual(argv[argv.index(key)+1],"180")
-        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE"],"prepare")
-        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_UI"],"1")
-        self.assertTrue(env["TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER"].startswith("TripDocket-Recovery-"))
+                         ["-only-testing:"+case for case in q.checkpoint.PREPARATION_TESTS])
+        for key,value in [("-default-test-execution-time-allowance","300"),
+                          ("-maximum-test-execution-time-allowance","600")]:
+            self.assertEqual(argv[argv.index(key)+1],value)
+        self.assertEqual(env["TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_UI"],"1")
+        token=env["TEST_RUNNER_TRIPDOCKET_BATCH_PREPARE_TOKEN"]
+        self.assertEqual(str(q.uuid.UUID(token)),token)
+        self.assertEqual(run.report["files_preparation"]["fixture_token"],token)
+        self.assertEqual(run.report["files_preparation"]["absent_folder_probe"],"TripDocket-Batch-Prepare-"+token)
+        self.assertEqual(run.report["files_preparation"]["ingress"],"direct-native-export-no-save")
+        self.assertFalse(any("TRIPDOCKET_RECOVERY" in key or "TRIPDOCKET_NATIVE_SEED" in key for key in env))
         with self.assertRaises(RuntimeError):run.prepare_files_ui()
         self.assertEqual(len(calls),1);self.assertEqual(run.driver_calls,0)
+
+    def test_files_preparation_780_cap_preserves_original_deadlines_and_case(self):
+        run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+        run.started=100.0;run.work_deadline=2500.0;run.cleanup_deadline=2680.0
+        run.commands.t0=100.0;run.commands.limit=run.work_deadline
+        run.inspect_files_preparation=lambda:None
+        with patch.object(q.time,"monotonic",return_value=100.0), \
+             patch.object(run.commands.ops,"now",return_value=100.0), \
+             patch.object(run.commands.ops,"spawn",side_effect=RuntimeError("stopped before process creation")) as spawn:
+            with self.assertRaisesRegex(RuntimeError,"files-prepare-ui failed"):
+                run.prepare_files_ui()
+        spawn.assert_called_once()
+        record=run.commands.report["commands"][0]
+        self.assertEqual(record["requested_cap_seconds"],788)
+        self.assertEqual(record["stop_reserve_seconds"],8)
+        self.assertEqual(record["work_deadline"],780)
+        self.assertEqual(record["command_deadline"],788)
+        self.assertEqual((run.work_deadline,run.cleanup_deadline),(2500.0,2680.0))
+        self.assertEqual(q.MODES["batch"][1],1200)
+        self.assertEqual(q.CLEANUP_SECONDS,180)
+        self.assertEqual(q.WORK_SECONDS["batch"],2400)
+        self.assertEqual(run.report["files_preparation"]["case_seconds"],180)
+        for flag,value in (("-default-test-execution-time-allowance","300"),
+                           ("-maximum-test-execution-time-allowance","600")):
+            self.assertEqual(record["argv"][record["argv"].index(flag)+1],value)
+        self.assertNotIn("files_preparation_verified",run.report)
+
+    def test_files_preparation_admission_reserves_780_plus_full_driver_and_postchecks(self):
+        for spare in (-0.01,0.0,0.01):
+            with self.subTest(spare=spare), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                run=q.Qualification(directory,"batch",ENV)
+                run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
+                run.work_deadline=100.0+780+1200+120+spare
+                run.command=lambda *a,**k:None
+                run.inspect_files_preparation=lambda:None
+                with patch.object(q.time,"monotonic",return_value=100.0):
+                    if spare<=0:
+                        with self.assertRaisesRegex(RuntimeError,"Insufficient Files preparation"):
+                            run.prepare_files_ui()
+                        self.assertEqual(run.preparation_calls,0)
+                    else:
+                        run.prepare_files_ui()
+                        self.assertEqual(run.preparation_calls,1)
+                self.assertEqual(run.work_deadline,2200.0+spare)
+
+    def test_intel_preparation_1200_cap_preserves_original_global_and_native_allowances(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+            run = q.Qualification(self.root, "batch", env)
+        run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+        run.started = 100.0; run.work_deadline = 3100.0; run.cleanup_deadline = 3280.0
+        run.commands.t0 = 100.0; run.commands.limit = run.work_deadline
+        run.inspect_files_preparation = lambda: None
+        with patch.object(q.time, "monotonic", return_value=400.0), \
+             patch.object(run.commands.ops, "now", return_value=400.0), \
+             patch.object(run.commands.ops, "spawn", side_effect=RuntimeError("before process creation")) as spawn:
+            with self.assertRaisesRegex(RuntimeError, "files-prepare-ui failed"):
+                run.prepare_files_ui()
+        spawn.assert_called_once()
+        record = run.commands.report["commands"][0]
+        self.assertEqual((record["start"], record["work_deadline"], record["command_deadline"]), (300, 1500, 1508))
+        self.assertEqual((record["requested_cap_seconds"], record["stop_reserve_seconds"]), (1208, 8))
+        self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline, run.commands.limit),
+                         (100.0, 3100.0, 3280.0, 3100.0))
+        phase = run.report["files_preparation"]
+        self.assertEqual((phase["phase_seconds"], phase["hosted_case_seconds"], phase["case_seconds"]), (1200, 300, 180))
+        self.assertEqual(phase["cases"], list(q.checkpoint.PREPARATION_CASES))
+        self.assertEqual(q.MODES["batch"][1], 1200)
+        self.assertEqual((q.PREPARE_SECONDS, q.SEED_CASE_SECONDS, q.CLEANUP_SECONDS), (780, 180, 180))
+        for flag, value in (("-default-test-execution-time-allowance", "300"),
+                            ("-maximum-test-execution-time-allowance", "600")):
+            self.assertEqual(record["argv"][record["argv"].index(flag)+1], value)
+        self.assertNotIn("files_preparation_verified", run.report)
+
+    def test_intel_preparation_strict_2520_admission_before_command_or_output(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        for spare in (-0.01, 0.0, 0.01):
+            with self.subTest(spare=spare), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+                    run = q.Qualification(directory, "batch", env)
+                run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+                run.started = 100.0; run.work_deadline = 3100.0; run.cleanup_deadline = 3280.0
+                run.inspect_files_preparation = lambda: None
+                with patch.object(q.time, "monotonic", return_value=580.0-spare), \
+                     patch.object(run, "command") as command, patch.object(run.commands.ops, "spawn") as spawn:
+                    if spare <= 0:
+                        with self.assertRaisesRegex(RuntimeError, "Insufficient Files preparation"):
+                            run.prepare_files_ui()
+                        command.assert_not_called(); spawn.assert_not_called()
+                        self.assertEqual(run.preparation_calls, 0)
+                        self.assertNotIn("files_preparation", run.report)
+                    else:
+                        run.prepare_files_ui()
+                        command.assert_called_once()
+                        self.assertEqual(command.call_args.args[2], 1200)
+                        self.assertEqual(run.report["files_preparation"]["phase_seconds"], 1200)
+                        self.assertEqual(run.preparation_calls, 1)
+                        saved = json.loads((run.out/"receipt.json").read_text())
+                        self.assertEqual(saved["files_preparation"]["phase_seconds"], 1200)
+                    self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline), (100.0, 3100.0, 3280.0))
+
+    def test_intel_preparation_primary_error_and_environment_remain_preserved(self):
+        env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        with patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")):
+            run = q.Qualification(self.root, "batch", env)
+        run.owned = OWNED; run.baseline = {}; run.intent = {"name": "owned"}
+        previous = run.commands.ops.env
+        run.inspect_files_preparation = lambda: (_ for _ in ()).throw(RuntimeError("inspection also failed"))
+        with patch.object(run, "command", side_effect=RuntimeError("native failed")) as command:
+            with self.assertRaisesRegex(RuntimeError, "native failed"):
+                run.prepare_files_ui()
+        command.assert_called_once(); self.assertEqual(command.call_args.args[2], 1200)
+        self.assertIs(run.commands.ops.env, previous)
+        self.assertIn("inspection also failed", run.report["files_preparation_inspection_error"])
+        self.assertNotIn("files_preparation_verified", run.report)
 
     def test_files_preparation_failure_remains_primary_and_restores_environment(self):
         run=self.run_object();run.owned=OWNED;run.baseline={};run.intent={"name":"owned"}
@@ -575,7 +1060,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(run.execute(),1);self.assertEqual(run.report["status"],"failed")
         run.report["files_preparation_verified"]=True
         (run.out/"files-prepare.xcresult/Data/result").write_bytes(b"late mutation")
-        with self.assertRaisesRegex(RuntimeError,"changed before final capture"):run.capture_original_result()
+        with self.assertRaisesRegex(RuntimeError,"Original preparation pair changed"):run.capture_original_result()
 
     def test_successful_capture_is_pending_review_and_binds_unchanged_original_bytes(self):
         for mode in q.MODES:
@@ -591,6 +1076,22 @@ class Guards(unittest.TestCase):
                 self.assertEqual(manifest["./Data/result"]["sha256"],hashlib.sha256(before["Data/result"]).hexdigest())
                 self.assertEqual(before,{str(p.relative_to(result)):p.read_bytes() for p in result.rglob("*") if p.is_file()})
                 self.root=saved
+
+    def test_combined_capture_has_two_real_bundles_and_requires_checkpoint(self):
+        run,result=self.prepared_capture()
+        self.assertFalse((run.out/"native-seed.xcresult").exists())
+        self.assertFalse((run.out/"native-folder.xcresult").exists())
+        run.report.pop("batch_checkpoint_verified")
+        self.assertEqual(run.execute(),1)
+        self.assertNotIn("original_xcresult",run.report)
+        run.report["batch_checkpoint_verified"]=True
+        run.report["combined_batch"]["cases"]=list(batch.CASES)
+        with self.assertRaisesRegex(RuntimeError,"exact two UI cases"):run.capture_original_result()
+
+    def test_combined_capture_rejects_fabricated_separate_seed_result(self):
+        run,result=self.prepared_capture();run.report["cleanup_verified"]=True
+        run.report["native_seed_verified"]=True
+        with self.assertRaisesRegex(RuntimeError,"separate seed"):run.capture_original_result()
 
     def test_result_manifest_failure_never_becomes_a_successful_capture(self):
         run,result=self.prepared_capture();(result/"Info.plist").unlink()
@@ -834,7 +1335,8 @@ class Guards(unittest.TestCase):
         for mode in q.MODES:
             directory = self.root / mode; directory.mkdir()
             run = q.Qualification(directory, mode, ENV)
-            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
             profile = q.toolchain_profile(mode); schemas = self.schemas(); calls = []
             outputs = {"xcode": profile["xcode_version"], "developer": profile["developer_dir"],
                        "sdk": profile["sdk_version"], "architecture": "arm64", "generate-project": "",
@@ -857,7 +1359,8 @@ class Guards(unittest.TestCase):
         for mode in q.MODES:
             directory = self.root / mode; directory.mkdir()
             run = q.Qualification(directory, mode, ENV)
-            run.source = lambda label: {"head": HEAD, "tree": "b" * 40}
+            run.source = lambda label: {"head": HEAD, "tree": "b" * 40,
+                "files": dict.fromkeys(q.BATCH_BUILD_RETAINED + q.BATCH_BUILD_EXCLUDED, {})}
             run.preflight_schemas = lambda: None
             profile = q.toolchain_profile(mode)
             runtimes = {"runtimes": [{"version": version, "buildversion": build,
@@ -899,7 +1402,9 @@ class Guards(unittest.TestCase):
         run.report["files_preparation_verified"]=True
         run.report["native_folder_verified"]=True
         derived=run.root/"build/QualificationPreparationDerivedData-123-1";derived.mkdir()
-        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root))}
+        run.report["files_preparation"]={"derived_data":str(derived.relative_to(run.root)),
+            "fixture_token":TOKEN,"absent_folder_probe":"TripDocket-Batch-Prepare-"+TOKEN,
+            "ingress":"direct-native-export-no-save"}
         group=self.root/"group";provider=group/"File Provider Storage";provider.mkdir(parents=True)
         token="12345678-1234-4234-8234-123456789abc"
         owned=provider/("TripDocket-Batch-QA-"+token);owned.mkdir()
@@ -917,7 +1422,26 @@ class Guards(unittest.TestCase):
             self.assertEqual((value,kind),(str(group),("Shared","AppGroup")))
             return group
         run.container_path=container
+        driver.qualified_build=derived
+        run.report["shared_build"]={"observations":{"before_seed":{}}}
+        run.observe_shared_build=lambda driver,label:None
         return run,driver
+
+    def test_seed_refuses_missing_reused_or_mutated_preparation_identity_before_reading(self):
+        for fault in ("missing", "same", "upper", "probe", "ingress"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                old=self.root;self.root=Path(root)
+                try:run,driver=self.seed_fixture()
+                finally:self.root=old
+                record=run.report["files_preparation"]
+                if fault=="missing":record.pop("fixture_token")
+                elif fault=="same":record.update(fixture_token=driver.token,
+                    absent_folder_probe="TripDocket-Batch-Prepare-"+driver.token)
+                elif fault=="upper":record["fixture_token"]="12345678-1234-4234-8234-123456789ABC"
+                elif fault=="probe":record["absent_folder_probe"]="other"
+                else:record["ingress"]="share-sheet"
+                with patch.object(q,"bounded_read",side_effect=AssertionError("No file read is authorized")):
+                    with self.assertRaises((RuntimeError,ValueError)):run.native_seed_files(driver,empty=True)
 
     def test_seed_destination_is_empty_then_exact_bytes_with_pinned_identity(self):
         run,driver=self.seed_fixture();run.native_seed_files(driver,empty=True)
@@ -955,6 +1479,7 @@ class Guards(unittest.TestCase):
         self.assertTrue(run.report["native_seed_verified"]);self.assertEqual(len(calls),1)
         label,argv,seconds,env=calls[0]
         self.assertEqual((label,seconds),("native-seed-ui",300))
+        self.assertEqual(argv[-1], "test-without-building")
         self.assertIn("platform=iOS Simulator,id="+OWNED,argv)
         self.assertEqual([x for x in argv if x.startswith("-only-testing:")],
                          ["-only-testing:TripfolioUITests/"+q.SEED_CASE.removesuffix("()")])
@@ -1007,7 +1532,7 @@ class Guards(unittest.TestCase):
                 q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.SEED_CASE)
 
     def test_final_capture_requires_native_seed_and_rechecks_seed_bytes_after_cleanup(self):
-        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run,_=self.prepared_capture(combined=False);run.report["cleanup_verified"]=True
         run.report.pop("native_seed_verified")
         with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
         run.report["native_seed_verified"]=True
@@ -1100,7 +1625,7 @@ class Guards(unittest.TestCase):
                 self.assertTrue(target.exists());self.assertFalse(run.report["native_folder"]["adopted"])
                 self.assertNotIn("native_folder_verified",run.report)
 
-    def test_failed_folder_phase_never_starts_main_or_removes_unadopted_leaf(self):
+    def test_failed_root_admission_never_starts_main_or_removes_unowned_path(self):
         run=self.run_object();run.owned=OWNED
         leaf=run.root/"partial-native-folder";leaf.mkdir();(leaf/"keep").write_bytes(b"keep")
         module=SimpleNamespace(timestamp=lambda:"recorded")
@@ -1116,10 +1641,10 @@ class Guards(unittest.TestCase):
             def source_snapshot(self):return {"head":HEAD}
             def save(self):(self.directory/"summary.json").write_text(json.dumps(self.summary))
         module.Driver=Driver
-        def failed(driver):raise RuntimeError("original folder failure")
-        run.prepare_native_folder=failed
+        def failed(driver):raise RuntimeError("original root admission failure")
+        run.prepare_native_root=failed
         with patch.object(q,"load_module",return_value=module):
-            with self.assertRaisesRegex(RuntimeError,"original folder failure"):run.run_driver()
+            with self.assertRaisesRegex(RuntimeError,"original root admission failure"):run.run_driver()
         self.assertEqual((leaf/"keep").read_bytes(),b"keep")
         summary=json.loads((run.root/run.report["driver_directory"]/"summary.json").read_text())
         self.assertEqual(summary["status"],"failed")
@@ -1161,7 +1686,7 @@ class Guards(unittest.TestCase):
                 q.validate_files_preparation(result,nodes,OWNED,run.report["runtime_selection"],q.FOLDER_CASE)
 
     def test_final_capture_requires_native_folder_and_rechecks_original_after_cleanup(self):
-        run,_=self.prepared_capture();run.report["cleanup_verified"]=True
+        run,_=self.prepared_capture(combined=False);run.report["cleanup_verified"]=True
         run.report.pop("native_folder_verified")
         with self.assertRaisesRegex(RuntimeError,"Missing verified"):run.capture_original_result()
         run.report["native_folder_verified"]=True
@@ -1177,7 +1702,7 @@ class Guards(unittest.TestCase):
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",workflow)
         self.assertEqual(set(q.MODES),{"batch","biometrics"})
         self.assertIn("DEVELOPER_DIR: " + q.DEVELOPER_DIR, workflow)
-        self.assertIn('run-name: "Release qualification: ${{ inputs.mode }}"', workflow)
+        self.assertIn("run-name: \"Release qualification: ${{ inputs.mode }} / ${{ inputs.runner || 'macos-15' }}\"", workflow)
         self.assertIn("python3 -B scripts/test-batch-scroll-container.py", workflow)
         ci=(Path(__file__).parent.parent/".github/workflows/ci.yml").read_text()
         self.assertIn('--validate-schemas', ci)
@@ -1186,6 +1711,267 @@ class Guards(unittest.TestCase):
         self.assertNotIn('--schema-version', ci)
         self.assertNotIn('export DEVELOPER_DIR=', ci)
 
+class FocusedBuildGuards(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="x86_64")))
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.env = {**ENV, "QUALIFICATION_RUNNER": "macos-15-intel", "QUALIFICATION_RUNNER_ARCH": "X64"}
+        self.profile = q.execution_profile("batch", self.env, "x86_64")
+        self.retained = ["AppTests/LocalizationTests.swift", "AppTests/PlatformTests.swift",
+                         "AppTests/StoreKitTestBootstrap.swift", "UITests/BatchImportUITests.swift"]
+        self.excluded = ["AppTests/" + name + ".swift" for name in (
+            "AppModelTests", "BatchCopiedSelectionTests", "BatchDocumentPickerTests", "BatchExternalSelectionTests",
+            "BatchImportTests", "BatchPickerRequestTests", "ExternalReadCoordinationTests", "NotificationSystemTests",
+            "PrivacySupportTests", "ReminderLifecycleTests")] + ["UITests/" + name + ".swift" for name in (
+            "AccessibilityUITests", "LocalizationUITests", "PrivacySupportUITests", "PrivacyTransitionUITests",
+            "PurchaseUITests", "TripfolioUITests")]
+        self.files = dict.fromkeys(self.retained + self.excluded + ["App/Views.swift", "Sources/TravelCore/Models.swift",
+            "Tests/TravelCoreTests/LocalizationTests.swift", "App/Tripfolio.storekit"], {})
+        self.setting = "EXCLUDED_SOURCE_FILE_NAMES=" + " ".join(sorted(Path(path).name for path in self.excluded))
+
+    def test_exact_four_complete_files_and_sixteen_literal_exclusions(self):
+        selected = q.focused_build_selection("batch", self.profile, self.files)
+        self.assertEqual(selected, {"retained_sources": self.retained, "excluded_sources": self.excluded,
+                                    "build_settings": [self.setting]})
+        self.assertNotIn("LocalizationTests.swift", self.setting)
+        self.assertEqual((len(self.retained), len(self.excluded)), (4, 16))
+
+    def test_default_arm_uses_the_same_complete_batch_source_selection(self):
+        profile = q.execution_profile("batch", ENV, "arm64")
+        self.assertEqual(q.focused_build_selection("batch", profile, self.files),
+                         q.focused_build_selection("batch", self.profile, self.files))
+        self.assertEqual((profile["work_seconds"], profile["boot_seconds"]), (2400, 180))
+
+    def test_all_biometrics_keep_full_compilation_scope(self):
+        for env, arch in ((ENV, "arm64"), (self.env, "x86_64")):
+            profile = q.execution_profile("biometrics", env, arch)
+            self.assertIsNone(q.focused_build_selection("biometrics", profile, None))
+
+    def test_wrong_mode_or_profile_identity_cannot_enable_focused_build(self):
+        arm = q.execution_profile("batch", ENV, "arm64")
+        for profile, other in ((self.profile, arm), (arm, self.profile)):
+            for key in ("name", "runner", "runner_architecture", "architecture"):
+                with self.subTest(profile=profile, key=key), self.assertRaisesRegex(RuntimeError, "verified batch"):
+                    q.focused_build_selection("batch", {**profile, key: other[key]}, self.files)
+        with self.assertRaisesRegex(RuntimeError, "verified batch"):
+            q.focused_build_selection("biometrics", self.profile, self.files)
+
+    def test_changed_test_source_set_fails_closed(self):
+        for files in (None, {k:v for k,v in self.files.items() if k != self.retained[0]},
+                      {**self.files, "UITests/NewTest.swift": {}}, {**self.files, "AppTests/Nested/NewTest.swift": {}},
+                      {**self.files, "AppTests/NewHelper.m": {}}):
+            with self.subTest(files=files), self.assertRaises(RuntimeError):
+                q.focused_build_selection("batch", self.profile, files)
+
+    def test_colliding_app_package_or_resource_name_fails_closed(self):
+        for path in ("App/AppModelTests.swift", "Sources/TravelCore/AccessibilityUITests.swift",
+                     "Tests/TravelCoreTests/BatchImportTests.swift", "Resources/PurchaseUITests.swift"):
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "collides"):
+                q.focused_build_selection("batch", self.profile, {**self.files, path: {}})
+
+    def test_invalid_exclusion_patterns_cannot_become_cli_settings(self):
+        for name in ("AppTests/*.swift", "AppTests/Bad Name.swift", "AppTests/Bad;Name.swift"):
+            paths = q.BATCH_BUILD_EXCLUDED + (name,)
+            with patch.object(q, "BATCH_BUILD_EXCLUDED", paths), self.assertRaisesRegex(RuntimeError, "literal"):
+                q.focused_build_selection("batch", self.profile, {**self.files, name: {}})
+
+    def test_preparation_uses_one_exact_setting_and_retains_native_limits(self):
+        run = q.Qualification(self.root, "batch", self.env)
+        run.build_settings = tuple(q.focused_build_selection("batch", run.profile, self.files)["build_settings"])
+        run.owned = OWNED; run.baseline = {}; run.intent = {}
+        calls = []
+        run.command = lambda label, argv, seconds=30: calls.append((label, list(map(str, argv)), seconds))
+        run.inspect_files_preparation = lambda: None
+        run.prepare_files_ui()
+        self.assertEqual(len(calls), 1)
+        label, argv, cap = calls[0]
+        self.assertEqual((label, cap), ("files-prepare-ui", 1200))
+        self.assertEqual(argv.count(self.setting), 1)
+        self.assertEqual(argv[-3:], ["CODE_SIGNING_ALLOWED=NO", self.setting, "test"])
+        self.assertEqual([s for s in argv if s.startswith("-only-testing:")],
+                         ["-only-testing:" + case for case in q.checkpoint.PREPARATION_TESTS])
+        self.assertEqual(argv[argv.index("-default-test-execution-time-allowance")+1], "300")
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance")+1], "600")
+
+    def test_facade_rejects_missing_changed_duplicate_or_extra_override_before_spawn(self):
+        run = q.Qualification(self.root, "batch", self.env); run.owned = OWNED
+        run.build_settings = (self.setting,)
+        base = ["xcodebuild", "-destination", "platform=iOS Simulator,id=" + OWNED]
+        for settings in ([], ["EXCLUDED_SOURCE_FILE_NAMES=Other.swift"], [self.setting, self.setting],
+                         [self.setting, "INCLUDED_SOURCE_FILE_NAMES=*.swift"]):
+            with self.subTest(settings=settings), patch.object(q.subprocess, "Popen", return_value=SimpleNamespace(pid=987654)) as spawn,                  self.assertRaisesRegex(RuntimeError, "changed the qualified"):
+                run.facade().Popen(base + settings, cwd=self.root, start_new_session=True)
+            spawn.assert_not_called()
+            self.assertEqual(run.driver_calls, 0)
+        with patch.object(q.subprocess, "Popen", return_value=SimpleNamespace(pid=987654)) as spawn:
+            argv = base + [self.setting]
+            run.facade().Popen(argv, cwd=self.root, start_new_session=True)
+        self.assertEqual(spawn.call_args.args[0], argv)
+        self.assertEqual(run.xcode.report["commands"][0]["argv"], argv)
+
+    def test_default_facade_rejects_unrequested_override(self):
+        run = q.Qualification(self.root, "biometrics", self.env); run.owned = OWNED
+        with patch.object(q.subprocess, "Popen") as spawn, self.assertRaisesRegex(RuntimeError, "changed the qualified"):
+            run.facade().Popen(["xcodebuild", "-destination", "platform=iOS Simulator,id=" + OWNED, self.setting],
+                               cwd=self.root, start_new_session=True)
+        spawn.assert_not_called()
+
+class SharedBuildGuards(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(q.os, "uname", return_value=SimpleNamespace(machine="arm64")))
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve();self.run=q.Qualification(self.root,"batch",ENV)
+        self.run.owned=OWNED;self.run.baseline={}
+        self.derived=self.root/"build/QualificationPreparationDerivedData-123-1"
+        products=self.derived/"Build/Products/Debug-iphonesimulator";products.mkdir(parents=True)
+        app=products/"Tripfolio.app";host=app/"PlugIns/TripfolioTests.xctest"
+        ui=products/"TripfolioUITests-Runner.app/PlugIns/TripfolioUITests.xctest"
+        self.paths={"Tripfolio":app,"TripfolioTests":host,"TripfolioUITests":ui}
+        ids={"Tripfolio":q.APP_ID,"TripfolioTests":q.APP_ID+".tests","TripfolioUITests":q.APP_ID+".uitests"}
+        self.settings=[]
+        for target,path in self.paths.items():
+            path.mkdir(parents=True,exist_ok=True)
+            (path/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":ids[target]}))
+            (path/target).write_bytes(target.encode())
+            self.settings.append({"target":target,"buildSettings":{"CONFIGURATION":"Debug",
+                "PLATFORM_NAME":"iphonesimulator","PRODUCT_BUNDLE_IDENTIFIER":ids[target],
+                "SYMROOT":str(products.parent),"BUILT_PRODUCTS_DIR":str(products),
+                "TARGET_BUILD_DIR":str(path.parent),"FULL_PRODUCT_NAME":path.name}})
+        runner=ui.parent.parent
+        (runner/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":q.RUNNER_ID}))
+        frameworks=runner/"Frameworks";frameworks.mkdir()
+        (frameworks/"runtime.dylib").write_bytes(b"runtime")
+        self.paths["TripfolioUITestsRunner"]=runner
+        self.run.report.update(files_preparation_verified=True,
+            files_preparation={"derived_data":str(self.derived.relative_to(self.root))})
+        self.driver=SimpleNamespace(args=SimpleNamespace(native_root=True),remaining=lambda:1200,summary={})
+        self.calls=[]
+        data=self.root/"data";data.mkdir()
+        def command(label,argv,seconds=30):
+            self.calls.append((label,argv,seconds))
+            if label=="shared-build-settings":return json.dumps(self.settings)
+            return str(data if argv[-1]=="data" else app)
+        self.run.command=command
+        self.run.container_path=lambda value,*kind:Path(value)
+
+    def test_actual_paths_and_three_observations_keep_products_bytes_modes_and_clock(self):
+        self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.run.shared_products,self.paths)
+        self.assertEqual(self.driver.qualified_build,self.derived)
+        self.run.observe_shared_build(self.driver,"after_seed")
+        self.run.observe_shared_build(self.driver,"after_main")
+        proof=self.run.report["shared_build"]
+        self.assertEqual(set(proof["observations"]),{"before_seed","after_seed","after_main"})
+        self.assertEqual(len(self.calls),7);self.assertTrue(all(c[2]==30 for c in self.calls))
+        self.assertIn("-showBuildSettings",self.calls[0][1])
+        self.assertEqual(self.calls[0][1][-1],"build-for-testing")
+        query = self.calls[0][1]
+        self.assertEqual(query[query.index("-destination") + 1], "generic/platform=iOS Simulator")
+        self.assertFalse(any(OWNED in str(arg) for arg in query))
+        self.assertTrue(all(OWNED in call[1] for call in self.calls[1:]))
+        for ref in proof["observations"].values():
+            raw=(self.run.out/ref["path"]).read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),ref["sha256"])
+            value=json.loads(raw);self.assertEqual(set(value["products"]),set(self.paths))
+            self.assertIn("modes",value["products"]["Tripfolio"])
+            self.assertIn("identity",value["installed"]["data"])
+        with self.assertRaises(RuntimeError):self.run.observe_shared_build(self.driver,"after_main")
+
+    def test_focused_settings_are_identical_in_query_and_qualified_driver(self):
+        setting = "EXCLUDED_SOURCE_FILE_NAMES=Other.swift Another.swift"
+        self.run.build_settings = (setting,)
+        for item in self.settings:
+            item["buildSettings"]["EXCLUDED_SOURCE_FILE_NAMES"] = setting.split("=", 1)[1]
+        self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls[0][1].count(setting), 1)
+        self.assertIs(self.driver.qualified_build_settings, self.run.build_settings)
+        self.assertEqual(self.driver.qualified_build, self.derived)
+
+    def test_dropped_changed_or_counteracting_target_setting_rejected(self):
+        setting = "EXCLUDED_SOURCE_FILE_NAMES=Other.swift Another.swift"
+        for target in range(3):
+            for key, value in (("EXCLUDED_SOURCE_FILE_NAMES", ""), ("EXCLUDED_SOURCE_FILE_NAMES", "Other.swift"),
+                               ("INCLUDED_SOURCE_FILE_NAMES", "Other.swift")):
+                settings = copy.deepcopy(self.settings)
+                for item in settings:
+                    item["buildSettings"]["EXCLUDED_SOURCE_FILE_NAMES"] = setting.split("=", 1)[1]
+                settings[target]["buildSettings"][key] = value
+                with self.subTest(target=target, key=key, value=value),                      self.assertRaisesRegex(RuntimeError, "exclusion settings differ"):
+                    q.shared_product_paths(json.dumps(settings), self.derived, (setting,))
+
+    def test_missing_duplicate_wrong_platform_identity_or_escaped_target_fails(self):
+        variants=[self.settings[:-1],self.settings+[self.settings[0]]]
+        for key,value in [("CONFIGURATION","Release"),("PLATFORM_NAME","iphoneos"),
+                          ("PRODUCT_BUNDLE_IDENTIFIER","wrong"),("TARGET_BUILD_DIR",str(self.root)),
+                          ("FULL_PRODUCT_NAME","../outside")]:
+            variant=copy.deepcopy(self.settings);variant[0]["buildSettings"][key]=value;variants.append(variant)
+        for value in variants:
+            with self.subTest(value=value),self.assertRaises(RuntimeError):
+                q.shared_product_paths(json.dumps(value),self.derived)
+        with self.assertRaises(RuntimeError):q.shared_product_paths(" "*(q.MIB+1),self.derived)
+        (self.paths["TripfolioTests"]/"Info.plist").unlink()
+        with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
+
+    def test_changed_bytes_or_modes_and_replaced_derived_directory_rejected(self):
+        self.run.prepare_shared_build(self.driver)
+        p=self.paths["Tripfolio"]/"Tripfolio";original=p.read_bytes();mode=p.stat().st_mode
+        p.write_bytes(b"different")
+        with self.assertRaisesRegex(RuntimeError,"products changed"):self.run.observe_shared_build(self.driver,"after_seed")
+        p.write_bytes(original);p.chmod(0o700)
+        with self.assertRaisesRegex(RuntimeError,"products changed"):self.run.observe_shared_build(self.driver,"after_seed")
+        p.chmod(mode)
+        self.run.shared_derived_identity=(0,0)
+        with self.assertRaisesRegex(RuntimeError,"identity changed"):self.run.observe_shared_build(self.driver,"after_seed")
+
+    def test_symlink_product_or_inactive_budget_never_starts_seed(self):
+        p=self.paths["TripfolioTests"];moved=p.with_name("Original.xctest");p.rename(moved);p.symlink_to(moved)
+        with self.assertRaises((RuntimeError,OSError)):q.shared_product_paths(json.dumps(self.settings),self.derived)
+        self.driver.remaining=lambda:1174
+        with self.assertRaisesRegex(RuntimeError,"budget"):self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls,[])
+        self.driver.remaining=lambda:1200;self.run.commands.active[999]=object()
+        with self.assertRaisesRegex(RuntimeError,"writer"):self.run.prepare_shared_build(self.driver)
+        self.assertEqual(self.calls,[])
+
+    def test_installed_bytes_mismatch_and_expired_postcheck_fail(self):
+        self.run.prepare_shared_build(self.driver)
+        other=self.root/"different-app";other.mkdir();(other/"Info.plist").write_bytes(b"bad")
+        self.run.command=lambda *args:str(other)
+        with self.assertRaisesRegex(RuntimeError,"Installed app differs"):self.run.observe_shared_build(self.driver,"after_seed")
+        self.driver.remaining=lambda:0
+        with self.assertRaisesRegex(RuntimeError,"deadline"):self.run.observe_shared_build(self.driver,"after_seed")
+
+    def test_shared_command_preserves_stop_reserve_inside_driver_deadline(self):
+        self.driver.remaining=lambda:19
+        self.run.shared_build_command(self.driver,"observation",["query"])
+        self.assertEqual(self.calls[-1][2],11)
+        self.driver.remaining=lambda:8
+        with self.assertRaisesRegex(RuntimeError,"budget"):
+            self.run.shared_build_command(self.driver,"observation",["query"])
+
+    def test_shared_settings_require_same_symroot_and_real_bundle_identifier(self):
+        different=self.derived/"other";different.mkdir()
+        bad=copy.deepcopy(self.settings);bad[1]["buildSettings"]["SYMROOT"]=str(different)
+        with self.assertRaisesRegex(RuntimeError,"SYMROOT"):
+            q.shared_product_paths(json.dumps(bad),self.derived)
+        (self.paths["Tripfolio"]/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":"other"}))
+        with self.assertRaisesRegex(RuntimeError,"plist identity"):
+            q.shared_product_paths(json.dumps(self.settings),self.derived)
+
+    def test_products_uses_shared_built_paths_instead_of_driver_default(self):
+        self.run.prepare_shared_build(self.driver)
+        runner=self.paths["TripfolioUITests"].parent.parent
+        (runner/"Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":q.RUNNER_ID}))
+        self.run.command=lambda label,argv,seconds:str(runner if argv[-2]==q.RUNNER_ID else self.paths["Tripfolio"])
+        self.driver.directory=self.root/"nonexistent-default"
+        self.run.products(self.driver)
+        self.assertTrue(self.run.report["products_verified"])
+
+    def test_runner_frameworks_are_included_in_compiled_product_identity(self):
+        self.run.prepare_shared_build(self.driver)
+        (self.paths["TripfolioUITestsRunner"]/"Frameworks/runtime.dylib").write_bytes(b"changed runtime")
+        with self.assertRaisesRegex(RuntimeError,"products changed"):
+            self.run.observe_shared_build(self.driver,"after_seed")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

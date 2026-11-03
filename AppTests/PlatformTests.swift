@@ -289,7 +289,14 @@ final class PlatformTests: XCTestCase {
             await manager.load()
             _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
             try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
-            let purchaseFailure = await manager.purchase()
+            var actionCalls = 0
+            let purchaseFailure = await manager.purchase(using: { product in
+                actionCalls += 1
+                XCTAssertEqual(product.id, PurchaseManager.productID)
+                XCTAssertEqual(product.type, .nonConsumable)
+                return try await product.purchase()
+            })
+            XCTAssertEqual(actionCalls, 1)
             XCTAssertEqual(purchaseFailure, .failed)
             XCTAssertFalse(manager.isPro)
             XCTAssertFalse(manager.isBusy)
@@ -297,7 +304,12 @@ final class PlatformTests: XCTestCase {
             try await session.setSimulatedError(nil, forAPI: .purchase)
             try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .loadProducts)
             let withoutCatalog = PurchaseManager()
-            let catalogFailure = await withoutCatalog.purchase()
+            var catalogActionCalls = 0
+            let catalogFailure = await withoutCatalog.purchase(using: { product in
+                catalogActionCalls += 1
+                return try await product.purchase()
+            })
+            XCTAssertEqual(catalogActionCalls, 0, "Catalog failure must not invoke the supplied purchase action")
             XCTAssertEqual(catalogFailure, .failed)
             XCTAssertNil(withoutCatalog.displayPrice)
             XCTAssertFalse(withoutCatalog.isPro)
@@ -323,7 +335,14 @@ final class PlatformTests: XCTestCase {
             let manager = PurchaseManager()
             await manager.load()
             _ = try XCTUnwrap(manager.displayPrice, diagnostics(manager))
-            let failure = await manager.purchase()
+            var actionCalls = 0
+            let failure = await manager.purchase(using: { product in
+                actionCalls += 1
+                XCTAssertEqual(product.id, PurchaseManager.productID)
+                XCTAssertEqual(product.type, .nonConsumable)
+                return try await product.purchase()
+            })
+            XCTAssertEqual(actionCalls, 1)
             XCTAssertEqual(failure, manager.isPro ? nil : .noEntitlement)
             XCTAssertFalse(manager.isBusy)
             let purchased = try await eventually { manager.isPro }

@@ -181,7 +181,7 @@ struct Main {
 
 def load_method(source):
     start = "    func load() async {"
-    end = "\n    @discardableResult\n    func purchase()"
+    end = "\n    @discardableResult\n    func purchase("
     if source.count(start) != 1 or source.count(end) != 1:
         raise ValueError("Cannot identify the unique production load() boundary")
     return source[source.index(start):source.index(end, source.index(start))]

@@ -219,10 +219,10 @@ can pass; partial testcase progress is not acceptance.
 
 One complete resource sample normally has a fixed five-second cooperative
 allowance. During an unfinished `phase-prepare`, `phase-export` or `phase-restore` command,
-including its admission and finalization, the explicit ceiling is fifteen
-seconds. The same ceiling applies while an active owned `boot-ready` process is
-waiting for `simctl bootstatus <owned UUID> -b`; its admission and post-process
-samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
+including its admission and finalization, the explicit ceiling is thirty
+seconds. An active owned `boot-ready` process waiting for
+`simctl bootstatus <owned UUID> -b` retains its separate fifteen-second ceiling;
+its admission and post-process samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
 owner's limit and its original work deadline, preserving the stop reserve. The
 one fixed deadline covers both free-space reads and the full uncached output
 traversal; its deadline is never renewed within a sample. Capability, other preparation and
@@ -248,7 +248,7 @@ This targets observed index-store traversal overhead; it does not establish
 that every future filesystem or scheduler delay will fit the unchanged budget.
 
 
-The fifteen-second phase ceiling is a scheduling-policy proposal based on a
+The earlier fifteen-second phase ceiling was based on a
 retained hosted failure: one sample took 5.305 seconds in traversal and failed
 at 350.670 elapsed, while the original export work deadline was 769.587. Its last
 `scandir_open` began at 4.971 seconds and returned 0.334 seconds later; a different
@@ -268,9 +268,31 @@ the five-second ceiling at 5.195 seconds. The longest `scandir_next` span was
 1.105 seconds; the final root-identity span was 0.575 seconds. This traversal
 reads metadata, not those payload bytes. Its elapsed spans include scheduling
 and do not establish filesystem latency or another physical cause. The active
-owned boot wait now uses the existing finite fifteen-second native ceiling;
+owned boot wait retains its separate finite fifteen-second ceiling;
 it gains no missing-entry rescan permission. Complete accounting, root/link
 checks, command deadlines and cleanup bounds remain required.
+
+[C3 Recovery run 41426294706](https://github.com/4alvit/travel-documents-ios/actions/runs/41426294706)
+completed preparation, then stopped during export because a full resource scan
+exceeded fifteen seconds. Its failed traversal lasted 16.848 seconds after
+503 completed accounting samples; the export command's original work deadline
+still had over 470 seconds remaining. The last observed `entry_stat` span began
+14.610 seconds into traversal and lasted 1.161 seconds. These spans include
+scheduler delay and do not identify a filesystem cause. No traversal restart
+occurred. Export produced no final XCTest result; restore never began.
+
+Only unfinished native phase scans now permit thirty seconds, still clipped
+to the original command and global deadlines. The boot ceiling remains fifteen
+seconds, and other contexts remain five. All entries still receive fresh,
+uncached checks; no size, allocation, depth, ownership or cleanup guard is
+removed. Thirty seconds does not guarantee completion, and timeouts still fail
+without an automatic retry. Completed resource samples now also retain a fixed
+set of scalar scan timings, operation/encounter counts, attempts and maximum
+depth, so later audits can distinguish completion intervals from traversal time.
+The old receipt retained only completion times for successful scans. Its last
+complete sample reported about 27.1 GB logical length but 306.3 MB allocated;
+the allocated output cap was not reached. Per-file sparse/compression attribution
+is unavailable because build intermediates were not retained.
 
 Capability commands keep their own pending-command context when delegating a
 resource checkpoint to the parent output scanner. Their admission, execution

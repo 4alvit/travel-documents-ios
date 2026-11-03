@@ -87,8 +87,9 @@ final class DismissalHarness {
     }
     func capture(_ app: XCUIApplication, _ name: String, batchDiagnostic: Bool) { captures.append(name) }
     func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
-    func run(_ navigation: XCUIElement) async throws {
-        try await requireFilesDismissal(XCUIApplication(), navigation: navigation, openedAt: .now)
+    func run(_ navigation: XCUIElement, observeLateFailure: Bool = true) async throws {
+        try await requireFilesDismissal(XCUIApplication(), navigation: navigation, openedAt: .now,
+                                       observeLateFailure: observeLateFailure)
     }
     // ACTUAL_DISMISSAL
 }
@@ -152,7 +153,7 @@ struct Main {
             expect(reader.read(valid) == initial, "1024 total nodes must be admitted")
             let excessive = Node(identifier: "root", type: .other, children: [Node(initial)] + Array(repeating: leaf, count: 1023))
             expect(reader.read(excessive) == "unavailable", "Excessive tree must fail")
-        case "dismissal-success", "dismissal-late", "dismissal-still-present", "dismissal-cancelled":
+        case "dismissal-success", "dismissal-late", "dismissal-still-present", "dismissal-cancelled", "dismissal-no-late":
             let harness = DismissalHarness()
             let navigation = XCUIElement()
             navigation.exists = name != "dismissal-success"
@@ -162,7 +163,7 @@ struct Main {
             var originalRethrown = false
             var cancellationRethrown = false
             do {
-                try await harness.run(navigation)
+                try await harness.run(navigation, observeLateFailure: name != "dismissal-no-late")
                 returned = true
             } catch let error as BatchTestFailure {
                 originalRethrown = error === harness.original
@@ -174,6 +175,10 @@ struct Main {
                 expect(cancellationRethrown == (name == "dismissal-cancelled"), "Cancellation must propagate")
                 expect(navigation.requests.isEmpty && harness.captures.isEmpty && harness.attachments.isEmpty,
                        "No passive diagnostic outside the original dismissal failure")
+            } else if name == "dismissal-no-late" {
+                expect(!returned && originalRethrown, "Seed control must retain the exact original failure")
+                expect(navigation.requests.isEmpty && harness.attachments.isEmpty, "Seed control omits only passive observation")
+                expect(harness.captures == ["Files remained after opening the selection"], "Original failure capture retained")
             } else {
                 expect(!returned && originalRethrown, "Late disappearance must still throw exact original failure")
                 expect(navigation.requests == [30], "Exactly one passive request")
@@ -248,18 +253,35 @@ class BatchImportDiagnosticTests(unittest.TestCase):
     def test_cancellation_is_not_observed_or_replaced(self):
         self.run_case("dismissal-cancelled")
 
+    def test_seed_control_omits_only_late_observation(self):
+        self.run_case("dismissal-no-late")
+
     def test_late_observation_has_no_actions_or_polling_loop(self):
         ui = UI.read_text()
         dismissal = section(ui, "    private func requireFilesDismissal(", "\n    private func reviewRows(")
         self.assertEqual(dismissal.count("waitForNonExistence(timeout: 30)"), 1)
         self.assertEqual(dismissal.count('try await wait("Files remained after opening the selection", app: app) { !navigation.exists }'), 1)
         self.assertIn("catch let originalFailure as BatchTestFailure", dismissal)
-        self.assertIn("throw originalFailure", dismissal)
+        self.assertIn("observeLateFailure: Bool = true", dismissal)
+        early = "guard observeLateFailure else { throw originalFailure }"
+        self.assertEqual(dismissal.count(early), 1)
+        self.assertEqual(dismissal.count("throw originalFailure"), 2)
+        self.assertLess(dismissal.index(early), dismissal.index("let observationStarted"))
         self.assertNotIn("timeout:", dismissal.split("catch let")[0])
         for forbidden in [".tap(", ".swipe", ".launch(", ".terminate(", "Task.sleep", "while ", "repeat {", "try?"]:
             self.assertNotIn(forbidden, dismissal)
         self.assertLess(dismissal.index("add(timing)"), dismissal.index("capture(app,"))
-        self.assertLess(dismissal.index("capture(app,"), dismissal.index("throw originalFailure"))
+        passive = dismissal[dismissal.index("let observationStarted"):]
+        self.assertLess(passive.index("capture(app,"), passive.index("throw originalFailure"))
+        selection = section(ui, "    private func selectRealFiles(", "\n    private func requireFilesDismissal(")
+        self.assertIn("observeLateFailure: Bool = true", selection)
+        self.assertIn("observeLateFailure: observeLateFailure", selection)
+        self.assertEqual(ui.count("observeLateFailure: false"), 1)
+        seed = section(ui, "    func testNativeSaveSeedsBothSyntheticOriginals()", "\n    // Combined qualification preserves")
+        self.assertIn("try await selectRealFiles(app, nativeRoot: true, observeLateFailure: false)", seed)
+        main = section(ui, "    func testRealFilesBatchRequiresEveryReviewAndPreservesOriginals()", "\n    // Opt-in prepare/export/restore phases.")
+        self.assertIn("try await selectRealFiles(app, nativeRoot: nativeRoot)", main)
+        self.assertNotIn("observeLateFailure:", main)
 
     def test_all_app_diagnostics_are_debug_simulator_only(self):
         stack = []
@@ -276,12 +298,23 @@ class BatchImportDiagnosticTests(unittest.TestCase):
 
     def test_capture_is_observation_only_and_before_existing_screenshot(self):
         app = APP.read_text()
-        callback = section(app, "                          allowsMultipleSelection: true)", "\nprivate struct BatchItemReviewView")
-        self.assertLess(callback.index("importerDiagnostics.record(result)"), callback.index("guard model.batchImportDraft?.id"))
+        callback = section(app, "    private func receivedPickerResult(", "\n}\n\n#if DEBUG")
+        self.assertEqual(callback.count("importerDiagnostics.record("), 1)
+        self.assertLess(callback.index("session.consumeRequest(from: model.batchImportDraft, clearing: &pickerSession)"), callback.index("importerDiagnostics.record(result.map(\\.urls))"))
+        self.assertNotIn("guard pickerSession?.id", callback)
+        self.assertNotIn(".onDisappear", app)
+        self.assertLess(callback.index("guard let result else"), callback.index("importerDiagnostics.record("))
         ui = UI.read_text()
         selection = section(ui, "    private func selectRealFiles(", "\n    private func reviewRows(")
         self.assertEqual(selection.count("open.tap()"), 1)
-        self.assertIn('capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)\n        open.tap()', selection)
+        diagnostic = 'capture(app, "Two synthetic originals selected in real Files", batchDiagnostic: true)'
+        self.assertEqual(selection.count(diagnostic), 1)
+        self.assertLess(selection.index(diagnostic), selection.index("open.tap()"))
+        between = selection[selection.index(diagnostic) + len(diagnostic):selection.index("open.tap()")]
+        self.assertEqual(between.strip(), """if nativeRoot {
+            try check(isNativeFilesRoot(app) && openActions.count == 1,
+                      app: app, "Batch selection left its verified local root or unique Open action")
+        }""")
         capture = section(ui, "    private func capture(", "\n    private struct BatchTestFailure")
         self.assertIn('if batchDiagnostic && app.launchArguments.contains("' + FLAG + '")', capture)
         self.assertEqual(capture.count("app.snapshot()"), 1)
@@ -295,6 +328,51 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         self.assertIn("executionTimeAllowance = 600", batch)
         recovery = section(ui, "    private func recoveryConfiguration(", "\n    private func recoveryTab(")
         self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', recovery)
+
+
+class PickerLifecycleDiagnosticTests(unittest.TestCase):
+    def test_trace_and_call_sites_are_debug_simulator_only(self):
+        source = (ROOT / "App/BatchDocumentPicker.swift").read_text()
+        stack = []
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#if "):
+                stack.append(stripped)
+            elif stripped == "#endif":
+                stack.pop()
+            elif any(token in line for token in ["TraceEvent", "traceCount", "trace(", "BATCH_PICKER"]):
+                self.assertIn("#if DEBUG && targetEnvironment(simulator)", stack, line)
+        self.assertFalse(stack)
+        gate = section(source, "        func consumeRequest(", "\n        #if DEBUG")
+        self.assertIn("draft?.id == draftID", gate)
+        self.assertIn("draft?.consumePickerRequest(id) == true", gate)
+        self.assertNotIn("active", gate)
+        full_gate = section(source, "        func consumeRequest(", "\n        #if DEBUG && targetEnvironment(simulator)\n        enum TraceEvent")
+        self.assertIn("if accepted, presentation?.id == id { presentation = nil }", full_gate)
+        dismantle = section(source, "    static func dismantleUIViewController(", "\n    @MainActor")
+        self.assertNotIn("invalidate()", dismantle)
+
+    def test_actual_trace_is_opt_in_bounded_and_uses_only_fixed_values(self):
+        source = (ROOT / "App/BatchDocumentPicker.swift").read_text()
+        trace = section(source, "        enum TraceEvent:", "\n        #endif")
+        harness = "import Foundation\n@MainActor final class TraceHarness {\n" + trace + "\n}\n"
+        harness += "@main struct Main { @MainActor static func main() { let x = TraceHarness(); x.trace(.didPick, urlCount: -1); x.trace(.didPick, urlCount: Int.max); for _ in 0..<100 { x.trace(.dismantle) }; let y = TraceHarness(); y.trace(.nativeCancel); y.trace(.resultAccepted); y.trace(.resultRejected) } }"
+        with tempfile.TemporaryDirectory(prefix="tripdocket-picker-trace-") as directory:
+            swift = Path(directory) / "main.swift"
+            binary = Path(directory) / "trace-tests"
+            swift.write_text(harness)
+            built = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            disabled = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+            self.assertEqual((disabled.returncode, disabled.stdout, disabled.stderr), (0, "", ""))
+            enabled = subprocess.run([str(binary), FLAG], capture_output=True, text=True, timeout=5)
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(enabled.stderr, "")
+            lines = enabled.stdout.splitlines()
+            self.assertEqual(len(lines), 19)  # 16 per first session, then three in a fresh session.
+            self.assertEqual(lines[:2], ["BATCH_PICKER event=didPick urls=0", "BATCH_PICKER event=didPick urls=11"])
+            self.assertEqual(lines[2:16], ["BATCH_PICKER event=dismantle urls=0"] * 14)
+            self.assertEqual(lines[16:], ["BATCH_PICKER event=nativeCancel urls=0", "BATCH_PICKER event=resultAccepted urls=0", "BATCH_PICKER event=resultRejected urls=0"])
 
 
 if __name__ == "__main__":
