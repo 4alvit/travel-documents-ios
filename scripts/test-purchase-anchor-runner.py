@@ -690,7 +690,9 @@ class Guards(unittest.TestCase):
                 self.assertIsNone(getattr(arm,'_boot_boundary',None))
 
     def late_stop_fixture(self,root):
-        p=self.fake_pair(root);arm=Context(p,p.root/'child',p.final,'unused');p.current=arm
+        with mock.patch.object(time,'monotonic',return_value=1000.0), \
+                mock.patch.object(core.base.RealOps,'now',return_value=1000.0):
+            p=self.fake_pair(root);arm=Context(p,p.root/'child',p.final,'unused');p.current=arm
         now=[p.started];arm.owned='ABC';arm.cleaning=True
         arm.limit=p.started+110;arm.write_deadline=p.started+120
         sent=[];child=SimpleNamespace(pid=77,returncode=None)
