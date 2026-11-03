@@ -188,8 +188,12 @@ class HostedRecovery(core.Recovery):
 
     def sim(self,label,*args,cap=30):
         discovery=getattr(self,'_discovery_deadline',None)
+        if label=='runtime-cache-ready':
+            require(not self.cleaning and discovery is not None and not self.create_attempted
+                    and self.owned is None and args==('runtime','dyld_shared_cache','update','--all')
+                    and cap==30,'Unexpected runtime cache preparation command')
         if discovery is not None and not self.cleaning and label in (
-                'profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'):
+                'profile-runtimes','runtime-cache-ready','runtime-inventory','baseline-inventory','create','created-inventory'):
             # All startup commands spend the same window; a later query or
             # create never receives a fresh 300 seconds. command() reserves
             # its original eight seconds for stopping inside self.limit.
@@ -391,19 +395,59 @@ class HostedRecovery(core.Recovery):
                 self.active.update(probe.active);self.unknown_spawn=self.unknown_spawn or probe.unknown_spawn
             self.limit=original_limit
 
+    def prepare_runtime_cache(self):
+        # Apple recommends completing runtime cache generation before first boot.
+        # This consumes the existing discovery window, not a new timeout budget.
+        require(hasattr(self,'_discovery_deadline') and self.limit<=self._discovery_deadline
+                and self.report.get('resolved_profile') and self.report.get('host_capability')
+                and not self.create_attempted and self.owned is None
+                and not self.active and not self.unknown_spawn,
+                'Runtime cache preparation prerequisites incomplete')
+        self.timecheck()
+        self.once('runtime-cache-ready')
+        state={'status':'pending','discovery_deadline_elapsed':self._discovery_deadline-self.t0,
+               'scope':'host-managed runtime cache readiness; no Simulator allocated'}
+        self.report['runtime_cache_readiness']=state
+        try:
+            self.sim('runtime-cache-ready','runtime','dyld_shared_cache','update','--all')
+            row=self.report['commands'][-1]
+            require(row['id']=='runtime-cache-ready' and row.get('returncode')==0
+                    and row.get('outcome')=='completed' and 'error' not in row
+                    and row.get('stop',{}).get('leader_reaped') is True
+                    and row.get('stop',{}).get('group_absent') is True
+                    and not self.active and not self.unknown_spawn,
+                    'Runtime cache preparation did not close successfully')
+            state.update(status='completed',finished_elapsed=self.ops.now()-self.t0)
+        except BaseException as error:
+            state.update(status='failed',error=repr(error))
+            raise
+
     def setup(self):
         require(shutil.disk_usage(self.out).free>=core.CAPS['admission_free_bytes'],'Hosted admission space below 16GiB')
         self.capture_source()
+        first=len(self.report['commands']);primary=None
         try:
             self.discover_profile()
             self.check_capability()
+            self.prepare_runtime_cache()
             super().setup()
+        except BaseException as error:
+            primary=error
+            raise
         finally:
             if hasattr(self,'_discovery_original_limit'):
                 self.report['discovery_budget'].update(status='failed',finished_elapsed=self.ops.now()-self.t0)
                 self.limit=self._discovery_original_limit
                 del self._discovery_original_limit
                 del self._discovery_deadline
+            try:
+                self.retain_startup_logs(first)
+                self.save()
+            except BaseException as error:
+                self.report['startup_log_publication_error']=repr(error)
+                self.error('Startup log publication: '+repr(error))
+                if primary is None:
+                    raise
 
     def owned_root(self):
         discovering=hasattr(self,'_discovery_original_limit') and not self.cleaning
@@ -445,39 +489,50 @@ class HostedRecovery(core.Recovery):
                     raise
 
     def retain_files_logs(self, first):
-        # Raw root logs include ps output and must never be uploaded wholesale.
-        # Move only closed streams of these exact owned Files commands. No copy
-        # doubles their resource charge and no extra native command is needed.
+        allowed={name:(['/usr/bin/xcrun','simctl',action,self.owned,core.FILES_BUNDLE]
+                       if self.owned else None)
+                 for name,action in [('files-launch','launch'),('files-terminate','terminate')]}
+        self.retain_closed_logs(first,allowed,'Files')
+
+    def retain_startup_logs(self, first):
+        allowed={'runtime-cache-ready':['/usr/bin/xcrun','simctl','runtime','dyld_shared_cache','update','--all'],
+                 'boot-ready':(['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b'] if self.owned else None)}
+        self.retain_closed_logs(first,allowed,'Startup')
+
+    def retain_closed_logs(self, first, allowed, label):
+        # Raw root logs can include ps/source output and stay private. Only exact
+        # allowlisted commands with closed streams move into existing PhaseLogs.
+        # Moving does not duplicate their resource charge or launch a process.
         seen=set()
         for index,record in enumerate(self.report['commands'][first:],start=first):
-            action={'files-launch':'launch','files-terminate':'terminate'}.get(record['id'])
-            if action is None:
+            if record['id'] not in allowed:
                 continue
+            expected=allowed[record['id']]
             self.timecheck()
-            require(record['id'] not in seen,'Duplicate Files log command')
+            require(record['id'] not in seen,f'Duplicate {label} log command')
             seen.add(record['id'])
-            require(self.owned and record.get('argv')==['/usr/bin/xcrun','simctl',action,self.owned,core.FILES_BUNDLE],
-                    'Unexpected Files log command')
+            require(expected is not None and record.get('argv')==expected,
+                    f'Unexpected {label} log command')
             stop=record.get('stop',{})
             require(not self.active and not self.unknown_spawn and stop.get('leader_reaped') is True
                     and stop.get('group_absent') is True and not record.get('close_error')
-                    and not record.get('log_close_errors'),'Files log ownership or closure unresolved')
-            require(core.identity_of(self.out)==self.output_id,'Output root changed before Files log publication')
+                    and not record.get('log_close_errors'),f'{label} log ownership or closure unresolved')
+            require(core.identity_of(self.out)==self.output_id,f'Output root changed before {label} log publication')
             directory=self.out/'PhaseLogs'
             self.timecheck()
             directory.mkdir(exist_ok=True)
             self.timecheck()
             directory_id=core.identity_of(directory)
-            require(set(record.get('logs',{}))=={'stdout','stderr'},'Unexpected Files log streams')
+            require(set(record.get('logs',{}))=={'stdout','stderr'},f'Unexpected {label} log streams')
             for channel in ('stdout','stderr'):
                 self.timecheck()
                 path=Path(record['logs'][channel])
                 require(path==self.out/(str(index+1)+'-'+channel+'.log') and path.resolve(strict=True)==path
-                        and not path.is_symlink() and path.is_file(),'Unexpected Files log path')
-                require(path.stat().st_size==record['bytes'][channel]<=core.base.PER_LOG,'Files log size differs')
-                require(core.identity_of(directory)==directory_id,'Files log directory changed')
+                        and not path.is_symlink() and path.is_file(),f'Unexpected {label} log path')
+                require(path.stat().st_size==record['bytes'][channel]<=core.base.PER_LOG,f'{label} log size differs')
+                require(core.identity_of(directory)==directory_id,f'{label} log directory changed')
                 public=directory/(record['id']+'-'+channel+'.log')
-                require(not os.path.lexists(public),'Public Files log already exists')
+                require(not os.path.lexists(public),f'Public {label} log already exists')
                 self.timecheck()
                 path.rename(public);record['logs'][channel]=str(public)
                 self.timecheck()
