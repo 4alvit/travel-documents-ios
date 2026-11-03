@@ -821,6 +821,25 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('host_capability',r.report)
         self.assertFalse((r.out/'host-capability.json').exists());self.assertEqual(r.limit,1380)
 
+    def test_base_recovery_nonzero_exit_is_strict_and_reaps_owned_group(self):
+        ops=Ops({'exit':65});ops.env={};ops.cwd=self.root
+        r=hosted.core.Recovery(ops,self.root/'base-output',{'runtime':'synthetic','device_type':'synthetic'}, {},'strict-nonzero',0,
+                              candidate=self.root,source_manifest={})
+        with patch.object(ops,'close',wraps=ops.close) as close:
+            with self.assertRaisesRegex(RuntimeError,'rejected failed') as caught:
+                r.command('rejected',['synthetic-only'],38)
+        self.assertIsInstance(caught.exception.__cause__,RuntimeError)
+        self.assertEqual(str(caught.exception.__cause__),'Nonzero command exit: 65')
+        row=r.report['commands'][0]
+        self.assertEqual((row['returncode'],row['outcome']),(65,'failed'))
+        self.assertEqual(row['error'],"RuntimeError('Nonzero command exit: 65')")
+        self.assertTrue(row['stop']['group_absent']);self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertEqual(len(ops.processes),1);close.assert_called_once_with(ops.processes[0])
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(38,30,38))
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        self.assertIs(hosted.core.Recovery.accept_nonzero_exit,hosted.core.base.Smoke.accept_nonzero_exit)
+
     def test_existing_core_process_and_recovery_methods_are_reused(self):
         for name in ['take_snapshot','authorize_restore','copy_tree','preserve_result','read_result','cleanup']:
             self.assertIs(getattr(hosted.HostedRecovery,name),getattr(hosted.core.Recovery,name))
@@ -974,7 +993,8 @@ class BoundaryTests(unittest.TestCase):
         # Keep the real hosted/core orchestration, commands, ownership matching,
         # budgets and stop behavior; replace only external filesystem/capability.
         with patch.object(r,'capture_source'),patch.object(r,'source'), \
-             patch.object(r,'check_capability'),patch.object(hosted,'toolchain_paths'), \
+             patch.object(r,'check_capability'),patch.object(r,'prepare_runtime_cache'), \
+             patch.object(hosted,'toolchain_paths'), \
              patch.object(hosted.core,'file_digest',return_value='a'*64), \
              patch.object(hosted.core.Recovery,'owned_root',return_value=self.root), \
              patch.object(hosted.core.Recovery,'prepare_files_ui_baseline'):
@@ -1773,8 +1793,10 @@ class BoundaryTests(unittest.TestCase):
             self.assertIsNone(hosted.core.Recovery.run_phase(r,'prepare'))
         state.assert_not_called();self.assertEqual(len(r.ops.processes),1)
         row=r.report['commands'][-1];budget=r.report['phase_budget']['prepare']
-        self.assertEqual(row['requested_cap_seconds'],600)
-        self.assertAlmostEqual(row['work_deadline'],747.9)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertAlmostEqual(row['work_deadline'],927.9)
+        self.assertEqual(budget['requested_command_cap_seconds'],row['requested_cap_seconds'])
+        self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
         self.assertEqual(row['stop_reserve_seconds'],8)
         self.assertEqual(budget['original_work_deadline_elapsed'],1380)
         self.assertEqual(budget['selected_case_max_seconds'],180)
@@ -1793,10 +1815,73 @@ class BoundaryTests(unittest.TestCase):
         preserve.assert_not_called();row=r.report['commands'][-1]
         self.assertEqual(row['error'],"RuntimeError('Command timeout')")
         self.assertEqual(row['command_deadline'],1380);self.assertEqual(row['work_deadline'],1372)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertEqual(r.report['phase_budget']['prepare']['command_deadline_ceiling_elapsed'],1380)
         self.assertEqual((r.limit,r.final),(1380,1500))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertNotIn('prepare',r.report.get('phase_passed',{}))
         self.assertEqual(len(r.ops.processes),1)
+
+    def test_ui_prepare_late_startup_and_full_case_fit_without_second_attempt(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.t=125.42;r.ops.plans=[{'delay':700}]
+        original_env,original_cwd=r.ops.env,r.ops.cwd
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
+             patch.object(r,'read_result',side_effect=read) as result:
+            self.assertIsNone(hosted.core.Recovery.run_phase(r,'prepare'))
+            with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_called_once_with('prepare')
+        result.assert_called_once_with('prepare',r.out/'copy.xcresult')
+        row=r.report['commands'][-1];budget=r.report['phase_budget']['prepare']
+        self.assertGreaterEqual(row['finish']-row['start'],700)
+        self.assertEqual(row['requested_cap_seconds'],780)
+        self.assertAlmostEqual(row['work_deadline'],897.42)
+        self.assertAlmostEqual(row['command_deadline'],905.42)
+        self.assertEqual(budget['requested_command_cap_seconds'],row['requested_cap_seconds'])
+        self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
+        self.assertEqual(budget['selected_case_max_seconds'],180)
+        self.assertTrue(r.report['phase_passed']['prepare'])
+        self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual(r.report['attempts']['phase-prepare'],1)
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertIs(r.ops.env,original_env);self.assertIs(r.ops.cwd,original_cwd)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_ui_prepare_stop_reserve_only_starts_no_process(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.t=1372;original_env,original_cwd=r.ops.env,r.ops.cwd
+        with patch.object(r,'failure_evidence'),patch.object(r,'preserve_result') as preserve:
+            with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_not_called();self.assertEqual(r.ops.processes,[])
+        self.assertNotIn('prepare',r.report.get('phase_passed',{}))
+        self.assertIs(r.ops.env,original_env);self.assertIs(r.ops.cwd,original_cwd)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def test_ui_export_restore_actual_commands_keep600_and_case300(self):
+        r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.owned='10000000-0000-0000-0000-000000000001'
+        r.report['phase_passed']={'prepare':True};r.report['files_folder']={'fixture_verified':True}
+        r.ops.plans=[{'delay':1},{'delay':1}];r.ops.t=100
+        with patch.object(r,'verify_folder'),patch.object(r,'authorize_restore') as authorize, \
+             patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result'),patch.object(r,'app_state',return_value='validated library'):
+            for phase in ['export','restore']:
+                self.assertEqual(hosted.core.Recovery.run_phase(r,phase),'validated library')
+                row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
+                self.assertEqual(row['requested_cap_seconds'],600)
+                self.assertAlmostEqual(row['command_deadline']-row['start'],600)
+                self.assertAlmostEqual(row['work_deadline']-row['start'],592)
+                self.assertEqual(budget['requested_command_cap_seconds'],600)
+                self.assertEqual(budget['selected_case_max_seconds'],300)
+                self.assertAlmostEqual(budget['command_deadline_ceiling_elapsed'],row['command_deadline'])
+                self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        authorize.assert_called_once_with();self.assertEqual(len(r.ops.processes),2)
+        self.assertEqual((r.limit,r.final),(1380,1500))
 
     def files_runner(self, group=None):
         home=self.root/'home'
@@ -2874,6 +2959,122 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):self.c12_command_pair(r)
         self.assertEqual(len(r.ops.processes),1);row=r.report['commands'][0]
         self.assertEqual(row['outcome'],'failed');self.assertIn('Interrupted',row['finalization_error'])
+
+
+    def cache_runner(self, plans=(), now=250, deadline=300):
+        r=self.runner(Ops(*plans));r.ops.t=now
+        r._discovery_original_limit=r.limit;r._discovery_deadline=deadline;r.limit=deadline
+        r.report['resolved_profile']={'path':'resolved-profile.json','sha256':'a'*64}
+        r.report['host_capability']={'path':'host-capability.json','sha256':'b'*64}
+        r.report['discovery_budget']={'status':'active','deadline_elapsed':deadline,
+            'requested_seconds':300,'original_work_deadline_elapsed':1380}
+        return r
+
+    def test_cache_ready_once_uses_remaining_discovery_window_before_owned_setup(self):
+        r=self.cache_runner([{'delay':20}]);events=[]
+        r.capture_source=lambda:events.append('source')
+        r.discover_profile=lambda:events.append('profile')
+        r.check_capability=lambda:events.append('capability')
+        r.ops.on_spawn=lambda argv:events.append(tuple(argv))
+        def owned_setup():
+            events.append('owned-setup')
+            self.assertEqual(r.report['runtime_cache_readiness']['status'],'completed')
+            self.assertFalse(r.active);self.assertIsNone(r.owned)
+            with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
+                r.prepare_runtime_cache()
+        with patch.object(hosted.core.Recovery,'setup',side_effect=owned_setup):r.setup()
+        row=r.report['commands'][0]
+        self.assertEqual(events,['source','profile','capability',
+            ('/usr/bin/xcrun','simctl','runtime','dyld_shared_cache','update','--all'),'owned-setup'])
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(300,292,300))
+        self.assertEqual((r.limit,r.final),(1380,1500));self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual(r.report['attempts'],{'runtime-cache-ready':1})
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual({p.name for p in (r.out/'PhaseLogs').iterdir()},
+                         {'runtime-cache-ready-stdout.log','runtime-cache-ready-stderr.log'})
+
+    def test_cache_failure_or_exhausted_budget_never_creates_device_and_keeps_primary(self):
+        for fault in ('timeout','nonzero','spawn','stop-only'):
+            with self.subTest(fault=fault):
+                old=self.root;self.root=old/fault;self.root.mkdir()
+                plan={'delay':float('inf')} if fault=='timeout' else {'exit':65} if fault=='nonzero' else {'spawn_error':True} if fault=='spawn' else {}
+                plan['output']=[('stdout',b'cache diagnostic')]
+                r=self.cache_runner([plan],now=292 if fault=='stop-only' else 290)
+                r.capture_source=lambda:None;r.discover_profile=lambda:None;r.check_capability=lambda:None
+                with patch.object(hosted.core.Recovery,'setup') as owned:
+                    with self.assertRaises(RuntimeError) as failure:r.setup()
+                owned.assert_not_called();self.assertFalse(r.create_attempted);self.assertIsNone(r.owned)
+                self.assertEqual(r.report['runtime_cache_readiness']['status'],'failed')
+                self.assertEqual((r.limit,r.final),(1380,1500))
+                self.assertEqual(len(r.ops.processes),0 if fault in ('spawn','stop-only') else 1)
+                self.assertNotIn('create',r.report['attempts'])
+                if fault in ('timeout','nonzero'):
+                    row=r.report['commands'][0]
+                    self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                    self.assertEqual((r.out/'PhaseLogs/runtime-cache-ready-stdout.log').read_bytes(),b'cache diagnostic')
+                    self.assertIn('runtime-cache-ready failed',str(failure.exception))
+                if fault=='spawn':
+                    self.assertTrue(r.unknown_spawn)
+                    self.assertIn('runtime-cache-ready failed',str(failure.exception))
+                    self.assertIn('startup_log_publication_error',r.report)
+                self.root=old
+
+    def test_cache_scope_and_original_global_clipping_do_not_expand_any_budget(self):
+        r=self.cache_runner([{'delay':float('inf')}],now=1370,deadline=1380)
+        with self.assertRaisesRegex(RuntimeError,'runtime-cache-ready failed'):r.prepare_runtime_cache()
+        row=r.report['commands'][0]
+        self.assertEqual((row['work_deadline'],row['command_deadline'],r.final),(1372,1380,1500))
+        self.assertEqual(row['requested_cap_seconds'],300)
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertEqual(len(r.ops.processes),1)
+        for args in [('runtime','dyld_shared_cache','delete','--all'),('runtime','dyld_shared_cache','update','other')]:
+            with self.assertRaisesRegex(RuntimeError,'Unexpected runtime cache'):
+                r.sim('runtime-cache-ready',*args)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_setup_retains_only_exact_cache_and_owned_boot_failure_streams(self):
+        r=self.cache_runner([{}, {'delay':float('inf'),'output':[('stdout',b'Waiting for synthetic boot')]}],now=0)
+        r.capture_source=lambda:None;r.discover_profile=lambda:None;r.check_capability=lambda:None
+        def owned_setup():
+            r.owned='10000000-0000-0000-0000-000000000001'
+            r.limit=r._discovery_original_limit
+            del r._discovery_original_limit;del r._discovery_deadline
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        with patch.object(hosted.core.Recovery,'setup',side_effect=owned_setup):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):r.setup()
+        rows=r.report['commands']
+        self.assertEqual([row['id'] for row in rows],['runtime-cache-ready','boot-ready'])
+        self.assertEqual(rows[-1]['requested_cap_seconds'],120)
+        self.assertEqual((r.out/'PhaseLogs/boot-ready-stdout.log').read_bytes(),b'Waiting for synthetic boot')
+        self.assertEqual(len(r.ops.processes),2)
+        private=r.out/'3-stdout.log';private.write_text('private process listing')
+        r.report['commands'].append({'id':'ps','argv':['/bin/ps','-axww'],'logs':{'stdout':str(private)}})
+        r.retain_startup_logs(2)
+        self.assertEqual(private.read_text(),'private process listing')
+        self.assertEqual(len(list((r.out/'PhaseLogs').iterdir())),4)
+
+    def test_startup_log_allowlist_rejects_forged_or_unclosed_streams(self):
+        for fault in ('argv','private-path','unreaped','log-close','unknown','symlink','size','collision'):
+            with self.subTest(fault=fault):
+                old=self.root;self.root=old/fault;self.root.mkdir()
+                r=self.cache_runner([{'output':[('stdout',b'cache diagnostic')]}])
+                r.prepare_runtime_cache();row=r.report['commands'][0]
+                private=r.out/'private-ps.log';private.write_text('private process listing')
+                if fault=='argv':row['argv']=['/bin/ps','-axww']
+                elif fault=='private-path':row['logs']['stdout']=str(private)
+                elif fault=='unreaped':row['stop']['leader_reaped']=False
+                elif fault=='log-close':row['log_close_errors']={'stdout':'unclosed'}
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='symlink':
+                    path=Path(row['logs']['stdout']);path.unlink();path.symlink_to(private)
+                elif fault=='size':row['bytes']['stdout']+=1
+                elif fault=='collision':
+                    folder=r.out/'PhaseLogs';folder.mkdir();(folder/'runtime-cache-ready-stdout.log').write_text('existing')
+                with self.assertRaises(RuntimeError):r.retain_startup_logs(0)
+                self.assertEqual(private.read_text(),'private process listing')
+                self.assertEqual(len(r.ops.processes),1)
+                self.root=old
+
 
 
 class ResourceAccountingTests(unittest.TestCase):
