@@ -78,18 +78,29 @@ build or product copy is substituted. Installed app and data-container identitie
 one invocation removes the separate seed-to-import launch boundary; it does not
 by itself prove that Xcode skipped installation or that a Files error is fixed.
 
-The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, exports each PDF from
-an opt-in Debug Simulator view through a document picker in copy mode. The test
-selects the exact local root and presses Save once for each file. Before reporting
-success, the app requires one matching destination URL and reads that exact URL
-through the existing security-scoped, coordinated reader, capped at 1024 bytes.
-The complete bytes must match the synthetic source. A missing callback, failed
-read or mismatch fails preparation; the destination is never removed by the app.
-Its existing 180-second case allowance and destination assertions remain. After all seed
-actions succeed, the UI test process records its run identity and terminates the
-synthetic app. At the start of the import case, before resetting or launching the
-app, the test consumes that same-process record and waits for one host response.
-A missing or restarted producer process cannot authorize import.
+The seed case, `testNativeSaveSeedsBothSyntheticOriginals`, exports both PDFs from
+an opt-in Debug Simulator view through one document picker in copy mode. The test
+selects the exact local root and presses Save once. The app requires a nonempty
+callback containing at most two unique expected filenames and unique local URLs,
+none referring to a source URL. It reads every exact returned URL through the
+existing security-scoped, coordinated reader, capped at 1024 bytes per file.
+Every read must match its complete synthetic source. A missing callback, invalid
+URL, failed read or mismatch fails the seed case; the app never removes a destination
+or constructs an unreturned URL. The callback may contain only one of the exported
+files: this alone does not prove that both files were saved.
+
+The `nativeSeed.callbackVerified` marker and `BATCH_NATIVE_SEED_CALLBACK` record
+report the source names and the successfully read names/count in sorted order.
+A per-file `nativeSeed.saved` marker appears only for a returned file that was
+actually read successfully. These are app callback proofs, distinct from the
+host's two-file proof below. The existing 180-second case allowance and destination
+assertions remain. Single-file direct preparation still opens its own exporter
+without saving. Optional same-process copy-reopen diagnostics are not enabled by
+the normal workflow and require both app readbacks if explicitly requested.
+After seed actions succeed, the UI test process records its run identity and
+terminates the synthetic app. At the start of the import case, before resetting
+or launching the app, the test consumes that same-process record and waits for
+one host response. A missing or restarted producer process cannot authorize import.
 
 The host requires the earlier hosted/preparation pass evidence, then the actual
 seed XCTest pass followed by the import-case start and its fresh checkpoint
@@ -362,8 +373,9 @@ too. Batch mode requires two distinct result-bundle reviews, in execution order:
 
 Each bundle must match the same captured source and device, retain an unchanged
 original manifest, and have no skips, failures or runtime warnings. Review the
-verified empty provider root and unchanged identity, both native Save operations
-and their complete-byte proof, and the main test's purchase, import, review,
+verified empty provider root and unchanged identity, the single two-source native
+Save and actual callback readback names, the host's complete two-file byte proof,
+and the main test's purchase, import, review,
 save and relaunch evidence. The public batch receipt retains the three named
 functional methods: hosted purchase/restore, native seeding, and real batch
 import. They span the two bundles; the second bundle must not be reported as a

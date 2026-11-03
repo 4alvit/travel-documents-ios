@@ -415,16 +415,17 @@ final class BatchImportUITests: XCTestCase {
         app.terminate()
         defer { app.terminate() }
         app.launchArguments = recoveryArguments + ["--ui-testing-native-batch-seed",
-                                                   "--ui-testing-native-batch-token", token]
+                                                   "--ui-testing-native-batch-token", token,
+                                                   "--ui-testing-batch-diagnostics"]
         if reopenControl {
-            app.launchArguments += ["--ui-testing-native-reopen", "--ui-testing-batch-diagnostics"]
+            app.launchArguments += ["--ui-testing-native-reopen"]
         }
         app.launch()
-        // The control changes only export grouping. Direct preparation and
-        // ordinary seeding retain their one-file export presentations.
-        let exportGroups = reopenControl ? [filenames] : filenames.map { [$0] }
+        // Native Save writes both fixtures in one presentation. The callback
+        // proves only returned URLs; the host must verify both files before main.
+        let exportGroups = [filenames]
         for exportNames in exportGroups {
-            let sourceIdentifier = reopenControl ? "nativeSeed.exportBoth" : "nativeSeed." + exportNames[0]
+            let sourceIdentifier = "nativeSeed.exportBoth"
             let seed = app.buttons[sourceIdentifier]
             try await wait("Native seed source is unavailable", app: app) { seed.exists && seed.isEnabled && seed.isHittable }
             seed.tap()
@@ -448,13 +449,23 @@ final class BatchImportUITests: XCTestCase {
                           app: app, "Native seed left its verified local root or unique Save action")
             }
             save.tap()
-            let verified = exportNames.map { app.staticTexts["nativeSeed.saved." + $0] }
+            let verified = [app.staticTexts["nativeSeed.callbackVerified"]]
             let failed = app.staticTexts["nativeSeed.failure"]
             try await waitForNativeSeedExport(app, navigation: navigation, verified: verified,
                                               failed: failed, observeLateFailure: reopenControl)
             try check(!failed.exists && verified.allSatisfy { $0.exists }, app: app,
                       "Native seed export destination was not verified")
-            capture(app, "Native seed returned after Save — " + exportNames.joined(separator: ", "))
+            let sourceNames = exportNames.sorted()
+            let subsets = sourceNames.map { [$0] } + [sourceNames]
+            let expectedValues = subsets.map {
+                "sourceCount=\(sourceNames.count) sourceNames=\(sourceNames.joined(separator: ",")) "
+                    + "verifiedCount=\($0.count) verifiedNames=\($0.joined(separator: ","))"
+            }
+            let callbackValue = verified[0].value as? String ?? ""
+            try check(expectedValues.contains(callbackValue), app: app,
+                      "Native seed callback verification evidence is invalid")
+            print("BATCH_NATIVE_SEED_CALLBACK \(callbackValue)")
+            capture(app, "Native seed returned URLs verified after Save — " + exportNames.joined(separator: ", "))
         }
         if reopenControl {
             // Diagnostic only: keep this AUT process alive after both exports.

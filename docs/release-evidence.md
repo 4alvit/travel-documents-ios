@@ -1154,6 +1154,35 @@ must determine whether the corrected configuration resolves this boundary.
 Purchase handling, picker ownership, single Open action and all validation
 deadlines remain unchanged.
 
+## Native batch fixture callback and host proof
+
+The [retained array-export observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41551259620)
+failed before the product import case: the exporter received two source PDFs,
+but its one recorded callback returned only the insurance URL. The fixture's
+exact-two callback guard rejected that result before reading any returned URL.
+The host's post-failure check found both exact destination PDFs. This observation
+does not establish that another callback would arrive, or that the product's
+original-URL picker can import both files. It remains failed native evidence.
+
+Normal fixture creation now exports both PDFs with one native Save and validates
+the nonempty, unique expected subset of URLs UIKit actually returns. Every returned
+URL must be local, distinct from the sources, and read to its complete expected
+bytes through the existing coordinated reader. The app reports the source names
+and actual successfully read names/count; it never reports a readback for an
+unreturned file or synthesizes that file's URL. This explicitly replaces the
+fixture's assumption that the callback must contain one URL per source.
+
+Before any product main-case action, the existing host checkpoint still requires
+the seed pass, stopped app writer, unchanged owned provider identity, exactly two
+expected regular PDFs, and complete equality with both retained synthetic sources.
+An incomplete or changed destination prevents the ACK and blocks import. The
+production picker must then return and import both selected originals, preserve
+every review requirement, save both original byte streams and survive relaunch.
+Optional copy-reopen diagnostics are excluded from the normal workflow; if invoked
+separately, they require both actual app readbacks. No deadline, ownership or product
+assertion is relaxed, and no successful native qualification is claimed for this
+new fixture contract until its full capture is independently reviewed.
+
 ## Distribution and physical-device limits
 
 Physical-device authentication, background sharing, camera, VoiceOver, large
