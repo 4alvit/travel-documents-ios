@@ -236,9 +236,9 @@ class BootstrapTests(unittest.TestCase):
         runner = self.make(); before_env = runner.ops.env
         self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
         _, argv, cap = next(call for call in runner.calls if call[0] == "prepare-ui")
-        self.assertEqual(cap, 780)
-        self.assertEqual((m.WORK, m.STOP, m.WRITE), (900, 30, 10))
-        self.assertEqual(runner.limit - runner.t0, 900)
+        self.assertEqual(cap, 960)
+        self.assertEqual((m.WORK, m.STOP, m.WRITE), (1080, 30, 10))
+        self.assertEqual(runner.limit - runner.t0, 1080)
         self.assertEqual([v for v in argv if v.startswith("-only-testing:")], ["-only-testing:TripfolioUITests/" + m.PREPARE_CASE.removesuffix("()")])
         self.assertEqual(argv[argv.index("-destination") + 1], "platform=iOS Simulator,id=" + s.FIRST)
         self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "180")
@@ -256,10 +256,28 @@ class BootstrapTests(unittest.TestCase):
         runner = self.make(); before_env = runner.ops.env; runner.fail = "prepare-ui"
         self.assertEqual(self.run_bootstrap(runner), 1); self.assertIs(runner.ops.env, before_env)
 
+    def test_cold_start_model_preserves_case_and_fixed_postprocessing_deadline(self):
+        runner = self.make()
+        # Model the observed startup plus the full existing case allowance and
+        # completion margin. This is not a measured native performance claim.
+        command_seconds = 711 + m.recovery.PREPARE_CASE_SECONDS + 30
+        self.assertLess(command_seconds, m.PREPARE_COMMAND_SECONDS - 8)
+        def transform(label, value):
+            runner.ops.value += {"prepare-ui": command_seconds, "prepare-summary": 20,
+                                 "prepare-tests": 20, "devices-booted": 20,
+                                 "files-group": 20, "devices-final": 20}.get(label, 0)
+            return value
+        runner.transform = transform
+        self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
+        self.assertEqual(runner.limit - runner.t0, 1080)
+        self.assertEqual(runner.cleanup_deadline - runner.limit, 30)
+        self.assertEqual(runner.write_deadline - runner.cleanup_deadline, 10)
+        self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
+
     def test_slow_preparation_does_not_extend_postprocessing_work_deadline(self):
         runner = self.make()
         def transform(label, value):
-            runner.ops.value += {"prepare-ui": 770, "prepare-summary": 60,
+            runner.ops.value += {"prepare-ui": 950, "prepare-summary": 60,
                                  "prepare-tests": 60, "devices-booted": 11}.get(label, 0)
             return value
         runner.transform = transform
@@ -268,7 +286,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(runner.report.get("final_inventory_verified", False))
         self.assertNotIn("files-group", [call[0] for call in runner.calls])
         self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
-        self.assertEqual(runner.limit - runner.t0, 900)
+        self.assertEqual(runner.limit - runner.t0, 1080)
 
     def test_exact_preparation_case_warnings_and_device_contract(self):
         runner = self.make()
@@ -364,6 +382,20 @@ class ShellBoundary(s.ShellTests):
                      ("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")]:
             result = self.run_script(*args)
             self.assertEqual(result.returncode, 2, result.stderr); self.assertFalse(self.output.exists())
+
+    def test_workflow_budget_preserves_guidance_and_external_reserves(self):
+        text = (HERE.parent / ".github/workflows/ci.yml").read_text()
+        guidance = text.split("  ui_guidance:\n", 1)[1].split("  privacy_ipad:\n", 1)[0]
+        integration = guidance.split("      - name: Simulator integration and StoreKit tests\n", 1)[1]
+        self.assertIn("    timeout-minutes: 65\n", guidance)
+        self.assertIn("        timeout-minutes: 45\n", integration)
+        self.assertIn("    timeout-minutes: 35\n", text.split("  ui_guidance:\n", 1)[0])
+        # Planning envelope: 60s selection, bounded bootstrap including final
+        # receipts, 24m previously observed guidance, 80s remaining margin.
+        self.assertEqual(60 + m.WORK + m.STOP + m.WRITE + 24 * 60 + 80, 45 * 60)
+        self.assertEqual(2 + 3 + 45 + 5 + 3 + 3 + 2 + 2, 65)
+        self.assertEqual(guidance.count("        timeout-minutes: 3\n"), 3)
+        self.assertEqual(guidance.count("        timeout-minutes: 2\n"), 2)
 
     def test_workflow_retains_nested_receipt_and_uses_explicit_flag(self):
         text = (HERE.parent / ".github/workflows/ci.yml").read_text()

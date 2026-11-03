@@ -1,0 +1,66 @@
+name: CodeQL
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '53 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/security-scan.yml@86c9afca5625a97ef3d69ef10348ccd28a27e0cf
+    with:
+      languages: python,actions
+      run-codeql: true
+      force-full: true
+      run-trivy: false
+      run-dependency-review: false
+  swift:
+    name: Swift security analysis
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require reviewed ARM toolchain profile
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(xcodebuild -version)" = $'Xcode 26.2\nBuild version 17C52'
+      - name: Initialize Swift analysis
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: swift
+          build-mode: manual
+      - name: Build the committed app and local TravelCore package for analysis
+        run: >-
+          xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio
+          -configuration Release -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath .codeql-derivedData CODE_SIGNING_ALLOWED=NO
+          ENABLE_CODE_COVERAGE=NO DEPLOYMENT_POSTPROCESSING=YES
+          STRIP_INSTALLED_PRODUCT=YES build
+      - name: Analyze Swift
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:swift

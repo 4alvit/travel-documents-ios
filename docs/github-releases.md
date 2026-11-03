@@ -253,7 +253,7 @@ If the same selected device and data-root inode are unchanged, preparation then
 runs one `simctl bootstatus <UUID> -b` command with a 180-second cap and verifies
 a fresh complete inventory, Booted state and unchanged root before container
 lookup. An already-Booted device receives no additional boot command. These
-steps share the existing 900-second work budget; failures are not retried.
+steps share the fixed 1,080-second work budget; failures are not retried.
 The receipt records the observed post-test state, whether a warm boot was needed,
 and the resulting state. Final checks still reject changes to any other device.
 The preparation creates no backup or Files folder and does not erase or delete
@@ -270,21 +270,32 @@ count and per-action deadlines are unchanged. Each scroll observation reuses
 its app, navigation, obstruction and selected-container frames. Count rows use one
 fresh snapshot for identity, label and value while retaining the global uniqueness
 and live hit checks; snapshots are never reused after a drag or a new observation.
-Phone preparation has a 900-second work budget and a 780-second build/test command
+Phone preparation has a 1,080-second work budget and a 960-second build/test command
 cap; the shared preparation case has a 180-second allowance. A captured cold phone
 run reached local Files checks at 132 seconds, after its former 120-second limit.
 That failed run remains failed; no completed preparation is inferred from its
 late observations. A later phone run spent about 518 seconds in build and runner
 startup before its case began, including a 280-second runner launch call. Its
-former 600-second command cap expired during the case. The phone command budget
-now accommodates that measured startup and the unchanged case allowance within
-the same total work budget. Result inspection, provider checks and final inventory
+former 600-second command cap expired during the case. In
+[run 41577208390](https://github.com/4alvit/travel-documents-ios/actions/runs/41577208390),
+about 711 seconds elapsed before the preparation case started; the 780-second
+command cap then expired after about 61 seconds of case activity. The current
+960-second combined command allowance includes its eight-second stop reserve;
+it is not a separately enforced startup deadline. The case still has the same
+180-second allowance. Result inspection, provider checks and final inventory
 share the remaining budget and still fail if it expires; their completion is not
-guaranteed. The startup delay and the failed run's unconfirmed process-group
-cleanup are not claimed fixed. Recovery retains its 600-second command cap; batch release qualification
+guaranteed. The earlier 600-second failure's unconfirmed process-group cleanup
+remains historical evidence. The later 780-second run confirmed its owned group
+absent and its leader reaped; neither result proves the startup delay fixed.
+Recovery retains its 600-second command cap; batch release qualification
 preparation has the profile-specific cap described above. The guidance test
 deadlines and 30-second cleanup budget are unchanged. The phone integration step
-has a 40-minute cap within a 60-minute job. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
+has a 45-minute cap within a 65-minute job. Its planning envelope leaves one
+minute for initial selection, 1,080 seconds for preparation work plus 30 seconds
+for cleanup and ten for its receipt, 24 minutes for the measured guidance
+invocation, and 80 seconds of margin. These are planning allocations within the
+step limit, not separate enforced timers. The existing 20-minute job allowance
+outside that step is unchanged. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
 completed its integration step in 37 minutes 56 seconds but exceeded the former
 35-minute job limit. Raw test artifacts upload before optional failure extraction
 so that extraction cannot consume the time reserved for preserving the original
