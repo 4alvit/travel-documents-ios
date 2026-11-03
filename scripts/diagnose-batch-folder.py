@@ -8,7 +8,7 @@ import stat
 import sys
 
 HERE = Path(__file__).resolve().parent
-PROVIDER_SHA256 = "e2f0c132548242b520fb6665c5fcc9e70e44062e9db0798729b65879a5b44047"
+PROVIDER_SHA256 = "b0e2b78e5336e4027257ffde1ff30cc83f6dde3e182319c92d6fa318cf521d2c"
 
 
 def verify_provider():
@@ -43,6 +43,8 @@ class FolderQualification(provider.ProviderLogQualification):
             "scope": "Native-created subfolder; additional folder case plus unchanged mandatory preparation/seed/main cases",
             "folder_creation": "Files UI only; host verifies absent-before and exact empty leaf after",
             "expected_phase_case_counts": [2, 1, 2], "expected_result_bundles": 3,
+            "driver_seconds": 1440, "additional_folder_seconds": q.FOLDER_SECONDS,
+            "clock": "Initial 1200-second driver plus separate 240-second folder envelope; global 2400 unchanged",
             "provider_sha256": PROVIDER_SHA256,
         })
         super().save()

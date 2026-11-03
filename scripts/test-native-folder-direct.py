@@ -22,7 +22,7 @@ SWIFT = r'''
 import Foundation
 import CoreGraphics
 struct BatchTestFailure: Error { let message: String }
-enum Kind { case application, window, other, collectionView, navigationBar, keyboard, cell, button, textView }
+enum Kind { case application, window, other, collectionView, navigationBar, keyboard, cell, button, textView, staticText }
 @MainActor final class XCUIElementSnapshot {
     var elementType: Kind
     var identifier: String
@@ -30,6 +30,7 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
     var frame: CGRect
     var children: [XCUIElementSnapshot]
     var isEnabled = true
+    var value: Any? = nil
     init(_ kind: Kind, _ id: String = "", _ label: String = "", _ frame: CGRect = .zero,
          _ children: [XCUIElementSnapshot] = []) {
         elementType = kind; identifier = id; self.label = label
@@ -46,6 +47,9 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
     static func combined(_ env: [String: String], _ debug: Bool) throws -> String {
         guard let result = try combinedBatchConfiguration(env, debugSimulator: debug) else { return "none" }
         return result.session + ":" + result.token
+    }
+    static func editor(_ snapshot: XCUIElementSnapshot, _ expected: String) -> CGRect? {
+        nativeFolderEditorFrame(in: snapshot, expectedName: expected, localTitle: "On My iPhone")
     }
     static func candidate(_ snapshot: XCUIElementSnapshot) -> CGRect? {
         nativeFolderRenameFrame(in: snapshot, localTitle: "On My iPhone")
@@ -103,9 +107,74 @@ enum Kind { case application, window, other, collectionView, navigationBar, keyb
         }
     }
 }
+@MainActor final class EditorTree {
+    let title = XCUIElementSnapshot(.staticText, "", "On My iPhone", CGRect(x: 72, y: 99.7, width: 109.7, height: 20.7))
+    let editor = XCUIElementSnapshot(.textView, "DOC.inlineRenameField", "", CGRect(x: 0, y: 305, width: 169, height: 63))
+    let cell = XCUIElementSnapshot(.cell, "Folder", "", CGRect(x: 10, y: 212, width: 122, height: 189.7))
+    let grid = XCUIElementSnapshot(.collectionView, "File View", "", CGRect(x: 0, y: 72, width: 402, height: 802))
+    let nav = XCUIElementSnapshot(.navigationBar, "FullDocumentManagerViewControllerNavigationBar", "", CGRect(x: 0, y: 88, width: 402, height: 114))
+    let root = XCUIElementSnapshot(.other, "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: On My iPhone")
+    let picker = XCUIElementSnapshot(.other, "Browse View (Picker)")
+    let keyboard = XCUIElementSnapshot(.keyboard, "", "", CGRect(x: 0, y: 583, width: 402, height: 233))
+    let window = XCUIElementSnapshot(.window, "", "", CGRect(x: 0, y: 0, width: 402, height: 874))
+    let app = XCUIElementSnapshot(.application)
+    init(_ expected: String) {
+        editor.value = expected; cell.children = [editor]; grid.children = [cell]; nav.children = [title]
+        root.children = [nav, grid]; picker.children = [root]; window.children = [picker, keyboard]; app.children = [window]
+    }
+    func mutate(_ name: String) {
+        switch name {
+        case "exact": break
+        case "wrong-provider": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
+        case "duplicate-picker": window.children.append(picker)
+        case "duplicate-root": picker.children.append(root)
+        case "duplicate-grid": root.children.append(grid)
+        case "duplicate-nav": root.children.append(nav)
+        case "duplicate-title": nav.children.append(title)
+        case "wrong-title": title.label = "Other"
+        case "title-outside-nav": title.frame.origin.y = 300
+        case "title-outside-window": window.frame.origin.y = 200
+        case "empty-title": title.frame.size.width = 0
+        case "nonfinite-title": title.frame.origin.x = .nan
+        case "missing-editor": cell.children = []
+        case "duplicate-editor": cell.children.append(editor)
+        case "wrong-value": editor.value = "foreign"
+        case "disabled-editor": editor.isEnabled = false
+        case "editor-outside-cell-ancestry": cell.children = []; grid.children.append(editor)
+        case "editor-outside-grid": editor.frame.origin.y = 0
+        case "editor-outside-window": window.frame.size.width = 150
+        case "editor-under-keyboard": editor.frame.origin.y = 600
+        case "empty-editor": editor.frame.size.height = 0
+        case "nonfinite-editor": editor.frame.origin.x = .infinity
+        case "second-cell": grid.children.append(XCUIElementSnapshot(.cell))
+        case "cell-outside-grid": cell.frame.origin.y = 0
+        case "missing-keyboard": window.children = [picker]
+        case "duplicate-keyboard": window.children.append(keyboard)
+        case "root-outside-picker": picker.children = []; window.children.append(root)
+        case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
+        case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
+        case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "oversized-tree": window.children += (0..<4097).map { _ in XCUIElementSnapshot(.other) }
+        case "too-deep":
+            let top = XCUIElementSnapshot(.other); var current = top
+            for _ in 0..<100 { let next = XCUIElementSnapshot(.other); current.children = [next]; current = next }
+            window.children.append(top)
+        default: fatalError("Unknown editor shape")
+        }
+    }
+}
 @main struct Main {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args[0] == "editor" {
+            let tree = EditorTree(args[2]); tree.mutate(args[1])
+            if let frame = Harness.editor(tree.app, args[2]) {
+                precondition(frame == tree.editor.frame)
+                precondition(!tree.cell.frame.contains(frame))
+                print("accepted")
+            } else { print("rejected") }
+            return
+        }
         if args[0] == "shape" {
             let tree = Tree(); tree.mutate(args[1])
             if let rect = Harness.candidate(tree.app) {
@@ -210,6 +279,36 @@ class FolderDirectTests(unittest.TestCase):
                      "nonfinite-cell", "empty-cell", "outside-grid", "outside-window", "missing-window",
                      "oversized-tree", "too-deep"]:
             with self.subTest(case=case): self.assertEqual(self.probe("shape", case), "rejected")
+
+    def test_actual_editing_hierarchy_accepts_visible_title_and_real_editor_geometry(self):
+        # Current original AX: editor x0..169 extends beyond its cell x10..132.
+        # Snapshot titles have no hittability API; actual live editor remains checked at both call sites.
+        for expected in ["untitled folder", "TripDocket-Batch-QA-" + TOKEN]:
+            self.assertEqual(self.probe("editor", "exact", expected), "accepted")
+            for case in ["wrong-provider", "duplicate-picker", "duplicate-root", "duplicate-grid", "duplicate-nav",
+                         "duplicate-title", "wrong-title", "title-outside-nav", "title-outside-window", "empty-title",
+                         "nonfinite-title", "missing-editor", "duplicate-editor", "wrong-value", "disabled-editor",
+                         "editor-outside-cell-ancestry", "editor-outside-grid", "editor-outside-window",
+                         "editor-under-keyboard", "empty-editor", "nonfinite-editor", "second-cell", "cell-outside-grid",
+                         "missing-keyboard", "duplicate-keyboard", "root-outside-picker", "nav-outside-root",
+                         "grid-outside-root", "introduction-overlay", "oversized-tree", "too-deep"]:
+                with self.subTest(expected=expected, case=case):
+                    self.assertEqual(self.probe("editor", case, expected), "rejected")
+
+    def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
+        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        self.assertEqual(case.count("Self.nativeFolderEditorFrame(in: try app.snapshot()"), 2)
+        self.assertIn('expectedName: "untitled folder"', case)
+        self.assertIn("expectedName: ownedFolder", case)
+        for failure in ["Native folder editor left the single newly created local folder",
+                        "Native folder editor is not ready for explicit end-editing"]:
+            statement = case[:case.index(failure)].rsplit("try check(", 1)[1]
+            self.assertIn("inlineNames.element.isEnabled && inlineNames.element.isHittable", statement)
+            self.assertIn("== inlineNames.element.frame", statement)
+            self.assertNotIn("isRecoveryFolder(", statement)
+            self.assertNotIn("isNativeFilesRoot(", statement)
+        normal = UI[UI.index("    private func isRecoveryFolder"): ]
+        self.assertIn("navigation.exists && titles.count == 1 && titles.element(boundBy: 0).isHittable", normal.split("\n    private func", 1)[0])
 
     def test_ui_has_one_direct_ingress_and_guarded_rename_without_save_or_retry(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")

@@ -121,6 +121,34 @@ class FolderControlTests(unittest.TestCase):
             self.assertIs(proof["release_acceptance"], False)
             self.assertEqual(proof["expected_phase_case_counts"], [2, 1, 2])
             self.assertEqual(proof["expected_result_bundles"], 3)
+            self.assertEqual(proof["driver_seconds"], 1440)
+            self.assertEqual(proof["additional_folder_seconds"], 240)
+
+    def test_added_folder_envelope_is_allocated_once_after_actual_preparation(self):
+        owner = self.fixture_owner()
+        run = owner.run_object()
+        original = run.started, run.work_deadline, run.cleanup_deadline
+        self.assertEqual(q.MODES["batch"][1], 1200)
+        for folder, seconds in ((False, 1200), (True, 1440)):
+            run.native_folder_control = folder
+            constructor = Mock(side_effect=LookupError("stop before any native work"))
+            module = SimpleNamespace(Driver=constructor)
+            boundary = run.work_deadline - seconds - 120
+            with self.subTest(folder=folder), patch.object(q, "load_module", return_value=module) as loader:
+                with patch.object(q.time, "monotonic", return_value=boundary):
+                    with self.assertRaisesRegex(RuntimeError, "full driver/postcheck budget"):
+                        run.run_driver()
+                loader.assert_not_called()
+                constructor.assert_not_called()
+                with patch.object(q.time, "monotonic", return_value=boundary - 0.001):
+                    with self.assertRaisesRegex(LookupError, "stop before any native work"):
+                        run.run_driver()
+                constructor.assert_called_once()
+                args = constructor.call_args.args[0]
+                self.assertEqual(args.timeout, seconds)
+                self.assertEqual(args.native_folder, folder)
+                self.assertEqual(args.native_root, not folder)
+                self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline), original)
 
     def test_native_folder_forwards_setting_and_adopts_only_after_native_return(self):
         owner = self.fixture_owner()
@@ -208,7 +236,7 @@ class FolderControlTests(unittest.TestCase):
         self.assertEqual((proof["result_bundles"], proof["destination_mode"]), (3, "native_folder"))
         self.assertEqual([proof[key] for key in ("driver_seconds", "seed_case_seconds",
                          "seed_observed_envelope_seconds", "main_case_seconds", "checkpoint_seconds")],
-                         [1200, 180, 300, 600, 60])
+                         [1440, 180, 300, 600, 60])
         self.assertEqual((run.started, run.work_deadline, run.cleanup_deadline, driver.deadline), clocks)
         self.assertTrue(callable(driver.checkpoint_callback))
         self.assertIs(driver.combined_protocol, q.checkpoint)

@@ -53,6 +53,69 @@ final class BatchImportUITests: XCTestCase {
         return frame
     }
 
+    // While Files edits a folder name, its visible title can intentionally have
+    // no hit point. Verify the editing hierarchy and geometry separately; all
+    // navigation and action checks retain their normal hittability requirement.
+    @MainActor
+    private static func nativeFolderEditorFrame(
+        in snapshot: XCUIElementSnapshot, expectedName: String, localTitle: String
+    ) -> CGRect? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return nil }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func visibleFrame(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width > 0 && frame.height > 0
+        }
+        guard let all = nodes(snapshot), !expectedName.isEmpty,
+              !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }) else { return nil }
+        let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
+        let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
+        let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
+        let grids = all.filter { $0.elementType == .collectionView && $0.identifier == "File View" }
+        let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
+        let editors = all.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
+        let keyboards = all.filter { $0.elementType == .keyboard }
+        let windows = snapshot.children.filter { $0.elementType == .window }
+        guard pickers.count == 1, roots.count == 1, grids.count == 1, navigations.count == 1,
+              editors.count == 1, keyboards.count == 1, !windows.isEmpty,
+              let pickerNodes = nodes(pickers[0]), let rootNodes = nodes(roots[0]),
+              pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
+              rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
+              rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
+              let gridNodes = nodes(grids[0]), let navigationNodes = nodes(navigations[0]) else { return nil }
+        let cells = gridNodes.filter { $0.elementType == .cell }
+        guard cells.count == 1, let cellNodes = nodes(cells[0]),
+              cellNodes.filter({ $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }).count == 1,
+              editors[0].value as? String == expectedName, editors[0].isEnabled else { return nil }
+        let titles = navigationNodes.filter {
+            ($0.elementType == .staticText && $0.label == localTitle)
+                || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
+        }
+        guard titles.count == 1,
+              [grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
+               titles[0].frame, keyboards[0].frame].allSatisfy(visibleFrame),
+              windows.allSatisfy({ visibleFrame($0.frame) }) else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        guard visibleFrame(window), window.contains(titles[0].frame), window.contains(editors[0].frame),
+              window.contains(cells[0].frame), navigations[0].frame.contains(titles[0].frame),
+              grids[0].frame.contains(editors[0].frame), grids[0].frame.contains(cells[0].frame),
+              !keyboards[0].frame.intersects(editors[0].frame),
+              !keyboards[0].frame.intersects(titles[0].frame) else { return nil }
+        // The real inline editor extends beyond the folder cell's horizontal
+        // bounds. Ownership is its ancestry; visible bounds are grid/window.
+        return editors[0].frame
+    }
+
     private let productID = "com.4alvit.tripfolio.pro"
     private var folder: String {
         ProcessInfo.processInfo.environment["TRIPDOCKET_BATCH_FOLDER"] ?? "TripDocket-Batch-QA"
@@ -418,8 +481,10 @@ final class BatchImportUITests: XCTestCase {
         }
         // Files selects the default inline name. Do not collapse that selection
         // by tapping the editor; verify that typing replaced the complete value.
-        try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
-                  && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable,
+        try check(files.count == 1 && files.element.cells.count == 1
+                  && inlineNames.count == 1 && inlineNames.element.isEnabled && inlineNames.element.isHittable
+                  && Self.nativeFolderEditorFrame(in: try app.snapshot(), expectedName: "untitled folder",
+                                                   localTitle: localTitle) == inlineNames.element.frame,
                   app: app, "Native folder editor left the single newly created local folder")
         inlineNames.element.typeText(ownedFolder)
         try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
@@ -444,7 +509,8 @@ final class BatchImportUITests: XCTestCase {
         try check(files.count == 1 && inlineNames.count == 1
                   && inlineNames.element.isEnabled && inlineNames.element.isHittable
                   && inlineNames.element.value as? String == ownedFolder
-                  && isRecoveryFolder(localTitle, navigation: navigation.element),
+                  && Self.nativeFolderEditorFrame(in: try app.snapshot(), expectedName: ownedFolder,
+                                                   localTitle: localTitle) == inlineNames.element.frame,
                   app: app, "Native folder editor is not ready for explicit end-editing")
         guard let before = nativeFolderBlankPoint(in: try app.snapshot(), ownedFolder: ownedFolder, localTitle: localTitle) else {
             capture(app, "Native folder has no verified blank grid area")

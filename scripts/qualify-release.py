@@ -1129,7 +1129,7 @@ class Qualification:
             "cases": list(checkpoint.CASES), "preparation_cases": list(checkpoint.PREPARATION_CASES),
             "preparation_prerequisite": prerequisite, "result_bundles": 3 if folder else 2,
             "destination_mode": "native_folder" if folder else "native_root",
-            "driver_deadline": driver.deadline - self.started, "driver_seconds": 1200,
+            "driver_deadline": driver.deadline - self.started, "driver_seconds": self.driver_budget(),
             "seed_case_seconds": 180, "seed_observed_envelope_seconds": 300,
             "seed_envelope_boundary": "combined invocation start to observed seed PASS",
             "main_case_seconds": 600, "checkpoint_seconds": 60,
@@ -1344,8 +1344,14 @@ class Qualification:
         return SimpleNamespace(run=run, Popen=popen, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
                                TimeoutExpired=subprocess.TimeoutExpired)
 
+    def driver_budget(self):
+        # The diagnostic adds a separate native folder invocation. Allocate its
+        # existing envelope before constructing the driver; never renew its clock.
+        return MODES[self.mode][1] + (FOLDER_SECONDS if self.native_folder_control else 0)
+
     def run_driver(self):
-        filename, timeout = MODES[self.mode]
+        filename = MODES[self.mode][0]
+        timeout = self.driver_budget()
         require(time.monotonic() + timeout + 120 < self.work_deadline, "Insufficient full driver/postcheck budget")
         module = load_module(HERE / filename, "qualification_" + self.mode)
         module.subprocess = self.facade()
