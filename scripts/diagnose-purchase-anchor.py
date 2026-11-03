@@ -450,6 +450,23 @@ def make_runner(q, core):
                     evidence['inspection_copy_closed']=True
             evidence['evidence_capture_complete']=True
 
+        def install_aut(self,arm):
+            # SKTestSession preflight runs before app.launch in the UI case.
+            # Register the same bound AUT on both fresh devices before that case.
+            require(self.current is arm and arm.owned is not None,
+                    'AUT installation requires the current owned device')
+            arm.checkpoint()
+            arm.once('install-aut')
+            arm.sim('install-aut','install',arm.owned,self.product_paths['Tripfolio'],cap=38)
+            raw=arm.sim('pretest-installed-Tripfolio','get_app_container',arm.owned,q.APP_ID,'app',cap=38)
+            path=arm.owned_path(raw,('data','Containers','Bundle','Application'),self.product_paths['Tripfolio'].name)
+            identity=q.compiled_identity(path,arm.checkpoint)
+            require(identity['content']==self.products['Tripfolio']['content'],
+                    'Pretest installed AUT bytes differ from shared build')
+            arm.persist('pretest-installed-aut.json',{'identity':identity,'content_matches_shared':True,
+                'modes_match_shared':identity['modes']==self.products['Tripfolio']['modes']})
+            arm.report['pretest_installed_aut_verified']=True
+
         def installed(self,arm):
             installed={}
             for name,identifier in [('Tripfolio',q.APP_ID),('TripfolioUITestsRunner',q.RUNNER_ID)]:
@@ -477,6 +494,8 @@ def make_runner(q, core):
                 require(arm.report['baseline'] == self.baseline, 'Pair baseline inventory changed')
                 require(arm.owned not in self.used_devices, 'Pair reused a Simulator')
                 self.used_devices.add(arm.owned)
+                self.install_aut(arm)
+                require(arm.report.get('pretest_installed_aut_verified') is True, 'Pretest AUT proof missing')
                 arm.once('selected-tests')
                 arm.ops.env={**arm.ops.env,**arm.report['environment_overrides']}
                 try:

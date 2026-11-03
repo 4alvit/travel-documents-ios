@@ -145,6 +145,7 @@ class Guards(unittest.TestCase):
         p.capture=lambda arm,mode:arm.report.update(native_result={'selected_case_passed':True,
             'evidence_capture_complete':True,'inspection_copy_closed':True})
         p.installed=lambda arm:arm.report.update(installed_product_content_verified=True)
+        p.install_aut=lambda arm:arm.report.update(pretest_installed_aut_verified=True)
         return p
 
     def setup_arm(self,arm):
@@ -153,6 +154,59 @@ class Guards(unittest.TestCase):
 
     def clean_arm(self,arm):
         arm.report['cleanup_verified']=True
+
+    def test_aut_install_and_content_proof_precede_each_selected_test(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(Context,'checkpoint',lambda self,**kw:None):
+            p=self.fake_pair(Path(tmp));p.install_aut=Pair.install_aut.__get__(p,Pair)
+            built=p.root/'built'/'Tripfolio.app';built.mkdir(parents=True);(built/'binary').write_bytes(b'same build')
+            p.product_paths={'Tripfolio':built};p.products={'Tripfolio':q.compiled_identity(built,lambda:None)}
+            events=[]
+            def command(arm,label,args,cap=38):
+                events.append((arm.owned,label,list(args),cap))
+                if label=='pretest-installed-Tripfolio':return str(built)
+                if label=='selected-tests':self.assertIs(arm.report.get('pretest_installed_aut_verified'),True)
+                return ''
+            with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)), \
+                    mock.patch.object(Context,'command',command), \
+                    mock.patch.object(Context,'owned_path',return_value=built) as owned_path, \
+                    mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
+                p.run_arm('child',0);p.run_arm('ownedAncestor',1)
+            self.assertEqual([x[1] for x in events],['install-aut','pretest-installed-Tripfolio','selected-tests']*2)
+            for start in (0,3):
+                owned=events[start][0]
+                self.assertEqual(events[start][2],['/usr/bin/xcrun','simctl','install',owned,built])
+                self.assertEqual(events[start+1][2],['/usr/bin/xcrun','simctl','get_app_container',owned,q.APP_ID,'app'])
+                self.assertEqual([x[3] for x in events[start:start+3]],[38,38,780])
+            self.assertNotEqual(events[0][0],events[3][0]);self.assertEqual(owned_path.call_count,2)
+            for mode in m.MODES:
+                receipt=json.loads((p.root/mode/'pretest-installed-aut.json').read_text())
+                self.assertEqual(receipt['identity'],p.products['Tripfolio'])
+                self.assertTrue(receipt['content_matches_shared'])
+
+    def test_aut_setup_failure_prevents_test_and_second_arm(self):
+        for fault in ('install','query','path','bytes','missing-proof'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(Context,'checkpoint',lambda self,**kw:None):
+                p=self.fake_pair(Path(tmp));p.prepare=lambda:None
+                p.install_aut=Pair.install_aut.__get__(p,Pair)
+                p.product_paths={'Tripfolio':p.root/'Tripfolio.app'}
+                p.products={'Tripfolio':{'content':{'expected':'build'},'modes':{}}}
+                if fault=='missing-proof':p.install_aut=lambda arm:None
+                events=[]
+                def command(arm,label,args,cap=38):
+                    events.append(label)
+                    if (fault=='install' and label=='install-aut') or (fault=='query' and label=='pretest-installed-Tripfolio'):
+                        raise RuntimeError(fault+' failed')
+                    return str(p.root/'Tripfolio.app')
+                with mock.patch.object(Context,'setup',lambda arm:self.setup_arm(arm)), \
+                        mock.patch.object(Context,'command',command), \
+                        mock.patch.object(Context,'owned_path',side_effect=RuntimeError('wrong owned path') if fault=='path' else None,return_value=p.root/'Tripfolio.app'), \
+                        mock.patch.object(q,'compiled_identity',return_value={'content':{'other':'build'},'modes':{}}), \
+                        mock.patch.object(Context,'cleanup',lambda arm:self.clean_arm(arm)):
+                    self.assertEqual(p.run(),1)
+                self.assertEqual(list(p.report['arms']),['child']);self.assertNotIn('selected-tests',events)
+                self.assertTrue(p.report['arms']['child']['cleanup_verified'])
+                self.assertNotIn('pretest_installed_aut_verified',p.report['arms']['child'])
 
     def test_failed_first_test_still_runs_second_after_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
