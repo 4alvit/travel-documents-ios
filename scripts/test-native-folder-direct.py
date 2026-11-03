@@ -582,11 +582,13 @@ class FolderDirectTests(unittest.TestCase):
     def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         initial = case[case.index('try await wait("Native folder has neither'):case.index("try await acknowledgeNativeFolderKeyboardIntroduction(")]
-        self.assertEqual(initial.count("try? self.nativeFolderSnapshots(app)"), 1)
+        self.assertEqual(initial.count("try self.nativeFolderSnapshots(app, diagnostic:"), 1)
         self.assertEqual(initial.count("Self.nativeFolderInitialState("), 1)
         self.assertIn("in: snapshots.picker, applicationSnapshot: snapshots.application", initial)
-        self.assertLess(initial.index("renameFrame = nil"), initial.index("try? self.nativeFolderSnapshots(app)"))
-        self.assertIn("else { return false }", initial)
+        self.assertLess(initial.index("renameFrame = nil"), initial.index("try self.nativeFolderSnapshots(app, diagnostic:"))
+        self.assertIn("initialObservation.begin()", initial)
+        self.assertIn("initialObservation.failed(error)\n                    return false", initial)
+        self.assertIn("recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)\n            throw error", initial)
         self.assertIn("renameFrame = state.renameFrame", initial)
         self.assertIn("return state.ready", initial)
         for forbidden in [".count", ".isHittable", ".isEnabled", "nativeFolderRenameFrame(",

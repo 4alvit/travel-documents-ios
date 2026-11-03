@@ -17,16 +17,17 @@ import Vision
 final class BatchImportUITests: XCTestCase {
     @MainActor
     private static func nativeFolderRenameFrame(
-        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot, localTitle: String
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot, localTitle: String,
+        diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
             var result: [XCUIElementSnapshot] = []
             var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
             while let (node, depth) = pending.popLast() {
-                guard depth <= 96, result.count < 4_096 else { return nil }
+                guard depth <= 96, result.count < 4_096 else { diagnostic?("tree-depth-or-count"); return nil }
                 result.append(node)
                 let children = node.children
-                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                guard children.count <= 4_096 - result.count - pending.count else { diagnostic?("tree-children-count"); return nil }
                 pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
             }
             return result
@@ -35,7 +36,7 @@ final class BatchImportUITests: XCTestCase {
               applicationSnapshot.elementType == .application,
               let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
               !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }),
-              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { return nil }
+              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { diagnostic?("snapshot-scope-or-editor-or-keyboard"); return nil }
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -46,15 +47,15 @@ final class BatchImportUITests: XCTestCase {
               pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
               rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
               rootNodes.filter({ $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
-              let gridNodes = nodes(grids[0]) else { return nil }
+              let gridNodes = nodes(grids[0]) else { diagnostic?("structure-counts-or-ancestry"); return nil }
         let cells = gridNodes.filter { $0.elementType == .cell }
         guard cells.count == 1, cells[0].identifier == "untitled folder, Folder",
-              cells[0].label == "untitled folder, 0 items", cells[0].isEnabled else { return nil }
+              cells[0].label == "untitled folder, 0 items", cells[0].isEnabled else { diagnostic?("cell-count-or-name-or-enabled"); return nil }
         let frame = cells[0].frame
         let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }),
               !frame.isEmpty, grids[0].frame.contains(frame),
-              windows.contains(where: { $0.frame.contains(frame) }) else { return nil }
+              windows.contains(where: { $0.frame.contains(frame) }) else { diagnostic?("window-or-containment-or-frame"); return nil }
         return frame
     }
 
@@ -132,23 +133,78 @@ final class BatchImportUITests: XCTestCase {
     @MainActor
     private static func nativeFolderInitialState(
         in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
-        localTitle: String
+        localTitle: String, diagnostic: ((String) -> Void)? = nil
     ) -> (ready: Bool, renameFrame: CGRect?) {
         // All alternatives must describe the same retained observations. Files
         // can enter inline editing while an accessibility query is in flight.
         for introduction in [false, true] {
+            var reason: String?
             if nativeFolderEditorFrame(
                 in: snapshot, applicationSnapshot: applicationSnapshot,
                 expectedName: "untitled folder", localTitle: localTitle,
-                keyboardIntroduction: introduction
+                keyboardIntroduction: introduction,
+                diagnostic: { if reason == nil { reason = $0 } }
             ) != nil {
                 return (true, nil)
             }
+            diagnostic?("editor-\(introduction ? "with" : "without")-introduction: " + (reason ?? "unspecified"))
         }
+        var reason: String?
         let frame = nativeFolderRenameFrame(
-            in: snapshot, applicationSnapshot: applicationSnapshot, localTitle: localTitle
+            in: snapshot, applicationSnapshot: applicationSnapshot, localTitle: localTitle,
+            diagnostic: { if reason == nil { reason = $0 } }
         )
+        if frame == nil { diagnostic?("rename: " + (reason ?? "unspecified")) }
         return (frame != nil, frame)
+    }
+
+    // Evidence storage only; none of these fields participate in readiness.
+    // A new attempt clears partial inputs without erasing the last bound pair.
+    private struct NativeFolderInitialObservation {
+        var attempt = 0
+        var stage = "not-sampled"
+        var picker: XCUIElementSnapshot?
+        var application: XCUIElementSnapshot?
+        var lastBound: (attempt: Int, picker: XCUIElementSnapshot, application: XCUIElementSnapshot)?
+        var acquisitionError: String?
+        var errorTruncated = false
+        var rejections: [String] = []
+
+        mutating func begin() {
+            attempt += 1
+            stage = "started"
+            picker = nil
+            application = nil
+            acquisitionError = nil
+            errorTruncated = false
+            rejections = []
+        }
+
+        mutating func failed(_ error: Error) {
+            let description = String(describing: error)
+            acquisitionError = String(description.prefix(512))
+            errorTruncated = acquisitionError != description
+        }
+
+        func metadata() -> Data {
+            let payload: [String: Any] = [
+                "version": 1, "attempt": attempt, "acquisitionStage": String(stage.prefix(128)),
+                "currentPickerPresent": picker != nil, "currentApplicationPresent": application != nil,
+                "currentPairBound": lastBound?.attempt == attempt,
+                "lastBoundAttempt": lastBound.map { $0.attempt as Any } ?? NSNull(),
+                "acquisitionError": acquisitionError.map { $0 as Any } ?? NSNull(),
+                "errorTruncated": errorTruncated,
+                "alternativeFirstRejections": Array(rejections.prefix(3)).map { String($0.prefix(160)) },
+                "snapshotScope": "Sequential existing picker/application observations; not atomic. Prior bound pair is not the current failed acquisition.",
+                "limits": ["errorCharacters": 512, "stageCharacters": 128, "rejections": 3,
+                           "rejectionCharacters": 160, "bytes": 16_384]
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+                  data.count <= 16_384 else {
+                return Data(#"{"version":1,"truncation":"metadata-serialization-limit"}"#.utf8)
+            }
+            return data
+        }
     }
 
     // Evidence only. Serialize the supplied immutable snapshot, never a fresh
@@ -584,14 +640,32 @@ final class BatchImportUITests: XCTestCase {
         let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
         var keyboardIntroductionAcknowledged = false
         var renameFrame: CGRect?
-        try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
-            renameFrame = nil
-            guard let snapshots = try? self.nativeFolderSnapshots(app) else { return false }
-            let state = Self.nativeFolderInitialState(
-                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
-            )
-            renameFrame = state.renameFrame
-            return state.ready
+        var initialObservation = NativeFolderInitialObservation()
+        do {
+            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
+                renameFrame = nil
+                initialObservation.begin()
+                do {
+                    let snapshots = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
+                        initialObservation.stage = stage
+                        initialObservation.picker = picker
+                        initialObservation.application = application
+                    })
+                    initialObservation.lastBound = (initialObservation.attempt, snapshots.picker, snapshots.application)
+                    let state = Self.nativeFolderInitialState(
+                        in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle,
+                        diagnostic: { initialObservation.rejections.append($0) }
+                    )
+                    renameFrame = state.renameFrame
+                    return state.ready
+                } catch {
+                    initialObservation.failed(error)
+                    return false
+                }
+            }
+        } catch {
+            recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+            throw error
         }
         try await acknowledgeNativeFolderKeyboardIntroduction(
             app, expectedName: "untitled folder", acknowledged: &keyboardIntroductionAcknowledged
@@ -1076,19 +1150,30 @@ final class BatchImportUITests: XCTestCase {
     // These are sequential observations, not an atomic combined hierarchy.
     @MainActor
     private func nativeFolderSnapshots(
-        _ app: XCUIApplication
+        _ app: XCUIApplication,
+        diagnostic: ((String, XCUIElementSnapshot?, XCUIElementSnapshot?) -> Void)? = nil
     ) throws -> (picker: XCUIElementSnapshot, application: XCUIElementSnapshot) {
+        var stage = "foreground-unique-picker"
+        var observedPicker: XCUIElementSnapshot?
+        var observedApplication: XCUIElementSnapshot?
+        defer { diagnostic?(stage, observedPicker, observedApplication) }
         let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
         guard app.state == .runningForeground, pickers.count == 1 else {
             throw BatchTestFailure(message: "Native folder requires one foreground Files picker")
         }
+        stage = "picker-snapshot"
         let picker = try pickers.element.snapshot()
+        observedPicker = picker
+        stage = "application-snapshot"
         let application = try app.snapshot()
+        observedApplication = application
+        stage = "live-binding"
         guard picker.elementType == .other, picker.identifier == "Browse View (Picker)",
               application.elementType == .application, app.state == .runningForeground,
               pickers.count == 1, pickers.element.frame == picker.frame else {
             throw BatchTestFailure(message: "Native folder picker changed while observing its environment")
         }
+        stage = "bound"
         return (picker, application)
     }
 
@@ -2198,6 +2283,27 @@ final class BatchImportUITests: XCTestCase {
         attachment.name = "Recovery file selection — failure state"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func recordNativeFolderInitialFailure(_ observation: NativeFolderInitialObservation, localTitle: String) {
+        let metadata = XCTAttachment(string: String(decoding: observation.metadata(), as: UTF8.self))
+        metadata.name = "Native folder initial readiness — last actual attempt"
+        metadata.lifetime = .keepAlways
+        add(metadata)
+        recordNativeFolderSnapshot(observation.picker, observation: "initial-current-picker-input",
+                                   localTitle: localTitle, returnedFrame: nil, liveFrame: nil,
+                                   reason: "See initial readiness metadata; this may be a partial/unbound acquisition.")
+        recordNativeFolderSnapshot(observation.application, observation: "initial-current-application-input",
+                                   localTitle: localTitle, returnedFrame: nil, liveFrame: nil,
+                                   reason: "See initial readiness metadata; this may be a partial/unbound acquisition.")
+        if let prior = observation.lastBound, prior.attempt != observation.attempt {
+            recordNativeFolderSnapshot(prior.picker, observation: "initial-prior-bound-picker-input",
+                                       localTitle: localTitle, returnedFrame: nil, liveFrame: nil,
+                                       reason: "Prior bound attempt \(prior.attempt); NOT current failed acquisition.")
+            recordNativeFolderSnapshot(prior.application, observation: "initial-prior-bound-application-input",
+                                       localTitle: localTitle, returnedFrame: nil, liveFrame: nil,
+                                       reason: "Prior bound attempt \(prior.attempt); NOT current failed acquisition.")
+        }
     }
 
     private func recordNativeFolderSnapshot(
