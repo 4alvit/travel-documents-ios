@@ -581,7 +581,7 @@ class FolderDirectTests(unittest.TestCase):
 
     def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
-        initial = case[case.index('try await wait("Native folder has neither'):case.index("try await acknowledgeNativeFolderKeyboardIntroduction(")]
+        initial = case[case.index('try await wait("Native folder has neither'):case.index("if let before = renameFrame")]
         self.assertEqual(initial.count("try self.nativeFolderSnapshots(app, diagnostic:"), 1)
         self.assertEqual(initial.count("Self.nativeFolderInitialState("), 1)
         self.assertIn("in: snapshots.picker, applicationSnapshot: snapshots.application", initial)
@@ -725,22 +725,21 @@ class FolderDirectTests(unittest.TestCase):
                           "createDirectory", ".mkdir", "while ", "for attempt", "recordBatchProducer"]:
             self.assertNotIn(forbidden, case)
 
-    def test_introduction_uses_one_shared_action_budget_at_all_three_boundaries(self):
+    def test_introduction_uses_one_shared_action_budget_at_both_typing_boundaries(self):
         case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
         helper = section("    private func acknowledgeNativeFolderKeyboardIntroduction(", "    func testNativeCreateOwnedFilesFolder")
         self.assertEqual(case.count("var keyboardIntroductionAcknowledged = false"), 1)
-        self.assertEqual(case.count("acknowledgeNativeFolderKeyboardIntroduction("), 3)
-        self.assertEqual(case.count("acknowledged: &keyboardIntroductionAcknowledged"), 3)
+        self.assertEqual(case.count("acknowledgeNativeFolderKeyboardIntroduction("), 2)
+        self.assertEqual(case.count("acknowledged: &keyboardIntroductionAcknowledged"), 2)
         first = case.index("acknowledgeNativeFolderKeyboardIntroduction(")
         second = case.index("acknowledgeNativeFolderKeyboardIntroduction(", first + 1)
-        third = case.index("acknowledgeNativeFolderKeyboardIntroduction(", second + 1)
-        self.assertLess(first, case.index("if let before = renameFrame"))
-        self.assertLess(case.index("rename.element.tap()"), second)
-        self.assertLess(second, case.index("let pretypeLiveReady"))
-        self.assertLess(case.index("inlineNames.element.typeText(ownedFolder)"), third)
-        self.assertLess(third, case.index("let endEditingSnapshots"))
+        self.assertLess(case.index("if let before = renameFrame"), first)
+        self.assertLess(case.index("rename.element.tap()"), first)
+        self.assertLess(first, case.index("let pretypeLiveReady"))
+        self.assertLess(case.index("inlineNames.element.typeText(ownedFolder)"), second)
+        self.assertLess(second, case.index("let endEditingSnapshots"))
         initial_wait = case[case.index('try await wait("Native folder has neither'):first]
-        rename_wait = case[case.index('try await wait("Native folder Rename did not'):second]
+        rename_wait = case[case.index('try await wait("Native folder Rename did not'):first]
         self.assertIn("Self.nativeFolderInitialState(", initial_wait)
         self.assertIn("keyboardIntroduction.count != 0", rename_wait)
         self.assertEqual(helper.count("acknowledge.element.tap()"), 1)
@@ -855,6 +854,141 @@ class KeyboardIntroductionTests(unittest.TestCase):
                 self.assertTrue(result["acknowledged"])
                 self.assertEqual((result["taps"], result["captures"], result["waits"]), (1, 1, 1))
 
+
+
+
+PREACTION_SUPPORT = r"""
+@MainActor final class ActionCounters { var presses = 0; var taps = 0; var waits = 0 }
+@MainActor final class ActionElement {
+    var frame = CGRect(x: 10, y: 212, width: 122, height: 190)
+    var isEnabled = true; var isHittable = true
+    var cells: ActionQuery!
+    let counters: ActionCounters
+    init(_ counters: ActionCounters) { self.counters = counters }
+    func press(forDuration seconds: Double) { precondition(seconds == 1); counters.presses += 1 }
+    func tap() { counters.taps += 1 }
+}
+@MainActor final class ActionQuery {
+    var count = 1
+    let element: ActionElement
+    init(_ counters: ActionCounters) { element = ActionElement(counters) }
+    func matching(_ predicate: NSPredicate) -> ActionQuery { self }
+}
+@MainActor final class ActionApp {
+    let counters = ActionCounters()
+    let files: ActionQuery; let created: ActionQuery; let buttons: ActionQuery
+    let inlineNames: ActionQuery; let introduction: ActionQuery
+    var rootValid = true
+    init(_ mode: String) {
+        files = ActionQuery(counters); created = ActionQuery(counters); buttons = ActionQuery(counters)
+        inlineNames = ActionQuery(counters); introduction = ActionQuery(counters)
+        introduction.count = 0; files.element.cells = created
+        switch mode {
+        case "live-root": rootValid = false
+        case "live-duplicate": created.count = 2
+        case "live-frame": created.element.frame.origin.x += 1
+        case "live-disabled": created.element.isEnabled = false
+        case "live-hidden": created.element.isHittable = false
+        case "menu-hidden": buttons.element.isHittable = false
+        default: break
+        }
+    }
+}
+"""
+
+PREACTION_METHOD = r"""
+    func check(_ value: Bool, app: ActionApp, _ message: String) throws {
+        if !value { throw BatchTestFailure(message: message) }
+    }
+    func isNativeFilesRoot(_ app: ActionApp) -> Bool { app.rootValid }
+    func wait(_ message: String, app: ActionApp, _ condition: () -> Bool) async throws {
+        app.counters.waits += 1
+        try check(condition(), app: app, message)
+    }
+    func exerciseAction(_ app: ActionApp, _ picker: XCUIElementSnapshot,
+                        _ application: XCUIElementSnapshot) async -> String {
+        let before = CGRect(x: 10, y: 212, width: 122, height: 190)
+        let snapshots = (picker: picker, application: application)
+        let localTitle = "On My iPhone"
+        let files = app.files, created = app.created
+        let inlineNames = app.inlineNames, keyboardIntroduction = app.introduction
+        do {
+            // ACTUAL_PREACTION
+            return "accepted"
+        } catch { return "rejected" }
+    }
+"""
+
+PREACTION_MAIN = r"""
+@main struct ActionMain {
+    @MainActor static func main() async {
+        let mode = CommandLine.arguments[1]
+        let folder = Tree(), editor = EditorTree("untitled folder")
+        let app = ActionApp(mode)
+        var picker = folder.picker, application = folder.app
+        if mode.hasPrefix("editor") || mode.hasPrefix("invalid-editor-") {
+            picker = editor.picker; application = editor.app
+            if mode == "editor-introduction" { editor.mutate("introduction-overlay") }
+            if mode.hasPrefix("invalid-editor-") { editor.mutate(String(mode.dropFirst("invalid-editor-".count))) }
+        } else if mode == "changed-frame" { folder.cell.frame.origin.x += 1 }
+        else if mode == "unknown" { folder.mutate("missing-folder") }
+        else if mode == "ambiguous" { folder.mutate("duplicate-folder") }
+        else if mode == "wrong-provider" { folder.mutate("wrong-provider") }
+        else if mode == "crossed-pair" { application = editor.app }
+        let result = await Harness().exerciseAction(app, picker, application)
+        print("\(result),\(app.counters.presses),\(app.counters.taps),\(app.counters.waits)")
+    }
+}
+"""
+
+
+class PreRenameActionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="native-folder-preaction-")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        path = Path(cls.scratch.name)
+        helpers = section("    @MainActor\n    private static func nativeFolderRenameFrame", "    private let productID")
+        helpers += section("    private static func nativeFolderConfiguration", "    private func acknowledgeNativeFolderKeyboardIntroduction(")
+        helpers += section("    private static func combinedBatchConfiguration", "    private static func recordBatchProducer")
+        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        block = case[case.index("            let currentState = Self.nativeFolderInitialState("):case.index("        // One shared acknowledgement")]
+        # Remove only the closing brace of the outer initial-candidate branch.
+        assert block.endswith("        }\n")
+        block = block[:-len("        }\n")]
+        common = SWIFT[:SWIFT.index("@main struct Main")].replace("    // ACTUAL_HELPERS", helpers)
+        common = common.replace("}\n@MainActor final class Tree", PREACTION_METHOD.replace("            // ACTUAL_PREACTION", block) + "}\n@MainActor final class Tree", 1)
+        swift = path / "PreAction.swift"; cls.binary = path / "preaction"
+        swift.write_text(common + PREACTION_SUPPORT + PREACTION_MAIN)
+        result = subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-strict-concurrency=complete",
+                                 "-parse-as-library", str(swift), "-o", str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode: raise AssertionError(result.stdout + result.stderr)
+
+    def probe(self, mode):
+        return subprocess.run([str(self.binary), mode], capture_output=True, text=True,
+                              check=True, timeout=5).stdout.strip()
+
+    def test_late_real_editor_bypasses_both_rename_actions(self):
+        for mode in ["editor", "editor-introduction"]:
+            with self.subTest(mode=mode): self.assertEqual(self.probe(mode), "accepted,0,0,0")
+
+    def test_same_untitled_folder_still_requires_exactly_one_press_and_rename(self):
+        self.assertEqual(self.probe("same-folder"), "accepted,1,1,2")
+
+    def test_unknown_ambiguous_or_changed_frame_stops_before_any_action(self):
+        for mode in ["unknown", "ambiguous", "changed-frame", "wrong-provider", "crossed-pair"]:
+            with self.subTest(mode=mode): self.assertEqual(self.probe(mode), "rejected,0,0,0")
+
+    def test_invalid_editor_cannot_be_used_as_rename_bypass(self):
+        for mode in ["wrong-value", "duplicate-editor", "missing-keyboard", "wrong-provider",
+                     "editor-under-keyboard", "duplicate-picker", "introduction-in-picker"]:
+            with self.subTest(mode=mode): self.assertEqual(self.probe("invalid-editor-" + mode), "rejected,0,0,0")
+
+    def test_original_live_guards_remain_before_long_press(self):
+        for mode in ["live-root", "live-duplicate", "live-frame", "live-disabled", "live-hidden"]:
+            with self.subTest(mode=mode): self.assertEqual(self.probe(mode), "rejected,0,0,0")
+        self.assertEqual(self.probe("menu-hidden"), "rejected,1,0,1")
 
 if __name__ == "__main__":
     unittest.main()
