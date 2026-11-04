@@ -423,7 +423,7 @@ final class BatchImportUITests: XCTestCase {
     private static func recoveryNativeFolderCreation(
         _ environment: [String: String], debugSimulator: Bool
     ) throws -> Bool {
-        guard let mode = environment["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] else { return false }
+        let mode = environment["TRIPDOCKET_RECOVERY_CREATE_FOLDER"]
         let prefix = "TripDocket-Recovery-"
         let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? ""
         let token = String(folder.dropFirst(prefix.count))
@@ -435,13 +435,13 @@ final class BatchImportUITests: XCTestCase {
                            "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
                            "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION",
                            "TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
-        guard debugSimulator, mode == "1", environment["TRIPDOCKET_RECOVERY_UI"] == "1",
+        guard debugSimulator, mode == nil || mode == "1", environment["TRIPDOCKET_RECOVERY_UI"] == "1",
               environment["TRIPDOCKET_RECOVERY_PHASE"] == "prepare", folder.hasPrefix(prefix),
               UUID(uuidString: token)?.uuidString.lowercased() == token,
               conflicting.allSatisfy({ environment[$0] == nil }) else {
-            throw BatchTestFailure(message: "Native Recovery folder requires its isolated Debug Simulator prepare phase")
+            throw BatchTestFailure(message: "Files preparation requires its isolated Debug Simulator prepare phase")
         }
-        return true
+        return mode != nil
     }
 
     private static func recoveryNativeSourceArguments(folder: String, sourceToken: String) throws -> [String] {
@@ -496,16 +496,22 @@ final class BatchImportUITests: XCTestCase {
                       "Recovery preparation unexpectedly exported a destination")
             capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
         } else {
-            // Shared Phone/qualifier callers retain their production provider-readiness path.
-            app.launchArguments = recoveryArguments + ["--demo"]
+            // Provider-only preparation opens Files without exercising the app's Settings flow.
+            let sourceToken = UUID().uuidString.lowercased()
+            let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
+            app.launchArguments = recoveryArguments + sourceArguments
             app.launch()
-            try await wait("The preparation demo did not finish loading", app: app) {
-                app.staticTexts["Coast weekend"].exists
+            let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+            let failed = app.staticTexts["nativeSeed.failure"]
+            let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+            try await wait("Files preparation export source is unavailable", app: app) {
+                failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
             }
-            try await recoveryTab("Settings", app: app)
-            try await recoveryFreeCard(app)
-            try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
-            try await presentRecoverySave(app)
+            capture(app, "Files preparation — direct native exporter; no Save performed")
+            try check(!failed.exists && saved.count == 0 && source.count == 1
+                      && source.element.isEnabled && source.element.isHittable,
+                      app: app, "Files preparation has no unique live, unsaved export source")
+            source.element.tap()
             let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
             let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
             try await wait("Real Files preparation picker did not open", app: app) {
@@ -519,6 +525,8 @@ final class BatchImportUITests: XCTestCase {
             try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
             let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
             try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Files preparation unexpectedly exported a destination")
             capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
         }
         // Dedicated Recovery adopts the native-created empty leaf only after

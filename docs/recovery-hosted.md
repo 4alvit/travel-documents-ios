@@ -137,11 +137,15 @@ qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
-Shared Phone and qualifier callers omit this flag and retain their existing
-provider-only preparation through the app's Settings, disclosure and share
-route. The dedicated setup shortcut does not replace actual Recovery export
-or restore: those cases still use the production Free gate, disclosure,
-Save-to-Files and import/replacement paths.
+The shared guidance preparation invoked by `test-simulator.sh` omits this flag
+and uses the same existing Debug Simulator exporter for provider-only preparation. Both prepare modes
+require the isolated Recovery opt-in, prepare phase and canonical destination
+probe UUID. A separate canonical source UUID opens the synthetic-ticket source
+once; preparation never saves it. Provider-only preparation retains its generic
+phone/iPad local-root navigation, absent-folder probe and explicit app shutdown,
+and never requests folder creation. Ordinary UI cases and actual Recovery
+export/restore still use the production Free gate, disclosure, Save-to-Files
+and import/replacement paths.
 
 After the prepare case passes and its process group closes, the host adopts
 exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
@@ -162,7 +166,19 @@ the same live-binding check after the single New Folder action, before keyboard
 acknowledgement, name entry, host adoption, export or restore. The direct-exporter
 setup removes duplicated Settings/share navigation from preparation; it does
 not establish the OS cause of those failures or prove that the changed route
-fixes them. Native acceptance of this revised setup remains pending.
+fixes them. In run 41777826319 attempt 1, dedicated preparation and production
+export passed, including native empty-folder adoption and complete-original
+backup equality. Restore reached file selection and replacement confirmation,
+but the coordinated read received Cocoa 4101 with an underlying failure to
+connect to Apple's LocalStorage File Provider extension. That result is not
+successful recovery and does not establish a deterministic application defect.
+
+The same run's second-attempt Phone bootstrap failed before the ordinary UI
+suite: a single correctly targeted Settings tap left Trips selected. Its
+provider-only setup now opens the direct exporter without that preliminary
+application navigation. This changes preparation, not the ordinary Settings
+checks, and does not establish the cause of the native tab non-transition.
+The revised shared preparation requires fresh native CI acceptance.
 
 The export/restore AUT app and data container lookups and all other default
 command caps remain 30 seconds. Global time, ownership and cancellation checks
