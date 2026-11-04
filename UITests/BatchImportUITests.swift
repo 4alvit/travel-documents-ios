@@ -552,6 +552,9 @@ final class BatchImportUITests: XCTestCase {
         app.terminate()
         defer { app.terminate() }
         if createFolder {
+            // recoveryConfiguration already validated the hosted Intel opt-in.
+            let initialObservationTimeout: Duration = ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+                ? .seconds(60) : .seconds(30)
             let sourceToken = UUID().uuidString.lowercased()
             let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
             app.launchArguments = recoveryArguments + sourceArguments
@@ -570,7 +573,8 @@ final class BatchImportUITests: XCTestCase {
             let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
             try check(saved.count == 0 && !failed.exists, app: app,
                       "Recovery preparation unexpectedly exported a destination")
-            try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder)
+            try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder,
+                                                  initialObservationTimeout: initialObservationTimeout)
             try check(saved.count == 0 && !failed.exists, app: app,
                       "Recovery preparation unexpectedly exported a destination")
             capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
@@ -798,7 +802,8 @@ final class BatchImportUITests: XCTestCase {
     // This helper performs native folder actions only; caller-owned launch,
     // no-export checks, fixture stop and host adoption remain separate.
     private func createNativeEmptyFilesFolder(
-        _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String
+        _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String,
+        initialObservationTimeout: Duration = .seconds(30)
     ) async throws {
         try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
                   "Native folder creation requires its selected iPhone")
@@ -829,11 +834,11 @@ final class BatchImportUITests: XCTestCase {
         var initialObservation = NativeFolderInitialObservation()
         var parentReturnAttempted = false
         var parentReturnRejected = false
-        // Keep the existing polling allowance. Synchronous queries may finish
-        // late, but must not start Back or accept its result after this deadline.
-        let initialDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        // Polling and action admission share one selected observation window.
+        // Late queries must not start Back or accept a result after its deadline.
+        let initialDeadline = ContinuousClock.now.advanced(by: initialObservationTimeout)
         do {
-            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: .seconds(30)) {
+            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: initialObservationTimeout) {
                 renameFrame = nil
                 guard !parentReturnRejected, ContinuousClock.now < initialDeadline else { return false }
                 initialObservation.begin()

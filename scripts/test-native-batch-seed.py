@@ -315,7 +315,9 @@ class SeedGuards(unittest.TestCase):
         stop=recovery[recovery.index("// Dedicated Recovery adopts"):]
         for name, caller, target in (("batch",case,"ownedFolder"),("recovery",create+stop,"recoveryFolder")):
             with self.subTest(caller=name):
-                call="try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: " + target + ")"
+                call="try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: " + target
+                call += (",\n                                                  initialObservationTimeout: initialObservationTimeout)"
+                         if name == "recovery" else ")")
                 self.assertEqual(caller.count(call),1)
                 self.assertEqual(caller.count(".tap()"),1)
                 self.assertLess(caller.index("source.element.tap()"),caller.index("openNativeFilesRoot("))

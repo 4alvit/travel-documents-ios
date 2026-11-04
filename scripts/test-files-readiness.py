@@ -270,6 +270,8 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('directory.count == 0', provider)
         self.assertNotIn('presentRecoverySave(app)', create)
         self.assertLess(create.index('openNativeFilesRoot('), create.index('createNativeEmptyFilesFolder('))
+        self.assertLess(prepare.index('try recoveryConfiguration(phase: "prepare")'),
+                        prepare.index('let initialObservationTimeout: Duration'))
 
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
@@ -511,6 +513,7 @@ final class World {
     var presentationDelay: Int?, presentationElapsed = 0
     var events: [String] = []
     var waitSeconds: [Int64] = []
+    var folderObservationSeconds: [Int64] = []
     let scenario: String
     init(_ scenario: String) {
         self.scenario = scenario
@@ -651,8 +654,10 @@ final class Harness {
         if world.scenario == "saved-at-root" { world.saved = 1 }
         return Element(world, "picker")
     }
-    func createNativeEmptyFilesFolder(_ app: XCUIApplication, picker: Element, ownedFolder: String) async throws {
+    func createNativeEmptyFilesFolder(_ app: XCUIApplication, picker: Element, ownedFolder: String,
+                                     initialObservationTimeout: Duration) async throws {
         precondition(picker.kind == "picker" && ownedFolder == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc")
+        world.folderObservationSeconds.append(initialObservationTimeout.components.seconds)
         world.events.append("create")
         if world.scenario == "saved-at-create" { world.saved = 1 }
         if world.scenario == "failed-at-create" { world.failed = true }
@@ -669,6 +674,7 @@ catch { status = "rejected" }
 print(String(data: try JSONEncoder().encode(["status": [status], "events": world.events,
                                             "arguments": app.launchArguments,
                                             "presentationElapsed": [String(world.presentationElapsed)],
+                                            "folderObservationSeconds": world.folderObservationSeconds.map(String.init),
                                             "waitSeconds": world.waitSeconds.map(String.init)]), encoding: .utf8)!)
 '''
 
@@ -691,8 +697,14 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
                        capture_output=True, check=True, timeout=60)
 
-    def probe(self, scenario):
-        result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
+    def probe(self, scenario, profile=None):
+        import os
+        env = dict(os.environ)
+        env.pop('TRIPDOCKET_RECOVERY_EXECUTION_PROFILE', None)
+        if profile is not None:
+            env['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = profile
+        result = subprocess.run([str(self.binary), scenario], env=env,
+                                capture_output=True, text=True, check=True, timeout=5)
         return json.loads(result.stdout)
 
     def test_actual_direct_branch_opens_once_and_creates_only_after_root(self):
@@ -706,6 +718,14 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         self.assertEqual(str(uuid.UUID(token)), token)
         self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
         self.assertEqual(len(value['arguments']), 4)
+        self.assertEqual(value['folderObservationSeconds'], ['30'])
+
+    def test_validated_hosted_profile_selects_only_folder_observation_window(self):
+        value = self.probe('ready', 'hosted-intel-v1')
+        self.assertEqual(value['status'], ['passed'])
+        self.assertEqual(value['folderObservationSeconds'], ['60'])
+        self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'root', 'create', 'capture'])
+        self.assertEqual(value['waitSeconds'], ['15'])
 
     def test_actual_direct_branch_rejects_unusable_or_changed_source_before_tap(self):
         for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):

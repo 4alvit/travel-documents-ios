@@ -323,22 +323,22 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(environment.splitlines(),[
             '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 109\n',recovery)
+        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 113\n',recovery)
         checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 2\n',checkout)
         regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 15\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
-        self.assertIn('        timeout-minutes: 82\n',attempt)
+        self.assertIn('        timeout-minutes: 86\n',attempt)
         self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
         evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
         self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
         step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
                       for step in (checkout,regressions,attempt,evidence)]
         job_minutes=int(re.search(r'^    timeout-minutes: (\d+)$',recovery,re.M).group(1))
-        self.assertEqual(step_minutes,[2,15,82,5])
+        self.assertEqual(step_minutes,[2,15,86,5])
         self.assertEqual(sum(step_minutes)+5,job_minutes)
-        self.assertEqual(PROFILE['total_seconds'],4800)
+        self.assertEqual(PROFILE['total_seconds'],5040)
         self.assertEqual(step_minutes[2]*60-PROFILE['total_seconds'],120)
 
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
@@ -492,7 +492,8 @@ class BoundaryTests(unittest.TestCase):
         ops=ops or Ops();ops.env={};ops.cwd=workspace
         selected=hosted.core.execution_profile(execution_profile)
         profile=copy.deepcopy(PROFILE)
-        profile.update(execution_profile=selected['name'],total_seconds=selected['total_seconds'])
+        profile.update(execution_profile=selected['name'],total_seconds=selected['total_seconds'],
+                       cleanup_seconds=selected['cleanup_seconds'])
         if execution_profile == 'default':
             # Legacy injected-boundary tests exercise hosted methods with the
             # portable budget. This fixture is not a production admission path.
@@ -512,12 +513,19 @@ class BoundaryTests(unittest.TestCase):
 
     def test_execution_profile_is_known_immutable_and_selected_before_output(self):
         r=self.runner(execution_profile='hosted-intel-v1')
-        self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+        self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
         self.assertEqual(r.execution_profile['boot_scan_seconds'],60)
         self.assertEqual(hosted.core.execution_profile()['boot_scan_seconds'],15)
+        self.assertEqual((r.execution_profile['cleanup_seconds'],r.execution_profile['cleanup_action_seconds'],
+                          r.execution_profile['cleanup_inventory_seconds']),(360,90,60))
+        default=hosted.core.execution_profile()
+        self.assertEqual((default['cleanup_seconds'],default['cleanup_action_seconds'],
+                          default['cleanup_inventory_seconds']),(120,30,20))
         self.assertEqual(r.report['execution_profile'],dict(r.execution_profile))
         with self.assertRaises(TypeError):r.execution_profile['total_seconds']=9999
         with self.assertRaises(TypeError):r.execution_profile['boot_scan_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['cleanup_action_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['cleanup_inventory_seconds']=9999
         with self.assertRaises(AttributeError):r.execution_profile=hosted.core.execution_profile()
         selected=r.execution_profile;deadlines=(r.t0,r.limit,r.final)
         with self.assertRaisesRegex(AttributeError,'reselected'):r._execution_profile=hosted.core.execution_profile()
@@ -553,7 +561,7 @@ class BoundaryTests(unittest.TestCase):
         invalid=[(dict(PROFILE),dict(job),'arm64')]
         for field,value in [('runner_label','macos-15'),('runner_arch','ARM64'),('machine','arm64'),
                             ('runner_environment','self-hosted'),
-                            ('total_seconds',4801),('total_seconds',True),('cleanup_seconds',121),
+                            ('total_seconds',5041),('total_seconds',True),('cleanup_seconds',361),
                             ('execution_profile','default'),('unexpected',1)]:
             invalid.append(({**PROFILE,field:value},dict(job),'x86_64'))
         for field,value in [('TRIPDOCKET_RUNNER_LABEL','macos-15'),('TRIPDOCKET_RUNNER_ARCH','ARM64'),
@@ -567,7 +575,7 @@ class BoundaryTests(unittest.TestCase):
             hosted.HostedRecovery(Ops(),out,PROFILE,{**job,'TRIPDOCKET_RUNNER_ARCH':'ARM64'},
                                   self.event(),self.root,0,execution_profile=selected)
         self.assertFalse(out.exists())
-        default_profile={**PROFILE,'execution_profile':'default','total_seconds':1500}
+        default_profile={**PROFILE,'execution_profile':'default','total_seconds':1500,'cleanup_seconds':120}
         with self.assertRaisesRegex(RuntimeError,'Unexpected hosted execution profile'):
             hosted.HostedRecovery(Ops(),out,default_profile,job,self.event(),self.root,0,
                                   execution_profile=hosted.core.execution_profile())
@@ -577,9 +585,9 @@ class BoundaryTests(unittest.TestCase):
         default=self.runner(label='default')
         intel=self.runner(execution_profile='hosted-intel-v1',label='intel')
         self.assertEqual((default.limit,default.final),(1380,1500))
-        self.assertEqual((intel.limit,intel.final),(4680,4800))
+        self.assertEqual((intel.limit,intel.final),(4680,5040))
         default.ops.t=intel.ops.t=400
-        self.assertEqual((default.limit,default.final,intel.limit,intel.final),(1380,1500,4680,4800))
+        self.assertEqual((default.limit,default.final,intel.limit,intel.final),(1380,1500,4680,5040))
         self.assertEqual(default.execution_profile['ui_profile'],None)
 
     def test_hosted_phases_use_one_profile_for_native_command_receipt_and_environment(self):
@@ -606,7 +614,7 @@ class BoundaryTests(unittest.TestCase):
                 self.assertIs(r.ops.env,old_env)
                 self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         self.assertEqual(len(observed),3)
-        self.assertEqual((r.limit,r.final),(4680,4800))
+        self.assertEqual((r.limit,r.final),(4680,5040))
 
     def test_hosted_prepare_budget_causally_accepts_startup_rejected_by_default(self):
         for name,passes in [('default',False),('hosted-intel-v1',True)]:
@@ -633,7 +641,7 @@ class BoundaryTests(unittest.TestCase):
                 hosted.core.Recovery.run_phase(r,'prepare')
         preserve.assert_not_called();row=r.report['commands'][0]
         self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(1200,4672,4680))
-        self.assertEqual((r.limit,r.final),(4680,4800));self.assertFalse(r.active)
+        self.assertEqual((r.limit,r.final),(4680,5040));self.assertFalse(r.active)
         with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
             hosted.core.Recovery.run_phase(r,'prepare')
         self.assertEqual(len(r.ops.processes),1)
@@ -1346,6 +1354,125 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands'][-4:]],[20,30,30,20])
         self.assertEqual(r.report['attempts'],{'create':1,'shutdown':1,'delete':1})
         self.assertFalse(r.active or r.unknown_spawn)
+
+    @contextlib.contextmanager
+    def owned_cleanup(self, label, *, profile='hosted-intel-v1', recover=False,
+                      delays=(0,0,0,0), jump=None, start=0, shutdown_options=None):
+        """Real constructor/cleanup/command path; only OS clock/process/device effects are fake."""
+        ops=Ops();r=self.runner(ops,execution_profile=profile,label=label)
+        home=self.root/('home-'+label)
+        owned=str(uuid.uuid5(uuid.NAMESPACE_URL,label)).upper()
+        root=home/'Library/Developer/CoreSimulator/Devices'/owned
+        root.mkdir(parents=True)
+        baseline={'devices':{r.intent['runtime']:[]}}
+        created={'devices':{r.intent['runtime']:[{'udid':owned,'name':r.intent['name'],
+                                                 'deviceTypeIdentifier':r.intent['type']}]}}
+        r.create_attempted=True;r.report['baseline']=baseline;r.baseline=set()
+        if not recover:r.owned=owned;r.recovered=True
+        if recover:ops.plans.append({'delay':delays[0],'output':[('stdout',json.dumps(created).encode())]})
+        ops.plans.extend([{'delay':delays[1],**(shutdown_options or {})},{'delay':delays[2]},
+                          {'delay':delays[3],'output':[('stdout',json.dumps(baseline).encode())]}])
+        original_spawn=ops.spawn;original_sleep=ops.sleep
+        def spawn(argv):
+            p=original_spawn(argv);p.action=argv[2]
+            original_poll=p.poll
+            def poll():
+                result=original_poll()
+                if p.action=='delete' and result==0 and not p.dead and root.exists():root.rmdir()
+                return result
+            p.poll=poll
+            return p
+        jumped=False
+        def sleep(amount):
+            nonlocal jumped
+            if jump is not None and not jumped and ops.processes[-1].action=='shutdown':
+                ops.t=ops.processes[-1].started+jump;jumped=True
+            else:original_sleep(amount)
+        ops.spawn=spawn;ops.sleep=sleep;ops.t=start
+        with patch.object(Path,'home',return_value=home):yield r,owned,root
+
+    def test_hosted_cleanup_actions_cover_late_wakeup_without_changing_default(self):
+        for profile,accepted in [('hosted-intel-v1',True),('default',False)]:
+            with self.subTest(profile=profile),self.owned_cleanup(profile,profile=profile,
+                    delays=(0,61,0,0),jump=61.4) as (r,owned,root):
+                r.cleanup()
+                self.assertEqual(r.report['cleanup_verified'],accepted)
+                first=r.report['commands'][0]
+                self.assertEqual((first['requested_cap_seconds'],first['stop_reserve_seconds']),
+                                 (90 if accepted else 30,8))
+                self.assertEqual(first['argv'],['/usr/bin/xcrun','simctl','shutdown',owned])
+                if accepted:
+                    self.assertEqual([x['id'] for x in r.report['commands']],['shutdown','delete','final-inventory'])
+                    self.assertFalse(r.active or r.unknown_spawn or root.exists())
+                else:
+                    self.assertEqual(len(r.report['commands']),1)
+                    self.assertTrue(r.active);self.assertTrue(root.exists())
+                    self.assertEqual(first['stop']['signals'],[])
+
+    def test_hosted_cleanup_optional_recovery_and_queries_share_one_window(self):
+        with self.owned_cleanup('full-cleanup',recover=True,delays=(40,70,70,40)) as (r,owned,root):
+            r.cleanup()
+            self.assertTrue(r.report['cleanup_verified']);self.assertFalse(root.exists())
+            self.assertEqual([x['id'] for x in r.report['commands']],
+                             ['recover-created','shutdown','delete','final-inventory'])
+            self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,90,90,60])
+            self.assertTrue(all(x['stop_reserve_seconds']==8 and x['stop']['group_absent']
+                                and x['stop']['leader_reaped'] for x in r.report['commands']))
+            self.assertEqual((r.t0,r.final,r.limit,r.write_deadline),(0,5040,350,360))
+            self.assertGreaterEqual(r.ops.t,220);self.assertLess(r.ops.t,221)
+            self.assertEqual(r.report['attempts'],{'shutdown':1,'delete':1})
+
+    def test_old_cleanup_window_causally_rejects_the_same_delayed_chain(self):
+        source=(HERE/'recovery_core.py').read_text()
+        method=source[source.index('    def cleanup(self):'):source.index('    def run(self):')]
+        import textwrap
+        changed=method.replace("self.execution_profile['cleanup_seconds']",'120')
+        self.assertNotEqual(method,changed)
+        scope=dict(vars(hosted.core));exec(textwrap.dedent(changed),scope)
+        with self.owned_cleanup('old-cleanup',recover=True,delays=(40,70,70,40)) as (r,_,root), \
+             patch.object(hosted.core.Recovery,'cleanup',scope['cleanup']):
+            r.cleanup()
+            self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+            self.assertEqual((r.final,r.limit,r.write_deadline),(5040,110,120))
+            self.assertTrue(r.report['errors']);self.assertLessEqual(r.ops.t,120)
+
+    def test_hosted_cleanup_global_final_and_action_deadlines_are_not_reset(self):
+        for label,start,jump,end in [('late-action',0,91,90),('late-global',4980,61.4,5030)]:
+            with self.subTest(label=label),self.owned_cleanup(label,start=start,jump=jump,
+                    delays=(0,1000,0,0)) as (r,_,root):
+                r.cleanup()
+                self.assertEqual(len(r.report['commands']),1)
+                row=r.report['commands'][0]
+                self.assertEqual((row['command_deadline'],row['work_deadline']),(end,end-8))
+                self.assertEqual(row['stop']['signals'],[])
+                self.assertTrue(r.active);self.assertTrue(root.exists())
+                self.assertFalse(r.report['cleanup_verified']);self.assertEqual(r.final,5040)
+                self.assertEqual(r.write_deadline,min(5040,start+360))
+
+    def test_cleanup_ownership_errors_still_withhold_later_commands(self):
+        with self.owned_cleanup('unknown-group',shutdown_options={'delay':float('inf'),'probe_error':True}) as (r,_,root):
+            r.cleanup()
+            self.assertEqual(len(r.report['commands']),1);self.assertTrue(r.active)
+            self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+        for reason in ['active','unknown-spawn']:
+            with self.subTest(reason=reason),self.owned_cleanup(reason) as (r,_,root):
+                if reason=='active':r.active[999]=object()
+                else:r.unknown_spawn=True
+                r.cleanup()
+                self.assertEqual(r.report['commands'],[])
+                self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+
+    def test_interruption_allows_only_existing_owned_cleanup_and_nonnative_query_caps_stay_default(self):
+        with self.owned_cleanup('interrupted') as (r,owned,root):
+            r.interrupted=True;r.cleanup()
+            self.assertTrue(r.report['cleanup_verified']);self.assertTrue(r.interrupted)
+            self.assertEqual([x['argv'] for x in r.report['commands'][:2]],
+                             [['/usr/bin/xcrun','simctl',action,owned] for action in ['shutdown','delete']])
+            self.assertFalse(root.exists())
+        r=self.runner(label='ordinary-query',execution_profile='hosted-intel-v1')
+        with patch.object(r,'monitor'):
+            r.sim('ordinary-query','list','devices','--json',cap=20)
+        self.assertEqual(r.report['commands'][0]['requested_cap_seconds'],20)
 
     def test_nested_capability_restores_discovery_limit_instead_of_global_work_limit(self):
         r=self.discovery_runner(delay=250);self.discover(r)
@@ -3363,7 +3490,7 @@ class BoundaryTests(unittest.TestCase):
             row['id']='phase-prepare';r.monitor()
         self.assertEqual(observed,[(end,False,False) for end in [5.,60.,5.,5.,5.,5.,5.,7.,4.,5.]]
                          +[(30.,True,True)])
-        self.assertEqual((r.limit,r.final),(4680.,4800.))
+        self.assertEqual((r.limit,r.final),(4680.,5040.))
         self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
                           hosted.core.CAPS['boot_scan_seconds']),(5,30,15))
         self.assertEqual(r.ops.processes,[])
@@ -3386,7 +3513,7 @@ class BoundaryTests(unittest.TestCase):
                           row['stop_reserve_seconds'],row['returncode']),(300,292.,300.,8,0))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
-        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
 
     def test_default_boot_scan_still_rejects_26_second_stat(self):
         ops=Ops({'delay':float('inf'),'exit':-15})
@@ -3441,7 +3568,7 @@ class BoundaryTests(unittest.TestCase):
                                  (work,deadline,8))
                 self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
                 self.assertLess(row['finish'],deadline);self.assertFalse(r.active)
-                self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+                self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
 
     def test_hosted_repeated_boot_scans_cannot_renew_original_command(self):
         r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
@@ -3460,7 +3587,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertGreaterEqual(row['finish'],292.);self.assertLess(row['finish'],300.)
         self.assertEqual(row['stop']['signals'],[15]);self.assertEqual(len(r.ops.processes),1)
-        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
 
     def test_hosted_boot_scan_cancellation_still_closes_owned_process(self):
         r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
@@ -3472,7 +3599,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('Interrupted',row['error'])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(row['stop']['signals'],[15]);self.assertFalse(r.active)
-        self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+        self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
 
     def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
         r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
