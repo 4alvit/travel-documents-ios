@@ -1580,8 +1580,8 @@ class HostedIPadTimingTests(unittest.TestCase):
                                 env=env, capture_output=True, text=True, check=True, timeout=5)
         return result.stdout.strip()
 
-    def test_exact_hosted_intel_english_ipad_selector_sets_900(self):
-        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1'), '900.0')
+    def test_exact_hosted_intel_english_ipad_selector_sets_1200(self):
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1'), '1200.0')
 
     def test_exact_hosted_intel_russian_maximum_ipad_selector_sets_1200(self):
         self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1',
@@ -1616,23 +1616,33 @@ class HostedIPadTimingTests(unittest.TestCase):
                 self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', **arguments), 'rejected')
 
     def test_removing_only_native_allowance_loses_required_hosted_behavior(self):
-        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) :'
+        needle = 'executionTimeAllowance = hostedIPad ? 1200 :'
         self.assertEqual(self.code.count(needle), 1)
         mutated = self.compile(self.code.replace(needle, 'executionTimeAllowance = hostedIPad ? 480 :'),
                                'without-native-allowance', True)
         self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '480.0')
-        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
 
     def test_reverting_only_russian_native_allowance_loses_required_policy(self):
-        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) :'
+        needle = 'executionTimeAllowance = hostedIPad ? 1200 :'
         self.assertEqual(self.code.count(needle), 1)
         mutated = self.compile(self.code.replace(needle,
-            'executionTimeAllowance = hostedIPad ? (russian ? 600 : 900) :'), 'old-russian-allowance', True)
+            'executionTimeAllowance = hostedIPad ? (russian ? 600 : 1200) :'), 'old-russian-allowance', True)
         self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
                                      maximum=True, binary=mutated), '600.0')
         self.assertNotEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
                                         maximum=True, binary=mutated), '1200.0')
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
+
+    def test_reverting_only_english_native_allowance_loses_required_margin(self):
+        needle = 'executionTimeAllowance = hostedIPad ? 1200 :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle,
+            'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) :'), 'old-english-allowance', True)
         self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                     maximum=True, binary=mutated), '1200.0')
 
 
 class SDKSourceTests(unittest.TestCase):

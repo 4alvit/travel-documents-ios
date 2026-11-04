@@ -736,9 +736,7 @@ Inherited Phone/iPad timing tokens are rejected. Only the final native command
 receives `TEST_RUNNER_TRIPDOCKET_IPAD_TIMING`; the app receives no timing token.
 The consumer requires Debug x86_64 Simulator and iPad idiom, with the exact
 `hosted-intel-ipad-en-v1` token for the English case or
-`hosted-intel-ipad-ru-v1` for Russian at maximum type. English retains its
-900-second native allowance and 1,200-second command; Russian uses 1,200 and
-1,500 seconds respectively. Phone and missing-token timing stay unchanged.
+`hosted-intel-ipad-ru-v1` for Russian at maximum type. Both locales use a 1,200-second native allowance and 1,500-second command. Phone and missing-token timing stay unchanged.
 
 The Russian case in run `41928330972` failed at the 480-second native limit during
 the first confirmation's warning, with zero cancellations yet recorded. Its
@@ -749,12 +747,18 @@ cycles and final return by the observed first-cycle ratio gives an illustrative
 947.8 seconds. This estimate motivates finite headroom, not a guarantee that the
 new allowance will complete the case. Captures and geometry checks stay intact.
 
-English admission remains 1,817 seconds; Russian requires 2,117: preparation372,
+The same run reported the English case passing in895.949 seconds, only4.051 below
+its former900-second limit. Its upload then failed to create the439-file artifact
+with `ENOTFOUND`. The successful log is not independent native/visual/cleanup
+acceptance. English now receives the same1,200/1,500 timing margin using its
+existing strict token; no upload behavior changes.
+
+Each hosted locale requires 2,117 seconds of admission: preparation372,
 command1,500, a separate7-second stop reserve and post-validation238. The native
 command still has its full1,500-second wait cap, clipped by the original global
 deadline; immediate pre-spawn admission protects the stop/post-validation
 reserve. Work remains4,500 seconds and cleanup360, with the83-minute step and
-95-minute job unchanged. Russian summed phase maxima4,743 exceed the work
+95-minute job unchanged. Hosted locale summed phase maxima4,743 exceed the work
 window, so a late build must fail admission rather than reset the clock. All24
 text checks, four Cancels, zero Open actions and final Free/Trips evidence remain
 mandatory. Neither a timeout nor a nonzero result becomes a pass.

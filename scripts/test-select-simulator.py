@@ -177,7 +177,7 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
                 self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
                 self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], ceiling)
         source = (Path(__file__).resolve().parents[1] / "UITests/PrivacySupportUITests.swift").read_text()
-        self.assertIn("executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))", source)
+        self.assertIn("executionTimeAllowance = hostedIPad ? 1200 : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))", source)
         self.assertEqual(source.count("executionTimeAllowance ="), 1)
 
     def test_hosted_phone_profile_is_final_invocation_only(self):

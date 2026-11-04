@@ -158,8 +158,8 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(dict(policy), {'name': 'default', 'xcode_case_max_seconds': 480,
                                            'command_seconds': 900, 'runner_token': None})
         driver, _ = self.driver(architecture='x86_64', hosted_timing=True)
-        self.assertEqual(driver.case[3], 1200)
-        self.assertEqual(driver.timing['xcode_case_max_seconds'], 900)
+        self.assertEqual(driver.case[3], 1500)
+        self.assertEqual(driver.timing['xcode_case_max_seconds'], 1200)
         self.assertEqual(driver.report['timing_policy'], dict(driver.timing))
         with self.assertRaises(TypeError): driver.timing['command_seconds'] = 900
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
@@ -286,7 +286,7 @@ class DriverTests(unittest.TestCase):
     def test_hosted_actual_case_propagates_only_runner_token_and_full_fixed_budget(self):
         self.hosted_environment()
         before = dict(os.environ)
-        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True)
+        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True, delay=1300)
         self.assertEqual(str(error), 'Synthetic result validation withheld')
         self.assertTrue(parsed)
         process = world.processes[0]
@@ -294,12 +294,13 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(any(key in process.environment for key in ipad.TIMING_ENV_KEYS
                              if key != 'TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'))
         self.assertEqual(os.environ, before)
-        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '900')
+        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '1200')
         self.assertEqual(process.argv[process.argv.index('-default-test-execution-time-allowance') + 1], '180')
-        self.assertEqual(self.row(driver)['timeout_seconds'], 1200)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1500)
         self.assertEqual(self.row(driver)['timing_policy'], dict(driver.timing))
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1817)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
         self.assertEqual(driver.report['cases'][0]['admission']['post_validation_seconds'], 238)
+        world.plan = {'delay': 0}
         driver.command(['xcodebuild', 'build-for-testing'], 'build-for-testing', timeout=1200)
         self.assertFalse(any(key in world.processes[-1].environment for key in ipad.TIMING_ENV_KEYS))
         self.assertNotIn('timing_policy', self.row(driver))
@@ -311,26 +312,40 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'], 65)
         self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
 
+    def test_reverting_only_english_command_budget_rejects_1300_second_case(self):
+        self.hosted_environment()
+        original = ipad.timing_policy
+        def old_english_command(architecture, locale, hosted, environment):
+            policy = dict(original(architecture, locale, hosted, environment))
+            if hosted and locale == 'en-US': policy['command_seconds'] = 1200
+            return ipad.MappingProxyType(policy)
+        with patch.object(ipad, 'timing_policy', side_effect=old_english_command):
+            driver, world, error, parsed = self.attempted_case(
+                0, architecture='x86_64', hosted_timing=True, delay=1300)
+        self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1200)
+        self.assertFalse(driver.active)
+
     def test_hosted_case_admission_is_exact_and_does_not_reset_original_clock(self):
         self.hosted_environment()
         driver, world = self.driver(architecture='x86_64', hosted_timing=True)
-        world.t = 4500 - 1817
+        world.t = 4500 - 2117
         with self.assertRaisesRegex(RuntimeError, 'no case started'): driver.run_case(*driver.case)
         self.assertEqual(world.processes, [])
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1817)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
     def test_hosted_case_just_above_full_admission_finishes_without_borrowing_cleanup(self):
         self.hosted_environment()
-        driver, world, error, parsed = self.attempted_case(0, start_at=4500-1817-1,
-                                                         architecture='x86_64', hosted_timing=True, delay=1199)
+        driver, world, error, parsed = self.attempted_case(0, start_at=4500-2117-1,
+                                                         architecture='x86_64', hosted_timing=True, delay=1499)
         self.assertTrue(parsed); self.assertEqual(str(error), 'Synthetic result validation withheld')
         self.assertLess(world.t + 238, driver.work_deadline)
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
     def test_late_hosted_case_timeout_and_contaminated_environment_fail_closed(self):
         self.hosted_environment()
-        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True, delay=1201)
+        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True, delay=1501)
         self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
         self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
         with patch.dict(os.environ, {'SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING': 'unexpected'}):
