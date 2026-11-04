@@ -2109,5 +2109,232 @@ class RestoreFolderNavigation(unittest.TestCase):
 
 
 
+
+RECOVERY_PERSON_INTRODUCTION = r'''
+import Foundation
+struct NSPredicate {
+    let value: String
+    init(format: String, _ value: String) { precondition(format == "label == %@"); self.value = value }
+}
+struct Rejected: Error {}
+struct Cancelled: Error {}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw Cancelled() } }
+}
+@MainActor final class PersonWorld {
+    var introduction = 1, alerts = 1, matchingAlerts = 1, fields = 1, matchingFields = 1
+    var explanations = 1, buttons = 1
+    var value = "Recovery Sentinel"
+    var fieldEnabled = true, explanationHittable = true, buttonEnabled = true, buttonHittable = true
+    var foreground = true
+    var taps = 0, captures = 0, waits = 0
+    let mode: String
+    init(_ mode: String) {
+        self.mode = mode
+        switch mode {
+        case "absent", "late": introduction = 0
+        case "duplicate-intro": introduction = 2
+        case "extra-alert": alerts = 2
+        case "wrong-alert": matchingAlerts = 0
+        case "extra-field": fields = 2
+        case "wrong-field": matchingFields = 0
+        case "wrong-value": value = "Foreign person"
+        case "partial-value": value = "Recovery"
+        case "disabled-field": fieldEnabled = false
+        case "missing-explanation": explanations = 0
+        case "duplicate-explanation": explanations = 2
+        case "hidden-explanation": explanationHittable = false
+        case "missing-continue": buttons = 0
+        case "duplicate-continue": buttons = 2
+        case "disabled-continue": buttonEnabled = false
+        case "hidden-continue": buttonHittable = false
+        case "background": foreground = false
+        case "cancelled": Task.cancelled = true
+        default: break
+        }
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, runningBackground }
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    var state: State { world.foreground ? .runningForeground : .runningBackground }
+    var otherElements: PersonQuery { PersonQuery(world, "other") }
+    var alerts: PersonQuery { PersonQuery(world, "alerts") }
+}
+@MainActor final class PersonQuery {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var count: Int {
+        switch kind {
+        case "intro": return world.introduction
+        case "alerts": return world.alerts
+        case "alert": return world.matchingAlerts
+        case "fields": return world.fields
+        case "field": return world.matchingFields
+        case "explanation": return world.explanations
+        case "continue": return world.buttons
+        default: preconditionFailure("Unscoped query")
+        }
+    }
+    var element: PersonElement { PersonElement(world, kind) }
+    func matching(identifier: String) -> PersonQuery {
+        switch (kind, identifier) {
+        case ("other", "UIContinuousPathIntroductionView"): return PersonQuery(world, "intro")
+        case ("alerts", "Add a person"): return PersonQuery(world, "alert")
+        case ("fields", "Name or nickname"): return PersonQuery(world, "field")
+        default: preconditionFailure("Unexpected identity")
+        }
+    }
+    func matching(_ predicate: NSPredicate) -> PersonQuery {
+        if kind == "texts" {
+            precondition(predicate.value == "Speed up your typing by sliding your finger across the letters to compose a word.")
+            return PersonQuery(world, "explanation")
+        }
+        precondition(kind == "buttons" && predicate.value == "Continue")
+        return PersonQuery(world, "continue")
+    }
+}
+@MainActor final class PersonElement {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var textFields: PersonQuery { precondition(kind == "alert"); return PersonQuery(world, "fields") }
+    var staticTexts: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "texts") }
+    var buttons: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "buttons") }
+    var value: Any? { precondition(kind == "field"); return world.value }
+    var isEnabled: Bool { kind == "field" ? world.fieldEnabled : world.buttonEnabled }
+    var isHittable: Bool {
+        switch kind {
+        case "field": return world.introduction == 0
+        case "explanation": return world.explanationHittable
+        case "continue": return world.buttonHittable
+        default: preconditionFailure("Unexpected hit test")
+        }
+    }
+    func tap() {
+        precondition(kind == "continue"); world.taps += 1
+        if world.mode != "stays-open" { world.introduction = 0 }
+        if world.mode == "changed-after-tap" { world.value = "Foreign person" }
+    }
+}
+@MainActor final class PersonHarness {
+    func check(_ value: Bool, app: XCUIApplication, _ message: String) throws { if !value { throw Rejected() } }
+    func capture(_ app: XCUIApplication, _ name: String) {
+        app.world.captures += 1
+        if app.world.mode == "changed-after-capture" { app.world.value = "Foreign person" }
+        if app.world.mode == "cancel-after-capture" { Task.cancelled = true }
+    }
+    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+        app.world.waits += 1
+        if !condition() { throw Rejected() }
+    }
+    // ACTUAL_RECOVERY_PERSON_HELPER
+    func run(_ app: XCUIApplication, expectedName: String, acknowledged: inout Bool) async throws {
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(app, expectedName: expectedName, acknowledged: &acknowledged)
+    }
+}
+@main struct PersonMain {
+    @MainActor static func main() async throws {
+        let mode = CommandLine.arguments[1], world = PersonWorld(CommandLine.arguments[1])
+        let app = XCUIApplication(world), harness = PersonHarness()
+        var acknowledged = false, outcome = "returned"
+        do {
+            if ["pretype", "placeholder", "late", "repeated"].contains(mode) {
+                world.value = mode == "placeholder" ? "Name or nickname" : ""
+                try await harness.run(app, expectedName: world.value, acknowledged: &acknowledged)
+                world.value = "Recovery Sentinel"
+                if mode == "late" || mode == "repeated" { world.introduction = 1 }
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            } else {
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            }
+        } catch is Cancelled { outcome = "cancelled" }
+        catch { outcome = "rejected" }
+        let result: [String: Any] = ["outcome": outcome, "acknowledged": acknowledged,
+            "taps": world.taps, "captures": world.captures, "waits": world.waits]
+        print(String(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
+    }
+}
+'''
+
+
+class RecoveryPersonIntroductionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix='recovery-person-introduction-')
+        cls.addClassCleanup(cls.scratch.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func acknowledgeRecoveryPersonKeyboardIntroduction(')
+        end = source.index('    private func localStoreSession(', start)
+        swift = Path(cls.scratch.name) / 'Person.swift'
+        swift.write_text(RECOVERY_PERSON_INTRODUCTION.replace('    // ACTUAL_RECOVERY_PERSON_HELPER', source[start:end]))
+        cls.binary = Path(cls.scratch.name) / 'person-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-strict-concurrency=complete',
+                                 '-parse-as-library', str(swift), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def probe(self, mode):
+        import json
+        result = subprocess.run([str(self.binary), mode], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_absent_introduction_has_no_action_or_wait(self):
+        self.assertEqual(self.probe('absent'), {'outcome': 'returned', 'acknowledged': False,
+                                              'taps': 0, 'captures': 0, 'waits': 0})
+
+    def test_first_use_at_focus_or_during_typing_uses_one_acknowledgement(self):
+        for mode in ['pretype', 'placeholder', 'late']:
+            with self.subTest(mode=mode):
+                self.assertEqual(self.probe(mode), {'outcome': 'returned', 'acknowledged': True,
+                                                   'taps': 1, 'captures': 1, 'waits': 1})
+
+    def test_only_unique_expected_intro_form_and_value_can_be_acknowledged(self):
+        for mode in ['duplicate-intro', 'extra-alert', 'wrong-alert', 'extra-field', 'wrong-field',
+                     'wrong-value', 'partial-value', 'disabled-field', 'missing-explanation',
+                     'duplicate-explanation', 'hidden-explanation', 'missing-continue',
+                     'duplicate-continue', 'disabled-continue', 'hidden-continue', 'background']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_changed_form_and_cancellation_do_not_tap(self):
+        for mode, outcome in [('changed-after-capture', 'rejected'), ('cancelled', 'cancelled'),
+                              ('cancel-after-capture', 'cancelled')]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 (outcome, False, 0))
+
+    def test_reappearance_or_failed_dismissal_never_repeats_continue(self):
+        for mode in ['repeated', 'stays-open', 'changed-after-tap']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', True, 1))
+
+    def test_recovery_retains_single_type_and_add_with_pre_post_intro_checks(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        case = source[start:end]
+        self.assertEqual(case.count('var keyboardIntroductionAcknowledged = false'), 1)
+        self.assertEqual(case.count('acknowledgeRecoveryPersonKeyboardIntroduction('), 2)
+        self.assertEqual(case.count('name.typeText("Recovery Sentinel")'), 1)
+        self.assertEqual(case.count('confirm.tap()'), 1)
+        first = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(')
+        second = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(', first + 1)
+        self.assertLess(first, case.index('name.typeText("Recovery Sentinel")'))
+        self.assertLess(case.index('name.typeText("Recovery Sentinel")'), second)
+        self.assertLess(second, case.index('confirm.tap()'))
+        self.assertIn('name.value as? String == "Recovery Sentinel"', case[second:case.index('confirm.tap()')])
+        self.assertIn('UIContinuousPathIntroductionView").count == 0', case[second:case.index('confirm.tap()')])
+        self.assertIn('app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists', case)
+        self.assertIn('recoveryCounts(trips: 1, people: 2, documents: 1, app: app)', case)
+        self.assertNotIn('timeout:', case)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
