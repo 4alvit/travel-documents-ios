@@ -29,6 +29,22 @@ final class PrivacySupportUITests: XCTestCase {
         #endif
     }
 
+    private enum IPadTimingError: Error { case invalidProfile }
+
+    private func useHostedIPadTiming(russian: Bool, maximumType: Bool) throws -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        guard let profile = environment["TRIPDOCKET_IPAD_TIMING"] else { return false }
+        guard profile == "hosted-intel-ipad-en-v1",
+              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
+              !russian, !maximumType else { throw IPadTimingError.invalidProfile }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw IPadTimingError.invalidProfile }
+        return true
+        #else
+        throw IPadTimingError.invalidProfile
+        #endif
+    }
+
     private struct Copy {
         let russian: Bool
         var title: String { russian ? "Данные и помощь" : "Privacy & support" }
@@ -44,10 +60,11 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        // Hosted Intel Phone needs time for all four confirmations and captures.
-        // Other runs retain their allowances; the dedicated iPad cap remains 480s.
+        // Explicit hosted timing profiles preserve all four confirmations and captures.
+        // Runs without an iPad opt-in retain their existing Phone/default allowances.
+        let hostedIPad = try useHostedIPadTiming(russian: russian, maximumType: maximumType)
         let hostedPhone = try useHostedPhoneTiming()
-        executionTimeAllowance = russian && maximumType ? 600 : (hostedPhone ? 720 : 480)
+        executionTimeAllowance = hostedIPad ? 900 : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()

@@ -46,6 +46,30 @@ def execution_profile(architecture, locale):
                              "cleanup_seconds": 360 if intel else CLEANUP_SECONDS})
 
 
+TIMING_ENV_KEYS = tuple(prefix + name for prefix in ("", "TEST_RUNNER_", "SIMCTL_CHILD_")
+                        for name in ("TRIPDOCKET_IPAD_TIMING", "TRIPDOCKET_PHONE_TIMING"))
+HOSTED_TIMING_CONTEXT = {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS", "RUNNER_ARCH": "X64",
+                         "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_JOB": "privacy_ipad",
+                         "GITHUB_WORKFLOW": "CI", "GITHUB_REPOSITORY": "4alvit/travel-documents-ios"}
+
+
+def require_clean_timing_environment(environment):
+    require(not any(key in environment for key in TIMING_ENV_KEYS), "Inherited Phone/iPad timing token")
+
+
+def timing_policy(architecture, locale, hosted, environment):
+    require_clean_timing_environment(environment)
+    require(type(hosted) is bool, "Invalid hosted timing opt-in")
+    if hosted:
+        require(architecture == "x86_64" and locale == "en-US", "Hosted timing requires English Intel iPad")
+        require(all(environment.get(key) == value for key, value in HOSTED_TIMING_CONTEXT.items()),
+                "Hosted timing requires the exact GitHub-hosted iPad CI context")
+    return MappingProxyType({"name": "hosted-intel-ipad-en-v1" if hosted else "default",
+                             "xcode_case_max_seconds": 900 if hosted else 480,
+                             "command_seconds": 1200 if hosted else 900,
+                             "runner_token": "hosted-intel-ipad-en-v1" if hosted else None})
+
+
 def selected_case(locale):
     matches = [case for case in CASES if case[0] == locale]
     require(len(matches) == 1, "Exactly one supported locale is required")
@@ -175,9 +199,12 @@ def validate_result(summary, tree, method, udid):
 
 
 class Driver:
-    def __init__(self, root, locale):
-        self.case = selected_case(locale)
-        self.profile = execution_profile(os.uname().machine, locale)
+    def __init__(self, root, locale, hosted_timing=False):
+        case = selected_case(locale)
+        architecture = os.uname().machine
+        self.profile = execution_profile(architecture, locale)
+        self.timing = timing_policy(architecture, locale, hosted_timing, os.environ)
+        self.case = (*case[:3], self.timing["command_seconds"])
         self.root = Path(root).resolve()
         self.out = self.root / "build/PrivacySupport-iPad" / locale
         self.out.mkdir(parents=True)  # Refuse to overwrite another run's evidence.
@@ -201,7 +228,7 @@ class Driver:
         self.products = None
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
-                       "execution_profile": dict(self.profile),
+                       "execution_profile": dict(self.profile), "timing_policy": dict(self.timing),
                        "work_seconds": self.profile["work_seconds"], "cleanup_reserve_seconds": self.profile["cleanup_seconds"],
                        "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
@@ -328,7 +355,16 @@ class Driver:
                 if failure is None:
                     raise
 
-    def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0):
+    def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0, native_timing=False):
+        environment = dict(os.environ)
+        require_clean_timing_environment(environment)
+        if native_timing:
+            require(label == self.case[0] + "-test" and list(argv[:2]) == ["xcodebuild", "test-without-building"],
+                    "Timing token is restricted to the selected native test command")
+            if self.timing["runner_token"] is not None:
+                require(all(environment.get(key) == value for key, value in HOSTED_TIMING_CONTEXT.items()),
+                        "Hosted timing context changed before native execution")
+                environment["TEST_RUNNER_TRIPDOCKET_IPAD_TIMING"] = self.timing["runner_token"]
         limit = self.phase_limit()
         deadline = min(limit - 7, time.monotonic() + timeout)
         prefix = f"commands/{len(self.report['commands']):03d}-{label}"
@@ -337,6 +373,8 @@ class Driver:
         item = {"argv": [str(v) for v in argv], "label": label, "start": self.now(),
                 "timeout_seconds": timeout, "wait_deadline_monotonic": deadline, "phase_deadline_monotonic": limit,
                 "stdout": str(stdout.relative_to(self.out)), "stderr": str(stderr.relative_to(self.out))}
+        if native_timing:
+            item["timing_policy"] = dict(self.timing)
         self.report["commands"].append(item)
         process, failure, traceback = None, None, None
         try:
@@ -351,7 +389,8 @@ class Driver:
                             label + " lacks full test/post-validation budget; no test spawned")
                 self.registering_process = True
                 try:
-                    process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors, start_new_session=True)
+                    process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors,
+                                               start_new_session=True, env=environment)
                     self.confirmed_absent_groups.discard(process.pid)
                     self.active[process.pid] = process
                     item["owned_process_group"] = process.pid
@@ -501,7 +540,7 @@ class Driver:
         return ["-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "60",
                 "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                 "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "180",
-                "-maximum-test-execution-time-allowance", "480"]
+                "-maximum-test-execution-time-allowance", str(self.timing["xcode_case_max_seconds"])]
 
     def discover_products(self):
         products = self.derived / "Build/Products"
@@ -641,7 +680,7 @@ class Driver:
                                    *self.common_xcode(), "-resultBundlePath", original,
                                    "-only-testing:TripfolioUITests/PrivacySupportUITests/" + method],
                                   label + "-test", timeout=allowance, check=False, stream=True,
-                                  required_after=CASE_POST_SECONDS)
+                                  required_after=CASE_POST_SECONDS, native_timing=True)
             entry["xcodebuild_exit_code"] = code
             require(code == 0, "xcodebuild failed; result data cannot override nonzero exit")
         except BaseException as error:
@@ -760,5 +799,7 @@ class Driver:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--locale", required=True, choices=[case[0] for case in CASES])
+    parser.add_argument("--hosted-intel-timing", action="store_true",
+                        help="Use the fixed English Intel iPad timing policy in GitHub-hosted CI only")
     args = parser.parse_args()
-    sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale).run())
+    sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale, args.hosted_intel_timing).run())
