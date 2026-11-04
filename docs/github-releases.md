@@ -468,12 +468,12 @@ profile before a device is created. Two Intel runs exhausted the former
 180-second boot wait during data migration, while another completed in
 118.663 seconds. The added headroom does not establish that delayed boots will
 finish. It preserves exact runtime selection, full-case admission
-(1,487 seconds by default or1,787 for hosted English) and separate cleanup; it never resets a clock or retries a boot.
+(1,487 seconds on ARM, 1,517 on default Intel or 1,817 for hosted English) and separate cleanup; it never resets a clock or retries a boot.
 A later [Intel run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116)
 completed boot in 312.7 seconds but exhausted the 480-second fresh-build limit
 before any test. Its final log showed asset catalog compilation, not a compiler
-error. The Intel build/work profile leaves387 seconds beyond the default4,113-second
-command/case envelope, or87 seconds beyond4,413 with hosted English timing,
+error. The Intel build/work profile leaves 357 seconds beyond the default 4,143-second
+command/case envelope, or 57 seconds beyond 4,443 with hosted English timing,
 for parsing and byte verification.
 Intel cleanup includes final evidence in its 360-second reserve. These finite
 margins do not guarantee completion; source, product, original-result and owned
@@ -487,10 +487,18 @@ English native allowance and1,200-second command. It requires GitHub-hosted
 macOS/X64, exact locale/architecture and a Debug x86_64 iPad consumer. The fixed
 `hosted-intel-ipad-en-v1` token goes only to the test runner; inherited/conflicting
 Phone/iPad tokens fail before launch, and the app receives none. Standalone,
-Phone and Russian iPad timing stay unchanged. Full1,787-second admission and
+Phone and Russian iPad native timing stay unchanged. Full 1,817-second admission and
 238-second post-validation reserve protect the original4,500/360 work/cleanup
 windows; all text, cancellation, final navigation and original-evidence checks
 remain mandatory. This finite policy does not guarantee a future pass.
+
+After a Russian iPad run exceeded its 60-second AUT installation wait before
+any native test, the Intel profile permits 90 seconds for AUT installation only.
+This also applies to standalone Intel runs. ARM AUT installation, runner
+installation and fresh container lookups retain 60 seconds. Intel preparation
+reserves 372 seconds, including the extra 30; the full-case admission and global
+margins above include it. A timed-out or nonzero install still stops the case;
+installation and owned cleanup must be independently verified.
 
 Hosted iPad steps allow 83 minutes, with 95-minute jobs covering checkout,
 toolchain setup, artifact upload and cancellation. Fresh complete native results

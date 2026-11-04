@@ -28,7 +28,8 @@ RUNNER_BUNDLE_ID = BUNDLE_ID + ".uitests.xctrunner"
 WORK_SECONDS = {"en-US": 35 * 60, "ru-RU": 35 * 60}
 DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
-# Two installs, two fresh container lookups, and two content-size commands.
+# Default: two installs, two fresh container lookups, and two content-size commands.
+# Intel adds its selected AUT-install margin to this preparation admission.
 # Every command includes its 7s stop reserve; post-validation also reserves
 # 30s for local manifests/copy/validation in addition to both fresh lookups.
 CASE_PREP_SECONDS = 4 * (60 + 7) + 2 * (30 + 7)
@@ -43,6 +44,7 @@ def execution_profile(architecture, locale):
                              "work_seconds": 4500 if intel else WORK_SECONDS[locale],
                              "boot_seconds": 600 if intel else 180,
                              "build_seconds": 1200 if intel else 480,
+                             "aut_install_seconds": 90 if intel else 60,
                              "cleanup_seconds": 360 if intel else CLEANUP_SECONDS})
 
 
@@ -657,7 +659,8 @@ class Driver:
         entry = {"locale": locale, "method": method, "system_content_size_expected": size,
                  "original_xcresult": str(original), "status": "not_admitted"}
         self.report["cases"].append(entry)
-        required = CASE_PREP_SECONDS + allowance + 7 + CASE_POST_SECONDS
+        preparation = CASE_PREP_SECONDS + self.profile["aut_install_seconds"] - 60
+        required = preparation + allowance + 7 + CASE_POST_SECONDS
         entry["admission"] = {"required_seconds": required, "remaining_seconds": self.work_deadline - time.monotonic(),
                               "post_validation_seconds": CASE_POST_SECONDS, "work_deadline": self.work_deadline}
         self.save()
@@ -665,7 +668,8 @@ class Driver:
                 label + " lacks full case/post-validation budget; no case started")
         entry["status"] = "started"
         self.product_snapshot(label + "/products-before")
-        self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]], label + "-install", timeout=60)
+        self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]],
+                     label + "-install", timeout=self.profile["aut_install_seconds"])
         self.command(["xcrun", "simctl", "install", self.owned, self.products["runner"]], label + "-runner-install", timeout=60)
         entry["installed_before"] = self.installed(label + "/installed-before", required=True)["available"]
         entry["runner_installed_before"] = self.installed(label + "/runner-installed-before", required=True, product="runner")["available"]
