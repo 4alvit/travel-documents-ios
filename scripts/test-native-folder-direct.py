@@ -119,6 +119,11 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "editor-present": cell.children.append(XCUIElementSnapshot(.textView, "DOC.inlineRenameField"))
         case "editor-outside-grid": window.children.append(XCUIElementSnapshot(.textView, "DOC.inlineRenameField"))
         case "keyboard-present": window.children.append(XCUIElementSnapshot(.keyboard))
+        case "introduction-without-keyboard":
+            window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+                CGRect(x: 0, y: 539, width: 402, height: 335)))
+        case "introduction-in-picker": picker.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "wrong-type-introduction": window.children.append(XCUIElementSnapshot(.button, "UIContinuousPathIntroductionView"))
         case "wrong-provider": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
         case "wrong-root-title": root.identifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: Other"
         case "duplicate-root": picker.children.append(root)
@@ -163,6 +168,11 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         root.children = [nav, grid]; picker.children = [root]; window.children = [keyboard]; app.children = [window]
     }
     func mutate(_ name: String) {
+        if name.hasPrefix("without-keyboard:") {
+            mutate("missing-keyboard")
+            mutate(String(name.dropFirst("without-keyboard:".count)))
+            return
+        }
         switch name {
         case "exact", "application-as-picker", "root-as-picker", "picker-as-application", "window-as-application": break
         case "application-also-includes-picker": window.children.append(picker)
@@ -190,15 +200,30 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "nonfinite-editor": editor.frame.origin.x = .infinity
         case "second-cell": grid.children.append(XCUIElementSnapshot(.cell))
         case "cell-outside-grid": cell.frame.origin.y = 0
-        case "missing-keyboard": window.children = []
+        case "missing-keyboard": window.children.removeAll { $0 === keyboard }
         case "missing-window": app.children = [keyboard]
         case "duplicate-keyboard": window.children.append(keyboard)
         case "root-outside-picker": picker.children = []; window.children.append(root)
         case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
         case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
-        case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+            CGRect(x: 0, y: 539, width: 402, height: 335)))
         case "introduction-in-picker": picker.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
         case "wrong-introduction-type": window.children.last!.elementType = .button
+        case "nested-introduction-and-window":
+            let introduction = window.children.removeLast()
+            window.children.append(XCUIElementSnapshot(.window, "", "", window.frame, [introduction]))
+            app.children.append(XCUIElementSnapshot(.window, "", "", window.frame))
+        case "dismissed-introduction":
+            window.children.removeAll { $0.identifier == "UIContinuousPathIntroductionView" }
+        case "empty-introduction": window.children.last!.frame.size.height = 0
+        case "nonfinite-introduction": window.children.last!.frame.origin.x = .nan
+        case "introduction-outside-window": window.children.last!.frame.origin.y = 600
+        case "introduction-over-editor": window.children.last!.frame = editor.frame
+        case "introduction-over-title": window.children.last!.frame = title.frame
+        case "empty-keyboard": keyboard.frame.size.height = 0
+        case "nonfinite-keyboard": keyboard.frame.origin.x = .infinity
+        case "keyboard-over-title": keyboard.frame = title.frame
         case "remote-placeholder": picker.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
         case "non-string-value": editor.value = 5
         case "long-strings": editor.label = String(repeating: "x", count: 10000)
@@ -337,13 +362,15 @@ INTRODUCTION_SWIFT = r'''
         precondition(node.label == "Continue")
         app.taps += 1
         if app.mode != "dismissal-stalls" { app.tree.window.children.removeAll { $0 === app.introduction } }
+        if app.mode == "without-keyboard" { app.tree.window.children.append(app.tree.keyboard) }
         app.tree.editor.isHittable = true
         if app.mode == "wrong-value-after-tap" { app.tree.editor.value = "foreign" }
     }
 }
 @MainActor final class XCUIApplication {
     let tree = EditorTree("untitled folder")
-    let introduction = XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView")
+    let introduction = XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+        CGRect(x: 0, y: 539, width: 402, height: 335))
     let explanation = XCUIElementSnapshot(.staticText, "", "Speed up your typing by sliding your finger across the letters to compose a word.")
     let button = XCUIElementSnapshot(.button, "", "Continue")
     let mode: String
@@ -367,6 +394,7 @@ INTRODUCTION_SWIFT = r'''
     }
     func mutate() {
         switch mode {
+        case "without-keyboard": tree.mutate("missing-keyboard")
         case "duplicate-introduction": tree.window.children.append(introduction)
         case "wrong-explanation": explanation.label = "unrelated"
         case "duplicate-explanation": introduction.children.append(explanation)
@@ -557,9 +585,35 @@ class FolderDirectTests(unittest.TestCase):
             for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
                          "wrong-provider", "duplicate-root", "duplicate-picker", "duplicate-editor",
                          "missing-editor", "wrong-value", "disabled-editor", "editor-outside-cell-ancestry",
-                         "editor-outside-grid", "editor-under-keyboard", "duplicate-keyboard", "missing-keyboard"]:
+                         "editor-outside-grid", "editor-under-keyboard", "duplicate-keyboard"]:
                 with self.subTest(expected=expected, case=case):
                     self.assertEqual(self.probe("introduction-editor", case, expected), "rejected")
+
+    def test_visible_introduction_accepts_zero_or_one_keyboard_only_when_opted_in(self):
+        for shape in ["exact", "missing-keyboard", "nested-introduction-and-window",
+                      "without-keyboard:nested-introduction-and-window"]:
+            for expected in ["untitled folder", "TripDocket-Batch-QA-" + TOKEN]:
+                with self.subTest(shape=shape, expected=expected):
+                    self.assertEqual(self.probe("introduction-editor", shape, expected), "accepted")
+            self.assertEqual(self.probe("initial-introduction", shape), "editor")
+        self.assertEqual(self.probe("editor", "missing-keyboard", "untitled folder"), "rejected")
+        self.assertEqual(self.probe("initial-introduction", "without-keyboard:dismissed-introduction"), "rejected")
+        self.assertEqual(self.probe("initial-introduction", "dismissed-introduction"), "editor")
+
+    def test_introduction_geometry_and_any_present_keyboard_remain_required(self):
+        for keyboard in ["", "without-keyboard:"]:
+            for invalid in ["empty-introduction", "nonfinite-introduction", "introduction-outside-window",
+                            "introduction-over-editor", "introduction-over-title", "introduction-overlay",
+                            "wrong-introduction-type", "introduction-in-picker", "wrong-value", "wrong-provider",
+                            "duplicate-editor", "disabled-editor", "missing-editor", "editor-outside-cell-ancestry"]:
+                shape = keyboard + invalid
+                with self.subTest(shape=shape):
+                    self.assertEqual(self.probe("introduction-editor", shape, "untitled folder"), "rejected")
+                    self.assertEqual(self.probe("initial-introduction", shape), "rejected")
+        for shape in ["empty-keyboard", "nonfinite-keyboard", "keyboard-over-title", "duplicate-keyboard"]:
+            with self.subTest(shape=shape):
+                self.assertEqual(self.probe("introduction-editor", shape, "untitled folder"), "rejected")
+                self.assertEqual(self.probe("initial-introduction", shape), "rejected")
 
     def test_actual_initial_classifier_recognizes_both_editors_and_exact_rename(self):
         for mode in ["initial-editor", "initial-introduction"]:
@@ -581,13 +635,19 @@ class FolderDirectTests(unittest.TestCase):
 
     def test_actual_initial_classifier_rejects_ambiguous_introduction_and_rename(self):
         for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
-                     "missing-editor", "wrong-value", "missing-keyboard"]:
+                     "missing-editor", "wrong-value"]:
             with self.subTest(case=case):
                 self.assertEqual(self.probe("initial-introduction", case), "rejected")
         for case in ["missing-folder", "duplicate-folder", "wrong-name", "nonempty-folder",
                      "save-as-cell", "disabled-folder", "editor-present", "keyboard-present", "wrong-provider"]:
             with self.subTest(case=case):
                 self.assertEqual(self.probe("initial-rename", case), "rejected")
+
+    def test_introduction_without_editor_cannot_fall_back_to_rename(self):
+        for shape in ["introduction-without-keyboard", "introduction-in-picker", "wrong-type-introduction"]:
+            with self.subTest(shape=shape):
+                self.assertEqual(self.probe("shape", shape), "rejected")
+                self.assertEqual(self.probe("initial-rename", shape), "rejected")
 
     def test_actual_initial_classifier_changes_state_without_stale_rename_frame(self):
         self.assertEqual(self.probe("initial-transition"), "rename,editor,editor,rejected,rename")
@@ -868,6 +928,10 @@ class KeyboardIntroductionTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 self.assertEqual(self.probe(phase), {"outcome": "returned", "acknowledged": True,
                                                    "taps": 1, "captures": 1, "waits": 1, "samples": 2})
+
+    def test_introduction_without_keyboard_uses_one_acknowledgment_then_normal_editor(self):
+        self.assertEqual(self.probe("without-keyboard"), {"outcome": "returned", "acknowledged": True,
+                                                        "taps": 1, "captures": 1, "waits": 1, "samples": 2})
 
     def test_ambiguous_or_wrong_introduction_never_taps(self):
         for mode in ["duplicate-introduction", "wrong-explanation", "duplicate-explanation", "hidden-explanation",
