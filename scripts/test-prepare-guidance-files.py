@@ -300,7 +300,7 @@ class BootstrapTests(unittest.TestCase):
         # Model the observed startup plus the full existing case allowance and
         # completion margin. This is not a measured native performance claim.
         command_seconds = 711 + m.recovery.PREPARE_CASE_SECONDS + 30
-        self.assertLess(command_seconds, m.PREPARE_COMMAND_SECONDS - 8)
+        self.assertLess(command_seconds, runner.execution_profile["prepare_command_seconds"] - 8)
         def transform(label, value):
             runner.ops.value += {"prepare-ui": command_seconds, "prepare-summary": 20,
                                  "prepare-tests": 20, "devices-booted": 20,
@@ -439,7 +439,7 @@ class ShellBoundary(s.ShellTests):
                           if line.startswith("    timeout-minutes:")], ["    timeout-minutes: 75"])
         self.assertEqual([line for line in core_integration.splitlines()
                           if line.startswith("        timeout-minutes:")], ["        timeout-minutes: 35"])
-        # Intel bootstrap includes the same960s preparation, with bounded
+        # Intel bootstrap includes1080s preparation, with bounded
         # postprocessing headroom under the unchanged75-minute step.
         self.assertEqual(m.WORK + m.STOP + m.WRITE + 2700 + 680, 75 * 60)
         self.assertEqual(m.EXECUTION_PROFILES["x86_64"]["work_seconds"]
@@ -497,6 +497,111 @@ class OwnedBootOps(Clock):
     def close(self, child): self.closes += 1
 
 
+class OwnedPreparationOps(OwnedBootOps):
+    """Only the child process is synthetic; preparation and command policy run."""
+    def __init__(self, duration, returncode=0):
+        super().__init__(duration)
+        self.expected_returncode = returncode
+
+    def spawn(self, argv):
+        child = super().spawn(argv)
+        poll = child.poll
+        def completed():
+            result = poll()
+            if result == 0: child.returncode = self.expected_returncode
+            return child.returncode
+        child.poll = completed
+        return child
+
+    def absent(self, child):
+        self.probes += 1
+        return child.returncode is not None
+
+    def send(self, child, signal):
+        self.signals.append(signal)
+        child.returncode = -signal
+
+
+class PreparationCommandTests(unittest.TestCase):
+    make = BootstrapTests.make
+
+    def preparation_runner(self, architecture="x86_64", duration=1000, returncode=0):
+        runner = self.make(architecture=architecture)
+        ops = OwnedPreparationOps(duration, returncode); runner.ops = ops
+        runner.command = lambda label, argv, cap: m.Bootstrap.command(runner, label, argv, cap)
+        # Parsing is a separate tested boundary. This stub records whether the
+        # real preparation path reaches it; it cannot grant provider readiness.
+        inspections = []
+        runner.inspect_preparation = lambda: inspections.append(True)
+        return runner, ops, inspections
+
+    def test_actual_preparation_uses_intel_margin_and_arm_baseline(self):
+        for arch, cap, passes in [("x86_64", 1080, True), ("arm64", 960, False)]:
+            with self.subTest(architecture=arch):
+                runner, ops, inspections = self.preparation_runner(arch)
+                before = ops.env
+                if passes: m.Bootstrap.prepare_ui(runner)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "prepare-ui failed"):
+                        m.Bootstrap.prepare_ui(runner)
+                row = runner.report["commands"][0]
+                self.assertEqual(row["requested_cap_seconds"], cap)
+                self.assertEqual(row["work_deadline"], cap - 8)
+                self.assertEqual(row["outcome"], "completed" if passes else "failed")
+                argv = ops.processes[0].argv
+                for flag in ["-default-test-execution-time-allowance", "-maximum-test-execution-time-allowance"]:
+                    self.assertEqual(argv[argv.index(flag) + 1], "180")
+                self.assertEqual([a for a in argv if a.startswith("-only-testing:")],
+                                 ["-only-testing:TripfolioUITests/" + m.PREPARE_CASE.removesuffix("()")])
+                self.assertEqual(len(ops.processes), 1); self.assertEqual(runner.preparation_calls, 1)
+                self.assertEqual(inspections, [True]); self.assertIs(ops.env, before)
+                self.assertFalse(runner.active); self.assertEqual(runner.report["status"], "running")
+
+    def test_old_intel_preparation_cap_causally_rejects_delayed_completion(self):
+        old = {**m.EXECUTION_PROFILES["x86_64"], "prepare_command_seconds": 960}
+        with patch.object(m, "EXECUTION_PROFILES", {
+                **m.EXECUTION_PROFILES, "x86_64": m.MappingProxyType(old)}):
+            runner, ops, _ = self.preparation_runner()
+        with self.assertRaisesRegex(RuntimeError, "prepare-ui failed"):
+            m.Bootstrap.prepare_ui(runner)
+        self.assertEqual(runner.report["commands"][0]["requested_cap_seconds"], 960)
+        self.assertEqual(runner.limit - runner.t0, 1440)
+        self.assertEqual(len(ops.processes), 1); self.assertFalse(runner.active)
+
+    def test_late_and_nonzero_preparation_remain_failed(self):
+        for duration, returncode in [(1081, 0), (1000, 1)]:
+            with self.subTest(duration=duration, returncode=returncode):
+                runner, ops, inspections = self.preparation_runner(duration=duration, returncode=returncode)
+                with self.assertRaisesRegex(RuntimeError, "prepare-ui failed"):
+                    m.Bootstrap.prepare_ui(runner)
+                self.assertEqual(runner.report["commands"][0]["outcome"], "failed")
+                self.assertEqual(len(ops.processes), 1); self.assertEqual(inspections, [True])
+                self.assertFalse(runner.active); self.assertNotIn("preparation_result", runner.report)
+
+    def test_original_work_deadline_clips_preparation_without_reset(self):
+        runner, ops, _ = self.preparation_runner()
+        ops.value = runner.limit - 100
+        deadlines = (runner.t0, runner.limit, runner.cleanup_deadline, runner.write_deadline)
+        with self.assertRaisesRegex(RuntimeError, "prepare-ui failed"):
+            m.Bootstrap.prepare_ui(runner)
+        row = runner.report["commands"][0]
+        self.assertEqual((row["requested_cap_seconds"], row["command_deadline"], row["work_deadline"]),
+                         (1080, 1440, 1432))
+        self.assertEqual((runner.t0, runner.limit, runner.cleanup_deadline, runner.write_deadline), deadlines)
+        self.assertFalse(runner.active); self.assertEqual(len(ops.processes), 1)
+
+    def test_completed_command_still_requires_native_result_inspection(self):
+        runner, ops, _ = self.preparation_runner()
+        runner.inspect_preparation = lambda: m.Bootstrap.inspect_preparation(runner)
+        with self.assertRaises(FileNotFoundError):
+            m.Bootstrap.prepare_ui(runner)
+        self.assertEqual(runner.report["commands"][0]["outcome"], "completed")
+        self.assertIn("preparation_inspection_error", runner.report)
+        self.assertNotIn("preparation_result", runner.report)
+        self.assertEqual(runner.report["status"], "running")
+        self.assertFalse(runner.active); self.assertEqual(len(ops.processes), 1)
+
+
 class BootstrapLifecycleTests(unittest.TestCase):
     make = BootstrapTests.make
     run_bootstrap = BootstrapTests.run_bootstrap
@@ -511,16 +616,18 @@ class BootstrapLifecycleTests(unittest.TestCase):
         return runner, ops
 
     def test_constructor_selects_immutable_profile_before_original_deadlines(self):
-        for arch, work, boot in [("arm64", 1080, 180), ("x86_64", 1440, 300)]:
+        for arch, work, boot, prepare in [("arm64", 1080, 180, 960), ("x86_64", 1440, 300, 1080)]:
             with self.subTest(arch=arch):
                 runner = self.make(architecture=arch)
                 self.assertEqual((runner.t0, runner.limit, runner.cleanup_deadline, runner.write_deadline),
                                  (1., 1. + work, 31. + work, 41. + work))
                 self.assertEqual(runner.execution_profile["warm_boot_seconds"], boot)
+                self.assertEqual(runner.execution_profile["prepare_command_seconds"], prepare)
                 self.assertEqual(runner.report["execution_profile"], dict(runner.execution_profile))
                 self.assertEqual(runner.report["limits"]["work_seconds"], work)
                 selected = runner.execution_profile
                 with self.assertRaises(TypeError): selected["work_seconds"] = 1
+                with self.assertRaises(TypeError): selected["prepare_command_seconds"] = 1
                 with self.assertRaises(AttributeError): runner.execution_profile = {}
                 with self.assertRaises(AttributeError): del runner.execution_profile
                 self.assertIs(runner.execution_profile, selected)

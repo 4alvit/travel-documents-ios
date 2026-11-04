@@ -26,11 +26,12 @@ GROUP = "group.com.apple.FileProvider.LocalStorage"
 WORK, STOP, WRITE = 1080, 30, 10
 EXECUTION_PROFILES = MappingProxyType({
     "arm64": MappingProxyType({"name": "default", "architecture": "arm64",
-                              "work_seconds": WORK, "warm_boot_seconds": 180}),
+                              "work_seconds": WORK, "warm_boot_seconds": 180,
+                              "prepare_command_seconds": 960}),
     "x86_64": MappingProxyType({"name": "intel-phone", "architecture": "x86_64",
-                               "work_seconds": 1440, "warm_boot_seconds": 300}),
+                               "work_seconds": 1440, "warm_boot_seconds": 300,
+                               "prepare_command_seconds": 1080}),
 })
-PREPARE_COMMAND_SECONDS = 960
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
 # retains its measured 120s cap; ordinary commands get 30/60s. The one native
@@ -38,12 +39,15 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # command includes the shared primitive's 8s stop reserve. This phone command
 # includes build and runner startup: run 41577208390 used about 711s before
 # the case and exhausted the old 780s cap after only 61s of the unchanged
-# 180s case allowance. The 960s command cap includes its 8s stop reserve;
+# 180s case allowance. Arm retains 960s; Intel allows 1080s after a later run
+# exhausted 960s before its native case could use the unchanged 180s allowance.
+# Both command caps include the shared 8s stop reserve;
 # postprocessing shares one original work deadline: 1080s on Arm, 1440s on Intel.
 # The Intel warm-boot command gets 300s including its 8s stop reserve. Historical
-# successful post-boot work took 58s; 960s preparation + 19.4s other pre-boot work
-# + 300s boot + 58s leaves about 102s within 1440s. This is engineering margin,
-# not a guarantee that every individual command can consume its full cap.
+# successful post-boot work took 58s; 1080s preparation + 19.4s other pre-boot work
+# + the observed 78s boot + 58s leaves about 204s within 1440s. A full 300s boot
+# would exceed that projection by 17.4s and must clip to the original deadline.
+# This is not a guarantee that every command can consume its full cap.
 # The unchanged 75m integration / 95m job budget includes the Intel 1480s envelope,
 # nine case ceilings totaling 2700s, and 320s other-work margin.
 # Recovery and batch have separate profiles; their caps are not changed here.
@@ -244,7 +248,7 @@ class Bootstrap(process.Smoke):
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
         failure = None
         try:
-            self.command("prepare-ui", argv, PREPARE_COMMAND_SECONDS)
+            self.command("prepare-ui", argv, self.execution_profile["prepare_command_seconds"])
         except Exception as error:
             failure = error
         finally:

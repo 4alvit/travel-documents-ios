@@ -352,7 +352,8 @@ its app, navigation, obstruction and selected-container frames. Count rows use o
 fresh snapshot for identity, label and value while retaining the global uniqueness
 and live hit checks; snapshots are never reused after a drag or a new observation.
 Phone preparation has a 1,080-second work budget and a 960-second build/test command
-cap; the shared preparation case has a 180-second allowance. A captured cold phone
+cap on Arm; Intel uses 1,440 seconds of work and a 1,080-second command cap.
+The shared preparation case has a 180-second allowance. A captured cold phone
 run reached local Files checks at 132 seconds, after its former 120-second limit.
 That failed run remains failed; no completed preparation is inferred from its
 late observations. A later phone run spent about 518 seconds in build and runner
@@ -360,8 +361,12 @@ startup before its case began, including a 280-second runner launch call. Its
 former 600-second command cap expired during the case. In
 [run 41577208390](https://github.com/4alvit/travel-documents-ios/actions/runs/41577208390),
 about 711 seconds elapsed before the preparation case started; the 780-second
-command cap then expired after about 61 seconds of case activity. The current
-960-second combined command allowance includes its eight-second stop reserve;
+command cap then expired after about 61 seconds of case activity. A later Intel
+run exhausted the 960-second command before its native case could use 180 seconds:
+less than 130 seconds separate the recorded case start and the later shell failure.
+Its receipt does not record a UTC origin for the monotonic command clock, so the
+exact build/startup split is unknown. The Intel command now allows 1,080 seconds;
+Arm retains 960. Each combined command allowance includes its eight-second stop reserve;
 it is not a separately enforced startup deadline. The case still has the same
 180-second allowance. Result inspection, provider checks and final inventory
 share the remaining budget and still fail if it expires; their completion is not
@@ -404,14 +409,20 @@ host and cleanup limits still apply. This permits bounded recovery from the
 observed non-transition; it does not establish whether the first native action
 was ignored or delayed.
 Batch release qualification preparation has the profile-specific cap described above.
-Phone bootstrap retains its 960-second preparation command, 180-second native
-preparation allowance, 30-second cleanup and ten-second receipt limits. Intel
+Phone bootstrap selects an immutable 1,080-second Intel or 960-second Arm preparation
+command cap, with the same 180-second native preparation allowance, 30-second
+cleanup and ten-second receipt limits. Intel
 gets 1,440 seconds of work; Arm retains 1,080. The Phone integration step has
 75 minutes within a 95-minute job: 1,480 seconds for the complete Intel bootstrap,
 2,700 seconds for the nine case ceilings and 320 seconds for selection, generation,
 main build/session startup, skipped-case bookkeeping and result finalization.
 The Arm allocation remains 1,120 seconds for bootstrap and 680 seconds for other work.
 These are planning allocations under one step timer, not independent guarantees.
+For example, 1,080 seconds of preparation plus historical other work of 19.4 seconds,
+a 78-second warm boot and 58 seconds of final checks total about 1,235 seconds.
+If that warm boot instead consumes its full 300-second cap, the projection exceeds
+the original 1,440-second deadline by about 17.4 seconds; later work must clip and
+fail closed. The larger preparation cap does not reset or extend that deadline.
 The surrounding 20 minutes retain checkout, toolchain, cancellation, raw evidence,
 optional failure extraction/upload and finalization. Raw test artifacts upload
 before optional extraction to preserve originals even if extraction fails.
