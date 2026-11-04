@@ -400,16 +400,27 @@ The recovery compatibility job retains its separately pinned profile.
 Privacy/support text reading uses the same one-point inset viewport for scroll
 acceptance and coverage checks. Short text must fit completely in that reading
 viewport; tall text still requires overlapping coverage. Action-control tolerance,
-real hittability, screenshots, hierarchy captures and case deadlines are unchanged.
+real hittability, screenshots and hierarchy captures remain required.
+
+The English guidance case requests 480 seconds on both Phone and iPad. An
+[observed Intel iPad run](https://github.com/4alvit/travel-documents-ios/actions/runs/41867727747/job/126715831251)
+exceeded its former 360-second allowance during the fourth Cancel action. Its
+stdout continued through a final Trips capture operation at about 382 seconds,
+but those post-timeout attachments were not retained; the run remains failed.
+Russian maximum-type retains its 600-second source allowance. The dedicated
+iPad command still clamps either case to 480 seconds, within its unchanged
+900-second command limit, 2,100-second work budget and 180-second cleanup reserve.
+Every text, privacy, Cancel and final Trips check remains required. This allowance
+does not guarantee completion; a fresh successful native result is required.
 
 The iPad driver allows up to 480 seconds for its single fresh build, within the
 unchanged 2,100-second work budget and separate 180-second cleanup reserve.
 An [observed Russian run](https://github.com/4alvit/travel-documents-ios/actions/runs/41417736277/job/125185590697)
 was still compiling when its former 360-second build cap expired. This allocation does not guarantee completion or admission: that
 run had about 1,539 seconds left, only 52.1 seconds beyond the mandatory
-1,487-second preparation, test and post-validation allowance. Native case
-limits, full-budget admission and failure handling remain unchanged; no build
-or test is retried or reused from another run.
+1,487-second preparation, test and post-validation allowance. This build allowance
+leaves the case limits above, full-budget admission and failure handling unchanged;
+no build or test is retried or reused from another run.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
