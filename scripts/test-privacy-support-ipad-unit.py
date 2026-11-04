@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import signal
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -84,6 +85,8 @@ class DriverTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='trip-ipad-injected-')
         self.addCleanup(temp.cleanup); self.root = Path(temp.name)
+        architecture = patch('os.uname', return_value=SimpleNamespace(machine='arm64'))
+        architecture.start(); self.addCleanup(architecture.stop)
         self.guards = []
         for name in ['subprocess.Popen', 'os.killpg', 'os.kill', 'os.system']:
             guard = patch(name, side_effect=AssertionError('NO NATIVE EXECUTION'))
@@ -93,9 +96,10 @@ class DriverTests(unittest.TestCase):
         for guard in self.guards:
             guard.assert_not_called()
 
-    def driver(self, locale="en-US", **plan):
+    def driver(self, locale="en-US", architecture="arm64", **plan):
         world = World(**plan)
         for name, value in [('time.monotonic', world.clock), ('time.sleep', world.sleep),
+                            ('os.uname', lambda: SimpleNamespace(machine=architecture)),
                             ('subprocess.Popen', world.spawn), ('os.killpg', world.killpg)]:
             injected = patch(name, side_effect=value)
             injected.start(); self.addCleanup(injected.stop)
@@ -225,6 +229,43 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(TypeError): ipad.Driver(self.root)
         with self.assertRaisesRegex(RuntimeError, 'Exactly one supported locale'): ipad.Driver(self.root, 'all')
         self.assertFalse((self.root/'build').exists())
+
+    def test_host_profiles_are_immutable_and_unknown_architecture_creates_no_output(self):
+        for architecture,work,boot in [('arm64',2100,180),('x86_64',3000,600)]:
+            for locale in ('en-US','ru-RU'):
+                profile=ipad.execution_profile(architecture,locale)
+                self.assertEqual((profile['architecture'],profile['work_seconds'],profile['boot_seconds']),
+                                 (architecture,work,boot))
+                with self.assertRaises(TypeError):profile['work_seconds']=9999
+        with patch('os.uname',return_value=SimpleNamespace(machine='unknown')):
+            with self.assertRaisesRegex(RuntimeError,'Unsupported iPad host architecture'):
+                ipad.Driver(self.root,'en-US')
+        self.assertFalse((self.root/'build').exists())
+
+    def test_intel_profile_is_recorded_before_deadline_and_keeps_cleanup_separate(self):
+        driver,world=self.driver(architecture='x86_64')
+        self.assertEqual(driver.report['execution_profile'],dict(driver.profile))
+        self.assertEqual(driver.report['execution_profile']['name'],'intel-ipad')
+        self.assertEqual((driver.start,driver.work_deadline,driver.final_deadline),(0,3000,3180))
+        world.t=3000;driver.cleanup()
+        self.assertTrue(driver.report['cleanup']['verified'])
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        world.t=3180
+        with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
+        self.assertFalse(world.processes)
+
+    def test_intel_full_case_admission_retains_exact_1487_second_boundary(self):
+        driver,world=self.driver(architecture='x86_64')
+        world.t=3000-1487
+        with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
+        self.assertFalse(world.processes)
+        admitted,world,error,validated=self.attempted_case(1,start_at=3000-1487-1,
+                                                        architecture='x86_64',delay=1)
+        self.assertEqual(admitted.report['cases'][0]['status'],'started')
+        self.assertTrue(validated)
+        self.assertIn('Synthetic result validation withheld',str(error))
+        self.assertEqual((admitted.work_deadline,admitted.final_deadline),(3000,3180))
 
     def test_fresh_locale_driver_runs_exactly_one_case_and_requires_its_success(self):
         for locale in ('en-US', 'ru-RU'):
@@ -406,11 +447,13 @@ class DriverTests(unittest.TestCase):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 1',lane)
-        for locale,step,job in [('en-US',40,46),('ru-RU',40,46)]:
+        for locale,step,job in [('en-US',55,62),('ru-RU',55,62)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
-            work=ipad.WORK_SECONDS[locale]
+            work=ipad.execution_profile('x86_64',locale)['work_seconds']
             self.assertGreater(step*60,work+ipad.CLEANUP_SECONDS)
-            self.assertGreater(job,step+3)
+            self.assertEqual(job,2+3+step+2)
+        self.assertEqual(lane.count('        timeout-minutes: 2\n'),2)
+        self.assertIn('        timeout-minutes: 3\n',lane)
         self.assertEqual(lane.count('- locale:'),2)
         self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
         self.assertIn("run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'",lane)
@@ -992,12 +1035,14 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
         self.assert_finished(driver)
 
-    def complete_discovery(self, costs=None, after_read=None, selection_time=0, intent_time=0, start_at=0, parse_time=0):
-        driver,world=self.driver();world.t=start_at
+    def complete_discovery(self, costs=None, after_read=None, selection_time=0, intent_time=0, start_at=0, parse_time=0,
+                           architecture='arm64', reported_architecture=None, boot_delay=None):
+        driver,world=self.driver(architecture=architecture);world.t=start_at
+        captured = reported_architecture or architecture
         owned='11111111-2222-4333-8444-555555555555'
         dtype='synthetic.iPad';runtime='com.apple.CoreSimulator.SimRuntime.iOS-26-2'
         runtime_data={'runtimes':[{'identifier':runtime,'version':'26.2','isAvailable':True,
-            'supportedArchitectures':['arm64'],'supportedDeviceTypes':[{'identifier':dtype}]}]}
+            'supportedArchitectures':[captured],'supportedDeviceTypes':[{'identifier':dtype}]}]}
         type_data={'devicetypes':[{'identifier':dtype,'productFamily':'iPad','name':'iPad Pro 13-inch'}]}
         reached=[];actual_command=driver.command;actual_json=driver.json_command
         actual_choose=ipad.choose_pair;actual_write=driver.write
@@ -1010,7 +1055,7 @@ class DriverTests(unittest.TestCase):
             if label in ['runtimes','device-types','architecture','devices-before','create-owned-ipad','devices-created']:
                 reached.append(label)
                 outputs={'runtimes':json.dumps(runtime_data),'device-types':json.dumps(type_data),
-                    'architecture':'arm64','devices-before':json.dumps({'devices':{runtime:[]}}),
+                    'architecture':captured,'devices-before':json.dumps({'devices':{runtime:[]}}),
                     'create-owned-ipad':owned}
                 if label=='devices-created':
                     output=json.dumps({'devices':{runtime:[{'udid':owned,'name':driver.intent['name'],
@@ -1018,7 +1063,11 @@ class DriverTests(unittest.TestCase):
                 else:output=outputs[label]
                 world.plan.update(delay=(costs or {}).get(label,0),output=output.encode())
                 return actual_command(argv,label,**kwargs)
-            if label in ['boot','bootstatus']:reached.append(label)
+            if label in ['boot','bootstatus']:
+                reached.append(label)
+                if boot_delay is not None:
+                    world.plan.update(delay=boot_delay if label=='bootstatus' else 0,output=b'')
+                    return actual_command(argv,label,**kwargs)
             return 0, '26.2\n' if label == 'simulator-sdk-version' else ''
         def json_command(argv,label,**kwargs):
             value=actual_json(argv,label,**kwargs)
@@ -1037,7 +1086,8 @@ class DriverTests(unittest.TestCase):
             try:driver.prepare()
             except RuntimeError as failure:error=failure
         self.assertIsNone(driver.discovery_deadline)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        work = 3000 if architecture == 'x86_64' else 2100
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+180))
         return driver,world,reached,error
 
     def test_complete_discovery_near_boundary_has_one_deadline_and_fixed_global_origin(self):
@@ -1051,6 +1101,47 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(reached[-2:],['boot','bootstatus']);self.assertEqual(len(world.processes),6)
         self.assertTrue(all(r['wait_deadline_monotonic']<=310 for r in driver.report['commands']))
         self.assertIsNotNone(driver.owned)
+
+    def test_intel_boot_command_can_complete_after_180_without_renewing_work(self):
+        driver,world,reached,error=self.complete_discovery(architecture='x86_64',boot_delay=599)
+        self.assertIsNone(error)
+        boot=[r for r in driver.report['commands'] if r['label']=='bootstatus']
+        self.assertEqual(len(boot),1)
+        self.assertEqual(boot[0]['timeout_seconds'],600)
+        self.assertEqual(boot[0]['argv'],['xcrun','simctl','bootstatus',driver.owned,'-b'])
+        self.assertGreaterEqual(world.t,599);self.assertLess(world.t,600)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        self.assertFalse(driver.active)
+
+    def test_intel_boot_timeout_stays_failed_and_closes_only_owned_group(self):
+        driver,world,reached,error=self.complete_discovery(architecture='x86_64',boot_delay=601)
+        self.assertIn('bootstatus exceeded its finite timeout',str(error))
+        self.assertEqual(reached.count('bootstatus'),1)
+        self.assertEqual(driver.report['cases'],[])
+        self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        self.assertLessEqual(world.t,607)
+
+    def test_intel_boot_cap_is_clipped_by_original_work_not_cleanup(self):
+        driver,world,reached,error=self.complete_discovery(architecture='x86_64',boot_delay=10,start_at=2990)
+        self.assertIn('bootstatus exceeded its finite timeout',str(error))
+        boot=next(r for r in driver.report['commands'] if r['label']=='bootstatus')
+        self.assertEqual((boot['timeout_seconds'],boot['wait_deadline_monotonic']),(600,2993))
+        self.assertLessEqual(world.t,3000);self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+
+    def test_profile_and_captured_architecture_mismatch_refuses_creation(self):
+        original=self.root
+        for initial,captured in [('arm64','x86_64'),('x86_64','arm64')]:
+            with self.subTest(initial=initial),tempfile.TemporaryDirectory(dir=original) as root:
+                self.root=Path(root)
+                driver,world,reached,error=self.complete_discovery(architecture=initial,
+                                                                  reported_architecture=captured)
+                self.assertIn('Captured architecture differs',str(error))
+                self.assertNotIn('create-owned-ipad',reached)
+                self.assertNotIn('bootstatus',reached)
+                self.assertIsNone(driver.owned);self.assertFalse(driver.active)
+        self.root=original
 
     def test_discovery_shared_remaining_budget_clips_later_inventory_and_stops_before_create(self):
         driver,world,reached,error=self.complete_discovery(costs={

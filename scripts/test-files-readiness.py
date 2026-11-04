@@ -221,7 +221,7 @@ class ReadinessTests(unittest.TestCase):
         path.write_text(FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = root / 'readiness-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def run_case(self, name):
         result = subprocess.run([str(self.binary), name], capture_output=True, text=True,
@@ -327,7 +327,7 @@ class RecoveryNativeFolderModeTests(unittest.TestCase):
         path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = root / 'recovery-mode-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     @staticmethod
     def environment():
@@ -643,7 +643,7 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         path.write_text(fixture)
         cls.binary = root / 'direct-recovery-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def probe(self, scenario):
         result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
@@ -703,7 +703,7 @@ class ProviderOnlyPreparationTests(unittest.TestCase):
         path.write_text(fixture)
         cls.binary = root / 'provider-preparation-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def probe(self, scenario):
         result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
@@ -848,7 +848,7 @@ class FolderIdentityTests(unittest.TestCase):
         path.write_text(TITLE_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'folder-identity-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_exact_native_headings_and_rejected_distractors(self):
         for name in ['static-title', 'actions-heading', 'other-controls', 'missing',
@@ -1073,7 +1073,7 @@ class OpenFolderTests(unittest.TestCase):
         path.write_text(OPEN_FOLDER_FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = Path(cls.directory.name) / 'open-folder-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_remembered_destinations_routing_and_ambiguity(self):
         for name in ['already-current', 'delayed-current', 'normal-route',
@@ -1169,7 +1169,7 @@ class PresentationWaitTests(unittest.TestCase):
         path.write_text(WAIT_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'presentation-wait-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_remote_readiness_has_one_bounded_wait_and_failure_capture(self):
         for name in ['ready', 'cold-remote', 'never-ready', 'ordinary-default']:
@@ -1465,7 +1465,7 @@ class ShareReadinessTests(unittest.TestCase):
                         .replace('    // ACTUAL_WAIT', source[wait_start:wait_end]))
         cls.binary = root / 'share-readiness-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -1667,7 +1667,7 @@ class ShareTransitionTests(unittest.TestCase):
         path.write_text(SHARE_TRANSITION_FIXTURE.replace('    // ACTUAL_TRANSITION', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'share-transition-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -1918,7 +1918,7 @@ class PreviewReadinessTests(unittest.TestCase):
         path.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = root / 'preview-readiness-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -2106,7 +2106,7 @@ class SelectionDiagnosticTests(unittest.TestCase):
         path.write_text(SELECTION_DIAGNOSTIC_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = root / 'selection-diagnostic-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -2331,7 +2331,7 @@ class TabNavigationTests(unittest.TestCase):
         path.write_text(TAB_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'tab-navigation-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 

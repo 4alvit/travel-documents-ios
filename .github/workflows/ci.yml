@@ -181,17 +181,18 @@ jobs:
       matrix:
         include:
           - locale: en-US
-            step_minutes: 40
-            job_minutes: 46
+            step_minutes: 55
+            job_minutes: 62
           - locale: ru-RU
-            step_minutes: 40
-            job_minutes: 46
+            step_minutes: 55
+            job_minutes: 62
     runs-on: macos-15-intel
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Toolchain
@@ -203,10 +204,12 @@ jobs:
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
+        # 50m Intel work + 3m cleanup + 2m startup/finalization headroom.
         timeout-minutes: ${{ matrix.step_minutes }}
         run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
       - name: iPad test evidence
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -215,18 +218,20 @@ jobs:
           retention-days: 7
   recovery:
     name: Free backup and recovery
+    # 40m = checkout 2 + offline regressions 6 + native recovery 27 + evidence 5.
     runs-on: macos-15-intel
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       TRIPDOCKET_RUNNER_LABEL: macos-15-intel
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           fetch-depth: 2
           persist-credentials: false
       - name: Hosted adapter regression checks
-        timeout-minutes: 2
+        timeout-minutes: 6
         run: |
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py
