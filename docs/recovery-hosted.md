@@ -298,6 +298,15 @@ closure, successful pipe and log closure, and successful stdout read, the
 existing conditional final checkpoint may use the original total command
 deadline. This short-lived in-memory context belongs to that exact command and
 process; saved receipt fields cannot grant it. It is cleared even on an exception.
+For the exact owned hosted boot wait, one due periodic sample may be deferred
+after a successful live process poll while the final pipe data is drained.
+The drain keeps its original work deadline, cancellation checks and output caps;
+forced samples, delegated commands and any second drain checkpoint still scan.
+The sample schedule is not advanced, so successful process and stream closure
+must be followed by the still-due complete sample. Failure of that final sample
+still fails the command. This avoids starting a traversal before closing an
+already-exited boot process when little work time remains; it does not extend
+boot time or accept a partial resource scan.
 The five/fifteen/thirty-second sample ceilings and total command/global caps do
 not change, and no additional sample is forced. One fixed deadline covers both free-space reads and the full uncached output
 traversal; its deadline is never renewed within a sample. Capability, other preparation and

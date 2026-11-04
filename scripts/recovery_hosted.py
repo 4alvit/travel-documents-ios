@@ -186,6 +186,30 @@ class HostedRecovery(core.Recovery):
         self.report['job']=job
         self.save()  # Persist the actual run/attempt before any process acquisition.
 
+    def checkpoint(self, *, force_resources=False, command_owner=None):
+        self.timecheck()
+        rows=self.report['commands']
+        pending=rows[-1] if rows else None
+        if (not self.cleaning and not force_resources and command_owner is None
+                and self.ops.now()>=self.next_scan and pending is not None
+                and pending.get('id')=='boot-ready'
+                and not any(key in pending for key in ('finish','error','stop','post_exit_scan_deferral'))
+                and self.owned is not None and not self.unknown_spawn
+                and pending.get('argv')==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+                and self.ops.now()<self.t0+pending['work_deadline']):
+            process=self.active.get(pending.get('pgid'))
+            poll=pending.get('process_observations',{}).get('command.poll',{})
+            if (process is not None and len(self.active)==1 and process.pid==pending['pgid']
+                    and type(process.returncode) is int and process.returncode==0
+                    and poll.get('outcome')=='returned'
+                    and type(poll.get('result')) is int and poll['result']==0):
+                # One post-exit pipe drain can finish before a due disk scan.
+                # pump() still enforces output/work bounds. Do not move next_scan:
+                # verified closure must perform the due scan at finalization.
+                pending['post_exit_scan_deferral']={'elapsed':self.ops.now()-self.t0}
+                return
+        super().checkpoint(force_resources=force_resources,command_owner=command_owner)
+
     def sim(self,label,*args,cap=30):
         discovery=getattr(self,'_discovery_deadline',None)
         if label=='runtime-cache-ready':

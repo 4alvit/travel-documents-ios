@@ -2815,6 +2815,140 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('resource_scan_failure',r.report)
         self.assertEqual(r.ops.processes,[])
 
+    def boot_exit_accounting(self, *, drain_seconds=1.7, scan_seconds=1.,
+                             cancel=False, output_cap=False):
+        r=self.runner(Ops())
+        r.owned='10000000-0000-0000-0000-000000000001'
+        def spawned(_):
+            r.ops.t=289.;r.next_scan=290.
+        r.ops.on_spawn=spawned
+        reads=0;scans=[]
+        def read(_):
+            nonlocal reads
+            reads+=1
+            r.ops.t+=.6 if reads==1 else drain_seconds
+            if reads==2 and cancel:r.signal()
+            if reads==2 and output_cap:
+                r.log_total=hosted.core.base.ALL_LOG-1
+                return [('stdout',b'xx')]
+            return []
+        r.ops.read=read
+        original_scan=hosted.core.live_sizes
+        def scan(*args,**kwargs):
+            if r.ops.t>=290.:
+                scans.append({'started':r.ops.t,'deadline':args[3],
+                              'active':bool(r.active),
+                              'finalizing':getattr(r,'_finalizing_success',None) is not None})
+                r.ops.t+=scan_seconds
+            return original_scan(*args,**kwargs)
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            try:
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                succeeded=True
+            except RuntimeError:succeeded=False
+        return r,r.report['commands'][-1],scans,succeeded
+
+    def test_boot_exit_drain_defers_due_scan_until_verified_closure(self):
+        r,row,scans,ok=self.boot_exit_accounting()
+        self.assertTrue(ok)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                         (292.,300.,8))
+        self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(len(scans),1)
+        self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
+        self.assertAlmostEqual(scans[0]['started'],291.3)
+        self.assertAlmostEqual(row['finish'],292.3)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[])
+        self.assertFalse(r.active)
+        self.assertAlmostEqual(row['post_exit_scan_deferral']['elapsed'],291.3)
+        self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
+        self.assertAlmostEqual(r.report['resources'][-1]['elapsed'],292.3)
+
+    def test_boot_exit_drain_keeps_work_cancel_and_output_bounds(self):
+        cases=[('deadline',{'drain_seconds':2.4},'Command timeout'),
+               ('cancel',{'cancel':True},'Interrupted'),
+               ('output',{'output_cap':True},'Output cap exceeded')]
+        for name,options,error in cases:
+            with self.subTest(name=name):
+                parent=self.root;self.root=parent/name;self.root.mkdir()
+                try:r,row,scans,ok=self.boot_exit_accounting(**options)
+                finally:self.root=parent
+                self.assertFalse(ok);self.assertIn(error,row['error'])
+                self.assertNotIn('post_exit_scan_deferral',row)
+                self.assertEqual(scans,[])
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertLess(row['finish'],300.)
+                self.assertFalse(r.active)
+
+    def test_boot_exit_deferral_requires_complete_final_accounting(self):
+        r,row,scans,ok=self.boot_exit_accounting(scan_seconds=5.)
+        self.assertFalse(ok)
+        self.assertIn('post_exit_scan_deferral',row)
+        self.assertIn('Output scan deadline exceeded',row['finalization_error'])
+        self.assertEqual(row['outcome'],'failed')
+        self.assertEqual(len(scans),1)
+        self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
+        self.assertAlmostEqual(scans[0]['deadline'],296.3)
+        self.assertLess(row['finish'],300.)
+        self.assertFalse(r.active)
+
+    def boot_exit_checkpoint(self):
+        r=self.runner(Ops())
+        r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        process=r.ops.spawn(argv)
+        row={'id':'boot-ready','argv':argv,'pgid':process.pid,'work_deadline':292.}
+        r.report['commands'].append(row);r.active[process.pid]=process
+        hosted.core.base.observed(r,row,'command','poll',process.poll)
+        r.ops.t=10.;r.next_scan=9.
+        return r,row,process
+
+    def test_boot_exit_defers_one_due_scan_without_moving_schedule(self):
+        r,row,process=self.boot_exit_checkpoint()
+        with patch.object(r,'monitor') as monitor:
+            r.checkpoint()
+            monitor.assert_not_called()
+            self.assertEqual(r.next_scan,9.)
+            self.assertEqual(row['post_exit_scan_deferral'],{'elapsed':10.})
+            r.checkpoint()
+            monitor.assert_called_once_with()
+        self.assertIs(r.active[process.pid],process)
+
+    def test_boot_exit_deferral_requires_exact_live_owned_success(self):
+        cases=('other-label','other-device','other-argv','missing-process','extra-process',
+               'nonzero','running','boolean-exit','missing-poll','raised-poll','boolean-poll',
+               'error','stop','finished','unknown-spawn','forced','delegated','not-due','cleaning')
+        for name in cases:
+            with self.subTest(name=name):
+                parent=self.root;self.root=parent/name;self.root.mkdir()
+                try:r,row,process=self.boot_exit_checkpoint()
+                finally:self.root=parent
+                kwargs={}
+                if name=='other-label':row['id']='phase-prepare'
+                if name=='other-device':r.owned='10000000-0000-0000-0000-000000000002'
+                if name=='other-argv':row['argv']=row['argv'][:-1]
+                if name=='missing-process':r.active.clear()
+                if name=='extra-process':r.active[999]=SimpleNamespace(pid=999)
+                if name=='nonzero':process.returncode=7
+                if name=='running':process.returncode=None
+                if name=='boolean-exit':process.returncode=False
+                if name=='missing-poll':row.pop('process_observations')
+                if name=='raised-poll':row['process_observations']['command.poll']['outcome']='raised'
+                if name=='boolean-poll':row['process_observations']['command.poll']['result']=False
+                if name=='error':row['error']='failure'
+                if name=='stop':row['stop']={}
+                if name=='finished':row['finish']=9.
+                if name=='unknown-spawn':r.unknown_spawn=True
+                if name=='forced':kwargs['force_resources']=True
+                if name=='delegated':kwargs['command_owner']=r
+                if name=='not-due':r.next_scan=11.
+                if name=='cleaning':r.cleaning=True
+                with patch.object(r,'monitor') as monitor:
+                    r.checkpoint(**kwargs)
+                    self.assertNotIn('post_exit_scan_deferral',row)
+                    self.assertEqual(monitor.call_count,0 if name in ('not-due','cleaning') else 1)
+
     def final_accounting_command(self, *, closed_at=111.4, scan_seconds=1.2,
                                  fault=None, owner_limit=None, delegated=False):
         r=self.runner(Ops({'exit':7} if fault=='accepted-nonzero' else {}))
