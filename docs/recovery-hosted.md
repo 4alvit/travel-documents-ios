@@ -152,7 +152,7 @@ canonical source UUID distinct from the Recovery destination UUID. It requires
 one enabled, hittable synthetic-ticket source and opens it once, then reaches
 the exact local root using the existing 30-second initial presentation allowance.
 It proves the canonical destination name absent and requests New Folder and
-rename through the unchanged bounded Files action sequence shared with Batch
+rename through the bounded Files action sequence shared with Batch
 qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
@@ -167,6 +167,22 @@ The new allowance permits another fresh, fully validated picker/application
 pair. More and New Folder are still tapped once, and no other wait or outer
 case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
 wait semantics. It does not guarantee remote Files readiness.
+
+In [main run 41845526416](https://github.com/4alvit/travel-documents-ios/actions/runs/41845526416),
+the single New Folder action instead opened an empty `untitled folder` child.
+The parent-only editor and Rename checks correctly rejected that state. The
+helper now recognizes this separate navigation state using the exact local
+provider, child title, parent Back action and visible empty-folder placeholder,
+with no cells, editor or keyboard. The remote snapshot may omit the empty
+collection view. A fresh bound observation and matching enabled, hittable Back
+control permit one return to `On My iPhone`; the child itself is never ready for
+rename. The return and subsequent unchanged parent checks share the original
+30-second deadline. A late query, changed control or repeated child state cannot
+initiate another Back. New Folder is not repeated, and Save is never pressed.
+Exact UUID naming,
+editor geometry, fixture termination and host empty-folder adoption remain
+required. This handles the observed transition; it does not establish why Files
+chose it or prove native acceptance of a new candidate.
 
 The explicit keyboard-introduction state accepts zero or one Keyboard node:
 its first-use overlay can be present in a bound application snapshot without a
