@@ -1418,10 +1418,23 @@ final class BatchImportUITests: XCTestCase {
         let alert = app.alerts["Add a person"]
         let name = alert.textFields["Name or nickname"]
         try await wait("Add-person dialog did not open", app: app) { name.isHittable }
+        var keyboardIntroductionAcknowledged = false
         name.tap()
+        let emptyName = name.value as? String
+        try check(emptyName == "" || emptyName == "Name or nickname", app: app,
+                  "Add-person name field was not empty before typing")
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(
+            app, expectedName: emptyName ?? "", acknowledged: &keyboardIntroductionAcknowledged
+        )
         name.typeText("Recovery Sentinel")
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(
+            app, expectedName: "Recovery Sentinel", acknowledged: &keyboardIntroductionAcknowledged
+        )
         let confirm = alert.buttons["Add"]
-        try check(confirm.isEnabled && confirm.isHittable, app: app, "Add person cannot be confirmed")
+        try check(confirm.isEnabled && confirm.isHittable
+                  && name.value as? String == "Recovery Sentinel"
+                  && app.otherElements.matching(identifier: "UIContinuousPathIntroductionView").count == 0,
+                  app: app, "Add person cannot be confirmed")
         confirm.tap()
         try await wait("The unassigned person was not saved", app: app) {
             app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists
@@ -1774,6 +1787,41 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
+
+    // The first-use introduction can arrive when focus opens the keyboard or
+    // while XCTest types. Acknowledge it only for this exact synthetic form,
+    // sharing one action budget across both observations.
+    private func acknowledgeRecoveryPersonKeyboardIntroduction(
+        _ app: XCUIApplication, expectedName: String, acknowledged: inout Bool
+    ) async throws {
+        let introduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        guard introduction.count != 0 else { return }
+        let alerts = app.alerts.matching(identifier: "Add a person")
+        let names = alerts.element.textFields.matching(identifier: "Name or nickname")
+        let explanation = introduction.element.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
+        ))
+        let acknowledge = introduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+        @MainActor func expectedForm() -> Bool {
+            app.state == .runningForeground && app.alerts.count == 1 && alerts.count == 1
+                && alerts.element.textFields.count == 1 && names.count == 1
+                && names.element.isEnabled && names.element.value as? String == expectedName
+        }
+        @MainActor func ready() -> Bool {
+            !acknowledged && introduction.count == 1 && expectedForm()
+                && explanation.count == 1 && explanation.element.isHittable
+                && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable
+        }
+        try check(ready(), app: app, "Native keyboard introduction has no unique expected person form")
+        capture(app, "Recovery person keyboard introduction before the single Continue")
+        try check(ready(), app: app, "Recovery person form changed before Continue")
+        try Task.checkCancellation()
+        acknowledged = true
+        acknowledge.element.tap()
+        try await wait("Native keyboard introduction did not return to the expected person form", app: app) {
+            introduction.count == 0 && expectedForm() && names.element.isHittable
+        }
+    }
 
     private func localStoreSession() async throws -> SKTestSession {
         let configuration = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "Tripfolio", withExtension: "storekit"))
