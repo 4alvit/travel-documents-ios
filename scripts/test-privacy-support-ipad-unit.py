@@ -155,6 +155,19 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(pair['os_build'], 'synthetic-build-18.5')
         self.assertEqual(ipad.choose_pair(runtimes, types, 'arm64', '26.2')['device_type'], 'type.ipad-m5')
 
+    def test_sdk_pair_selects_intel_runtime_without_architecture_fallback(self):
+        runtimes, types = self.sdk_fixture()
+        runtimes['runtimes'][1]['supportedArchitectures'] = ['x86_64']
+        pair = ipad.choose_pair(runtimes, types, 'x86_64', '26.2')
+        self.assertEqual(pair, {
+            'runtime': 'com.apple.CoreSimulator.SimRuntime.iOS-26-2',
+            'os_version': '26.2', 'os_build': 'synthetic-build-26.2',
+            'device_type': 'type.ipad-m5', 'device_name': 'iPad Pro 13-inch M5',
+            'architecture': 'x86_64',
+        })
+        with self.assertRaisesRegex(RuntimeError, 'architecture unavailable'):
+            ipad.choose_pair(runtimes, types, 'arm64', '26.2')
+
     def test_sdk_pair_rejects_ambiguous_match_even_if_one_is_unavailable(self):
         runtimes, types = self.sdk_fixture()
         duplicate = dict(runtimes['runtimes'][0]); duplicate['isAvailable'] = False

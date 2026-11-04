@@ -108,9 +108,10 @@ jobs:
   ui_guidance:
     name: Accessibility, localization and guidance UI
     # Limit this workflow to two eligible macOS jobs during hosted capacity shortages.
+    # Phone and iPad use Intel after repeated ARM runner assignment timeouts.
     needs: validate
     if: ${{ !cancelled() }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     # Run 41440392190 completed all phone cases in 37m56s but exceeded the old 35m job cap.
     # Cold startup in run 41577208390 consumed about 711s before its preparation case.
     # 65m = checkout2 + toolchain3 + integration45 + cancellation5
@@ -185,7 +186,7 @@ jobs:
           - locale: ru-RU
             step_minutes: 40
             job_minutes: 46
-    runs-on: macos-15
+    runs-on: macos-15-intel
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}

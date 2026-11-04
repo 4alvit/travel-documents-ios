@@ -40,7 +40,7 @@ class Fake(m.Bootstrap):
             (result / "Info.plist").write_bytes(b"synthetic-result")
         if label == "post-preparation-bootstatus":
             self.devices["devices"][s.RUNTIME][0]["state"] = "Booted"
-        result = {"xcode": "Xcode 26.2\nBuild version 17C52\n", "sdk": "26.2\n", "architecture": "arm64\n",
+        result = {"xcode": "Xcode 26.2\nBuild version 17C52\n", "sdk": "26.2\n", "architecture": self.architecture + "\n",
                   "runtimes": self.runtimes, "types": self.types, "devices-before": self.devices,
                   "devices-booted": self.devices, "devices-after-warm-boot": self.devices,
                   "devices-final": self.devices, "post-preparation-bootstatus": "",
@@ -52,7 +52,7 @@ class Fake(m.Bootstrap):
 
 
 class BootstrapTests(unittest.TestCase):
-    def make(self, state="Shutdown"):
+    def make(self, state="Shutdown", architecture="arm64"):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         root = Path(temporary.name).resolve(); home = root / "home"; home.mkdir()
         directory = root / "selection"; directory.mkdir()
@@ -62,18 +62,19 @@ class BootstrapTests(unittest.TestCase):
         runtimes, types, devices = s.fixture()
         devices["devices"][s.RUNTIME][0].update(state=state, dataPath=str(data))
         devices["devices"][s.NEWER][0]["state"] = "Shutdown"
-        raw = {"sdk.txt": b"26.2\n", "architecture.txt": b"arm64\n", "runtimes.json": json.dumps(runtimes).encode(),
+        raw = {"sdk.txt": b"26.2\n", "architecture.txt": (architecture + "\n").encode(), "runtimes.json": json.dumps(runtimes).encode(),
                "device-types.json": json.dumps(types).encode(), "devices.json": json.dumps(devices).encode()}
         for name, value in raw.items(): (directory / name).write_bytes(value)
-        selected = m.selector.select_device("26.2", "arm64", runtimes, types, devices)
+        selected = m.selector.select_device("26.2", architecture, runtimes, types, devices)
         selected["inventory_sha256"] = {name: m.digest(value) for name, value in raw.items()}
         (directory / "selection.json").write_text(json.dumps(selected))
         with patch.object(Path, "home", return_value=home): runner = Fake(directory, CI)
+        runner.architecture = architecture
         runner.home = home; runner.calls = []; runner.fail = None; runner.transform = lambda _, result: result
         runner.runtimes = runtimes; runner.types = types; runner.devices = devices; runner.group = group
         runner.summary = {"result": "Passed", "totalTestCount": 1, "passedTests": 1, "failedTests": 0,
             "skippedTests": 0, "expectedFailures": 0, "testFailures": [], "devicesAndConfigurations": [{"device": {
-                "deviceId": s.FIRST, "platform": "iOS Simulator", "osVersion": "26.2", "osBuildNumber": "23C54", "architecture": "arm64"}}]}
+                "deviceId": s.FIRST, "platform": "iOS Simulator", "osVersion": "26.2", "osBuildNumber": "23C54", "architecture": architecture}}]}
         runner.tree = {"testNodes": [{"nodeType": "Test Case", "nodeIdentifier": m.PREPARE_CASE, "result": "Passed"}],
                        "devices": [{"deviceId": s.FIRST, "platform": "iOS Simulator"}]}
         clock = Clock(); runner.ops = clock; runner.t0 = clock.now(); runner.limit = clock.now() + m.WORK
@@ -96,6 +97,43 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(runner.report["final_inventory_verified"])
         self.assertEqual(runner.report["status"], "provider_ready")
         self.assertEqual(runner.report["host_cleanup"], {"active_groups": [], "unknown_spawn": False})
+
+    def test_intel_bootstrap_preserves_selected_architecture_and_provider(self):
+        runner = self.make(architecture="x86_64")
+        sentinel = runner.group / "File Provider Storage/sentinel"
+        sentinel.write_text("unchanged")
+        self.assertEqual(self.run_bootstrap(runner), 0, runner.report)
+        self.assertEqual(runner.report["status"], "provider_ready")
+        self.assertEqual(runner.report["selected"]["architecture"], "x86_64")
+        self.assertEqual((runner.directory / "architecture.txt").read_text(), "x86_64\n")
+        self.assertTrue(runner.report["final_inventory_verified"])
+        self.assertTrue(runner.report["original_result"]["unchanged_after_reader"])
+        self.assertEqual(sentinel.read_text(), "unchanged")
+        self.assertEqual(sum(call[0] == "prepare-ui" for call in runner.calls), 1)
+        self.assertFalse(runner.report["post_preparation_warm_boot"])
+
+    def test_crossed_live_architecture_fails_before_native_preparation(self):
+        for selected, live in [("x86_64", "arm64"), ("arm64", "x86_64")]:
+            with self.subTest(selected=selected, live=live):
+                runner = self.make(architecture=selected)
+                runner.transform = lambda label, value: live + "\n" if label == "architecture" else value
+                self.assertEqual(self.run_bootstrap(runner), 1)
+                self.assertIn("Live toolchain differs from selection", " ".join(runner.report["errors"]))
+                labels = [call[0] for call in runner.calls]
+                self.assertNotIn("prepare-ui", labels)
+                self.assertNotIn("files-group", labels)
+
+    def test_crossed_result_architecture_fails_before_provider_acceptance(self):
+        for selected, result in [("x86_64", "arm64"), ("arm64", "x86_64")]:
+            with self.subTest(selected=selected, result=result):
+                runner = self.make(architecture=selected)
+                runner.summary["devicesAndConfigurations"][0]["device"]["architecture"] = result
+                self.assertEqual(self.run_bootstrap(runner), 1)
+                self.assertIn("Preparation runtime identity mismatch", " ".join(runner.report["errors"]))
+                labels = [call[0] for call in runner.calls]
+                self.assertEqual(labels.count("prepare-ui"), 1)
+                self.assertNotIn("files-group", labels)
+                self.assertFalse(runner.report.get("final_inventory_verified", False))
 
     def test_already_booted_is_not_booted_again(self):
         runner = self.make("Booted"); self.assertEqual(self.run_bootstrap(runner), 0)
