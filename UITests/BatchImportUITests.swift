@@ -420,11 +420,43 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
-    // Opt-in prepare/export/restore phases. Preparation returns before the host
-    // creates and verifies the exclusively owned empty folder. Export/restore
+    private static func recoveryNativeFolderCreation(
+        _ environment: [String: String], debugSimulator: Bool
+    ) throws -> Bool {
+        guard let mode = environment["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] else { return false }
+        let prefix = "TripDocket-Recovery-"
+        let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? ""
+        let token = String(folder.dropFirst(prefix.count))
+        let conflicting = ["TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN",
+                           "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                           "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                           "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
+                           "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION",
+                           "TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
+        guard debugSimulator, mode == "1", environment["TRIPDOCKET_RECOVERY_UI"] == "1",
+              environment["TRIPDOCKET_RECOVERY_PHASE"] == "prepare", folder.hasPrefix(prefix),
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              conflicting.allSatisfy({ environment[$0] == nil }) else {
+            throw BatchTestFailure(message: "Native Recovery folder requires its isolated Debug Simulator prepare phase")
+        }
+        return true
+    }
+
+    // Opt-in prepare/export/restore phases. Dedicated Recovery preparation
+    // creates its folder through Files before host empty-leaf verification. Export/restore
     // retain the file and library snapshot boundary. No StoreKit transaction is created.
     func testRecoveryPrepareFilesProvider() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        let createFolder = try Self.recoveryNativeFolderCreation(
+            ProcessInfo.processInfo.environment, debugSimulator: debugSimulator
+        )
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -450,16 +482,21 @@ final class BatchImportUITests: XCTestCase {
         try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
         let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
         try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
-        capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
-        // Native New Folder/rename is not a product acceptance requirement.
-        // The host creates only an exclusive empty run-UUID leaf after this
-        // real provider initialization and proven fixture stop; never a backup.
+        if createFolder {
+            try await createNativeEmptyFilesFolder(app, picker: picker.element, ownedFolder: recoveryFolder)
+            capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
+        } else {
+            // Shared Phone/qualifier callers request only provider readiness.
+            capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
+        }
+        // Dedicated Recovery adopts the native-created empty leaf only after
+        // this fixture stops. No backup is saved during either prepare mode.
         app.terminate()
         try await wait("Preparation fixture did not stop before host fixture creation", app: app) {
             app.state == .notRunning
         }
         // The existing defer remains cleanup on every success/failure path.
-        // Host must now create and independently prove the exact folder empty.
+        // Host must independently prove the dedicated Recovery folder empty.
     }
 
 
@@ -510,6 +547,7 @@ final class BatchImportUITests: XCTestCase {
                                                debugSimulator: Bool) throws -> String {
         let token = environment["TRIPDOCKET_BATCH_PREPARE_TOKEN"] ?? ""
         let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_RECOVERY_CREATE_FOLDER",
                            "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                            "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
                            "TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN",
@@ -530,6 +568,7 @@ final class BatchImportUITests: XCTestCase {
         let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
         let sourceToken = environment["TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN"] ?? ""
         let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_RECOVERY_CREATE_FOLDER",
                            "TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
                            "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                            "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
@@ -616,14 +655,40 @@ final class BatchImportUITests: XCTestCase {
         capture(app, "Native folder — direct exporter before opening Files; no Save performed")
         source.element.tap()
         let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+        try check(saved.count == 0 && !failed.exists, app: app,
+                  "Native-folder preparation unexpectedly exported a destination")
+        try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: ownedFolder)
+        // This fixture requests the native rename, then yields to the host's
+        // mandatory no-follow proof of the exact empty leaf. Editor dismissal
+        // is not its completion signal. The separate seed phase must navigate
+        // the real folder before it can save either synthetic original.
+        try check(saved.count == 0 && !failed.exists, app: app,
+                  "Native-folder preparation unexpectedly exported a destination")
+        capture(app, "Native folder rename requested; host empty-folder verification pending")
+        // Never tap Save: the host must independently prove this native-created
+        // leaf empty after the fixture stops, before the separate seed phase.
+        app.terminate()
+        try await wait("Native-folder fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
+    // Both callers supply their separately validated canonical UUID name.
+    // This helper performs native folder actions only; caller-owned launch,
+    // no-export checks, fixture stop and host adoption remain separate.
+    private func createNativeEmptyFilesFolder(
+        _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String
+    ) async throws {
+        try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
+                  "Native folder creation requires its selected iPhone")
         let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let localTitle = "On My iPhone"
         let files = picker.collectionViews.matching(identifier: "File View")
         let directory = picker.cells.matching(identifier: ownedFolder + ", Folder")
-        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
         try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 0
-                  && directory.count == 0 && saved.count == 0 && !failed.exists,
-                  app: app, "Native folder requires the empty local root and no exported destination")
+                  && directory.count == 0,
+                  app: app, "Native folder requires the empty local root and absent owned name")
         let more = navigation.element.buttons.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "OverflowBarButtonItem", "More"
         ))
@@ -778,19 +843,6 @@ final class BatchImportUITests: XCTestCase {
             throw BatchTestFailure(message: "Native folder blank grid area changed before end-editing")
         }
         files.element.coordinate(withNormalizedOffset: current.normalized).tap()
-        // This fixture requests the native rename, then yields to the host's
-        // mandatory no-follow proof of the exact empty leaf. Editor dismissal
-        // is not its completion signal. The separate seed phase must navigate
-        // the real folder before it can save either synthetic original.
-        try check(saved.count == 0 && !failed.exists, app: app,
-                  "Native-folder preparation unexpectedly exported a destination")
-        capture(app, "Native folder rename requested; host empty-folder verification pending")
-        // Never tap Save: the host must independently prove this native-created
-        // leaf empty after the fixture stops, before the separate seed phase.
-        app.terminate()
-        try await wait("Native-folder fixture did not stop before host verification", app: app) {
-            app.state == .notRunning
-        }
     }
 
     func testNativeSaveSeedsBothSyntheticOriginals() async throws {
@@ -1732,6 +1784,9 @@ final class BatchImportUITests: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_UI"] == "1", "Recovery UI phases require explicit opt-in")
         try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_PHASE"] == phase, "Run exactly the admitted recovery phase")
+        guard env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare" else {
+            throw BatchTestFailure(message: "Native Recovery folder creation is confined to prepare")
+        }
         guard let value = env["TRIPDOCKET_RECOVERY_FOLDER"],
               value.hasPrefix("TripDocket-Recovery-"), value.count <= 100,
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {

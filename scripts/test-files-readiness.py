@@ -5,6 +5,7 @@ The production helper is extracted unchanged; the fixture supplies only query,
 wait and tap boundaries so delayed root arrival exercises the real control flow.
 """
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
@@ -249,7 +250,7 @@ class ReadinessTests(unittest.TestCase):
     def test_disabled_controls_fail_without_taps(self): self.run_case('disabled')
     def test_hidden_controls_fail_without_taps(self): self.run_case('hidden')
 
-    def test_prepare_initializes_real_provider_without_native_folder_creation(self):
+    def test_prepare_default_retains_provider_only_with_guarded_native_creation(self):
         source = SOURCE.read_text()
         prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    func testNativeCreateOwnedFilesFolder')]
         self.assertIn('try await presentRecoverySave(app)', prepare)
@@ -259,6 +260,13 @@ class ReadinessTests(unittest.TestCase):
         for forbidden in ['newFolder.tap()', 'newFolder.element.tap()', 'field.typeText(', 'create.element.tap()', 'Save"].tap()']:
             self.assertNotIn(forbidden, prepare)
         self.assertLess(prepare.index('directory.count == 0'), prepare.index('app.state == .notRunning'))
+        branch = prepare[prepare.index('        if createFolder {'):prepare.index('        // Dedicated Recovery adopts')]
+        create, provider = branch.split('        } else {', 1)
+        self.assertEqual(create.count('createNativeEmptyFilesFolder('), 1)
+        self.assertNotIn('createNativeEmptyFilesFolder(', provider)
+        self.assertIn('real local Files provider before fixture shutdown', provider)
+        self.assertLess(prepare.index('Self.recoveryNativeFolderCreation('), prepare.index('app.launch()'))
+        self.assertLess(prepare.index('directory.count == 0'), prepare.index('if createFolder'))
 
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
@@ -275,6 +283,111 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('python3 -B scripts/test-files-readiness.py', workflow)
+
+
+RECOVERY_MODE_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Harness {
+    // ACTUAL_HELPER
+    static func run(_ environment: [String: String], _ debug: Bool) throws -> Bool {
+        try recoveryNativeFolderCreation(environment, debugSimulator: debug)
+    }
+}
+let data = Data(CommandLine.arguments[1].utf8)
+let environment = try JSONDecoder().decode([String: String].self, from: data)
+do {
+    print(try Harness.run(environment, CommandLine.arguments[2] == "true") ? "create" : "provider-only")
+} catch { print("rejected") }
+'''
+
+
+class RecoveryNativeFolderModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private static func recoveryNativeFolderCreation(')
+        end = source.index('    // Opt-in prepare/export/restore phases.', start)
+        helper = source[start:end]
+        root = Path(cls.directory.name)
+        path = root / 'RecoveryMode.swift'
+        path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper))
+        cls.binary = root / 'recovery-mode-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=30)
+
+    @staticmethod
+    def environment():
+        return {
+            'TRIPDOCKET_RECOVERY_UI': '1',
+            'TRIPDOCKET_RECOVERY_PHASE': 'prepare',
+            'TRIPDOCKET_RECOVERY_FOLDER': 'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc',
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': '1',
+        }
+
+    def probe(self, environment, debug=True):
+        result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower()],
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_only_explicit_debug_prepare_can_create(self):
+        self.assertEqual(self.probe(self.environment()), 'create')
+        self.assertEqual(self.probe(self.environment(), debug=False), 'rejected')
+        for key, values in {
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': ['', '0', 'true', '01', ' 1'],
+            'TRIPDOCKET_RECOVERY_UI': ['', '0', 'true'],
+            'TRIPDOCKET_RECOVERY_PHASE': ['', 'export', 'restore', 'prepare '],
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            environment = self.environment()
+            del environment[key]
+            with self.subTest(missing=key):
+                self.assertEqual(self.probe(environment), 'rejected')
+
+    def test_absent_mode_preserves_shared_provider_only_callers(self):
+        self.assertEqual(self.probe({}), 'provider-only')
+        environment = self.environment()
+        del environment['TRIPDOCKET_RECOVERY_CREATE_FOLDER']
+        # Existing callers need not use the new canonical native-folder identity.
+        environment['TRIPDOCKET_RECOVERY_FOLDER'] = 'TripDocket-Recovery-provider-probe'
+        for debug in (True, False):
+            self.assertEqual(self.probe(environment, debug=debug), 'provider-only')
+
+    def test_native_folder_requires_exact_canonical_recovery_uuid(self):
+        for folder in ('', 'TripDocket-Recovery-', 'TripDocket-Recovery-provider-probe',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789ABC',
+                       'TripDocket-Recovery-{12345678-1234-4234-8234-123456789abc}',
+                       'TripDocket-Batch-12345678-1234-4234-8234-123456789abc',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc/child'):
+            with self.subTest(folder=folder):
+                self.assertEqual(self.probe(self.environment() | {'TRIPDOCKET_RECOVERY_FOLDER': folder}), 'rejected')
+
+    def test_native_folder_rejects_every_other_ui_mode_even_if_empty(self):
+        for key in ('TRIPDOCKET_BATCH_PREPARE_UI', 'TRIPDOCKET_BATCH_PREPARE_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_UI', 'TRIPDOCKET_NATIVE_FOLDER_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN', 'TRIPDOCKET_NATIVE_SEED_UI',
+                    'TRIPDOCKET_NATIVE_SEED_TOKEN', 'TRIPDOCKET_NATIVE_ROOT_UI',
+                    'TRIPDOCKET_NATIVE_ROOT_TOKEN', 'TRIPDOCKET_BATCH_UI',
+                    'TRIPDOCKET_BATCH_FOLDER', 'TRIPDOCKET_COMBINED_BATCH_UI',
+                    'TRIPDOCKET_BATCH_CHECKPOINT_SESSION', 'TRIPDOCKET_NATIVE_REOPEN_CONTROL'):
+            for value in ('', '1'):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+
+    def test_creation_is_confined_to_existing_prepare_phase_and_allowance(self):
+        source = SOURCE.read_text()
+        config = source[source.index('    private func recoveryConfiguration('):source.index('    private func recoveryTab(')]
+        self.assertIn('env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare"', config)
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', config)
+        self.assertEqual(source.count('try await createNativeEmptyFilesFolder('), 2)
+        cases = [line.strip().split('(')[0] for line in source.splitlines() if line.strip().startswith('func testRecovery')]
+        self.assertEqual(cases, ['func testRecoveryPrepareFilesProvider', 'func testRecoveryExportFullBackupThroughFiles',
+                                 'func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal'])
 
 
 TITLE_FIXTURE = r'''

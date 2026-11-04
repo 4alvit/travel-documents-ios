@@ -124,22 +124,26 @@ preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
 not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
-Files preparation first runs the real provider initialization UI case, which
-reaches the exact local root, proves the run-UUID name absent and stops the
-fixture. After its exact PASS and process cleanup, the host performs one exact
-owned DocumentsApp group-container lookup with the existing 60-second cap
-(52 seconds of work plus the 8-second stop reserve). It pins the existing local
-provider, exclusively creates only an empty run-UUID leaf and independently
-rechecks its original inode, all ancestors and complete emptiness before export.
-It does not launch or terminate Files separately, create Apple roots, adopt an
-existing name or prepare any backup bytes. Provider readiness uses only the
-unused lookup work budget. No total, case or cleanup limit is increased.
+Dedicated Recovery preparation sets `TRIPDOCKET_RECOVERY_CREATE_FOLDER=1`
+only for its existing prepare case. The Debug Simulator fixture reaches the
+exact local root, proves its canonical run-UUID name absent and requests New
+Folder and rename through native Files UI. It shares the bounded folder action
+sequence with Batch qualification. Shared Phone and qualifier callers omit this
+flag and retain provider initialization only.
 
-Native Apple Files New Folder/name-commit remains unverified; failed diagnostic
-attempts are not product acceptance. Folder creation is now deterministic test
-setup, while the actual app Save-to-Files, import/restore, catalog/original-byte
-comparisons and rendered PDF checks remain mandatory. This source policy is
-still pending native end-to-end acceptance.
+After the prepare case passes and its process group closes, the host adopts
+exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
+and inode checks, and complete empty-directory check must all pass before export.
+Recovery does not create a provider directory on the host, fall back to host
+creation, retry the UI action or prepare backup bytes. The three cases, 180-second
+prepare allowance, global work deadline and cleanup reserve are unchanged.
+
+Run 41771491849 failed when native Files could not resolve the selected backup
+bookmark and returned no usable URL. This boundary precedes application restore;
+it does not by itself prove the folder's creation method caused the failure.
+The changed setup therefore requires new native end-to-end acceptance. Actual
+app Save-to-Files, import/restore, catalog/original-byte comparisons and rendered
+PDF checks remain mandatory; a passing folder setup alone is not acceptance.
 
 The export/restore AUT app and data container lookups and all other default
 command caps remain 30 seconds. Global time, ownership and cancellation checks
