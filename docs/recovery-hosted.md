@@ -124,6 +124,26 @@ preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
 not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
+Hosted readiness for the newly created, owned Simulator has a separate
+300-second command ceiling, including the unchanged eight-second stop reserve.
+Only the exact `simctl bootstatus <owned UUID> -b` call receives this allowance;
+the portable executor's 120-second default, the initial boot command, UI cases
+and all other command caps stay unchanged. Readiness still requires a successful
+command exit and verified process closure before building or testing. The
+allowance is clipped to the original 1,380-second work deadline and introduces
+no retry or renewed global clock.
+
+The [successful reference run](https://github.com/4alvit/travel-documents-ios/actions/runs/41781766427/job/126414697445)
+spent 106.9 seconds in cold boot readiness, leaving about five seconds under
+the former 112-second work allowance. Two attempts of
+[run 41790791116](https://github.com/4alvit/travel-documents-ios/actions/runs/41790791116)
+then failed before any build or test: the first reached that deadline during a
+resource scan, while the second reached it without a scan failure. Both stopped
+their owned process groups, but neither verified device deletion or final
+inventory. The larger hosted ceiling is a bounded cold-start scheduling policy,
+not evidence that the underlying Simulator service problem is fixed. Subsequent
+results must retain their actual readiness duration and cleanup outcome.
+
 Dedicated Recovery preparation sets `TRIPDOCKET_RECOVERY_CREATE_FOLDER=1`
 only for its existing prepare case. This mode requires the existing Recovery
 opt-in, prepare phase and canonical run UUID, with no competing fixture modes.
