@@ -1886,6 +1886,152 @@ class BoundaryTests(unittest.TestCase):
         authorize.assert_called_once_with();self.assertEqual(len(r.ops.processes),2)
         self.assertEqual((r.limit,r.final),(1380,1500))
 
+    def native_prepared_files_runner(self):
+        r,provider=self.files_runner()
+        r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.plans=[{'delay':.1}]
+        # Model the native writer creating its leaf while the phase is active.
+        r.ops.on_spawn=lambda argv:(provider/r.folder_name).mkdir(mode=0o700)
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read):
+            hosted.core.Recovery.run_phase(r,'prepare')
+        r.ops.on_spawn=None
+        return r,provider
+
+    def test_native_fixture_adopts_empty_ui_leaf_without_host_write_or_command(self):
+        r,provider=self.native_prepared_files_runner()
+        before=len(r.report['commands'])
+        with patch.object(hosted.core.os,'mkdir',side_effect=AssertionError('host mkdir')), \
+             patch.object(r,'setup_files',side_effect=AssertionError('host fixture route')):
+            r.adopt_native_files_fixture()
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual(r.folder_id,hosted.core.identity_of(r.folder))
+        self.assertEqual(list(r.folder.iterdir()),[])
+        self.assertTrue(r.report['files_folder']['fixture_verified'])
+        self.assertEqual(r.report['files_folder']['creation'],
+                         'native Files New Folder during prepare; host adopted after fixture stopped')
+        self.assertNotIn('files_fixture_creation',r.report)
+        self.assertEqual(len(r.report['commands']),before)
+        self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        with self.assertRaisesRegex(RuntimeError,'already initialized'):r.adopt_native_files_fixture()
+
+    def test_native_fixture_requires_exact_intent_success_and_closed_writer(self):
+        r,provider=self.native_prepared_files_runner()
+        original=copy.deepcopy(r.report)
+        for fault in ['missing_intent','wrong_folder','wrong_phase','missing_pass','active','unknown',
+                      'missing_command','duplicate_command','nonzero','failed','unreaped','group_live','pipe_error','log_error']:
+            with self.subTest(fault=fault):
+                r.report=copy.deepcopy(original);r.active={};r.unknown_spawn=False
+                if fault=='missing_intent':r.report.pop('native_files_preparation')
+                elif fault=='wrong_folder':r.report['native_files_preparation']['folder_name']='other'
+                elif fault=='wrong_phase':r.report['native_files_preparation']['phase']='export'
+                elif fault=='missing_pass':r.report['phase_passed']={}
+                elif fault=='active':r.active={999:object()}
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='missing_command':r.report['commands']=[]
+                elif fault=='duplicate_command':r.report['commands']*=2
+                elif fault=='nonzero':r.report['commands'][0]['returncode']=1
+                elif fault=='failed':r.report['commands'][0]['outcome']='failed'
+                elif fault=='unreaped':r.report['commands'][0]['stop']['leader_reaped']=False
+                elif fault=='group_live':r.report['commands'][0]['stop']['group_absent']=False
+                elif fault=='pipe_error':r.report['commands'][0]['close_error']='synthetic'
+                elif fault=='log_error':r.report['commands'][0]['log_close_errors']=['synthetic']
+                with patch.object(r,'discover_ui_files_folder',side_effect=AssertionError('premature lookup')):
+                    with self.assertRaises(RuntimeError):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder)
+        r.active={};r.unknown_spawn=False
+
+    def test_native_fixture_rejects_missing_nonempty_duplicate_and_symlink_leaves(self):
+        base=self.root
+        for fault in ['missing','nonempty','duplicate','symlink']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir()
+                r,provider=self.native_prepared_files_runner();folder=provider/r.folder_name
+                if fault=='missing':folder.rmdir()
+                elif fault=='nonempty':(folder/'unexpected').write_bytes(b'not a fixture')
+                elif fault=='duplicate':
+                    other=provider.parent.parent/'30000000-0000-0000-0000-000000000003'/'File Provider Storage'
+                    other.mkdir(parents=True);(other/r.folder_name).mkdir()
+                else:folder.rmdir();folder.symlink_to(provider,target_is_directory=True)
+                with self.assertRaises((RuntimeError,OSError)):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder);self.assertNotIn('fixture_verified',r.report.get('files_folder',{}))
+                self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+                with self.assertRaisesRegex(RuntimeError,'One-shot'):r.adopt_native_files_fixture()
+        self.root=base
+
+    def test_native_fixture_rejects_baseline_and_opened_leaf_identity_changes(self):
+        base=self.root
+        for fault in ['baseline','leaf_open']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir()
+                r,provider=self.native_prepared_files_runner();folder=provider/r.folder_name
+                if fault=='baseline':
+                    groups=provider.parent.parent;groups.rename(groups.with_name('OldAppGroup'))
+                    (groups/provider.parent.name/'File Provider Storage'/r.folder_name).mkdir(parents=True)
+                    with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed'):r.adopt_native_files_fixture()
+                else:
+                    original=hosted.core.os.open;changed=[]
+                    def opened(path,*args,**kwargs):
+                        if path==folder and not changed:
+                            folder.rename(provider/'retained-ui-leaf');folder.mkdir();changed.append(True)
+                        return original(path,*args,**kwargs)
+                    with patch.object(hosted.core.os,'open',side_effect=opened):
+                        with self.assertRaisesRegex(RuntimeError,'directory changed'):r.adopt_native_files_fixture()
+                    self.assertTrue(changed)
+                self.assertIsNone(r.folder)
+        self.root=base
+
+    def test_native_fixture_preserves_permission_and_original_scan_deadlines(self):
+        base=self.root
+        for fault in ['permission','scan_time','global_time']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir();r,provider=self.native_prepared_files_runner()
+                original=hosted.core.os.scandir
+                def scanned(path):
+                    if fault=='permission':raise PermissionError('denied')
+                    result=original(path);r.ops.t+=5.1 if fault=='scan_time' else .2;return result
+                if fault=='global_time':r.ops.t=1379.9
+                with patch.object(hosted.core.os,'scandir',side_effect=scanned):
+                    with self.assertRaises((RuntimeError,PermissionError)):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
+                self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+        self.root=base
+
+    def test_native_create_flag_is_prepare_only_and_restores_inherited_environment(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER']='untrusted-inherited'
+        original=r.ops.env;r.report['phase_passed']={'prepare':True};r.report['files_folder']={'fixture_verified':True}
+        observed=[]
+        def command(label,argv,cap):
+            observed.append((label,r.ops.env.get('TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER'),cap))
+        with patch.object(r,'command',side_effect=command),patch.object(r,'verify_folder'), \
+             patch.object(r,'authorize_restore'),patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result'),patch.object(r,'app_state'):
+            for phase in ['prepare','export','restore']:
+                hosted.core.Recovery.run_phase(r,phase)
+                self.assertIs(r.ops.env,original)
+        self.assertEqual(observed,[('phase-prepare','1',780),('phase-export',None,600),('phase-restore',None,600)])
+        self.assertEqual(original['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER'],'untrusted-inherited')
+        self.assertEqual(r.report['native_files_preparation'],
+                         {'folder_name':r.folder_name,'phase':'prepare','request':'native_new_folder'})
+
+    def test_native_fixture_work_orders_adoption_before_export_without_host_creation(self):
+        r,provider=self.files_runner();calls=[]
+        def phase(name):
+            calls.append(name)
+            if name=='export':raise RuntimeError('stop before unrelated snapshot work')
+        with patch.object(r,'setup',side_effect=lambda:calls.append('setup')), \
+             patch.object(r,'run_phase',side_effect=phase), \
+             patch.object(r,'adopt_native_files_fixture',side_effect=lambda:calls.append('adopt')), \
+             patch.object(r,'create_owned_files_fixture',side_effect=AssertionError('legacy host create')), \
+             patch.object(r,'take_snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError,'stop before unrelated'):hosted.core.Recovery.work(r)
+        self.assertEqual(calls,['setup','prepare','adopt','export']);snapshot.assert_not_called()
+
     def files_runner(self, group=None):
         home=self.root/'home'
         owned='10000000-0000-0000-0000-000000000001'

@@ -18,6 +18,18 @@ def section(start, end):
     return UI[offset:UI.index(end, offset)]
 
 
+def native_folder_execution():
+    """Read the actual one-call helper at its caller position to check runtime order."""
+    caller = section("    func testNativeCreateOwnedFilesFolder", "    // Both callers supply")
+    helper = section("    private func createNativeEmptyFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+    call = "        try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: ownedFolder)\n"
+    assert caller.count(call) == 1
+    opening = "    ) async throws {\n"
+    body = helper.split(opening, 1)[1]
+    assert body.endswith("    }\n\n")
+    return caller.replace(call, body[:-len("    }\n\n")], 1)
+
+
 SWIFT = r'''
 import Foundation
 import CoreGraphics
@@ -476,7 +488,7 @@ class FolderDirectTests(unittest.TestCase):
 
     def test_actual_folder_rejects_every_other_phase_even_empty_flags(self):
         for key in ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
-                    "TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
+                    "TRIPDOCKET_RECOVERY_CREATE_FOLDER", "TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
                     "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                     "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN", "TRIPDOCKET_BATCH_UI",
                     "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION", "TRIPDOCKET_NATIVE_REOPEN_CONTROL"]:
@@ -579,8 +591,34 @@ class FolderDirectTests(unittest.TestCase):
     def test_actual_initial_classifier_changes_state_without_stale_rename_frame(self):
         self.assertEqual(self.probe("initial-transition"), "rename,editor,editor,rejected,rename")
 
+    def test_shared_creation_preserves_caller_boundaries_and_action_order(self):
+        caller = section("    func testNativeCreateOwnedFilesFolder", "    // Both callers supply")
+        helper = section("    private func createNativeEmptyFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        call = 'try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: ownedFolder)'
+        self.assertEqual(caller.count(call), 1)
+        before, after = caller.split(call)
+        self.assertIn('Self.nativeFolderConfiguration(', before)
+        self.assertIn('source.element.tap()', before)
+        self.assertIn('try await openNativeFilesRoot(app, initialTimeout: .seconds(30))', before)
+        self.assertIn('saved.count == 0 && !failed.exists', before)
+        self.assertIn('saved.count == 0 && !failed.exists', after)
+        self.assertIn('app.terminate()', after)
+        self.assertIn('app.state == .notRunning', after)
+        self.assertIn('UIDevice.current.userInterfaceIdiom == .phone', helper)
+        self.assertIn('files.element.cells.count == 0', helper)
+        self.assertIn('directory.count == 0', helper)
+        for forbidden in ('app.launch()', 'app.terminate()', 'nativeSeed.', 'presentRecoverySave(',
+                          'openNativeFilesRoot(', 'buttons["Save"]', 'executionTimeAllowance'):
+            self.assertNotIn(forbidden, helper)
+        self.assertEqual(helper.count('more.element.tap()'), 1)
+        self.assertEqual(helper.count('newFolder.element.tap()'), 1)
+        self.assertEqual(helper.count('inlineNames.element.typeText(ownedFolder)'), 1)
+        self.assertLess(helper.index('files.element.cells.count == 0'), helper.index('more.element.tap()'))
+        self.assertLess(helper.index('more.element.tap()'), helper.index('newFolder.element.tap()'))
+        self.assertLess(helper.index('newFolder.element.tap()'), helper.index('inlineNames.element.typeText(ownedFolder)'))
+
     def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         initial = case[case.index('try await wait("Native folder has neither'):case.index("if let before = renameFrame")]
         self.assertEqual(initial.count("try self.nativeFolderSnapshots(app, diagnostic:"), 1)
         self.assertEqual(initial.count("Self.nativeFolderInitialState("), 1)
@@ -596,7 +634,7 @@ class FolderDirectTests(unittest.TestCase):
             self.assertNotIn(forbidden, initial)
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         self.assertEqual(case.count("Self.nativeFolderEditorFrame("), 2)
         self.assertIn("in: snapshots.picker, applicationSnapshot: snapshots.application", case)
         self.assertIn('expectedName: "untitled folder"', case)
@@ -703,7 +741,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertTrue(all(len(n["label"]) <= 128 for n in long["nodes"]))
 
     def test_ui_has_one_direct_ingress_and_guarded_rename_without_save_or_retry(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         self.assertIn("executionTimeAllowance = 180", case)
         self.assertIn("Self.nativeFolderConfiguration(environment, debugSimulator: debugSimulator)", case)
         self.assertIn("#if DEBUG && targetEnvironment(simulator)", case)
@@ -726,7 +764,7 @@ class FolderDirectTests(unittest.TestCase):
             self.assertNotIn(forbidden, case)
 
     def test_introduction_uses_one_shared_action_budget_at_both_typing_boundaries(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         helper = section("    private func acknowledgeNativeFolderKeyboardIntroduction(", "    func testNativeCreateOwnedFilesFolder")
         self.assertEqual(case.count("var keyboardIntroductionAcknowledged = false"), 1)
         self.assertEqual(case.count("acknowledgeNativeFolderKeyboardIntroduction("), 2)
@@ -752,7 +790,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertNotRegex(helper, r"(?m)^\s*(while|repeat|for)\b")
 
     def test_exact_name_and_single_rename_request_precede_host_handoff(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         self.assertIn("inlineNames.element.value as? String == ownedFolder", case)
         self.assertEqual(case.count("nativeFolderBlankPoint(in:"), 2)
         for name in ["beforeBlankSnapshots", "currentBlankSnapshots"]:
@@ -768,7 +806,7 @@ class FolderDirectTests(unittest.TestCase):
 
 
     def test_post_rename_handoff_checks_no_save_and_stops_before_host_proof(self):
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         request = "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"
         self.assertEqual(case.count(request), 1)
         handoff = case[case.index(request) + len(request):]
@@ -951,7 +989,7 @@ class PreRenameActionTests(unittest.TestCase):
         helpers = section("    @MainActor\n    private static func nativeFolderRenameFrame", "    private let productID")
         helpers += section("    private static func nativeFolderConfiguration", "    private func acknowledgeNativeFolderKeyboardIntroduction(")
         helpers += section("    private static func combinedBatchConfiguration", "    private static func recordBatchProducer")
-        case = section("    func testNativeCreateOwnedFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        case = native_folder_execution()
         block = case[case.index("            let currentState = Self.nativeFolderInitialState("):case.index("        // One shared acknowledgement")]
         # Remove only the closing brace of the outer initial-candidate branch.
         assert block.endswith("        }\n")
