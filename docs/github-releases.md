@@ -489,7 +489,8 @@ profile before a device is created. Two Intel runs exhausted the former
 180-second boot wait during data migration, while another completed in
 118.663 seconds. The added headroom does not establish that delayed boots will
 finish. It preserves exact runtime selection, full-case admission
-(1,487 seconds on ARM, 1,517 on default Intel or 1,817 for hosted English) and separate cleanup; it never resets a clock or retries a boot.
+(1,487 seconds on ARM, 1,517 on default Intel, 1,817 for hosted English or
+2,117 for hosted Russian) and separate cleanup; it never resets a clock or retries a boot.
 A later [Intel run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116)
 completed boot in 312.7 seconds but exhausted the 480-second fresh-build limit
 before any test. Its final log showed asset catalog compilation, not a compiler
@@ -503,15 +504,30 @@ retain their own existing profiles.
 An English iPad case later reached its480-second native limit during retained
 second-cancellation evidence; its raw log continued through fourth Cancel near660
 seconds but the native result remained failed, without final Trips evidence.
-Only the explicit `--hosted-intel-timing` CI option now selects a fixed900-second
-English native allowance and1,200-second command. It requires GitHub-hosted
-macOS/X64, exact locale/architecture and a Debug x86_64 iPad consumer. The fixed
-`hosted-intel-ipad-en-v1` token goes only to the test runner; inherited/conflicting
-Phone/iPad tokens fail before launch, and the app receives none. Standalone,
-Phone and Russian iPad native timing stay unchanged. Full 1,817-second admission and
-238-second post-validation reserve protect the original4,500/360 work/cleanup
-windows; all text, cancellation, final navigation and original-evidence checks
-remain mandatory. This finite policy does not guarantee a future pass.
+Only the explicit `--hosted-intel-timing` CI option selects the hosted iPad
+native allowances: English uses 900 seconds with a 1,200-second command; Russian
+at maximum type uses 1,200 seconds with a 1,500-second command. The producer
+requires the exact GitHub-hosted macOS/X64 context. Separate
+`hosted-intel-ipad-en-v1` and `hosted-intel-ipad-ru-v1` tokens require the matching
+locale/type arguments in a Debug x86_64 iPad consumer. The token goes only to the
+test runner; inherited/conflicting Phone/iPad tokens fail before launch, and the
+app receives none. Standalone, ARM and Phone timing remain unchanged.
+
+The Russian case in run `41928330972` reached its 480-second limit during the
+first confirmation's public-support warning. A historical complete ARM run used
+the same functional UI implementation and took 316.8 seconds. Scaling its
+remaining work by the current first-cycle duration gives an illustrative 947.8
+seconds, not a measured completion or prediction of a pass. The 1,200-second
+Russian allowance provides finite headroom without removing captures or checks.
+
+Full admission is 1,817 seconds for hosted English and 2,117 for hosted Russian,
+including preparation, the command's separate 7-second stop reserve, and 238
+seconds of post-validation. The original 4,500/360 work/cleanup windows and
+83/95-minute step/job remain fixed. Summed phase maxima for Russian reach 4,743
+seconds, so late preparation must fail admission; the larger command does not
+extend the original deadline or borrow cleanup time. All 24 text checks, four
+Cancels, zero Open actions, final Free/Trips navigation and original-evidence
+checks remain mandatory.
 
 After a Russian iPad run exceeded its 60-second AUT installation wait before
 any native test, the Intel profile permits 90 seconds for AUT installation only.

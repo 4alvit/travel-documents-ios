@@ -1583,6 +1583,10 @@ class HostedIPadTimingTests(unittest.TestCase):
     def test_exact_hosted_intel_english_ipad_selector_sets_900(self):
         self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1'), '900.0')
 
+    def test_exact_hosted_intel_russian_maximum_ipad_selector_sets_1200(self):
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1',
+                                     russian=True, maximum=True), '1200.0')
+
     def test_missing_ipad_token_preserves_phone_and_both_default_locales(self):
         for supported in (False, True):
             for idiom in ('pad', 'phone'):
@@ -1594,7 +1598,7 @@ class HostedIPadTimingTests(unittest.TestCase):
                                      russian=True, maximum=True), '600.0')
 
     def test_invalid_conflicting_or_out_of_scope_ipad_tokens_reject(self):
-        for token in ('', 'wrong', 'hosted-intel-ipad-en-v1 ', 'hosted-intel-ipad-ru-v1'):
+        for token in ('', 'wrong', 'hosted-intel-ipad-en-v1 ', 'hosted-intel-ipad-ru-v1 '):
             with self.subTest(token=token):
                 self.assertEqual(self.invoke(token=token), 'rejected')
         for kwargs in ({'supported': False}, {'idiom': 'phone'}, {'russian': True},
@@ -1603,13 +1607,32 @@ class HostedIPadTimingTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', **kwargs), 'rejected')
 
+    def test_russian_token_rejects_each_wrong_case_build_idiom_or_phone_conflict(self):
+        for kwargs in ({'supported': False}, {'idiom': 'phone'}, {'russian': False},
+                       {'maximum': False}, {'russian': False, 'maximum': False},
+                       {'phone': ''}, {'phone': 'hosted-intel-phone-v1'}, {'phone': 'wrong'}):
+            arguments = {'russian': True, 'maximum': True, **kwargs}
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', **arguments), 'rejected')
+
     def test_removing_only_native_allowance_loses_required_hosted_behavior(self):
-        needle = 'executionTimeAllowance = hostedIPad ? 900 :'
+        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) :'
         self.assertEqual(self.code.count(needle), 1)
         mutated = self.compile(self.code.replace(needle, 'executionTimeAllowance = hostedIPad ? 480 :'),
                                'without-native-allowance', True)
         self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '480.0')
         self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
+
+    def test_reverting_only_russian_native_allowance_loses_required_policy(self):
+        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle,
+            'executionTimeAllowance = hostedIPad ? (russian ? 600 : 900) :'), 'old-russian-allowance', True)
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                     maximum=True, binary=mutated), '600.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                        maximum=True, binary=mutated), '1200.0')
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
 
 
 class SDKSourceTests(unittest.TestCase):

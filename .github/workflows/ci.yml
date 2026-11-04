@@ -215,10 +215,7 @@ jobs:
         # Job: checkout 2 + toolchain 3 + driver 83 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
         run: |
-          args=(--locale '${{ matrix.locale }}')
-          if [[ '${{ matrix.locale }}' == en-US ]]; then
-            args+=(--hosted-intel-timing)
-          fi
+          args=(--locale '${{ matrix.locale }}' --hosted-intel-timing)
           bash scripts/test-privacy-support-ipad.sh "${args[@]}"
       - name: iPad test evidence
         if: always()

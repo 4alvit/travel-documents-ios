@@ -172,22 +172,115 @@ class DriverTests(unittest.TestCase):
             if value is None: wrong.pop(key)
             else: wrong[key] = value
             root = self.root / str(index)
-            with patch.dict(os.environ, wrong, clear=True), patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
-                with self.assertRaisesRegex(RuntimeError, 'exact GitHub-hosted'): ipad.Driver(root, 'en-US', True)
+            for locale in ('en-US', 'ru-RU'):
+                with self.subTest(key=key, locale=locale), patch.dict(os.environ, wrong, clear=True), \
+                     patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
+                    with self.assertRaisesRegex(RuntimeError, 'exact GitHub-hosted'): ipad.Driver(root, locale, True)
             self.assertFalse(root.exists())
-        for arch, locale in [('arm64', 'en-US'), ('x86_64', 'ru-RU')]:
+        for arch, locale in [('arm64', 'en-US'), ('arm64', 'ru-RU')]:
             with patch('os.uname', return_value=SimpleNamespace(machine=arch)):
-                with self.assertRaisesRegex(RuntimeError, 'English Intel'): ipad.Driver(self.root / arch, locale, True)
+                with self.assertRaisesRegex(RuntimeError, 'supported Intel'): ipad.Driver(self.root / arch, locale, True)
             self.assertFalse((self.root / arch).exists())
+        with self.assertRaisesRegex(RuntimeError, 'supported Intel'):
+            ipad.timing_policy('x86_64', 'fr-FR', True, environment)
+
+    def test_hosted_russian_actual_case_preserves_full_policy_and_runner_only_token(self):
+        self.hosted_environment()
+        before = dict(os.environ)
+        driver, world, error, parsed = self.attempted_case(
+            1, architecture='x86_64', hosted_timing=True, delay=1300)
+        self.assertEqual(str(error), 'Synthetic result validation withheld')
+        self.assertTrue(parsed)
+        self.assertEqual(dict(driver.timing), {'name': 'hosted-intel-ipad-ru-v1',
+            'xcode_case_max_seconds': 1200, 'command_seconds': 1500,
+            'runner_token': 'hosted-intel-ipad-ru-v1'})
+        with self.assertRaises(TypeError): driver.timing['command_seconds'] = 900
+        self.assertEqual(driver.report['timing_policy'], dict(driver.timing))
+        self.assertEqual(self.row(driver)['timing_policy'], dict(driver.timing))
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1500)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
+        process = world.processes[0]
+        self.assertEqual(process.environment['TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'], 'hosted-intel-ipad-ru-v1')
+        self.assertFalse(any(key in process.environment for key in ipad.TIMING_ENV_KEYS
+                             if key != 'TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'))
+        self.assertEqual(os.environ, before)
+        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '1200')
+        self.assertEqual(process.argv[process.argv.index('-default-test-execution-time-allowance') + 1], '180')
+        # build_once and the native case both use this exact common argv.
+        common = driver.common_xcode()
+        self.assertEqual(common[common.index('-maximum-test-execution-time-allowance') + 1], '1200')
+        world.plan = {'delay': 0}
+        driver.command(['xcodebuild', 'build-for-testing', *common], 'build-for-testing', timeout=1200)
+        self.assertFalse(any(key in world.processes[-1].environment for key in ipad.TIMING_ENV_KEYS))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_russian_original_admission_boundary_rejects_without_spawning(self):
+        self.hosted_environment()
+        driver, world = self.driver(locale='ru-RU', architecture='x86_64', hosted_timing=True)
+        world.t = 4500 - 2117
+        with self.assertRaisesRegex(RuntimeError, 'no case started'): driver.run_case(*driver.case)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
+        self.assertEqual(world.processes, [])
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_russian_just_admitted_case_keeps_full_wait_and_post_reserve(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(
+            1, start_at=4500-2117-1, architecture='x86_64', hosted_timing=True, delay=1499)
+        self.assertTrue(parsed)
+        self.assertEqual(str(error), 'Synthetic result validation withheld')
+        self.assertLess(world.t + 238, driver.work_deadline)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_russian_late_result_remains_failure(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(
+            1, architecture='x86_64', hosted_timing=True, delay=1501)
+        self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
+        self.assertFalse(driver.active)
+        self.assertEqual(len(world.processes), 1)
+
+    def test_hosted_russian_command_rechecks_original_post_validation_budget(self):
+        self.hosted_environment()
+        driver, world = self.driver(locale='ru-RU', architecture='x86_64', hosted_timing=True)
+        world.t = 4500 - 1500 - 7 - 238
+        with self.assertRaisesRegex(RuntimeError, 'no test spawned'):
+            driver.command(['xcodebuild', 'test-without-building'], 'ru-RU-test',
+                           timeout=1500, required_after=238, native_timing=True)
+        self.assertEqual(world.processes, [])
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_russian_nonzero_result_cannot_be_overridden(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(
+            1, architecture='x86_64', hosted_timing=True, exit=65)
+        self.assertIn('xcodebuild failed', str(error)); self.assertFalse(parsed)
+        self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'], 65)
+        self.assertFalse(driver.active)
+
+    def test_hosted_russian_reverting_command_policy_loses_observed_headroom(self):
+        self.hosted_environment()
+        original = ipad.timing_policy
+        def old_command(*args):
+            policy = dict(original(*args))
+            policy['command_seconds'] = 900
+            return ipad.MappingProxyType(policy)
+        with patch.object(ipad, 'timing_policy', side_effect=old_command):
+            driver, world, error, parsed = self.attempted_case(
+                1, architecture='x86_64', hosted_timing=True, delay=1300)
+        self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 900)
+        self.assertFalse(driver.active)
 
     def test_all_inherited_phone_and_ipad_timing_tokens_fail_before_output(self):
         environment = self.hosted_environment()
         for index, key in enumerate(ipad.TIMING_ENV_KEYS):
             root = self.root / str(index)
             for enabled in [False, True]:
-                with patch.dict(os.environ, {**environment, key: 'hosted-intel-ipad-en-v1'}, clear=True), \
-                     patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
-                    with self.assertRaisesRegex(RuntimeError, 'Inherited'): ipad.Driver(root, 'en-US', enabled)
+                for locale, token in [('en-US', 'hosted-intel-ipad-en-v1'), ('ru-RU', 'hosted-intel-ipad-ru-v1')]:
+                    with patch.dict(os.environ, {**environment, key: token}, clear=True), \
+                         patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
+                        with self.assertRaisesRegex(RuntimeError, 'Inherited'): ipad.Driver(root, locale, enabled)
                 self.assertFalse(root.exists())
 
     def test_hosted_actual_case_propagates_only_runner_token_and_full_fixed_budget(self):
@@ -727,10 +820,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn('        timeout-minutes: 3\n',lane)
         self.assertEqual(lane.count('- locale:'),2)
         self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
-        self.assertIn("""args=(--locale '${{ matrix.locale }}')
-          if [[ '${{ matrix.locale }}' == en-US ]]; then
-            args+=(--hosted-intel-timing)
-          fi
+        self.assertIn("""args=(--locale '${{ matrix.locale }}' --hosted-intel-timing)
           bash scripts/test-privacy-support-ipad.sh "${args[@]}"
 """, lane)
         self.assertIn('name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',lane)
