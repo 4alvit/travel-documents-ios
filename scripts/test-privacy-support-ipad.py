@@ -687,6 +687,8 @@ class Driver:
             cleanup["owned_uuid_absent"] = absent
             require(cleanup.get("delete_exit_code") == 0 and absent, "Owned iPad deletion not confirmed")
         require(not stop_errors, "Owned command process cleanup could not be confirmed")
+        # Cleanup commands may have left groups active after the initial sweep.
+        require(not self.active, "Owned process groups remain unconfirmed after cleanup")
         cleanup["verified"] = True
         cleanup["finished_at"] = self.now()
         self.save()

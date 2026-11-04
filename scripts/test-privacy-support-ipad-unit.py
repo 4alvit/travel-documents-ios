@@ -802,6 +802,58 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
         self.assertEqual(world.processes,[])
 
+    def cleanup_with_new_shutdown_group(self, unconfirmed=False):
+        driver,world=self.driver(locale='ru-RU');world.t=2100
+        driver.owned='11111111-2222-4333-8444-555555555555'
+        self.assertFalse(driver.active)
+        def spawn(argv, **kwargs):
+            world.plan={'output':b'{"devices": {}}'}
+            if unconfirmed and argv[2]=='shutdown':
+                # The leader exits, but its group's absence cannot be proved.
+                world.plan.update(lingering=True,
+                                  probe_error=PermissionError(errno.EPERM,'shutdown group probe denied'))
+            return world.spawn(argv, **kwargs)
+        failure=None
+        with patch('subprocess.Popen',side_effect=spawn):
+            try:driver.cleanup()
+            except RuntimeError as error:failure=error
+        self.assertEqual([row['argv'] for row in driver.report['commands']], [
+            ['xcrun','simctl','shutdown',driver.owned],
+            ['xcrun','simctl','delete',driver.owned],
+            ['xcrun','simctl','list','devices','--json'],
+        ])
+        self.assertEqual([row['timeout_seconds'] for row in driver.report['commands']],[30,30,20])
+        self.assertEqual(len(world.processes),3)
+        self.assertEqual(len(driver.report['process_stops']),3)
+        self.assertEqual(driver.report['cleanup']['process_stop_errors'],[])
+        self.assertEqual(driver.report['cleanup']['delete_exit_code'],0)
+        self.assertTrue(driver.report['cleanup']['owned_uuid_absent'])
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertFalse(any(name.startswith('signal_') for name,_ in world.calls))
+        self.assert_finished(driver)
+        return driver,world,failure
+
+    def test_cleanup_rejects_unconfirmed_group_created_after_initial_sweep(self):
+        driver,world,failure=self.cleanup_with_new_shutdown_group(unconfirmed=True)
+        self.assertIsInstance(failure,RuntimeError)
+        self.assertIn('process groups remain unconfirmed',str(failure))
+        self.assertFalse(driver.report['cleanup']['verified'])
+        self.assertIn('PermissionError',driver.report['cleanup']['shutdown_error'])
+        self.assertEqual(set(driver.active),{world.processes[0].pid})
+        stops=driver.report['process_stops']
+        self.assertEqual(stops[0]['leader_returncode'],0)
+        self.assertFalse(stops[0]['group_absent'])
+        self.assertEqual(stops[0]['observations']['group_probe']['errno'],errno.EPERM)
+        self.assertTrue(all(row['group_absent'] for row in stops[1:]))
+
+    def test_cleanup_accepts_all_groups_created_after_initial_sweep_when_closed(self):
+        driver,_,failure=self.cleanup_with_new_shutdown_group()
+        self.assertIsNone(failure)
+        self.assertTrue(driver.report['cleanup']['verified'])
+        self.assertNotIn('shutdown_error',driver.report['cleanup'])
+        self.assertFalse(driver.active)
+        self.assertTrue(all(row['group_absent'] for row in driver.report['process_stops']))
+
     def test_discovery_300_allows_70_seconds_and_other_default_stays_30(self):
         driver, world = self.driver(delay=70, output=b'{"runtimes": []}')
         # Real prepare() passes the timeout to real json_command()/command().
