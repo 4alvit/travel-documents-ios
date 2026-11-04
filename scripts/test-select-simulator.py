@@ -154,6 +154,11 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
         for flag, value in [("-default-test-execution-time-allowance", "180"),
                             ("-maximum-test-execution-time-allowance", "480")]:
             self.assertEqual(argv[argv.index(flag) + 1], value)
+        source = (HERE.parent / "UITests/PurchaseUITests.swift").read_text()
+        helper = source.split("private func verifyPurchaseFailureAlert(", 1)[1].split(
+            "private func requirePurchasePostcondition(", 1)[0]
+        self.assertIn("executionTimeAllowance = 240", helper)
+        self.assertEqual(source.count("executionTimeAllowance ="), 1)
         records = list((self.root / "build/ci-toolchain").glob("simulator-selection.*/selection.json"))
         self.assertEqual(len(records), 1)
         selection = json.loads(records[0].read_text())

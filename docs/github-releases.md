@@ -397,6 +397,18 @@ The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
 The recovery compatibility job retains its separately pinned profile.
+
+Core's three purchase-failure scenarios request 240 seconds for the complete
+two-alert, postcondition, Free-quota and diagnostic-capture flow. A retained
+Intel run exceeded the former 180-second default and continued to 191 seconds;
+the subsequent launch error and incomplete cohort remain failed evidence.
+The ordinary default stays 180 seconds and Core's per-case maximum stays 480.
+Its integration step is capped at 35 minutes within a 75-minute job with
+separate verification, packaging, cancellation and evidence allowances, as
+documented in [the hosted budget](recovery-hosted.md). Raw test evidence uploads
+before optional extraction. These limits do not guarantee a successful run or
+permit incomplete results to satisfy release qualification.
+
 Privacy/support text reading uses the same one-point inset viewport for scroll
 acceptance and coverage checks. Short text must fit completely in that reading
 viewport; tall text still requires overlapping coverage. Action-control tolerance,

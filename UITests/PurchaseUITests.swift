@@ -106,6 +106,9 @@ final class PurchaseUITests: XCTestCase {
     }
 
     private func verifyPurchaseFailureAlert(russian: Bool, diagnostics: Bool) async throws {
+        // A hosted Intel trace exceeded 180s and reached 191s through teardown.
+        // Keep this allowance local to the three failure-alert scenarios.
+        executionTimeAllowance = 240
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
