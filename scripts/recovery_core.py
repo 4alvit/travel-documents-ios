@@ -718,6 +718,37 @@ class Recovery:
         require(all(selected.get(key)==expected.get(key) for key in
                     ('path','identity','provider_identity','group_identity')),
                 'Exclusively created Files fixture identity changed')
+        self.bind_empty_files_folder(selected,deadline,
+                'exclusive host mkdir after real Files provider preparation')
+
+    def adopt_native_files_fixture(self):
+        require(self.report.get('phase_passed',{}).get('prepare') is True,
+                'UI provider preparation did not pass')
+        require(not self.active and not self.unknown_spawn,'Preparation writer ownership unresolved')
+        baseline = self.report.get('files_ui_baseline',{})
+        require(baseline.get('absent') is True and baseline.get('folder_name')==self.folder_name
+                and baseline.get('owned_root_identity')==self.root_id,'Files baseline is unbound')
+        require(self.report.get('native_files_preparation')=={
+                    'folder_name':self.folder_name,'phase':'prepare','request':'native_new_folder'},
+                'Native folder preparation was not requested')
+        commands = [row for row in self.report['commands'] if row['id']=='phase-prepare']
+        require(len(commands)==1 and commands[0].get('outcome')=='completed'
+                and commands[0].get('returncode')==0
+                and commands[0].get('stop',{}).get('leader_reaped') is True
+                and commands[0].get('stop',{}).get('group_absent') is True
+                and not commands[0].get('close_error') and not commands[0].get('log_close_errors'),
+                'Native folder preparation command did not close successfully')
+        require(self.folder is None,'Owned fixture already initialized')
+        self.once('native-files-adopt')
+        deadline = min(self.limit,self.ops.now()+CAPS['scan_seconds'])
+        candidates,_ = self.discover_ui_files_folder(deadline)
+        require(len(candidates)==1,'Missing unique native Files destination')
+        self.bind_empty_files_folder(candidates[0],deadline,
+                'native Files New Folder during prepare; host adopted after fixture stopped')
+
+    def bind_empty_files_folder(self, selected, deadline, creation):
+        # Both origins share the exact descriptor/identity/empty verification.
+        # Native adoption never creates a provider directory or writes a file.
         folder = Path(selected['path'])
         def check():
             self.timecheck()
@@ -763,7 +794,7 @@ class Recovery:
         self.folder,self.folder_id,self.provider_id = folder,selected['identity'],selected['provider_identity']
         self.files_group_id = selected['group_identity']
         self.report['files_folder'] = {**selected,'initially_empty':True,
-            'creation':'exclusive host mkdir after real Files provider preparation',
+            'creation':creation,
             'empty_boundary':'after prepare case, before export case','fixture_verified':True}
         self.save()
 
@@ -1042,6 +1073,11 @@ class Recovery:
         self.ops.env = {**old_env,'TEST_RUNNER_TRIPDOCKET_RECOVERY_UI':'1',
                         'TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE':phase,'TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER':self.folder_name,
                         'TEST_RUNNER_NSUnbufferedIO':'YES','NSUnbufferedIO':'YES'}
+        self.ops.env.pop('TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER',None)
+        if phase=='prepare':
+            self.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER']='1'
+            self.report['native_files_preparation'] = {
+                'folder_name':self.folder_name,'phase':'prepare','request':'native_new_folder'}
         self.ops.cwd = self.candidate
         try:
             self.command('phase-'+phase,self.phase_argv(phase),phase_cap)
@@ -1121,7 +1157,7 @@ class Recovery:
     def work(self):
         self.setup()
         self.run_phase('prepare')
-        self.create_owned_files_fixture()
+        self.adopt_native_files_fixture()
         library = self.run_phase('export')
         self.take_snapshot(library)
         library = self.run_phase('restore')

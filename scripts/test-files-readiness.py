@@ -5,6 +5,7 @@ The production helper is extracted unchanged; the fixture supplies only query,
 wait and tap boundaries so delayed root arrival exercises the real control flow.
 """
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
@@ -249,16 +250,25 @@ class ReadinessTests(unittest.TestCase):
     def test_disabled_controls_fail_without_taps(self): self.run_case('disabled')
     def test_hidden_controls_fail_without_taps(self): self.run_case('hidden')
 
-    def test_prepare_initializes_real_provider_without_native_folder_creation(self):
+    def test_prepare_default_retains_provider_only_with_guarded_native_creation(self):
         source = SOURCE.read_text()
         prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    func testNativeCreateOwnedFilesFolder')]
-        self.assertIn('try await presentRecoverySave(app)', prepare)
+        self.assertNotIn('try await presentRecoverySave(app)', prepare)
         self.assertIn('try await reachRecoveryLocalRoot', prepare)
         self.assertIn('directory.count == 0', prepare)
         self.assertIn('app.state == .notRunning', prepare)
         for forbidden in ['newFolder.tap()', 'newFolder.element.tap()', 'field.typeText(', 'create.element.tap()', 'Save"].tap()']:
             self.assertNotIn(forbidden, prepare)
         self.assertLess(prepare.index('directory.count == 0'), prepare.index('app.state == .notRunning'))
+        branch = prepare[prepare.index('        if createFolder {'):prepare.index('        // Dedicated Recovery adopts')]
+        create, provider = branch.split('        } else {', 1)
+        self.assertEqual(create.count('createNativeEmptyFilesFolder('), 1)
+        self.assertNotIn('createNativeEmptyFilesFolder(', provider)
+        self.assertIn('real local Files provider before fixture shutdown', provider)
+        self.assertLess(prepare.index('Self.recoveryNativeFolderCreation('), prepare.index('app.launch()'))
+        self.assertIn('directory.count == 0', provider)
+        self.assertNotIn('presentRecoverySave(app)', create)
+        self.assertLess(create.index('openNativeFilesRoot('), create.index('createNativeEmptyFilesFolder('))
 
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
@@ -275,6 +285,438 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('python3 -B scripts/test-files-readiness.py', workflow)
+
+
+RECOVERY_MODE_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Harness {
+    // ACTUAL_HELPER
+    static func run(_ environment: [String: String], _ debug: Bool) throws -> Bool {
+        try recoveryNativeFolderCreation(environment, debugSimulator: debug)
+    }
+    static func sourceArguments(_ folder: String, _ token: String) throws -> [String] {
+        try recoveryNativeSourceArguments(folder: folder, sourceToken: token)
+    }
+}
+let data = Data(CommandLine.arguments[1].utf8)
+let environment = try JSONDecoder().decode([String: String].self, from: data)
+do {
+    if CommandLine.arguments.count == 4 {
+        let arguments = try Harness.sourceArguments(environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? "",
+                                                    CommandLine.arguments[3])
+        print(String(data: try JSONEncoder().encode(arguments), encoding: .utf8)!)
+    } else {
+        print(try Harness.run(environment, CommandLine.arguments[2] == "true") ? "create" : "provider-only")
+    }
+} catch { print("rejected") }
+'''
+
+
+class RecoveryNativeFolderModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private static func recoveryNativeFolderCreation(')
+        end = source.index('    // Opt-in prepare/export/restore phases.', start)
+        helper = source[start:end]
+        root = Path(cls.directory.name)
+        path = root / 'RecoveryMode.swift'
+        path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper))
+        cls.binary = root / 'recovery-mode-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=30)
+
+    @staticmethod
+    def environment():
+        return {
+            'TRIPDOCKET_RECOVERY_UI': '1',
+            'TRIPDOCKET_RECOVERY_PHASE': 'prepare',
+            'TRIPDOCKET_RECOVERY_FOLDER': 'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc',
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': '1',
+        }
+
+    def probe(self, environment, debug=True):
+        result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower()],
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_only_explicit_debug_prepare_can_create(self):
+        self.assertEqual(self.probe(self.environment()), 'create')
+        self.assertEqual(self.probe(self.environment(), debug=False), 'rejected')
+        for key, values in {
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': ['', '0', 'true', '01', ' 1'],
+            'TRIPDOCKET_RECOVERY_UI': ['', '0', 'true'],
+            'TRIPDOCKET_RECOVERY_PHASE': ['', 'export', 'restore', 'prepare '],
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            environment = self.environment()
+            del environment[key]
+            with self.subTest(missing=key):
+                self.assertEqual(self.probe(environment), 'rejected')
+
+    def test_absent_mode_preserves_only_admitted_provider_callers(self):
+        environment = self.environment()
+        del environment['TRIPDOCKET_RECOVERY_CREATE_FOLDER']
+        self.assertEqual(self.probe(environment), 'provider-only')
+        self.assertEqual(self.probe(environment, debug=False), 'rejected')
+        self.assertEqual(self.probe({}), 'rejected')
+        self.assertEqual(self.probe(environment | {'TRIPDOCKET_RECOVERY_FOLDER':
+                                                  'TripDocket-Recovery-provider-probe'}), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            invalid = environment.copy()
+            del invalid[key]
+            with self.subTest(missing=key):
+                self.assertEqual(self.probe(invalid), 'rejected')
+        for key in ('TRIPDOCKET_BATCH_PREPARE_UI', 'TRIPDOCKET_BATCH_PREPARE_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_UI', 'TRIPDOCKET_NATIVE_FOLDER_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN', 'TRIPDOCKET_NATIVE_SEED_UI',
+                    'TRIPDOCKET_NATIVE_SEED_TOKEN', 'TRIPDOCKET_NATIVE_ROOT_UI',
+                    'TRIPDOCKET_NATIVE_ROOT_TOKEN', 'TRIPDOCKET_BATCH_UI',
+                    'TRIPDOCKET_BATCH_FOLDER', 'TRIPDOCKET_COMBINED_BATCH_UI',
+                    'TRIPDOCKET_BATCH_CHECKPOINT_SESSION', 'TRIPDOCKET_NATIVE_REOPEN_CONTROL'):
+            for value in ('', '1'):
+                with self.subTest(conflict=key, value=value):
+                    self.assertEqual(self.probe(environment | {key: value}), 'rejected')
+
+    def test_native_folder_requires_exact_canonical_recovery_uuid(self):
+        for folder in ('', 'TripDocket-Recovery-', 'TripDocket-Recovery-provider-probe',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789ABC',
+                       'TripDocket-Recovery-{12345678-1234-4234-8234-123456789abc}',
+                       'TripDocket-Batch-12345678-1234-4234-8234-123456789abc',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc/child'):
+            with self.subTest(folder=folder):
+                self.assertEqual(self.probe(self.environment() | {'TRIPDOCKET_RECOVERY_FOLDER': folder}), 'rejected')
+
+    def test_native_folder_rejects_every_other_ui_mode_even_if_empty(self):
+        for key in ('TRIPDOCKET_BATCH_PREPARE_UI', 'TRIPDOCKET_BATCH_PREPARE_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_UI', 'TRIPDOCKET_NATIVE_FOLDER_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN', 'TRIPDOCKET_NATIVE_SEED_UI',
+                    'TRIPDOCKET_NATIVE_SEED_TOKEN', 'TRIPDOCKET_NATIVE_ROOT_UI',
+                    'TRIPDOCKET_NATIVE_ROOT_TOKEN', 'TRIPDOCKET_BATCH_UI',
+                    'TRIPDOCKET_BATCH_FOLDER', 'TRIPDOCKET_COMBINED_BATCH_UI',
+                    'TRIPDOCKET_BATCH_CHECKPOINT_SESSION', 'TRIPDOCKET_NATIVE_REOPEN_CONTROL'):
+            for value in ('', '1'):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+
+    def test_creation_is_confined_to_existing_prepare_phase_and_allowance(self):
+        source = SOURCE.read_text()
+        config = source[source.index('    private func recoveryConfiguration('):source.index('    private func recoveryTab(')]
+        self.assertIn('env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare"', config)
+        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', config)
+        self.assertEqual(source.count('try await createNativeEmptyFilesFolder('), 2)
+        cases = [line.strip().split('(')[0] for line in source.splitlines() if line.strip().startswith('func testRecovery')]
+        self.assertEqual(cases, ['func testRecoveryPrepareFilesProvider', 'func testRecoveryExportFullBackupThroughFiles',
+                                 'func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal'])
+
+
+    def test_direct_source_arguments_require_distinct_canonical_identity(self):
+        source = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+        folder = self.environment()['TRIPDOCKET_RECOVERY_FOLDER']
+        def arguments(token, destination=folder):
+            result = subprocess.run([str(self.binary), json.dumps({'TRIPDOCKET_RECOVERY_FOLDER': destination}),
+                                     'true', token], capture_output=True, text=True, check=True, timeout=5)
+            return result.stdout.strip()
+        self.assertEqual(json.loads(arguments(source)),
+                         ['--ui-testing-native-batch-seed', '--ui-testing-native-batch-token', source])
+        for token in ('', source.upper(), '{' + source + '}', source + '/child', folder.removeprefix('TripDocket-Recovery-')):
+            with self.subTest(token=token):
+                self.assertEqual(arguments(token), 'rejected')
+        for destination in ('', source, folder.upper(), folder + '/child'):
+            with self.subTest(destination=destination):
+                self.assertEqual(arguments(source, destination), 'rejected')
+
+    def test_direct_route_has_single_admitted_source_and_common_stop(self):
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        create, remainder = prepare.split('        if createFolder {', 1)[1].split('        } else {', 1)
+        provider, stop = remainder.split('        // Dedicated Recovery adopts', 1)
+        self.assertEqual(create.count('UUID().uuidString.lowercased()'), 1)
+        self.assertEqual(create.count('app.launch()'), 1)
+        self.assertEqual(create.count('source.element.tap()'), 1)
+        self.assertLess(create.index('Self.recoveryNativeSourceArguments'), create.index('app.launch()'))
+        self.assertIn('app.launchArguments = recoveryArguments + sourceArguments', create)
+        self.assertNotIn('--demo', create)
+        self.assertIn('app.launchArguments = recoveryArguments + sourceArguments', provider)
+        self.assertEqual(provider.count('UUID().uuidString.lowercased()'), 1)
+        self.assertEqual(provider.count('source.element.tap()'), 1)
+        self.assertIn('reachRecoveryLocalRoot(localTitle,', provider)
+        for forbidden in ('--demo', 'presentRecoverySave(app)', 'createNativeEmptyFilesFolder(', 'openNativeFilesRoot('):
+            self.assertNotIn(forbidden, provider)
+        self.assertIn('app.terminate()', stop)
+        self.assertIn('app.state == .notRunning', stop)
+        self.assertIn('defer { app.terminate() }', prepare)
+
+
+DIRECT_RECOVERY_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+final class World {
+    var count = 1, saved = 0, directoryCount = 0
+    var enabled = true, hittable = true, failed = false, navigationReady = true
+    var events: [String] = []
+    var waitSeconds: [Int64] = []
+    let scenario: String
+    init(_ scenario: String) {
+        self.scenario = scenario
+        if scenario == "missing" { count = 0 }
+        if scenario == "ambiguous" { count = 2 }
+        if scenario == "disabled" { enabled = false }
+        if scenario == "hidden" { hittable = false }
+        if scenario == "failed" { failed = true }
+        if scenario == "already-saved" { saved = 1 }
+        if scenario == "navigation-missing" { navigationReady = false }
+        if scenario == "probe-exists" { directoryCount = 1 }
+    }
+}
+enum DeviceIdiom { case phone, pad }
+final class UIDevice {
+    static let current = UIDevice()
+    var userInterfaceIdiom: DeviceIdiom { CommandLine.arguments[1] == "ipad-ready" ? .pad : .phone }
+}
+final class Element {
+    let world: World, kind: String
+    init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
+    var exists: Bool { kind == "failure" ? world.failed : world.navigationReady }
+    var cells: Query { Query(world, "directory") }
+    var buttons: Query { Query(world, "browse") }
+    var isEnabled: Bool { precondition(world.count == 1); return world.enabled }
+    var isHittable: Bool { precondition(world.count == 1); return world.hittable }
+    func tap() {
+        precondition(kind == "source" && world.count == 1 && world.enabled && world.hittable)
+        world.events.append("source-tap")
+    }
+}
+final class Query {
+    let world: World, kind: String
+    init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
+    var count: Int {
+        if kind == "saved" { return world.saved }
+        if kind == "directory" { return world.directoryCount }
+        if kind == "navigation" || kind == "picker" { return world.navigationReady ? 1 : 0 }
+        return world.count
+    }
+    var element: Element { Element(world, kind) }
+    func matching(identifier: String) -> Query {
+        if kind == "navigation" { precondition(identifier == "FullDocumentManagerViewControllerNavigationBar"); return self }
+        if kind == "picker" { precondition(identifier == "Browse View (Picker)"); return self }
+        if kind == "directory" {
+            precondition(identifier == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc, Folder")
+            return self
+        }
+        precondition(identifier == "nativeSeed.synthetic-ticket.pdf")
+        return Query(world, "source")
+    }
+    func matching(_ predicate: NSPredicate) -> Query {
+        if kind == "cells" {
+            precondition(predicate.evaluate(with: ["identifier": "DOC.sidebar.item.On My iPhone"]))
+            precondition(predicate.evaluate(with: ["identifier": "DOC.sidebar.item.On My iPad"]))
+            precondition(!predicate.evaluate(with: ["identifier": "Other"]))
+            return Query(world, "location")
+        }
+        if kind == "browse" {
+            precondition(predicate.evaluate(with: ["label": "Browse"]))
+            precondition(!predicate.evaluate(with: ["label": "Other"]))
+            return self
+        }
+        precondition(predicate.evaluate(with: ["identifier": "nativeSeed.saved.synthetic-ticket.pdf"]))
+        precondition(!predicate.evaluate(with: ["identifier": "nativeSeed.failure"]))
+        return Query(world, "saved")
+    }
+    subscript(_ identifier: String) -> Element {
+        if kind == "tabBars" { precondition(identifier == "DOC.browsingModeTabBar"); return Element(world, "tabBar") }
+        precondition(identifier == "nativeSeed.failure"); return Element(world, "failure")
+    }
+}
+final class XCUIApplication {
+    let world: World
+    var launchArguments: [String] = []
+    init(_ world: World) { self.world = world }
+    var buttons: Query { Query(world, "buttons") }
+    var staticTexts: Query { Query(world, "staticTexts") }
+    var navigationBars: Query { Query(world, "navigation") }
+    var otherElements: Query { Query(world, "picker") }
+    var tabBars: Query { Query(world, "tabBars") }
+    var cells: Query { Query(world, "cells") }
+    func launch() { world.events.append("launch") }
+}
+final class Harness {
+    let world: World
+    let recoveryArguments = ["existing-recovery-arguments"]
+    init(_ world: World) { self.world = world }
+    // ACTUAL_ARGUMENT_HELPER
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15), condition: () -> Bool) async throws {
+        world.waitSeconds.append(timeout.components.seconds)
+        if !condition() { throw BatchTestFailure(message: message) }
+    }
+    func reachRecoveryLocalRoot(_ title: String, navigation: Query, location: Query, browse: Query,
+                               app: XCUIApplication) async throws {
+        precondition(navigation.kind == "navigation" && location.kind == "location" && browse.kind == "browse")
+        world.events.append("generic-root:" + title)
+        if world.scenario == "root-failed" { throw BatchTestFailure(message: "root") }
+        if world.scenario == "saved-at-root" { world.saved = 1 }
+        if world.scenario == "failed-at-root" { world.failed = true }
+    }
+    func check(_ value: Bool, app: XCUIApplication, _ message: String) throws {
+        if !value { throw BatchTestFailure(message: message) }
+    }
+    func capture(_ app: XCUIApplication, _ label: String) {
+        world.events.append("capture")
+        if world.scenario == "changed-at-capture" { world.count = 2 }
+    }
+    func openNativeFilesRoot(_ app: XCUIApplication, initialTimeout: Duration) async throws -> Element {
+        precondition(initialTimeout == .seconds(30)); world.events.append("root")
+        if world.scenario == "root-failed" { throw BatchTestFailure(message: "root") }
+        if world.scenario == "saved-at-root" { world.saved = 1 }
+        return Element(world, "picker")
+    }
+    func createNativeEmptyFilesFolder(_ app: XCUIApplication, picker: Element, ownedFolder: String) async throws {
+        precondition(picker.kind == "picker" && ownedFolder == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc")
+        world.events.append("create")
+        if world.scenario == "saved-at-create" { world.saved = 1 }
+        if world.scenario == "failed-at-create" { world.failed = true }
+    }
+    func run(_ app: XCUIApplication, recoveryFolder: String) async throws {
+        // ACTUAL_BRANCH
+    }
+}
+let world = World(CommandLine.arguments[1])
+let app = XCUIApplication(world)
+var status = "passed"
+do { try await Harness(world).run(app, recoveryFolder: "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc") }
+catch { status = "rejected" }
+print(String(data: try JSONEncoder().encode(["status": [status], "events": world.events,
+                                            "arguments": app.launchArguments,
+                                            "waitSeconds": world.waitSeconds.map(String.init)]), encoding: .utf8)!)
+'''
+
+
+class DirectRecoveryPreparationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        branch = prepare.split('        if createFolder {', 1)[1].split('        } else {', 1)[0]
+        start = source.index('    private static func recoveryNativeSourceArguments(')
+        helper = source[start:source.index('    // Opt-in prepare/export/restore phases.', start)]
+        fixture = DIRECT_RECOVERY_FIXTURE.replace('    // ACTUAL_ARGUMENT_HELPER', helper).replace('        // ACTUAL_BRANCH', branch)
+        root = Path(cls.directory.name)
+        path = root / 'DirectRecovery.swift'
+        path.write_text(fixture)
+        cls.binary = root / 'direct-recovery-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=30)
+
+    def probe(self, scenario):
+        result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_actual_direct_branch_opens_once_and_creates_only_after_root(self):
+        value = self.probe('ready')
+        self.assertEqual(value['status'], ['passed'])
+        self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'root', 'create', 'capture'])
+        self.assertEqual(value['arguments'][:3], ['existing-recovery-arguments', '--ui-testing-native-batch-seed',
+                                                '--ui-testing-native-batch-token'])
+        import uuid
+        token = value['arguments'][3]
+        self.assertEqual(str(uuid.UUID(token)), token)
+        self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
+        self.assertEqual(len(value['arguments']), 4)
+
+    def test_actual_direct_branch_rejects_unusable_or_changed_source_before_tap(self):
+        for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertNotIn('source-tap', value['events'])
+                self.assertNotIn('create', value['events'])
+
+    def test_actual_direct_branch_never_creates_after_failed_root_or_export(self):
+        for scenario in ('root-failed', 'saved-at-root'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertNotIn('create', value['events'])
+
+    def test_actual_direct_branch_rejects_export_or_failure_after_creation(self):
+        for scenario in ('saved-at-create', 'failed-at-create'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertEqual(value['events'].count('create'), 1)
+                self.assertEqual(value['events'][-1], 'create')
+
+
+class ProviderOnlyPreparationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        branch = prepare.split('        } else {', 1)[1].split('        // Dedicated Recovery adopts', 1)[0].rsplit('        }', 1)[0]
+        start = source.index('    private static func recoveryNativeSourceArguments(')
+        helper = source[start:source.index('    // Opt-in prepare/export/restore phases.', start)]
+        fixture = DIRECT_RECOVERY_FIXTURE.replace('    // ACTUAL_ARGUMENT_HELPER', helper).replace('        // ACTUAL_BRANCH', branch)
+        root = Path(cls.directory.name)
+        path = root / 'ProviderPreparation.swift'
+        path.write_text(fixture)
+        cls.binary = root / 'provider-preparation-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=30)
+
+    def probe(self, scenario):
+        result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_actual_provider_branch_uses_generic_phone_and_ipad_roots_without_create(self):
+        import uuid
+        for scenario, title in [('ready', 'On My iPhone'), ('ipad-ready', 'On My iPad')]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['passed'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'generic-root:' + title, 'capture'])
+                self.assertEqual(value['waitSeconds'], ['15', '15'])
+                self.assertEqual(value['arguments'][:3], ['existing-recovery-arguments', '--ui-testing-native-batch-seed',
+                                                        '--ui-testing-native-batch-token'])
+                token = value['arguments'][3]
+                self.assertEqual(str(uuid.UUID(token)), token)
+                self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
+                self.assertEqual(len(value['arguments']), 4)
+
+    def test_actual_provider_branch_rejects_unusable_source_without_tap(self):
+        for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertNotIn('source-tap', value['events'])
+
+    def test_actual_provider_branch_rejects_missing_navigation_root_and_occupied_probe(self):
+        for scenario in ('navigation-missing', 'root-failed', 'probe-exists'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertNotIn('create', value['events'])
+                self.assertNotEqual(value['events'][-1], 'capture')
+
+    def test_actual_provider_branch_rejects_export_or_failure_after_root(self):
+        for scenario in ('saved-at-root', 'failed-at-root'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertEqual(value['events'][-1], 'generic-root:On My iPhone')
 
 
 TITLE_FIXTURE = r'''
