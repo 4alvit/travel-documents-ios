@@ -311,19 +311,27 @@ class BoundaryTests(unittest.TestCase):
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
 
-    def test_recovery_workflow_pins_matched_toolchain_and_keeps_existing_budgets(self):
+    def test_recovery_workflow_bounds_offline_checks_and_preserves_native_budgets(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
         environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
         self.assertEqual(environment.splitlines(),[
             '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 35\n',recovery)
+        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 40\n',recovery)
+        checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 2\n',checkout)
+        regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 6\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 27\n',attempt)
         self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
         evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
         self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
+        step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
+                      for step in (checkout,regressions,attempt,evidence)]
+        job_minutes=int(re.search(r'^    timeout-minutes: (\d+)$',recovery,re.M).group(1))
+        self.assertLessEqual(sum(step_minutes),job_minutes)
 
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
         driver=(HERE/'test-simulator.sh').read_text()

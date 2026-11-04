@@ -280,8 +280,12 @@ remaining time. A late parse or selection cannot admit another query or device
 creation. If the deadline expires after creation, the existing cleanup still
 owns that exact device.
 
-Overall work deadlines remain fixed at driver start: 2,100 seconds for each
-locale, including discovery. Both reserve 180 seconds for cleanup.
+Overall work deadlines remain fixed at driver start, including discovery:
+2,100 seconds on ARM and 3,000 seconds on Intel for either locale. Both reserve
+180 seconds for cleanup. The immutable profile is selected from the host
+architecture before allocating the deadline, and recorded in the receipt.
+The later captured `uname` must match it before device creation; an unknown
+architecture or mismatch fails closed. Discovery never changes the profile.
 The phase is also clipped to that overall work deadline. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
@@ -308,7 +312,20 @@ Each test must fit inside its locale's absolute work deadline, including its
 seven-second process-stop reserve and mandatory post-test validation. Admission
 is checked before preparation and again immediately before spawn. A terminal
 test-process poll at or after its wait deadline fails, even with exit code 0.
-Both locales use 40-minute workflow steps and 46-minute jobs.
+On Intel, initial boot readiness allows 600 seconds, clipped to the original
+work deadline; ARM retains 180 seconds. Two Intel runs exhausted 180 seconds
+while reporting data migration. A separate run completed boot readiness in
+118.663 seconds. These observations support bounded cold-start headroom, not a
+claim that a larger allowance cures a service failure. The Intel 3,000/600-second
+work/boot envelope follows the existing fresh-Simulator Batch profile, with no
+inherited result or retry. The 480-second build, 900-second test command,
+1,487-second full-case admission and all cleanup requirements remain unchanged.
+
+Both hosted locales use 55-minute steps: 50 minutes of Intel work, three of
+cleanup and two for startup/finalization. Their 62-minute jobs allocate two
+minutes to checkout, three to toolchain setup, 55 to the owned driver and two
+to artifact upload. Longer boot consumes work time and can still leave too
+little time to admit a case; insufficient admission remains a failure.
 
 Guidance tab transitions retain a five-second observation deadline and one tap.
 A failed English run showed a fully rendered Settings screen: the selected-tab
@@ -463,8 +480,20 @@ The 2 GiB xcresult content limit still checks both logical and allocated size;
 manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
-measurement. The workflow's 27-minute execution step and 35-minute job give an
-outer deadline plus time for checkout, offline checks and evidence upload.
+measurement. The native execution step remains 27 minutes. The 40-minute job
+allocates two minutes to checkout, six to offline regressions, 27 to native
+recovery and five to evidence upload; the native 1,380-second work deadline and
+cleanup reserve are unchanged.
+
+In [run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897632),
+the first synthetic Swift fixture compilation exceeded its 30-second timeout.
+The first three regression suites then reported 125.137 seconds combined,
+already exceeding the former two-minute step before the other ten suites ran.
+The Files readiness fixture compilers now consistently allow 60 seconds;
+five-second fixture executions and 45-second SDK typechecks retain their limits.
+These offline allowances do not change native case limits or accept incomplete
+regressions. All 13 suites and the subsequent native recovery still require a
+fresh passing hosted run; the larger envelope does not guarantee completion.
 
 There is one new owned Simulator, one fixed Files-provider setup, one export
 case, a durable verified before-reset snapshot pin, then one restore case.
@@ -548,8 +577,9 @@ No case is inferred from the other locale's result.
 This corrects an observed allocation defect: English took 590 seconds including
 bootstrap; Russian was then admitted with only 357 seconds of work even though
 its requested command allowance was 570 seconds. Its timeout was subsequently
-masked by an installed-AUT lookup that could not fit. Fresh drivers now use
-2,100-second work budgets and the same 180-second cleanup reserve.
+masked by an installed-AUT lookup that could not fit. Fresh drivers use separate
+work budgets of 2,100 seconds on ARM or 3,000 on Intel and the same 180-second
+cleanup reserve.
 Both command waits are 900 seconds; XCTest's 480-second maximum is unchanged. Before
 case preparation, the driver requires the full command budgets and each 7-second
 stop reserve, plus 30 seconds for local manifests/copy/validation: 1,487 seconds
@@ -579,8 +609,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core and Recovery have 35-minute limits, phone guidance has 65 minutes, and
-each iPad locale has 46 minutes, at most 227 aggregate job-minutes. Within this
+Core has a 35-minute limit, Recovery has 40 minutes, phone guidance has 65 minutes,
+and each iPad locale has 62 minutes, at most 264 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same

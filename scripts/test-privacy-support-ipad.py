@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from types import MappingProxyType
 import uuid
 
 
@@ -32,6 +33,15 @@ CLEANUP_SECONDS = 3 * 60
 # 30s for local manifests/copy/validation in addition to both fresh lookups.
 CASE_PREP_SECONDS = 4 * (60 + 7) + 2 * (30 + 7)
 CASE_POST_SECONDS = 2 * (60 + 7) + 2 * (30 + 7) + 30
+
+
+def execution_profile(architecture, locale):
+    require(architecture in ("arm64", "x86_64"), "Unsupported iPad host architecture")
+    intel = architecture == "x86_64"
+    return MappingProxyType({"name": "intel-ipad" if intel else "arm-ipad",
+                             "architecture": architecture,
+                             "work_seconds": 3000 if intel else WORK_SECONDS[locale],
+                             "boot_seconds": 600 if intel else 180})
 
 
 def selected_case(locale):
@@ -165,13 +175,14 @@ def validate_result(summary, tree, method, udid):
 class Driver:
     def __init__(self, root, locale):
         self.case = selected_case(locale)
+        self.profile = execution_profile(os.uname().machine, locale)
         self.root = Path(root).resolve()
         self.out = self.root / "build/PrivacySupport-iPad" / locale
         self.out.mkdir(parents=True)  # Refuse to overwrite another run's evidence.
         self.derived = self.root / ("build/PrivacySupport-iPad-DerivedData-" + locale)
         require(not self.derived.exists(), "DerivedData must be fresh; no build reuse")
         self.start = time.monotonic()
-        self.work_deadline = self.start + WORK_SECONDS[locale]
+        self.work_deadline = self.start + self.profile["work_seconds"]
         self.final_deadline = self.work_deadline + CLEANUP_SECONDS
         self.cleaning = False
         self.discovery_deadline = None
@@ -188,7 +199,8 @@ class Driver:
         self.products = None
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
-                       "work_seconds": WORK_SECONDS[locale], "cleanup_reserve_seconds": CLEANUP_SECONDS,
+                       "execution_profile": dict(self.profile),
+                       "work_seconds": self.profile["work_seconds"], "cleanup_reserve_seconds": CLEANUP_SECONDS,
                        "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
         self.save()
@@ -444,7 +456,7 @@ class Driver:
         self.save()
         print("Owned iPad: " + json.dumps(self.report["destination"], sort_keys=True), flush=True)
         self.command(["xcrun", "simctl", "boot", self.owned], "boot", timeout=45)
-        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=180)
+        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=self.profile["boot_seconds"])
 
     def discover_owned_ipad(self):
         """All discovery, acquisition and identity checks share one phase limit."""
@@ -455,6 +467,7 @@ class Driver:
         self.checkpoint()
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
         self.checkpoint()
+        require(architecture == self.profile["architecture"], "Captured architecture differs from initial iPad profile")
         pair = choose_pair(runtimes, dtypes, architecture, self.sdk_version)
         self.checkpoint()
         inventory = self.json_command(["xcrun", "simctl", "list", "devices", "--json"], "devices-before")
