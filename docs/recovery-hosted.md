@@ -729,19 +729,35 @@ result is failed and contains no final Trips evidence. The command returned 65
 after 753.5 seconds; boot and build had completed. This supports additional native
 time, not a claim that the unrecorded final navigation succeeded.
 
-Only CI's explicit `--hosted-intel-timing` option now admits the fixed English
-policy. The producer checks the GitHub-hosted macOS/X64 context, selected locale
-and captured architecture; standalone Intel runs keep their defaults. Inherited
-Phone/iPad timing tokens are rejected. Only the final native command receives
-`TEST_RUNNER_TRIPDOCKET_IPAD_TIMING=hosted-intel-ipad-en-v1`; the app receives no
-timing token. The consumer requires the exact token, Debug x86_64 Simulator,
-iPad idiom and English case before selecting 900 seconds. Phone, Russian iPad
-and missing-token native timing remain unchanged. The 1,200-second command still
-reserves 238 seconds for post-validation, with the original 4,500-second work and
-360-second cleanup deadlines. The 83-minute step and 95-minute job are unchanged.
-All 24 text checks, four Cancels, zero Open actions and final Free/Trips evidence
-remain mandatory. The smaller 57-second non-command margin can still fail
-admission or finalization; no timeout or nonzero result becomes a pass.
+Only CI's explicit `--hosted-intel-timing` option admits hosted iPad timing. The
+producer checks the exact GitHub-hosted macOS/X64 context, selected locale and
+captured architecture; standalone Intel and ARM runs keep their defaults.
+Inherited Phone/iPad timing tokens are rejected. Only the final native command
+receives `TEST_RUNNER_TRIPDOCKET_IPAD_TIMING`; the app receives no timing token.
+The consumer requires Debug x86_64 Simulator and iPad idiom, with the exact
+`hosted-intel-ipad-en-v1` token for the English case or
+`hosted-intel-ipad-ru-v1` for Russian at maximum type. English retains its
+900-second native allowance and 1,200-second command; Russian uses 1,200 and
+1,500 seconds respectively. Phone and missing-token timing stay unchanged.
+
+The Russian case in run `41928330972` failed at the 480-second native limit during
+the first confirmation's warning, with zero cancellations yet recorded. Its
+post-timeout stdout continued only into the second link; those later actions
+are not accepted native evidence. A historical ARM pass took 316.8 seconds with
+byte-identical functional UI actions and captures. Scaling its remaining three
+cycles and final return by the observed first-cycle ratio gives an illustrative
+947.8 seconds. This estimate motivates finite headroom, not a guarantee that the
+new allowance will complete the case. Captures and geometry checks stay intact.
+
+English admission remains 1,817 seconds; Russian requires 2,117: preparation372,
+command1,500, a separate7-second stop reserve and post-validation238. The native
+command still has its full1,500-second wait cap, clipped by the original global
+deadline; immediate pre-spawn admission protects the stop/post-validation
+reserve. Work remains4,500 seconds and cleanup360, with the83-minute step and
+95-minute job unchanged. Russian summed phase maxima4,743 exceed the work
+window, so a late build must fail admission rather than reset the clock. All24
+text checks, four Cancels, zero Open actions and final Free/Trips evidence remain
+mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
 Core has a 75-minute limit, Recovery has 113 minutes, phone guidance has 95 minutes,

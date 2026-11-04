@@ -34,9 +34,15 @@ final class PrivacySupportUITests: XCTestCase {
     private func useHostedIPadTiming(russian: Bool, maximumType: Bool) throws -> Bool {
         let environment = ProcessInfo.processInfo.environment
         guard let profile = environment["TRIPDOCKET_IPAD_TIMING"] else { return false }
-        guard profile == "hosted-intel-ipad-en-v1",
-              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
-              !russian, !maximumType else { throw IPadTimingError.invalidProfile }
+        guard environment["TRIPDOCKET_PHONE_TIMING"] == nil else { throw IPadTimingError.invalidProfile }
+        switch profile {
+        case "hosted-intel-ipad-en-v1":
+            guard !russian, !maximumType else { throw IPadTimingError.invalidProfile }
+        case "hosted-intel-ipad-ru-v1":
+            guard russian, maximumType else { throw IPadTimingError.invalidProfile }
+        default:
+            throw IPadTimingError.invalidProfile
+        }
         #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
         guard UIDevice.current.userInterfaceIdiom == .pad else { throw IPadTimingError.invalidProfile }
         return true
@@ -64,7 +70,7 @@ final class PrivacySupportUITests: XCTestCase {
         // Runs without an iPad opt-in retain their existing Phone/default allowances.
         let hostedIPad = try useHostedIPadTiming(russian: russian, maximumType: maximumType)
         let hostedPhone = try useHostedPhoneTiming()
-        executionTimeAllowance = hostedIPad ? 900 : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))
+        executionTimeAllowance = hostedIPad ? (russian ? 1200 : 900) : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()

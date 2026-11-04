@@ -63,13 +63,14 @@ def timing_policy(architecture, locale, hosted, environment):
     require_clean_timing_environment(environment)
     require(type(hosted) is bool, "Invalid hosted timing opt-in")
     if hosted:
-        require(architecture == "x86_64" and locale == "en-US", "Hosted timing requires English Intel iPad")
+        require(architecture == "x86_64" and locale in ("en-US", "ru-RU"), "Hosted timing requires a supported Intel iPad locale")
         require(all(environment.get(key) == value for key, value in HOSTED_TIMING_CONTEXT.items()),
                 "Hosted timing requires the exact GitHub-hosted iPad CI context")
-    return MappingProxyType({"name": "hosted-intel-ipad-en-v1" if hosted else "default",
-                             "xcode_case_max_seconds": 900 if hosted else 480,
-                             "command_seconds": 1200 if hosted else 900,
-                             "runner_token": "hosted-intel-ipad-en-v1" if hosted else None})
+    token = ("hosted-intel-ipad-ru-v1" if locale == "ru-RU" else "hosted-intel-ipad-en-v1") if hosted else None
+    return MappingProxyType({"name": token if hosted else "default",
+                             "xcode_case_max_seconds": (1200 if locale == "ru-RU" else 900) if hosted else 480,
+                             "command_seconds": (1500 if locale == "ru-RU" else 1200) if hosted else 900,
+                             "runner_token": token})
 
 
 def selected_case(locale):
@@ -804,6 +805,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--locale", required=True, choices=[case[0] for case in CASES])
     parser.add_argument("--hosted-intel-timing", action="store_true",
-                        help="Use the fixed English Intel iPad timing policy in GitHub-hosted CI only")
+                        help="Use the fixed locale-specific Intel iPad timing policy in GitHub-hosted CI only")
     args = parser.parse_args()
     sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale, args.hosted_intel_timing).run())
