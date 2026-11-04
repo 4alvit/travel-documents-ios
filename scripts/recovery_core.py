@@ -38,10 +38,10 @@ PREPARE_PHASE_SECONDS = 780
 EXECUTION_PROFILES = MappingProxyType({
     'default': MappingProxyType(dict(name='default', total_seconds=1500,
         cleanup_seconds=120, prepare_command_seconds=780, phase_command_seconds=600,
-        prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None)),
+        prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None, boot_scan_seconds=15)),
     'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=4800,
         cleanup_seconds=120, prepare_command_seconds=1200, phase_command_seconds=900,
-        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1')),
+        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1', boot_scan_seconds=60)),
 })
 
 
@@ -457,8 +457,9 @@ class Recovery:
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
         # Native phase scans allow30s after a retained export scan exceeded15s.
-        # Active owned boot waits retain15s; admission, other discovery, capability
-        # and evidence retain5s. No command/global/stop deadline is extended.
+        # Exact active owned boot waits use the immutable profile's scan allowance:
+        # default15s, hosted Intel60s. Admission, other discovery, capability and
+        # evidence retain5s. No command/global/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         boot_process = (self.active.get(pending.get('pgid'))
                         if owner is self and unfinished and pending.get('id') == 'boot-ready' else None)
@@ -466,7 +467,7 @@ class Recovery:
                      and self.owned is not None
                      and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
         allowance = (CAPS['phase_scan_seconds'] if phase_scan else
-                     CAPS['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
+                     self.execution_profile['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
             context = getattr(owner, '_finalizing_success', None)

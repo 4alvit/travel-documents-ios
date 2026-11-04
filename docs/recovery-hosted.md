@@ -121,6 +121,17 @@ for the three phase commands, 360 for result readers, 160 for app-state checks,
 total 4,515 seconds, leaving 165 for source copying, manifests, parsing and other
 in-process verification before cleanup. They remain ceilings rather than new
 per-phase clocks. No phase retries or additional workers are introduced.
+The immutable hosted Intel profile allows up to 60 seconds for one complete
+resource scan during an exact active owned boot wait; the portable profile
+retains 15 seconds. Two Intel attempts exceeded 15 seconds before native tests,
+including one measured 25.86-second file-stat operation span. These spans include
+scheduling and do not establish the underlying cause. The scan still shares the
+original 300-second boot command, its eight-second stop reserve and the global
+work deadline. Repeated scans cannot renew those clocks. Admission and other
+ordinary scans retain five seconds, native phase scans retain 30 seconds, and
+all files, byte limits and ownership checks remain required. A synchronous
+operation can overrun a cooperative deadline; after it returns, the scan fails
+closed rather than accepting partial accounting.
 Recovery discovery uses one fixed 300-second window after source/toolchain
 preflight. It covers the first runtime query, profile parsing/selection, the
 existing capability check, runtime recheck, baseline device inventory, one
@@ -652,8 +663,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 109 minutes, phone guidance has 65 minutes,
-and each iPad locale has 95 minutes, at most 439 aggregate job-minutes. Within this
+Core has a 75-minute limit, Recovery has 109 minutes, phone guidance has 95 minutes,
+and each iPad locale has 95 minutes, at most 469 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same
@@ -663,6 +674,16 @@ There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
 runner change requires fresh runtime evidence and does not validate old failures
 or guarantee available hosted capacity.
+
+The hosted Intel Phone guidance profile uses a 75-minute integration step within
+that 95-minute job. Its bootstrap remains bounded by 1,120 seconds, the nine
+required native case allowances total 2,700 seconds, and 680 seconds remain for
+selection, generation, main build/session startup and result finalization. This
+is an allocation policy rather than a measured worst-case guarantee. Only the
+three short cases that timed out and English guidance receive the explicit
+Phone allowances; ordinary runs, Core, ARM and dedicated iPad limits stay intact.
+All assertions, diagnostic captures and app termination remain required; see
+[the release qualification policy](github-releases.md) for selection and evidence.
 
 In [Core run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897092),
 the English purchase-failure case exceeded its 180-second allowance while

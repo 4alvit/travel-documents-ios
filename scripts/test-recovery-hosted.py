@@ -513,8 +513,11 @@ class BoundaryTests(unittest.TestCase):
     def test_execution_profile_is_known_immutable_and_selected_before_output(self):
         r=self.runner(execution_profile='hosted-intel-v1')
         self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+        self.assertEqual(r.execution_profile['boot_scan_seconds'],60)
+        self.assertEqual(hosted.core.execution_profile()['boot_scan_seconds'],15)
         self.assertEqual(r.report['execution_profile'],dict(r.execution_profile))
         with self.assertRaises(TypeError):r.execution_profile['total_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['boot_scan_seconds']=9999
         with self.assertRaises(AttributeError):r.execution_profile=hosted.core.execution_profile()
         selected=r.execution_profile;deadlines=(r.t0,r.limit,r.final)
         with self.assertRaisesRegex(AttributeError,'reselected'):r._execution_profile=hosted.core.execution_profile()
@@ -3313,6 +3316,163 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual((row['work_deadline'],row['command_deadline'],row['returncode']),(112.,120.,0))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    @contextlib.contextmanager
+    def delayed_boot_stat(self, r, delay, *, repeat=False, cancel=False):
+        """Delay one real no-follow file stat using only the injected clock."""
+        payload=r.out/'scan-payload.bin';payload.write_bytes(b'complete accounting\n'*512)
+        original=hosted.core.os.scandir;calls=[]
+        @contextlib.contextmanager
+        def scan(fd):
+            with original(fd) as children:
+                def entries():
+                    for child in children:
+                        def read(*,follow_symlinks,child=child):
+                            if child.name==payload.name and r.active and (repeat or not calls):
+                                calls.append((r.ops.now(),follow_symlinks))
+                                r.ops.t+=delay
+                                if cancel:r.interrupted=True
+                            return child.stat(follow_symlinks=follow_symlinks)
+                        yield SimpleNamespace(name=child.name,stat=read)
+                yield entries()
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            yield calls,payload
+
+    def test_hosted_boot_scan_60_requires_exact_owned_context(self):
+        r=self.runner(execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':292.}
+        r.report['commands'].append(row);observed=[]
+        def scan(*args,**kwargs):
+            observed.append((args[3],kwargs['allow_xcresult_restart'],kwargs['allow_products_restart']))
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);r.monitor()
+            r.active[123]=SimpleNamespace(pid=456);r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);row['finish']=0.;r.monitor();del row['finish']
+            row['argv']=argv[:-2]+['unowned','-b'];r.monitor();row['argv']=argv
+            row['id']='boot';r.monitor();row['id']='boot-ready'
+            r.owned=None;r.monitor();r.owned=argv[3]
+            row['work_deadline']=7.;r.monitor();row['work_deadline']=292.
+            r.limit=4.;r.monitor();r.limit=4680.
+            probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[dict(row)]},
+                                  active={123:SimpleNamespace(pid=123)},owned=r.owned)
+            r.monitor(command_owner=probe)
+            row['id']='phase-prepare';r.monitor()
+        self.assertEqual(observed,[(end,False,False) for end in [5.,60.,5.,5.,5.,5.,5.,7.,4.,5.]]
+                         +[(30.,True,True)])
+        self.assertEqual((r.limit,r.final),(4680.,4800.))
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
+                          hosted.core.CAPS['boot_scan_seconds']),(5,30,15))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_hosted_boot_scan_completes_full_traversal_after_26_second_stat(self):
+        r=self.runner(Ops({'delay':26.}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.) as (calls,payload):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1);self.assertFalse(calls[0][1])
+        scans=[x for x in r.report['resources'] if x['scan']['requested_scan_seconds']==60]
+        self.assertEqual(len(scans),1)
+        self.assertEqual(scans[0]['scan']['traversal_duration_seconds'],26.)
+        self.assertEqual(scans[0]['entries'],4)
+        self.assertGreaterEqual(scans[0]['logical'],payload.stat().st_size)
+        self.assertGreaterEqual(scans[0]['allocated'],payload.stat().st_blocks*512)
+        self.assertNotIn('resource_scan_failure',r.report)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds'],row['returncode']),(300,292.,300.,8,0))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+
+    def test_default_boot_scan_still_rejects_26_second_stat(self):
+        ops=Ops({'delay':float('inf'),'exit':-15})
+        r=hosted.core.Recovery(ops,self.root/'portable',
+                              {'runtime':'synthetic-runtime','device_type':'synthetic-device'},
+                              {'machine':'arm64'},'test',0,
+                              candidate=self.root/'source',source_manifest={})
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1)
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(failure['requested_scan_seconds'],15)
+        self.assertTrue(failure['partial_counts_are_not_valid_accounting'])
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(112.,120.))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+
+    def test_hosted_boot_scan_over_60_fails_once_and_stops_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,60.25) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(len(calls),1);self.assertEqual(failure['requested_scan_seconds'],60)
+        self.assertEqual(failure['deadline_elapsed']-failure['started_elapsed'],60)
+        self.assertEqual(failure['traversal']['last_operation']['operation'],'entry_stat')
+        self.assertEqual(failure['traversal']['last_operation']['duration_seconds'],60.25)
+        self.assertTrue(failure['partial_counts_are_not_valid_accounting'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[15]);self.assertLess(row['finish'],300.)
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_hosted_boot_scan_late_stat_keeps_command_and_global_deadlines(self):
+        for name,start,wakeup,work,deadline in [('command',0.,290.,292.,300.),
+                                                 ('global',4600.,4670.,4672.,4680.)]:
+            with self.subTest(name=name):
+                r=self.runner(Ops({'delay':float('inf'),'exit':-15}),
+                              execution_profile='hosted-intel-v1',label=name)
+                r.owned='10000000-0000-0000-0000-000000000001';r.ops.t=start
+                r.ops.on_spawn=lambda argv:setattr(r.ops,'t',wakeup)
+                with self.delayed_boot_stat(r,2.25):
+                    with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                        r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+                self.assertEqual((failure['requested_scan_seconds'],failure['started_elapsed'],
+                                  failure['deadline_elapsed'],failure['finished_elapsed']),
+                                 (60,wakeup,work,wakeup+2.25))
+                self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                                 (work,deadline,8))
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertLess(row['finish'],deadline);self.assertFalse(r.active)
+                self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+
+    def test_hosted_repeated_boot_scans_cannot_renew_original_command(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.,repeat=True) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertGreaterEqual(len(calls),8)
+        scans=[x for x in r.report['resources'] if x['scan']['requested_scan_seconds']==60]
+        self.assertGreaterEqual(len(scans),7)
+        self.assertTrue(all(x['scan']['deadline_elapsed']<=292 for x in scans))
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual((failure['requested_scan_seconds'],failure['deadline_elapsed']),(60,292.))
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                         (292.,300.,8))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],292.);self.assertLess(row['finish'],300.)
+        self.assertEqual(row['stop']['signals'],[15]);self.assertEqual(len(r.ops.processes),1)
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
+
+    def test_hosted_boot_scan_cancellation_still_closes_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.,cancel=True) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1);row=r.report['commands'][0]
+        self.assertIn('Interrupted',row['error'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[15]);self.assertFalse(r.active)
+        self.assertEqual((r.t0,r.limit,r.final),(0,4680,4800))
 
     def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
         r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'

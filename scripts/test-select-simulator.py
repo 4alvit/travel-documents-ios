@@ -119,12 +119,14 @@ class ShellTests(unittest.TestCase):
         self.output = self.root / "xcode-arguments.json"
         self.env = {**os.environ, "PATH": str(self.root / "bin") + ":" + os.defpath,
                     "FAKE_SIM_INVENTORY": str(self.input), "FAKE_XCODE_ARGS": str(self.output)}
-        self.env.pop("TRIPFOLIO_SIMULATOR_ID", None)
+        for name in ("TRIPFOLIO_SIMULATOR_ID", "TEST_RUNNER_TRIPDOCKET_PHONE_TIMING",
+                     "TRIPDOCKET_PHONE_TIMING", "RUNNER_ARCH", "GITHUB_ACTIONS"):
+            self.env.pop(name, None)
         (self.root / "bin/python3").symlink_to(sys.executable)
         tools = {
             "xcodegen": "pass",
-            "uname": "print('arm64')",
-            "xcodebuild": "Path(os.environ['FAKE_XCODE_ARGS']).write_text(json.dumps(sys.argv[1:]))",
+            "uname": "print(os.environ.get('FAKE_ARCH', 'arm64'))",
+            "xcodebuild": "Path(os.environ['FAKE_XCODE_ARGS']).write_text(json.dumps(sys.argv[1:])); Path(os.environ['FAKE_XCODE_ARGS'] + '.env').write_text(json.dumps({k:v for k,v in os.environ.items() if 'PHONE_TIMING' in k}))",
             "xcrun": """args = sys.argv[1:]
 if args == ['--sdk', 'iphonesimulator', '--show-sdk-version']: print('26.2')
 elif args[:2] == ['simctl', 'list']:
@@ -175,8 +177,49 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
                 self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
                 self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], ceiling)
         source = (Path(__file__).resolve().parents[1] / "UITests/PrivacySupportUITests.swift").read_text()
-        self.assertIn("executionTimeAllowance = russian && maximumType ? 600 : 480", source)
+        self.assertIn("executionTimeAllowance = russian && maximumType ? 600 : (hostedPhone ? 720 : 480)", source)
         self.assertEqual(source.count("executionTimeAllowance ="), 1)
+
+    def test_hosted_phone_profile_is_final_invocation_only(self):
+        self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                        RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                        GITHUB_JOB="ui_guidance", FAKE_ARCH="x86_64")
+        (self.root / "scripts/prepare-guidance-files.py").write_text(
+            "import os\nassert 'TEST_RUNNER_TRIPDOCKET_PHONE_TIMING' not in os.environ\n"
+            "assert 'TRIPDOCKET_PHONE_TIMING' not in os.environ\n")
+        result = self.run_script("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(self.output.read_text())
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "720")
+        self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
+        exported = json.loads(Path(str(self.output) + ".env").read_text())
+        self.assertEqual(exported, {"TEST_RUNNER_TRIPDOCKET_PHONE_TIMING": "hosted-intel-phone-v1"})
+        for args in [(), ("--cohort", "core-purchase"), ("--cohort", "ui-guidance")]:
+            result = self.run_script(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(Path(str(self.output) + ".env").read_text()), {})
+
+    def test_hosted_phone_rejects_inherited_tokens_and_crossed_host_before_tools(self):
+        for name in ["TEST_RUNNER_TRIPDOCKET_PHONE_TIMING", "TRIPDOCKET_PHONE_TIMING"]:
+            for value in ["", "wrong", "hosted-intel-phone-v1"]:
+                with self.subTest(name=name, value=value):
+                    self.env[name] = value
+                    result = self.run_script()
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse(self.output.exists())
+                    del self.env[name]
+        self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                        RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                        GITHUB_JOB="ui_guidance", FAKE_ARCH="x86_64")
+        for name, wrong in [("RUNNER_OS", "Linux"), ("RUNNER_ENVIRONMENT", "self-hosted"),
+                            ("GITHUB_WORKFLOW", "Other"), ("GITHUB_JOB", "recovery"),
+                            ("FAKE_ARCH", "arm64")]:
+            with self.subTest(name=name):
+                old = self.env[name]; self.env[name] = wrong
+                result = self.run_script("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(self.output.exists())
+                self.env[name] = old
 
     def test_strict_wrong_requested_uuid_prevents_native_test_command(self):
         result = self.run_script("--require-sdk-match", requested=SECOND)

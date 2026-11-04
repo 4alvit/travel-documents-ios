@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import UIKit
 
 /// Run this class on both an iPhone and an iPad destination. Language and content
 /// size overrides belong only to each launched app process; no system settings
@@ -10,6 +11,21 @@ import XCTest
 /// every transient pixel, physical-device privacy, or VoiceOver behavior.
 @MainActor
 final class LocalizationUITests: XCTestCase {
+    private enum PhoneTimingError: Error { case invalidProfile }
+
+    private func useHostedPhoneTiming() throws -> Bool {
+        guard let profile = ProcessInfo.processInfo.environment["TRIPDOCKET_PHONE_TIMING"] else {
+            return false
+        }
+        guard profile == "hosted-intel-phone-v1" else { throw PhoneTimingError.invalidProfile }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw PhoneTimingError.invalidProfile }
+        return true
+        #else
+        throw PhoneTimingError.invalidProfile
+        #endif
+    }
+
     private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
     private let backupWarningText = "Резервная копия содержит все оригиналы документов, сведения о путешественниках и поездках в открытом, незашифрованном виде. Любой, у кого есть копия, может получить к ним доступ. Храните её в надёжном месте. Ранее переданные копии нельзя отозвать."
     private let backupWarningTitle = "Экспортировать копию без шифрования?"
@@ -103,7 +119,7 @@ final class LocalizationUITests: XCTestCase {
     }
 
     func testRussianMaximumTypeCompleteBackupWarningAndCancellation() async throws {
-        executionTimeAllowance = 120
+        executionTimeAllowance = try useHostedPhoneTiming() ? 240 : 120
         let app = try launchFixture(maximumType: true)
         defer { app.terminate() }
         try selectTab("Настройки", in: app)
