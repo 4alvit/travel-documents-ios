@@ -363,11 +363,15 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(self.run_bootstrap(runner), 1)
 
     def test_tampered_inputs_and_existing_output_never_overwritten(self):
-        runner = self.make(); original = runner.out.stat().st_ino
-        with self.assertRaises(FileExistsError): m.Bootstrap(runner.directory, CI)
-        self.assertEqual(runner.out.stat().st_ino, original)
-        (runner.directory / "sdk.txt").write_text("27.0")
-        with self.assertRaises(RuntimeError): m.read_selection(runner.directory)
+        for architecture in ("arm64", "x86_64"):
+            with self.subTest(architecture=architecture):
+                runner = self.make(architecture=architecture)
+                original = runner.out.stat().st_ino
+                with patch.object(m.os, "uname", return_value=SimpleNamespace(machine=architecture)):
+                    with self.assertRaises(FileExistsError): m.Bootstrap(runner.directory, CI)
+                self.assertEqual(runner.out.stat().st_ino, original)
+                (runner.directory / "sdk.txt").write_text("27.0")
+                with self.assertRaises(RuntimeError): m.read_selection(runner.directory)
 
     def test_forged_selection_and_late_input_mutation_fail(self):
         runner = self.make(); path = runner.directory / "selection.json"
