@@ -157,6 +157,27 @@ qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
+Only the shared post-New-Folder readiness observation gets a 30-second polling
+allowance. In run 41805678990, about 18 seconds elapsed between the first live
+picker-count query starting and the failure capture. That query did not report
+exactly one picker, and the previous 15-second window ended before a second
+sample. The later failure image showed an inline editor
+and keyboard introduction; it does not establish when either became ready.
+The new allowance permits another fresh, fully validated picker/application
+pair. More and New Folder are still tapped once, and no other wait or outer
+case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
+wait semantics. It does not guarantee remote Files readiness.
+
+The explicit keyboard-introduction state accepts zero or one Keyboard node:
+its first-use overlay can be present in a bound application snapshot without a
+separate Keyboard node. The unique introduction must have finite, positive bounds
+inside the application window, clear of the exact inline editor and local-root
+title. Any present keyboard must retain its existing geometry checks. Ordinary
+editing still requires exactly one keyboard. The nonediting Rename fallback
+rejects an introduction in either snapshot, including when no Keyboard is exposed.
+This changes only readiness classification; the single Continue acknowledgment, exact explanation and button,
+subsequent dismissal/editor checks, and all action budgets remain required.
+
 The shared guidance preparation invoked by `test-simulator.sh` omits this flag
 and uses the same existing Debug Simulator exporter for provider-only preparation. Both prepare modes
 require the isolated Recovery opt-in, prepare phase and canonical destination
@@ -298,6 +319,15 @@ closure, successful pipe and log closure, and successful stdout read, the
 existing conditional final checkpoint may use the original total command
 deadline. This short-lived in-memory context belongs to that exact command and
 process; saved receipt fields cannot grant it. It is cleared even on an exception.
+For the exact owned hosted boot wait, one due periodic sample may be deferred
+after a successful live process poll while the final pipe data is drained.
+The drain keeps its original work deadline, cancellation checks and output caps;
+forced samples, delegated commands and any second drain checkpoint still scan.
+The sample schedule is not advanced, so successful process and stream closure
+must be followed by the still-due complete sample. Failure of that final sample
+still fails the command. This avoids starting a traversal before closing an
+already-exited boot process when little work time remains; it does not extend
+boot time or accept a partial resource scan.
 The five/fifteen/thirty-second sample ceilings and total command/global caps do
 not change, and no additional sample is forced. One fixed deadline covers both free-space reads and the full uncached output
 traversal; its deadline is never renewed within a sample. Capability, other preparation and

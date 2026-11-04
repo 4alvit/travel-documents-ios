@@ -35,8 +35,10 @@ final class BatchImportUITests: XCTestCase {
         guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
               applicationSnapshot.elementType == .application,
               let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
-              !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }),
-              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { diagnostic?("snapshot-scope-or-editor-or-keyboard"); return nil }
+              !all.contains(where: { $0.identifier == "DOC.inlineRenameField"
+                  || $0.identifier == "UIContinuousPathIntroductionView" || $0.elementType == .keyboard }),
+              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField"
+                  || $0.identifier == "UIContinuousPathIntroductionView" || $0.elementType == .keyboard }) else { diagnostic?("snapshot-scope-or-editor-or-keyboard"); return nil }
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -99,9 +101,14 @@ final class BatchImportUITests: XCTestCase {
         let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
         let editors = all.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
         let keyboards = environment.filter { $0.elementType == .keyboard }
+        let introductions = environment.filter { $0.identifier == "UIContinuousPathIntroductionView" }
+        // The first-use introduction can replace the Keyboard accessibility node.
+        // It still needs its own visible, non-overlapping bounds before Continue.
+        let obstructions = keyboards + introductions
         let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard pickers.count == 1, roots.count == 1, grids.count == 1, navigations.count == 1,
-              editors.count == 1, keyboards.count == 1, !windows.isEmpty,
+              editors.count == 1, (keyboardIntroduction ? keyboards.count <= 1 : keyboards.count == 1),
+              !windows.isEmpty,
               let pickerNodes = nodes(pickers[0]), let rootNodes = nodes(roots[0]),
               pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
               rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
@@ -116,15 +123,16 @@ final class BatchImportUITests: XCTestCase {
                 || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
         }
         guard titles.count == 1,
-              [grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
-               titles[0].frame, keyboards[0].frame].allSatisfy(visibleFrame),
+              ([grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
+                titles[0].frame] + obstructions.map(\.frame)).allSatisfy(visibleFrame),
               windows.allSatisfy({ visibleFrame($0.frame) }) else { diagnostic?("title-or-nonfinite-frame"); return nil }
         let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
         guard visibleFrame(window), window.contains(titles[0].frame), window.contains(editors[0].frame),
               window.contains(cells[0].frame), navigations[0].frame.contains(titles[0].frame),
               grids[0].frame.contains(editors[0].frame), grids[0].frame.contains(cells[0].frame),
-              !keyboards[0].frame.intersects(editors[0].frame),
-              !keyboards[0].frame.intersects(titles[0].frame) else { diagnostic?("window-or-containment-or-keyboard"); return nil }
+              introductions.allSatisfy({ window.contains($0.frame) }),
+              obstructions.allSatisfy({ !$0.frame.intersects(editors[0].frame)
+                  && !$0.frame.intersects(titles[0].frame) }) else { diagnostic?("window-or-containment-or-keyboard"); return nil }
         // The real inline editor extends beyond the folder cell's horizontal
         // bounds. Ownership is its ancestry; visible bounds are grid/window.
         return editors[0].frame
@@ -748,7 +756,7 @@ final class BatchImportUITests: XCTestCase {
         var renameFrame: CGRect?
         var initialObservation = NativeFolderInitialObservation()
         do {
-            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
+            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: .seconds(30)) {
                 renameFrame = nil
                 initialObservation.begin()
                 do {
