@@ -761,8 +761,10 @@ longer reruns independent guidance jobs through the removed dependency edges;
 copied or earlier successful records are not fresh native evidence.
 
 The hosted Intel Phone guidance profile uses a 75-minute integration step within
-that 95-minute job. Its bootstrap remains bounded by 1,120 seconds, the nine
-required native case allowances total 2,700 seconds, and 680 seconds remain for
+that 95-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
+30 cleanup and ten receipt), including a 300-second post-preparation warm-boot
+command. Arm retains 1,080 seconds of work and its 180-second warm-boot cap.
+The nine required native case allowances total 2,700 seconds, and 320 seconds remain for
 selection, generation, main build/session startup and result finalization. This
 is an allocation policy rather than a measured worst-case guarantee. Only the
 three short cases that timed out and English guidance receive the explicit

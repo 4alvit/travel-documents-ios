@@ -2,6 +2,7 @@
 """Initialize the selected CI Files provider once; never certify cold first use."""
 import argparse
 from contextlib import ExitStack
+import errno
 import hashlib
 import importlib.util
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import signal
 import stat
 import time
+from types import MappingProxyType
 import uuid
 
 import recovery_process as process
@@ -22,6 +24,12 @@ require = process.require
 FILES = "com.apple.DocumentsApp"
 GROUP = "group.com.apple.FileProvider.LocalStorage"
 WORK, STOP, WRITE = 1080, 30, 10
+EXECUTION_PROFILES = MappingProxyType({
+    "arm64": MappingProxyType({"name": "default", "architecture": "arm64",
+                              "work_seconds": WORK, "warm_boot_seconds": 180}),
+    "x86_64": MappingProxyType({"name": "intel-phone", "architecture": "x86_64",
+                               "work_seconds": 1440, "warm_boot_seconds": 300}),
+})
 PREPARE_COMMAND_SECONDS = 960
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
@@ -31,11 +39,14 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # includes build and runner startup: run 41577208390 used about 711s before
 # the case and exhausted the old 780s cap after only 61s of the unchanged
 # 180s case allowance. The 960s command cap includes its 8s stop reserve;
-# all postprocessing still shares the fixed 1080s work deadline. This is a
-# bounded combined allowance, not a separately enforced launch deadline.
-# The 75m integration / 95m job budget includes this unchanged1120s envelope,
-# nine case ceilings totaling2700s, and680s other-work margin. Completion is not guaranteed.
-# Recovery allows 780s for prepare and 600s for export/restore; batch has separate caps.
+# postprocessing shares one original work deadline: 1080s on Arm, 1440s on Intel.
+# The Intel warm-boot command gets 300s including its 8s stop reserve. Historical
+# successful post-boot work took 58s; 960s preparation + 19.4s other pre-boot work
+# + 300s boot + 58s leaves about 102s within 1440s. This is engineering margin,
+# not a guarantee that every individual command can consume its full cap.
+# The unchanged 75m integration / 95m job budget includes the Intel 1480s envelope,
+# nine case ceilings totaling 2700s, and 320s other-work margin.
+# Recovery and batch have separate profiles; their caps are not changed here.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")
 
@@ -108,6 +119,16 @@ def validate_preparation(summary, tree, selected):
 
 
 class Bootstrap(process.Smoke):
+    def __setattr__(self, name, value):
+        if name == "execution_profile" and name in self.__dict__:
+            raise AttributeError("Execution profile is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name == "execution_profile":
+            raise AttributeError("Execution profile is immutable")
+        super().__delattr__(name)
+
     def __init__(self, directory, env=None):
         started = time.monotonic()
         self.env = dict(os.environ if env is None else env)
@@ -117,17 +138,22 @@ class Bootstrap(process.Smoke):
                 "Files preparation is hosted CI ui-guidance only")
         self.directory = directory.absolute()
         self.selected, self.input_hashes = read_selection(self.directory)
+        machine = os.uname().machine
+        require(machine in EXECUTION_PROFILES and self.selected["architecture"] == machine,
+                "Selected and actual bootstrap host architectures differ")
+        self.execution_profile = EXECUTION_PROFILES[machine]
         self.out = self.directory / "files-bootstrap"
         self.out.mkdir(exist_ok=False)
         self.ops = process.RealOps(self.env, str(HERE.parent))
-        self.t0 = started; self.limit = self.t0 + WORK
+        self.t0 = started; self.limit = self.t0 + self.execution_profile["work_seconds"]
         self.cleanup_deadline = self.limit + STOP; self.write_deadline = self.cleanup_deadline + WRITE
         self.active = {}; self.absent_groups = set(); self.unknown_spawn = False; self.log_total = 0
         self.interrupted = False
         self.preparation_calls = 0
         self.report = {"schema_version": 1, "status": "running", "commands": [], "errors": [],
             "coverage": "preinitialized-provider; not cold first-use acceptance", "selected": self.selected,
-            "input_sha256": self.input_hashes, "limits": {"work_seconds": WORK, "stop_seconds": STOP,
+            "input_sha256": self.input_hashes, "execution_profile": dict(self.execution_profile),
+            "limits": {"work_seconds": self.execution_profile["work_seconds"], "stop_seconds": STOP,
                 "receipt_seconds": WRITE, "per_stream_bytes": process.PER_LOG, "all_stream_bytes": process.ALL_LOG},
             "device_ownership": "preexisting; never delete, erase, or shut down",
             "cleanup_scope": "owned host command groups only; Simulator service lifetime is not claimed"}
@@ -304,7 +330,8 @@ class Bootstrap(process.Smoke):
         if row["state"] == "Shutdown":
             # Xcode can return a device it started to Shutdown after the test.
             # Container lookup requires Booted; warm only this validated device.
-            self.command("post-preparation-bootstatus", ["xcrun", "simctl", "bootstatus", udid, "-b"], 180)
+            self.command("post-preparation-bootstatus", ["xcrun", "simctl", "bootstatus", udid, "-b"],
+                         self.execution_profile["warm_boot_seconds"])
             live = self.json_command("devices-after-warm-boot", ["list", "devices", "--json"], 120)
             row, same_root = selected_device(self.selected, runtimes, types, live)
             require(row["state"] == "Booted" and same_root == root and directory_identity(root) == root_pin,
@@ -325,6 +352,64 @@ class Bootstrap(process.Smoke):
         selected, hashes = read_selection(self.directory)
         require(selected == self.selected and hashes == self.input_hashes, "Selection inputs changed during preparation")
 
+    def observe_failed_warm_boot(self, child, record):
+        """Observe one owned child after a failed stop; never retry stop or signal."""
+        pid = child.pid
+        stop = record.get("stop", {})
+        probe = record.get("process_observations", {}).get("stop.group_probe", {})
+        if not (type(pid) is int and pid > 0 and self.active.get(pid) is child
+                and len(self.active) == 1 and not self.unknown_spawn
+                and record.get("pgid") == pid and record.get("id") == "post-preparation-bootstatus"
+                and record.get("argv") == ["xcrun", "simctl", "bootstatus", self.selected["udid"], "-b"]
+                and record.get("outcome") == "failed" and record.get("error")
+                and stop.get("attempted") is True and stop.get("signals") == []
+                and stop.get("group_absent") is False
+                and probe.get("outcome") == "raised" and probe.get("exception_type") == "PermissionError"
+                and probe.get("errno") == errno.EPERM and "post_stop_observation" not in record):
+            return
+        deadline = self.cleanup_deadline
+        observation = {"attempted": True, "start": self.ops.now() - self.t0,
+                       "deadline": deadline - self.t0, "status": "unconfirmed",
+                       "unknown_probe_count": 0}
+        record["post_stop_observation"] = observation
+
+        def check():
+            require(self.active.get(pid) is child and child.pid == pid and len(self.active) == 1
+                    and not self.unknown_spawn and record.get("pgid") == pid
+                    and sum(row is record for row in self.report["commands"]) == 1
+                    and sum(row.get("pgid") == pid for row in self.report["commands"]) == 1,
+                    "Warm-boot observation ownership changed")
+            require(self.ops.now() < deadline, "Warm-boot observation deadline reached")
+
+        try:
+            while True:
+                check()
+                code = process.observed(self, observation, "confirmation", "poll", child.poll)
+                check()
+                require(code is None or type(code) is int, "Invalid child poll result")
+                absent = None
+                try:
+                    absent = process.observed(self, observation, "confirmation", "group_probe",
+                                              lambda: self.ops.absent(child))
+                except PermissionError as error:
+                    if error.errno != errno.EPERM:
+                        raise
+                    observation["unknown_probe_count"] += 1
+                check()
+                require(absent is None or type(absent) is bool, "Invalid group observation")
+                observation.update(last_reaped=type(code) is int, last_group_absence=absent)
+                if type(code) is int and absent is True:
+                    self.active.pop(pid)
+                    self.absent_groups.add(pid)
+                    observation["status"] = "confirmed"
+                    return
+                self.ops.sleep(min(.05, max(0., deadline - self.ops.now())))
+                check()
+        except BaseException as error:
+            observation["error"] = repr(error)
+        finally:
+            observation["finish"] = self.ops.now() - self.t0
+
     def execute(self):
         self.save()
         try:
@@ -343,6 +428,8 @@ class Bootstrap(process.Smoke):
                         self.stop(child, self.cleanup_deadline, records[0])
                     except BaseException as error:
                         self.error(repr(error))
+                elif len(records) == 1:
+                    self.observe_failed_warm_boot(child, records[0])
             self.report["host_cleanup"] = {"active_groups": sorted(self.active), "unknown_spawn": self.unknown_spawn}
             if self.active or self.unknown_spawn or self.report["errors"]:
                 self.report["status"] = "failed"
