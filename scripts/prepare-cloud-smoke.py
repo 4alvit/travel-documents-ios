@@ -201,7 +201,7 @@ def prepare(args, report):
             and re.fullmatch(r'[0-9a-f]{40}', env.get('GITHUB_SHA', ''))
             and all(re.fullmatch(r'[1-9][0-9]*', env.get(key, '')) for key in
                     ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')), 'Incomplete diagnostic run identity')
-    require(env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == 'ARM64'
+    require(env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == 'X64'
             and env.get('ImageOS') == 'macos15' and env.get('DEVELOPER_DIR') == DEVELOPER_DIR,
             'Unexpected hosted toolchain profile')
     require(re.fullmatch(r'[0-9a-f]{40}', args.commit) and args.run_id > 0 and args.artifact_id > 0,
@@ -245,7 +245,7 @@ def prepare(args, report):
     extract_app(preparer, files['TripDocket-Simulator.zip'], inputs, commands.check)
     report['input_files'] = {name: {'bytes': len(body), 'sha256': preparer.digest(body)} for name, body in files.items()}
     report['stage'] = 'host-profile'
-    expected = {'architecture': (['uname', '-m'], 'arm64'),
+    expected = {'architecture': (['uname', '-m'], 'x86_64'),
                 'xcode': (['xcodebuild', '-version'], 'Xcode 26.2\nBuild version 17C52'),
                 'sdk': (['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], '26.2')}
     report['host'] = {}

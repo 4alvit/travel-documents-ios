@@ -47,8 +47,9 @@ class CloudTests(unittest.TestCase):
                     'GITHUB_WORKFLOW': 'Release ZIP ordinary smoke', 'GITHUB_JOB': 'smoke',
                     'GITHUB_RUN_ID': '100', 'GITHUB_RUN_ATTEMPT': '1',
                     'GITHUB_REF': 'refs/heads/diagnostic/release-smoke', 'RUNNER_OS': 'macOS',
-                    'RUNNER_ARCH': 'ARM64', 'ImageOS': 'macos15', 'DEVELOPER_DIR': c.DEVELOPER_DIR,
+                    'RUNNER_ARCH': 'X64', 'ImageOS': 'macos15', 'DEVELOPER_DIR': c.DEVELOPER_DIR,
                     'GH_TOKEN': 'synthetic-secret-never-retain'}
+        self.host_architecture = 'x86_64'
         self.report, self.calls = {}, []
         self.ancestor = True
         outer = self
@@ -80,7 +81,7 @@ class CloudTests(unittest.TestCase):
                     if args == ['rev-parse', outer.f.commit + '^{tree}']: return outer.f.tree.encode()
                     if args == ['show', '-s', '--format=%P', outer.f.commit]: return b''
                     if args == ['show', outer.f.commit + ':project.yml']: return b'    MARKETING_VERSION: "0.1.0"\n'
-                values = {('uname', '-m'): b'arm64', ('xcodebuild', '-version'): b'Xcode 26.2\nBuild version 17C52',
+                values = {('uname', '-m'): outer.host_architecture.encode(), ('xcodebuild', '-version'): b'Xcode 26.2\nBuild version 17C52',
                           ('xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'): b'26.2',
                           ('sw_vers', '-productVersion'): b'15.8.2'}
                 if tuple(argv) in values: return values[tuple(argv)]
@@ -94,6 +95,8 @@ class CloudTests(unittest.TestCase):
     def test_exact_main_artifact_preserves_bytes_modes_and_separate_script_identity(self):
         self.assertEqual(self.prepare(), self.f.tree)
         self.assertEqual(self.report['status'], 'prepared_pending_ordinary_smoke')
+        self.assertEqual(self.report['runner']['RUNNER_ARCH'], 'X64')
+        self.assertEqual(self.report['host']['architecture'], 'x86_64')
         self.assertNotEqual(self.report['source']['commit'], self.report['runner_source']['commit'])
         self.assertEqual(set(self.report['runner_source']['files']), set(c.SOURCE_PATHS))
         for name, body in self.f.files.items():
@@ -104,6 +107,24 @@ class CloudTests(unittest.TestCase):
         self.assertNotIn(self.env['GH_TOKEN'], json.dumps(self.report))
         self.assertNotIn('GH_TOKEN', self.report['runner'])
         self.assertTrue(all(method == 'GET' for method, _ in self.api.calls))
+
+    def test_missing_or_wrong_runner_architecture_stops_before_commands(self):
+        for architecture in (None, 'ARM64', 'arm64', 'x86_64', ''):
+            with self.subTest(architecture=architecture):
+                if architecture is None: self.env.pop('RUNNER_ARCH', None)
+                else: self.env['RUNNER_ARCH'] = architecture
+                with self.assertRaisesRegex(ValueError, 'hosted toolchain profile'): self.prepare()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.api.calls, [])
+                self.assertFalse((self.out / 'inputs').exists())
+
+    def test_intel_runner_metadata_does_not_accept_arm_host(self):
+        self.host_architecture = 'arm64'
+        with self.assertRaisesRegex(ValueError, 'hosted architecture'): self.prepare()
+        self.assertEqual(self.report['stage'], 'host-profile')
+        self.assertNotEqual(self.report.get('status'), 'prepared_pending_ordinary_smoke')
+        self.assertEqual([argv for argv in self.calls if argv[0] != 'git'], [['uname', '-m']])
+        self.assertEqual(self.report['host'], {})
 
     def test_candidate_outside_main_history_stops_before_artifact_or_host_tools(self):
         self.ancestor = False
@@ -269,7 +290,7 @@ class CacheTests(unittest.TestCase):
                 return ''
             if label == 'runtimes': raise StopIteration('Reached runtime inventory after cache')
             return {'xcode': 'Xcode 26.2\nBuild version 17C52', 'developer': c.DEVELOPER_DIR,
-                    'sdk': '26.2', 'architecture': 'arm64'}[label]
+                    'sdk': '26.2', 'architecture': 'x86_64'}[label]
         owner.commands.command = command
         with patch.object(s.time, 'monotonic', side_effect=lambda: clock[0]):
             try: owner.prepare_device()
