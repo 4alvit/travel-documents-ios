@@ -690,4 +690,133 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertIsNone(ops.processes[0].returncode)
 
 
+class BootstrapControlTests(unittest.TestCase):
+    make = BootstrapTests.make
+    run_bootstrap = BootstrapTests.run_bootstrap
+    boot_runner = BootstrapLifecycleTests.boot_runner
+    controls = (KeyboardInterrupt, SystemExit, GeneratorExit)
+
+    def test_owned_warm_boot_controls_propagate_with_failed_receipt(self):
+        for kind in self.controls:
+            for boundary in ("poll", "probe", "sleep"):
+                with self.subTest(kind=kind.__name__, boundary=boundary):
+                    runner, ops = self.boot_runner("x86_64", duration=301)
+                    abort = kind("synthetic control"); original = {}
+                    deadlines = (runner.limit, runner.cleanup_deadline, runner.write_deadline)
+                    def interrupt(*_):
+                        row = runner.report["commands"][0]
+                        if "post_stop_observation" in row:
+                            original.update({key: copy.deepcopy(row[key])
+                                             for key in ("error", "outcome", "stop", "stop_error")})
+                            raise abort
+                    if boundary == "poll": ops.after_poll = interrupt
+                    elif boundary == "probe": ops.after_probe = interrupt
+                    else:
+                        sleep = ops.sleep
+                        def interrupt_sleep(seconds):
+                            interrupt(); sleep(seconds)
+                        ops.sleep = interrupt_sleep
+                    with self.assertRaises(kind) as caught:
+                        self.run_bootstrap(runner)
+                    self.assertIs(caught.exception, abort)
+                    row = runner.report["commands"][0]
+                    self.assertEqual({key: row[key] for key in original}, original)
+                    self.assertEqual(row["post_stop_observation"]["status"], "unconfirmed")
+                    self.assertIn("finish", row["post_stop_observation"])
+                    self.assertEqual(runner.report["status"], "failed")
+                    self.assertEqual(runner.report["host_cleanup"],
+                                     {"active_groups": [101], "unknown_spawn": False})
+                    saved = json.loads((runner.out / "receipt.json").read_text())
+                    self.assertEqual(saved["status"], "failed")
+                    self.assertEqual(saved["commands"][0], row)
+                    self.assertEqual(saved["host_cleanup"], runner.report["host_cleanup"])
+                    self.assertTrue(any(repr(abort) in error for error in saved["errors"]))
+                    self.assertEqual((runner.limit, runner.cleanup_deadline, runner.write_deadline), deadlines)
+                    self.assertEqual(len(ops.processes), 1); self.assertEqual(len(saved["commands"]), 1)
+                    self.assertEqual(ops.signals, []); self.assertEqual(ops.closes, 1)
+                    self.assertIs(runner.active[101], ops.processes[0])
+
+    def test_direct_prepare_control_propagates_after_final_accounting(self):
+        for kind in self.controls:
+            with self.subTest(kind=kind.__name__):
+                runner = self.make(); abort = kind("synthetic prepare control")
+                with patch.object(runner, "prepare", side_effect=abort):
+                    with self.assertRaises(kind) as caught:
+                        self.run_bootstrap(runner)
+                self.assertIs(caught.exception, abort)
+                saved = json.loads((runner.out / "receipt.json").read_text())
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["host_cleanup"], {"active_groups": [], "unknown_spawn": False})
+                self.assertEqual(runner.calls, [])
+
+    def test_cleanup_stop_control_propagates_without_removing_owned_child(self):
+        for kind in self.controls:
+            with self.subTest(kind=kind.__name__):
+                runner = self.make(); child = SimpleNamespace(pid=101)
+                row = {"id": "synthetic-owned-command", "pgid": 101}
+                runner.active[101] = child; runner.report["commands"].append(row)
+                abort = kind("synthetic stop control")
+                with patch.object(runner, "prepare", side_effect=RuntimeError("synthetic prior failure")), \
+                        patch.object(runner, "stop", side_effect=abort) as stop:
+                    with self.assertRaises(kind) as caught:
+                        self.run_bootstrap(runner)
+                self.assertIs(caught.exception, abort)
+                stop.assert_called_once_with(child, runner.cleanup_deadline, row)
+                self.assertIs(runner.active[101], child)
+                saved = json.loads((runner.out / "receipt.json").read_text())
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["host_cleanup"]["active_groups"], [101])
+                self.assertTrue(any("synthetic prior failure" in error for error in saved["errors"]))
+                self.assertTrue(any(repr(abort) in error for error in saved["errors"]))
+
+    def test_prepare_ui_control_restores_environment_without_inspection(self):
+        for kind in self.controls:
+            with self.subTest(kind=kind.__name__):
+                runner = self.make(); environment = runner.ops.env
+                abort = kind("synthetic preparation command control")
+                with patch.object(runner, "command", side_effect=abort) as command, \
+                        patch.object(runner, "inspect_preparation") as inspect:
+                    with self.assertRaises(kind) as caught:
+                        runner.prepare_ui()
+                self.assertIs(caught.exception, abort); self.assertIs(runner.ops.env, environment)
+                command.assert_called_once(); inspect.assert_not_called()
+                self.assertEqual(runner.preparation_calls, 1)
+
+    def test_inspection_control_is_not_replaced_by_earlier_command_failure(self):
+        for kind in self.controls:
+            with self.subTest(kind=kind.__name__):
+                runner = self.make(); environment = runner.ops.env
+                abort = kind("synthetic inspection control")
+                with patch.object(runner, "command", side_effect=RuntimeError("synthetic command failure")), \
+                        patch.object(runner, "inspect_preparation", side_effect=abort) as inspect:
+                    with self.assertRaises(kind) as caught:
+                        runner.prepare_ui()
+                self.assertIs(caught.exception, abort); self.assertIs(runner.ops.env, environment)
+                inspect.assert_called_once()
+
+    def test_receipt_failure_cannot_replace_pending_control_or_reset_deadline(self):
+        for kind in self.controls:
+            for failure in ("io", "deadline"):
+                with self.subTest(kind=kind.__name__, failure=failure):
+                    runner = self.make(); abort = kind("synthetic pending control")
+                    deadline = runner.write_deadline; save = runner.save; calls = []
+                    def failing_save():
+                        calls.append(runner.ops.now())
+                        if len(calls) == 2:
+                            if failure == "io": raise OSError(errno.EIO, "synthetic receipt failure")
+                            runner.ops.value = deadline
+                        save()
+                    with patch.object(runner, "prepare", side_effect=abort), \
+                            patch.object(runner, "save", side_effect=failing_save):
+                        with self.assertRaises(kind) as caught:
+                            self.run_bootstrap(runner)
+                    self.assertIs(caught.exception, abort); self.assertEqual(len(calls), 2)
+                    self.assertEqual(runner.write_deadline, deadline)
+                    self.assertEqual(runner.report["status"], "failed")
+                    self.assertEqual(runner.report["host_cleanup"], {"active_groups": [], "unknown_spawn": False})
+                    self.assertTrue(any("Final receipt: " in error for error in runner.report["errors"]))
+                    # Only the initial receipt is on disk; a failed write is never claimed as final evidence.
+                    self.assertEqual(json.loads((runner.out / "receipt.json").read_text())["status"], "running")
+
+
 if __name__ == "__main__": unittest.main(verbosity=2)

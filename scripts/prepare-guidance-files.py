@@ -245,7 +245,7 @@ class Bootstrap(process.Smoke):
         failure = None
         try:
             self.command("prepare-ui", argv, PREPARE_COMMAND_SECONDS)
-        except BaseException as error:
+        except Exception as error:
             failure = error
         finally:
             self.ops.env = previous
@@ -254,7 +254,7 @@ class Bootstrap(process.Smoke):
         try:
             require(not self.active and not self.unknown_spawn, "Preparation writer ownership unresolved")
             self.inspect_preparation()
-        except BaseException as error:
+        except Exception as error:
             self.report["preparation_inspection_error"] = repr(error)
             if failure is None: failure = error
         if failure is not None: raise failure
@@ -405,7 +405,7 @@ class Bootstrap(process.Smoke):
                     return
                 self.ops.sleep(min(.05, max(0., deadline - self.ops.now())))
                 check()
-        except BaseException as error:
+        except Exception as error:
             observation["error"] = repr(error)
         finally:
             observation["finish"] = self.ops.now() - self.t0
@@ -413,27 +413,38 @@ class Bootstrap(process.Smoke):
     def execute(self):
         self.save()
         try:
-            self.prepare(); self.checkpoint()
-            require(not self.active and not self.unknown_spawn, "Unresolved host process ownership")
-            self.report["status"] = "provider_ready"
+            try:
+                self.prepare(); self.checkpoint()
+                require(not self.active and not self.unknown_spawn, "Unresolved host process ownership")
+                self.report["status"] = "provider_ready"
+            except Exception as error:
+                self.error(repr(error)); self.report["status"] = "failed"
+            finally:
+                try:
+                    # No host-directed device/app lifecycle cleanup. The existing UI
+                    # case owns its fixture's launch/termination and keeps that defer.
+                    for pid, child in list(self.active.items()):
+                        records = [row for row in self.report["commands"] if row.get("pgid") == pid]
+                        if len(records) == 1 and not records[0].get("stop", {}).get("attempted"):
+                            try:
+                                self.stop(child, self.cleanup_deadline, records[0])
+                            except Exception as error:
+                                self.error(repr(error))
+                        elif len(records) == 1:
+                            self.observe_failed_warm_boot(child, records[0])
+                finally:
+                    self.report["host_cleanup"] = {"active_groups": sorted(self.active), "unknown_spawn": self.unknown_spawn}
+                    if self.active or self.unknown_spawn or self.report["errors"]:
+                        self.report["status"] = "failed"
         except BaseException as error:
             self.error(repr(error)); self.report["status"] = "failed"
-        finally:
-            # No host-directed device/app lifecycle cleanup. The existing UI
-            # case owns its fixture's launch/termination and keeps that defer.
-            for pid, child in list(self.active.items()):
-                records = [row for row in self.report["commands"] if row.get("pgid") == pid]
-                if len(records) == 1 and not records[0].get("stop", {}).get("attempted"):
-                    try:
-                        self.stop(child, self.cleanup_deadline, records[0])
-                    except BaseException as error:
-                        self.error(repr(error))
-                elif len(records) == 1:
-                    self.observe_failed_warm_boot(child, records[0])
-            self.report["host_cleanup"] = {"active_groups": sorted(self.active), "unknown_spawn": self.unknown_spawn}
-            if self.active or self.unknown_spawn or self.report["errors"]:
-                self.report["status"] = "failed"
-            self.save()
+            try:
+                self.save()
+            except Exception as receipt_error:
+                # Preserve the pending abort even if its diagnostic write fails.
+                self.error("Final receipt: " + repr(receipt_error))
+            raise
+        self.save()
         return 0 if self.report["status"] == "provider_ready" else 1
 
 
