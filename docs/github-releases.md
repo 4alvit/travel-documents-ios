@@ -299,7 +299,11 @@ test result. Both profiles require an SDK match. Ordinary CI and the default
 Xcode 27.1 review below must still establish actual results and warnings.
 
 Core/purchase tests, phone guidance and the Release preview use Xcode 26.2
-(17C52). Both test jobs require a unique available runtime matching that Xcode's
+(17C52). Core and the Release producer use `macos-15` (ARM64); phone guidance
+and both iPad guidance locales use `macos-15-intel` (x86_64). This separates
+guidance capacity after repeated hosted ARM runner acquisition failures; it
+does not change the test cases or establish that Intel will be available.
+Both iPhone test jobs require a unique available runtime matching that Xcode's
 Simulator SDK, with a compatible iPhone and host architecture. A supplied device
 UUID must satisfy the same checks; there is no fallback to another runtime.
 Release provenance records the actual producer; test bundles record their actual
@@ -440,8 +444,9 @@ retain Xcode 26.2/17C52 and SDK 26.2; Intel additionally requires the installed
 lists the toolchain and runtime version, but does not establish a particular
 job's runtime build or successful execution. Acceptance still requires its own
 live preflight, exact source/product evidence, native results, cleanup and
-independent 27.1 review. Existing Arm results do not certify Intel execution;
-the ordinary CI runner and Release producer are unchanged.
+independent 27.1 review. Existing Arm results do not certify Intel execution.
+The Core/Release producer, Recovery and Swift CodeQL jobs retain their ARM
+profiles; the ordinary phone and iPad guidance jobs use the Intel split above.
 
 Successful hosted capture has status `captured_pending_review`, never `passed`.
 It requires successful native execution, exact case counts and device identity,

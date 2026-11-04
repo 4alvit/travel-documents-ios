@@ -578,14 +578,17 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-three with 35-minute limits and two iPad jobs with 46-minute limits,
-at most 197 aggregate job-minutes. The workflow permits
-up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
-locale, subject to account runner capacity. There are six jobs including the
-Ubuntu gate. The bounded observer retains its original 120-minute admission
-window and records both locale jobs separately; it must not declare a complete
-cohort when one locale is missing, skipped or failed. This is a scheduling-policy
-change requiring new runtime evidence, not acceptance of either failed old run.
+Core and Recovery have 35-minute limits, phone guidance has 65 minutes, and
+each iPad locale has 46 minutes, at most 227 aggregate job-minutes. Within this
+CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
+for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
+account runner capacity. Core and Recovery retain `macos-15` ARM runners;
+phone and iPad guidance use `macos-15-intel` with the same Xcode 26.2 and
+SDK-compatible runtime selection after repeated ARM runner acquisition failures.
+There are six jobs including the Ubuntu gate. Both locale jobs remain required;
+a missing, skipped or failed locale cannot count as a complete cohort. The
+runner split requires fresh runtime evidence and does not validate old failures
+or guarantee available hosted capacity.
 
 
 Files provider readiness uses only the unused part of the original `files-group`
