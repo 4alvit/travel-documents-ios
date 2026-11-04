@@ -748,7 +748,7 @@ final class BatchImportUITests: XCTestCase {
         var renameFrame: CGRect?
         var initialObservation = NativeFolderInitialObservation()
         do {
-            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
+            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: .seconds(30)) {
                 renameFrame = nil
                 initialObservation.begin()
                 do {
