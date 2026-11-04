@@ -522,7 +522,8 @@ final class BatchImportUITests: XCTestCase {
             source.element.tap()
             let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
             let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
-            try await wait("Real Files preparation picker did not open", app: app) {
+            // Cold Files presentation uses the same bounded allowance as native preparation.
+            try await wait("Real Files preparation picker did not open", app: app, timeout: .seconds(30)) {
                 navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
             }
             let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"

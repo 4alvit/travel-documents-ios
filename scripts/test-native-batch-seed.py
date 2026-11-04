@@ -129,8 +129,8 @@ class SeedGuards(unittest.TestCase):
                     UI.index("    // Batch-only provider initialization.")]
         create, provider_only = recovery.split("        } else {",1)
         create = create.split("        if createFolder {",1)[1]
-        # These three callers own the larger initial allowance. The generic
-        # provider-only route and every other caller retain their own defaults.
+        # These three callers use the native-root helper's larger allowance.
+        # Provider-only preparation keeps its iPad-aware route and initial wait.
         remaining = UI
         for name, caller in (("batch prepare",case),("batch folder",folder),("recovery create",create)):
             with self.subTest(caller=name):
@@ -139,7 +139,8 @@ class SeedGuards(unittest.TestCase):
                 remaining = remaining.replace(caller,"",1)
         self.assertNotIn("initialTimeout: .seconds(30)",remaining)
         self.assertNotIn("openNativeFilesRoot(",provider_only)
-        self.assertIn('try await wait("Real Files preparation picker did not open", app: app)',provider_only)
+        self.assertIn('try await wait("Real Files preparation picker did not open", app: app, timeout: .seconds(30))',provider_only)
+        self.assertEqual(provider_only.count('timeout: .seconds(30)'),1)
         self.assertEqual(folder.count("source.element.tap()"),1)
         self.assertLess(folder.index("source.element.tap()"),folder.index("openNativeFilesRoot(app, initialTimeout:"))
         self.assertIn("executionTimeAllowance = 180",folder)

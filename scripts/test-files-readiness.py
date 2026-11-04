@@ -460,6 +460,9 @@ struct BatchTestFailure: Error { let message: String }
 final class World {
     var count = 1, saved = 0, directoryCount = 0
     var enabled = true, hittable = true, failed = false, navigationReady = true
+    var navigationCount = 1, pickerCount = 1
+    var navigationExists = true, pickerExists = true
+    var presentationDelay: Int?, presentationElapsed = 0
     var events: [String] = []
     var waitSeconds: [Int64] = []
     let scenario: String
@@ -472,18 +475,32 @@ final class World {
         if scenario == "failed" { failed = true }
         if scenario == "already-saved" { saved = 1 }
         if scenario == "navigation-missing" { navigationReady = false }
+        if scenario.contains("after-20-seconds") || scenario.contains("after-31-seconds") {
+            presentationDelay = scenario.contains("after-20-seconds") ? 20 : 31
+            navigationReady = false
+        }
+        if scenario.hasPrefix("ambiguous-navigation-") { navigationCount = 2 }
+        if scenario.hasPrefix("ambiguous-picker-") { pickerCount = 2 }
+        if scenario.hasPrefix("missing-picker-") { pickerCount = 0 }
+        if scenario.hasPrefix("absent-navigation-") { navigationExists = false }
+        if scenario.hasPrefix("absent-picker-") { pickerExists = false }
         if scenario == "probe-exists" { directoryCount = 1 }
     }
 }
 enum DeviceIdiom { case phone, pad }
 final class UIDevice {
     static let current = UIDevice()
-    var userInterfaceIdiom: DeviceIdiom { CommandLine.arguments[1] == "ipad-ready" ? .pad : .phone }
+    var userInterfaceIdiom: DeviceIdiom { CommandLine.arguments[1].hasPrefix("ipad-") ? .pad : .phone }
 }
 final class Element {
     let world: World, kind: String
     init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
-    var exists: Bool { kind == "failure" ? world.failed : world.navigationReady }
+    var exists: Bool {
+        if kind == "failure" { return world.failed }
+        if kind == "navigation" { return world.navigationReady && world.navigationExists }
+        if kind == "picker" { return world.navigationReady && world.pickerExists }
+        return world.navigationReady
+    }
     var cells: Query { Query(world, "directory") }
     var buttons: Query { Query(world, "browse") }
     var isEnabled: Bool { precondition(world.count == 1); return world.enabled }
@@ -499,7 +516,8 @@ final class Query {
     var count: Int {
         if kind == "saved" { return world.saved }
         if kind == "directory" { return world.directoryCount }
-        if kind == "navigation" || kind == "picker" { return world.navigationReady ? 1 : 0 }
+        if kind == "navigation" { return world.navigationReady ? world.navigationCount : 0 }
+        if kind == "picker" { return world.navigationReady ? world.pickerCount : 0 }
         return world.count
     }
     var element: Element { Element(world, kind) }
@@ -553,6 +571,17 @@ final class Harness {
     // ACTUAL_ARGUMENT_HELPER
     func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15), condition: () -> Bool) async throws {
         world.waitSeconds.append(timeout.components.seconds)
+        if world.events.contains("source-tap") {
+            // Controlled seconds exercise the extracted branch's actual timeout
+            // and readiness predicate without real sleeps or native UI launches.
+            for second in 0..<Int(timeout.components.seconds) {
+                world.presentationElapsed = second
+                if let delay = world.presentationDelay, second >= delay { world.navigationReady = true }
+                if condition() { return }
+            }
+            world.presentationElapsed = Int(timeout.components.seconds)
+            throw BatchTestFailure(message: message)
+        }
         if !condition() { throw BatchTestFailure(message: message) }
     }
     func reachRecoveryLocalRoot(_ title: String, navigation: Query, location: Query, browse: Query,
@@ -593,6 +622,7 @@ do { try await Harness(world).run(app, recoveryFolder: "TripDocket-Recovery-1234
 catch { status = "rejected" }
 print(String(data: try JSONEncoder().encode(["status": [status], "events": world.events,
                                             "arguments": app.launchArguments,
+                                            "presentationElapsed": [String(world.presentationElapsed)],
                                             "waitSeconds": world.waitSeconds.map(String.init)]), encoding: .utf8)!)
 '''
 
@@ -686,13 +716,36 @@ class ProviderOnlyPreparationTests(unittest.TestCase):
                 value = self.probe(scenario)
                 self.assertEqual(value['status'], ['passed'])
                 self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'generic-root:' + title, 'capture'])
-                self.assertEqual(value['waitSeconds'], ['15', '15'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
                 self.assertEqual(value['arguments'][:3], ['existing-recovery-arguments', '--ui-testing-native-batch-seed',
                                                         '--ui-testing-native-batch-token'])
                 token = value['arguments'][3]
                 self.assertEqual(str(uuid.UUID(token)), token)
                 self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
                 self.assertEqual(len(value['arguments']), 4)
+
+    def test_actual_provider_accepts_delayed_presentation_without_retapping(self):
+        for scenario, title in [('after-20-seconds', 'On My iPhone'),
+                                ('ipad-after-20-seconds', 'On My iPad')]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['passed'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
+                self.assertEqual(value['presentationElapsed'], ['20'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap',
+                                                  'generic-root:' + title, 'capture'])
+
+    def test_actual_provider_rejects_late_missing_or_wrong_native_controls_at_bound(self):
+        for scenario in ('after-31-seconds', 'navigation-missing',
+                         'ambiguous-navigation-after-20-seconds', 'ambiguous-picker-after-20-seconds',
+                         'missing-picker-after-20-seconds', 'absent-navigation-after-20-seconds',
+                         'absent-picker-after-20-seconds'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
+                self.assertEqual(value['presentationElapsed'], ['30'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap'])
 
     def test_actual_provider_branch_rejects_unusable_source_without_tap(self):
         for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):
