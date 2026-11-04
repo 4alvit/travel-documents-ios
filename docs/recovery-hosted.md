@@ -88,20 +88,39 @@ published artifacts. It does not replace the UI flows with direct service calls.
 
 ## Bounds and evidence
 
-The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
-reserved for owned cleanup, including a final 10-second receipt reserve. The
-prepare Xcode command has at most 780 seconds; export and restore retain 600
-seconds each. All command caps include the eight-second stop reserve and are
-clipped to the original remaining work deadline. The preparation case retains
-180 seconds and export/restore each retain 300.
+The standalone executor retains its 1,500-second total, 1,380-second work
+window and 120-second owned cleanup reserve, including a final 10-second receipt
+reserve. Its prepare command/case caps remain 780/180 seconds, and export and
+restore each retain 600/300 seconds.
 
-A retained PR16 run spent about 514 seconds before its preparation case began,
-including a 272-second runner launch. Its former 600-second command allowance
-left only 78 seconds for the case and interrupted final evidence formatting
-after Files/root checks. The 780-second allowance covers that observed startup
-plus the full case allowance; it does not diagnose or repair the startup delay.
-Later phases and result inspection still share the original work budget and
-may fail if insufficient time remains. No phase is retried or given a new clock.
+The hosted Intel adapter selects the immutable `hosted-intel-v1` profile before
+creating output or deriving deadlines from the original entry clock. It requires
+the exact `macos-15-intel` / `X64` / `x86_64` hosted tuple. Unknown profiles,
+crossed host identities and changed timing policy are rejected before work.
+The selected profile cannot be replaced during the run. It allows 4,800 seconds
+total: 4,680 for work and the same 120 for cleanup. Prepare allows 1,200 command
+seconds and 300 native case seconds; export and restore each allow 900 command
+seconds and 600 native case seconds. Every command includes the unchanged
+eight-second stop reserve and is clipped to the original work deadline. The
+native allowances require an exact profile token, the existing Recovery opt-in,
+matching phase and canonical folder identity in a Debug Intel Simulator build.
+Without that token the standalone native allowances are unchanged.
+
+In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126765257864),
+prepare spent 713.25 seconds before its test began, leaving only 58.75 seconds
+of command work. The command expired during app launch, before any Files action;
+this was not a demonstrated native case timeout. A historical Arm
+restore case took 274.88 seconds of its 300-second allowance. The hosted native
+increases provide performance margin for slower Intel execution; they do not
+prove an application defect or guarantee completion.
+
+The complete hosted work envelope includes 110 seconds for source Git commands,
+80 for toolchain checks, 300 for shared discovery, 330 for boot commands, 3,000
+for the three phase commands, 360 for result readers, 160 for app-state checks,
+135 for result comparators and 40 for final Git checks. Those command ceilings
+total 4,515 seconds, leaving 165 for source copying, manifests, parsing and other
+in-process verification before cleanup. They remain ceilings rather than new
+per-phase clocks. No phase retries or additional workers are introduced.
 Recovery discovery uses one fixed 300-second window after source/toolchain
 preflight. It covers the first runtime query, profile parsing/selection, the
 existing capability check, runtime recheck, baseline device inventory, one
@@ -119,10 +138,10 @@ stopped and reaped. Earlier identical queries completed in 7.7–63.4 seconds.
 These observations justify a bounded startup policy, but do not prove the OS
 cause or that 300 seconds will always suffice. There is no retry, warmup query,
 runtime fallback or download. The capability stage keeps its own 60-second cap
-inside the shared discovery window. The original 1,380-second work deadline is
-unchanged: fully consuming discovery leaves at most 1,080 seconds minus
-preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
-not a guarantee that all can run for their maximum duration in one attempt;
+inside the shared discovery window. Fully consuming discovery leaves at most
+4,380 hosted work seconds minus preflight for boot, UI phases and evidence.
+Standalone execution retains its original 1,380-second work deadline. The
+per-phase maxima are ceilings, not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
 Hosted readiness for the newly created, owned Simulator has a separate
@@ -131,7 +150,7 @@ Only the exact `simctl bootstatus <owned UUID> -b` call receives this allowance;
 the portable executor's 120-second default, the initial boot command, UI cases
 and all other command caps stay unchanged. Readiness still requires a successful
 command exit and verified process closure before building or testing. The
-allowance is clipped to the original 1,380-second work deadline and introduces
+allowance is clipped to the selected original work deadline and introduces
 no retry or renewed global clock.
 
 The [successful reference run](https://github.com/4alvit/travel-documents-ios/actions/runs/41781766427/job/126414697445)
@@ -480,10 +499,11 @@ The 2 GiB xcresult content limit still checks both logical and allocated size;
 manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
-measurement. The native execution step remains 27 minutes. The 40-minute job
-allocates two minutes to checkout, six to offline regressions, 27 to native
-recovery and five to evidence upload; the native 1,380-second work deadline and
-cleanup reserve are unchanged.
+measurement. The native execution step allows 82 minutes, including two minutes
+beyond the 80-minute executor ceiling. The 100-minute job allocates two minutes
+to checkout, six to offline regressions, 82 to native recovery and five to evidence
+upload, plus five minutes for cancellation and step overhead. The executor still
+reserves its own cleanup time before the outer workflow deadline.
 
 In [run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897632),
 the first synthetic Swift fixture compilation exceeded its 30-second timeout.
@@ -546,15 +566,16 @@ it does not permit a nonzero group lookup. The existing Files log-publication
 allowlist is also unchanged. Group lookup output remains a private root log,
 not a new public artifact route.
 
-Removing the forced 120-second launch and 60-second termination does not extend
-the total work deadline or reserve new time for a later phase. At the observed
-preparation start of 148.57 seconds, 1,231.43 seconds remain before the original
+The earlier removal of the forced 120-second launch and 60-second termination
+did not extend that run's work deadline or reserve new time for a later phase.
+At the observed preparation start of 148.57 seconds, 1,231.43 seconds remained before the original
 1,380-second work limit. A full 60-second group lookup leaves at most 1,171.43
 seconds for export, restore and evidence processing; the two 600-second phase
 caps still cannot both be consumed in full. They remain maxima clipped to the
 original remaining work time. Every command still needs more than its 8-second
 stop reserve before admission and again before spawn. Cleanup retains its
-original 120 seconds within the same 1,500-second executor limit. No additional
+original 120 seconds within that historical 1,500-second executor limit. The
+current hosted profile is specified above. No additional
 worker, Simulator, test attempt or runtime fallback is introduced.
 
 Each iPad guidance locale now runs in a separate fresh driver and owned device.
@@ -609,8 +630,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 40 minutes, phone guidance has 65 minutes,
-and each iPad locale has 62 minutes, at most 304 aggregate job-minutes. Within this
+Core has a 75-minute limit, Recovery has 100 minutes, phone guidance has 65 minutes,
+and each iPad locale has 62 minutes, at most 364 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same

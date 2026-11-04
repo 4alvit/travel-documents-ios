@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'be2421f7ccbfed689e7c991710a71e0f19592c6959c6bcba806fb54b71f55571'
+CORE_SHA = 'ca768a9b41b5d6d6d2587ea023d973ff3af77252c29cce920c2a9792884374c0'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -46,6 +46,30 @@ def job_context(env, profile, machine):
     return {k:env[k] for k in ['GITHUB_REPOSITORY','GITHUB_WORKFLOW','GITHUB_JOB','GITHUB_EVENT_NAME',
             'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_REF','GITHUB_SHA','ImageOS','ImageVersion',
             'TRIPDOCKET_RUNNER_LABEL','TRIPDOCKET_RUNNER_ARCH','TRIPDOCKET_RUNNER_ENVIRONMENT']}
+
+
+def select_execution_profile(profile, job, machine):
+    require(set(profile) == {'schema','repository','runner_label','runner_environment','runner_arch','machine',
+            'image_os_prefix','python_minimum','xcode_minimum_major','xcode_selection','runtime_selection',
+            'device_type','case_attempts','execution_profile','total_seconds','cleanup_seconds','prep_seconds',
+            'minimum_admission_free_GiB','minimum_work_free_GiB','maximum_output_GiB','maximum_xcresult_GiB','project'},
+            'Unexpected hosted profile fields')
+    require((profile['runner_label'], profile['runner_arch'], profile['machine'], profile['runner_environment'],
+             job['TRIPDOCKET_RUNNER_LABEL'], job['TRIPDOCKET_RUNNER_ARCH'],
+             job['TRIPDOCKET_RUNNER_ENVIRONMENT'], machine)
+            == ('macos-15-intel', 'X64', 'x86_64', 'github-hosted', 'macos-15-intel', 'X64', 'github-hosted', 'x86_64'),
+            'Hosted Recovery execution profile requires the exact Intel host')
+    require(profile['execution_profile'] == 'hosted-intel-v1', 'Unexpected hosted execution profile')
+    selected = core.execution_profile(profile['execution_profile'])
+    require(type(profile['total_seconds']) is int and type(profile['cleanup_seconds']) is int
+            and (profile['total_seconds'], profile['cleanup_seconds'])
+            == (selected['total_seconds'], selected['cleanup_seconds']), 'Hosted timing policy changed')
+    require((profile['minimum_admission_free_GiB'], profile['minimum_work_free_GiB'],
+             profile['maximum_output_GiB'], profile['maximum_xcresult_GiB']) == (16,8,8,2)
+            and profile['prep_seconds'] == 60
+            and profile['case_attempts'] == {'prepare':1,'export':1,'restore':1}
+            and all(type(value) is int for value in profile['case_attempts'].values()), 'Policy changed')
+    return selected
 
 
 def attempt_output(workspace, job):
@@ -177,12 +201,19 @@ def capability_result(normal, failed, observations, elapsed, actual):
 
 
 class HostedRecovery(core.Recovery):
-    def __init__(self,ops,out,profile,job,event,workspace,started):
+    def __init__(self,ops,out,profile,job,event,workspace,started, *, execution_profile):
+        core.validated_execution_profile(execution_profile)
+        require((profile['execution_profile'], profile['total_seconds'], profile['cleanup_seconds'])
+                == (execution_profile['name'], execution_profile['total_seconds'], execution_profile['cleanup_seconds']),
+                'Hosted profile and selected timing disagree')
+        require(select_execution_profile(profile, job, profile['machine']) is execution_profile,
+                'Hosted execution profile mismatch')
         self.profile,self.job,self.event,self.workspace=profile,job,event,Path(workspace)
         plan={'runtime':'UNSELECTED','device_type':profile['device_type']}
         host={'machine':profile['machine'],'python':str(Path(sys.executable).resolve())}
         run_id=str(uuid.uuid5(uuid.NAMESPACE_URL,job['GITHUB_REPOSITORY']+'/'+job['GITHUB_RUN_ID']+'/recovery/'+job['GITHUB_RUN_ATTEMPT']))
-        super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={})
+        super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={},
+                         execution_profile=execution_profile)
         self.report['job']=job
         self.save()  # Persist the actual run/attempt before any process acquisition.
 
@@ -603,10 +634,9 @@ def main(argv=None):
     try:
         started=time.monotonic();profile=core.json_file(HERE/'recovery-hosted-profile.json')
         require(sys.version_info[:2]>=tuple(profile['python_minimum']),'Python version unsupported')
-        require((profile['total_seconds'],profile['cleanup_seconds'],profile['minimum_admission_free_GiB'],
-                 profile['minimum_work_free_GiB'],profile['maximum_output_GiB'],profile['maximum_xcresult_GiB'])
-                ==(1500,120,16,8,8,2) and profile['prep_seconds']==60 and profile['case_attempts']=={'prepare':1,'export':1,'restore':1},'Policy changed')
-        job=job_context(os.environ,profile,platform.machine())
+        machine=platform.machine()
+        job=job_context(os.environ,profile,machine)
+        selected_profile=select_execution_profile(profile,job,machine)
         workspace=Path(os.environ['GITHUB_WORKSPACE']);core.identity_of(workspace)
         require(HERE==workspace/'scripts','Entrypoint not from checked-out source')
         event=core.json_file(os.environ['GITHUB_EVENT_PATH'],8*core.MIB)
@@ -614,7 +644,8 @@ def main(argv=None):
         out=attempt_output(workspace,job)
         env={k:os.environ[k] for k in ['HOME','USER','TMPDIR','DEVELOPER_DIR'] if k in os.environ}
         env.update(PATH='/usr/bin:/bin:/usr/sbin:/sbin',GIT_OPTIONAL_LOCKS='0')
-        runner=HostedRecovery(core.base.RealOps(env,workspace),out,profile,job,event,workspace,started)
+        runner=HostedRecovery(core.base.RealOps(env,workspace),out,profile,job,event,workspace,started,
+                              execution_profile=selected_profile)
         old={s:signal.signal(s,runner.signal) for s in [signal.SIGTERM,signal.SIGINT]}
         try:return runner.run()
         finally:

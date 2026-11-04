@@ -1963,9 +1963,37 @@ final class BatchImportUITests: XCTestCase {
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
             throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
         }
-        executionTimeAllowance = phase == "prepare" ? 180 : 300
+        #if DEBUG && targetEnvironment(simulator) && arch(x86_64)
+        let debugIntelSimulator = true
+        #else
+        let debugIntelSimulator = false
+        #endif
+        executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(
+            env, phase: phase, debugIntelSimulator: debugIntelSimulator
+        )
         continueAfterFailure = false
         return value
+    }
+
+    private static func recoveryExecutionTimeAllowance(
+        _ environment: [String: String], phase: String, debugIntelSimulator: Bool
+    ) throws -> TimeInterval {
+        guard ["prepare", "export", "restore"].contains(phase) else {
+            throw BatchTestFailure(message: "Unknown Recovery execution phase")
+        }
+        guard let profile = environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] else {
+            return phase == "prepare" ? 180 : 300
+        }
+        guard profile == "hosted-intel-v1", debugIntelSimulator,
+              environment["TRIPDOCKET_RECOVERY_UI"] == "1",
+              environment["TRIPDOCKET_RECOVERY_PHASE"] == phase,
+              let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"],
+              folder.hasPrefix("TripDocket-Recovery-"),
+              let identity = UUID(uuidString: String(folder.dropFirst("TripDocket-Recovery-".count))),
+              folder == "TripDocket-Recovery-" + identity.uuidString.lowercased() else {
+            throw BatchTestFailure(message: "Hosted Recovery execution profile is not admitted")
+        }
+        return phase == "prepare" ? 300 : 600
     }
 
     private func recoveryTab(_ title: String, app: XCUIApplication) async throws {

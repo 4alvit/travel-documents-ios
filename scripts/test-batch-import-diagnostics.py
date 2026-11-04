@@ -327,7 +327,9 @@ class BatchImportDiagnosticTests(unittest.TestCase):
         self.assertEqual(batch.count("executionTimeAllowance ="), 1)
         self.assertIn("executionTimeAllowance = 600", batch)
         recovery = section(ui, "    private func recoveryConfiguration(", "\n    private func recoveryTab(")
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', recovery)
+        self.assertIn('executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(', recovery)
+        self.assertIn('return phase == "prepare" ? 180 : 300', recovery)
+        self.assertIn('#if DEBUG && targetEnvironment(simulator) && arch(x86_64)', recovery)
 
 
 class PickerLifecycleDiagnosticTests(unittest.TestCase):
