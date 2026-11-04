@@ -203,6 +203,13 @@ class HostedRecovery(core.Recovery):
             require(self.ops.now()<self.t0+row['work_deadline'],
                     'Discovery command work deadline reached')
             return result
+        if label=='boot-ready':
+            require(not self.cleaning and self.owned
+                    and args==('bootstatus',self.owned,'-b') and cap==120,
+                    'Unexpected hosted boot readiness command')
+            # Cold hosted startup shares the original work/global deadline.
+            # command() still reserves eight seconds for this one owned wait.
+            cap=300
         # Only the initial owned Files preparation gets a larger command cap.
         action={'files-launch':'launch','files-terminate':'terminate'}.get(label)
         if action:

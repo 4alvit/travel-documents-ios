@@ -1012,7 +1012,7 @@ class BoundaryTests(unittest.TestCase):
             ['profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'])
         self.assertTrue(all(x['requested_cap_seconds']==300 and x['command_deadline']==300
                             and x['work_deadline']==292 for x in discovery))
-        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,120])
+        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,300])
         self.assertEqual(r.report['discovery_budget']['status'],'completed')
         self.assertGreaterEqual(r.report['discovery_budget']['finished_elapsed'],270)
         self.assertLess(r.report['discovery_budget']['finished_elapsed'],292)
@@ -1028,6 +1028,80 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(len(r.ops.processes),count)
         self.assertEqual(r.report['discovery_budget']['requested_seconds'],300)
         self.assertEqual(r.report['attempts'],{'create':1})
+
+    def test_hosted_owned_boot_ready_can_finish_after_120_without_renewing_global_budget(self):
+        r=self.runner(Ops({'delay':180.,'output':[('stdout',b'Finished synthetic boot')]}))
+        r.owned='10000000-0000-0000-0000-000000000001'
+        self.assertEqual(r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120),'Finished synthetic boot')
+        row=r.report['commands'][0]
+        self.assertEqual(row['argv'],['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b'])
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds']),(300,292.,300.,8))
+        self.assertEqual((row['outcome'],row['returncode']),('completed',0))
+        self.assertGreaterEqual(row['finish'],180.);self.assertLess(row['finish'],292.)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(r.ops.signals,[]);self.assertEqual(len(r.ops.processes),1)
+        self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertEqual((r.limit,r.final),(1380.,1500.))
+        self.assertTrue(all(sample['scan']['requested_scan_seconds'] in (5,15)
+                            for sample in r.report['resources']))
+
+    def test_hosted_owned_boot_ready_exhaustion_stops_once_inside_original_reserve(self):
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}))
+        r.owned='10000000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds']),(300,292.,300.,8))
+        self.assertEqual(row['outcome'],'failed');self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],297.);self.assertLess(row['finish'],300.)
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertNotIn('resource_scan_failure',r.report);self.assertNotIn('cap_error',row)
+        self.assertEqual((r.limit,r.final),(1380.,1500.))
+
+    def test_hosted_owned_boot_ready_is_clipped_by_remaining_work_not_cleanup_budget(self):
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}));r.ops.t=1300.
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (300,1372.,1380.))
+        self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],1377.);self.assertLess(row['finish'],1380.)
+        self.assertEqual((r.limit,r.final),(1380.,1500.));self.assertFalse(r.active)
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_hosted_boot_ready_override_rejects_nonowned_or_changed_command_before_spawn(self):
+        r=self.runner();owned='10000000-0000-0000-0000-000000000001'
+        other='20000000-0000-0000-0000-000000000002'
+        for current,cleaning,args,cap in [
+                (None,False,('bootstatus',owned,'-b'),120),
+                (owned,True,('bootstatus',owned,'-b'),120),
+                (owned,False,('bootstatus',other,'-b'),120),
+                (owned,False,('bootstatus',owned),120),
+                (owned,False,('bootstatus',owned,'-b','--extra'),120),
+                (owned,False,('boot',owned),120),
+                (owned,False,('bootstatus',owned,'-b'),30),
+                (owned,False,('bootstatus',owned,'-b'),300)]:
+            with self.subTest(current=current,cleaning=cleaning,args=args,cap=cap):
+                r.owned=current;r.cleaning=cleaning
+                with self.assertRaisesRegex(RuntimeError,'Unexpected hosted boot readiness command'):
+                    r.sim('boot-ready',*args,cap=cap)
+        self.assertEqual(r.report['commands'],[]);self.assertEqual(r.ops.processes,[])
+        r.owned=owned;r.cleaning=False
+        r.sim('boot','boot',owned)
+        r.sim('other-readiness','bootstatus',owned,'-b',cap=120)
+        hosted.core.Recovery.sim(r,'boot-ready','bootstatus',owned,'-b',cap=120)
+        r.cleaning=True;r.sim('shutdown','shutdown',owned)
+        self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],[30,120,120,30])
+        self.assertEqual((r.limit,r.final),(1380.,1500.))
 
     def test_late_runtime_parse_or_selection_does_not_admit_selected_profile(self):
         for stage in ('parse','selection'):
@@ -2913,7 +2987,7 @@ class BoundaryTests(unittest.TestCase):
             if r.active and not delayed:delayed=True;r.ops.t+=6.
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
-            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+            hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         self.assertTrue(delayed);self.assertNotIn('resource_scan_failure',r.report)
         self.assertGreaterEqual(r.report['resources'][-1]['logical'],len(payload))
         self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
@@ -2931,7 +3005,7 @@ class BoundaryTests(unittest.TestCase):
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
-                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
         self.assertEqual(len(delays),1);self.assertEqual(failed['requested_scan_seconds'],15)
         self.assertEqual(failed['deadline_elapsed']-failed['started_elapsed'],15)
@@ -2950,7 +3024,7 @@ class BoundaryTests(unittest.TestCase):
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
-                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
         self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),
                          (110.,112.,112.25))
@@ -3329,7 +3403,7 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):r.setup()
         rows=r.report['commands']
         self.assertEqual([row['id'] for row in rows],['runtime-cache-ready','boot-ready'])
-        self.assertEqual(rows[-1]['requested_cap_seconds'],120)
+        self.assertEqual(rows[-1]['requested_cap_seconds'],300)
         self.assertEqual((r.out/'PhaseLogs/boot-ready-stdout.log').read_bytes(),b'Waiting for synthetic boot')
         self.assertEqual(len(r.ops.processes),2)
         private=r.out/'3-stdout.log';private.write_text('private process listing')

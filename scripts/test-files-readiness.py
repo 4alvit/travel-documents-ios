@@ -2503,7 +2503,6 @@ class RestoreFolderNavigation(unittest.TestCase):
         if result.returncode: raise AssertionError(result.stdout + result.stderr)
 
     def probe(self, *args):
-        import json
         result = subprocess.run([str(self.binary), *args], check=True, capture_output=True, text=True, timeout=5)
         return json.loads(result.stdout.strip().splitlines()[-1])
 
@@ -2801,7 +2800,6 @@ class RecoveryPersonIntroductionTests(unittest.TestCase):
             raise AssertionError(result.stderr)
 
     def probe(self, mode):
-        import json
         result = subprocess.run([str(self.binary), mode], capture_output=True, text=True, check=True, timeout=5)
         return json.loads(result.stdout)
 
