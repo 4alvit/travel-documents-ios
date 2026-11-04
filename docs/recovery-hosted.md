@@ -377,9 +377,9 @@ work deadline; ARM retains 180 seconds. Two Intel runs exhausted 180 seconds
 while reporting data migration. A separate run completed boot readiness in
 118.663 seconds. These observations support bounded cold-start headroom, not a
 claim that a larger allowance cures a service failure. Initial boot retains
-600 seconds on Intel and 180 on ARM. The default test command and full-case
-admission remain 900 and 1,487 seconds; the explicit hosted English policy below
-uses 1,200 and 1,787 seconds.
+600 seconds on Intel and 180 on ARM. The default test command remains 900 seconds;
+full-case admission is 1,487 seconds on ARM and 1,517 on Intel. The explicit
+hosted English policy below uses a 1,200-second command and 1,817-second admission.
 
 In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116),
 Intel boot completed in 312.7 seconds, but the fresh build reached its 480-second
@@ -391,10 +391,10 @@ underlying cause of the delay. All 26 process groups closed and the complete
 The selected Intel profile now permits a 1,200-second fresh build inside its
 4,500-second work window; ARM retains its 480-second build. Preflight, discovery,
 boot, project generation, the build and the complete case admission have combined
-command ceilings of 4,113 seconds on Intel under the default native policy,
-leaving 387 seconds for manifests, product discovery, parsing and receipt writes.
-The explicit hosted English policy increases that sum to 4,413 seconds, leaving
-87 seconds while retaining the same original work deadline and strict admission. This is engineering headroom,
+command ceilings of 4,143 seconds on Intel under the default native policy,
+leaving 357 seconds for manifests, product discovery, parsing and receipt writes.
+The explicit hosted English policy increases that sum to 4,443 seconds, leaving
+57 seconds while retaining the same original work deadline and strict admission. This is engineering headroom,
 not a measured requirement or a guarantee that the next build will complete.
 The 360-second Intel cleanup window includes final source/product/original checks:
 normal cleanup and four final Git commands have 249 seconds of command ceilings.
@@ -671,7 +671,8 @@ Default command waits are 900 seconds with XCTest's 480-second maximum.
 The explicit hosted English policy uses a 1,200-second command and 900-second
 XCTest maximum. Before case preparation, the driver requires the full command
 budgets and each 7-second stop reserve, plus 30 seconds for local manifests/copy/validation:
-1,487 seconds by default or 1,787 seconds for hosted English. Immediately before test spawn it again requires the full
+1,487 seconds on ARM, 1,517 on default Intel or 1,817 for hosted English.
+Immediately before test spawn it again requires the full
 test wait, its 7-second stop reserve and 238 seconds for post-test validation
 (two installed lookups of 60 seconds, result summary 30, result tests 30, four 7-second stops
 and 30 seconds of local evidence work). These are admissions within each locale's absolute work
@@ -692,7 +693,20 @@ expected identifier. Fresh 60-second container lookups before and after the test
 verify both identifiers, bundle paths and complete built-versus-installed bytes;
 they do not reuse a path that xcodebuild may replace. The added runner install
 and lookups are included in the case and post-test admissions above. Installation
-or readback failure cannot become test success. The original generated xctestrun,
+or readback failure cannot become test success.
+
+The Russian iPad job in run `41899787568` completed boot and build, then exceeded
+its 60-second AUT installation wait without reporting an installation error or
+success. It reached no native case. Intel AUT installation now allows 90 seconds;
+ARM AUT installation, runner installation and every container lookup keep 60.
+This is part of the architecture-selected profile, including standalone Intel,
+not a hosted-only opt-in. The extra 30 seconds are included in the full-case
+admission: Intel preparation is 372 seconds, with the original 7-second stop
+reserves and 238-second post-validation budget. Work, cleanup and native limits
+are unchanged. The failed run's process and owned-device cleanup completed;
+a larger install allowance neither proves installation nor guarantees a pass.
+
+The original generated xctestrun,
 selected finite host wait, native assertions, exact result checks and no-retry
 behavior remain required. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
@@ -710,11 +724,11 @@ Phone/iPad timing tokens are rejected. Only the final native command receives
 `TEST_RUNNER_TRIPDOCKET_IPAD_TIMING=hosted-intel-ipad-en-v1`; the app receives no
 timing token. The consumer requires the exact token, Debug x86_64 Simulator,
 iPad idiom and English case before selecting 900 seconds. Phone, Russian iPad
-and missing-token behavior remain unchanged. The 1,200-second command still
+and missing-token native timing remain unchanged. The 1,200-second command still
 reserves 238 seconds for post-validation, with the original 4,500-second work and
 360-second cleanup deadlines. The 83-minute step and 95-minute job are unchanged.
 All 24 text checks, four Cancels, zero Open actions and final Free/Trips evidence
-remain mandatory. The smaller 87-second non-command margin can still fail
+remain mandatory. The smaller 57-second non-command margin can still fail
 admission or finalization; no timeout or nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:

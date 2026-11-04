@@ -205,7 +205,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(process.argv[process.argv.index('-default-test-execution-time-allowance') + 1], '180')
         self.assertEqual(self.row(driver)['timeout_seconds'], 1200)
         self.assertEqual(self.row(driver)['timing_policy'], dict(driver.timing))
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1787)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1817)
         self.assertEqual(driver.report['cases'][0]['admission']['post_validation_seconds'], 238)
         driver.command(['xcodebuild', 'build-for-testing'], 'build-for-testing', timeout=1200)
         self.assertFalse(any(key in world.processes[-1].environment for key in ipad.TIMING_ENV_KEYS))
@@ -221,15 +221,15 @@ class DriverTests(unittest.TestCase):
     def test_hosted_case_admission_is_exact_and_does_not_reset_original_clock(self):
         self.hosted_environment()
         driver, world = self.driver(architecture='x86_64', hosted_timing=True)
-        world.t = 4500 - 1787
+        world.t = 4500 - 1817
         with self.assertRaisesRegex(RuntimeError, 'no case started'): driver.run_case(*driver.case)
         self.assertEqual(world.processes, [])
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1787)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1817)
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
     def test_hosted_case_just_above_full_admission_finishes_without_borrowing_cleanup(self):
         self.hosted_environment()
-        driver, world, error, parsed = self.attempted_case(0, start_at=4500-1787-1,
+        driver, world, error, parsed = self.attempted_case(0, start_at=4500-1817-1,
                                                          architecture='x86_64', hosted_timing=True, delay=1199)
         self.assertTrue(parsed); self.assertEqual(str(error), 'Synthetic result validation withheld')
         self.assertLess(world.t + 238, driver.work_deadline)
@@ -251,6 +251,81 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'restricted'):
             driver.command(['xcodebuild', 'build-for-testing'], 'build-for-testing', native_timing=True)
         self.assertEqual(len(world.processes), 1)
+
+    def install_case(self, architecture='x86_64', aut_delay=63, runner_delay=2,
+                     aut_exit=0, start_at=0, snapshot_seconds=0):
+        driver, world = self.driver(locale='ru-RU', architecture=architecture)
+        world.t = start_at
+        driver.owned = 'synthetic-owned-device'
+        driver.products = {'aut': self.root/'Synthetic.app', 'runner': self.root/'SyntheticRunner.app',
+                           'xctestrun': self.root/'synthetic.xctestrun'}
+        actual = driver.command
+        def command(argv, label, **kwargs):
+            if label == 'ru-RU-install': world.plan = {'delay': aut_delay, 'exit': aut_exit}
+            elif label == 'ru-RU-runner-install': world.plan = {'delay': runner_delay}
+            else: raise AssertionError('Unexpected command after install: ' + label)
+            return actual(argv, label, **kwargs)
+        def snapshot(*_): world.t += snapshot_seconds
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'product_snapshot', side_effect=snapshot), \
+             patch.object(driver, 'installed', side_effect=RuntimeError('Synthetic lookup withheld')) as lookup, \
+             patch.object(driver, 'parse_case') as parse:
+            with self.assertRaises(RuntimeError) as error: driver.run_case(*driver.case)
+        parse.assert_not_called()
+        self.assertNotIn('xcodebuild_exit_code', driver.report['cases'][0])
+        self.assertFalse(driver.active)
+        return driver, world, str(error.exception), lookup.called
+
+    def test_intel_aut_install_accepts_after60_but_does_not_certify_native_case(self):
+        driver, world, error, lookup = self.install_case()
+        self.assertEqual(error, 'Synthetic lookup withheld'); self.assertTrue(lookup)
+        self.assertEqual([c['timeout_seconds'] for c in driver.report['commands']], [90, 60])
+        self.assertEqual([c['returncode'] for c in driver.report['commands']], [0, 0])
+        self.assertEqual(world.processes[0].argv[:4], ['xcrun', 'simctl', 'install', driver.owned])
+        self.assertEqual(world.processes[0].argv[-1], str(driver.products['aut']))
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1517)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+        with self.assertRaisesRegex(RuntimeError, 'no retry'): driver.run_case(*driver.case)
+
+    def test_arm_and_causal_old_intel_aut_cap_reject63_before_runner(self):
+        original_root = self.root; original_profile = ipad.execution_profile
+        def old_profile(architecture, locale):
+            return ipad.MappingProxyType({**original_profile(architecture, locale), 'aut_install_seconds': 60})
+        for architecture, causal in [('arm64', False), ('x86_64', True)]:
+            with self.subTest(architecture=architecture):
+                self.root = original_root/architecture; self.root.mkdir()
+                with patch.object(ipad, 'execution_profile', side_effect=old_profile if causal else original_profile):
+                    driver, world, error, lookup = self.install_case(architecture=architecture)
+                self.assertIn('ru-RU-install exceeded its finite timeout', error)
+                self.assertFalse(lookup); self.assertEqual(len(world.processes), 1)
+                self.assertEqual(self.row(driver)['timeout_seconds'], 60)
+        self.root = original_root
+
+    def test_late_or_nonzero_intel_aut_install_prevents_all_later_preparation(self):
+        original_root = self.root
+        for index, (delay, code) in enumerate([(90.2, 0), (91, 0), (1, 65)]):
+            with self.subTest(delay=delay, code=code):
+                self.root = original_root/str(index); self.root.mkdir()
+                driver, world, error, lookup = self.install_case(aut_delay=delay, aut_exit=code)
+                self.assertIn('finite timeout' if not code else 'failed; see command stdout/stderr', error)
+                self.assertFalse(lookup); self.assertEqual(len(world.processes), 1)
+                self.assertEqual(self.row(driver)['timeout_seconds'], 90)
+        self.root = original_root
+
+    def test_intel_runner_install_retains60_and_prevents_lookup_when_late(self):
+        driver, world, error, lookup = self.install_case(aut_delay=1, runner_delay=63)
+        self.assertIn('ru-RU-runner-install exceeded its finite timeout', error)
+        self.assertFalse(lookup); self.assertEqual(len(world.processes), 2)
+        self.assertEqual([c['timeout_seconds'] for c in driver.report['commands']], [90, 60])
+
+    def test_intel_aut_install_is_clipped_after_late_preparation_without_clock_reset(self):
+        driver, world, error, lookup = self.install_case(start_at=4500-1517-1, snapshot_seconds=1450)
+        self.assertIn('ru-RU-install exceeded its finite timeout', error)
+        self.assertFalse(lookup); self.assertEqual(len(world.processes), 1)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 90)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 4500-7)
+        self.assertLess(world.t, 4500)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
     def sdk_fixture(self):
         types = {'devicetypes': [
@@ -350,6 +425,7 @@ class DriverTests(unittest.TestCase):
                                  (architecture,work,boot))
                 self.assertEqual((profile['build_seconds'],profile['cleanup_seconds']),
                                  (1200,360) if architecture == 'x86_64' else (480,180))
+                self.assertEqual(profile['aut_install_seconds'],90 if architecture == 'x86_64' else 60)
                 with self.assertRaises(TypeError):profile['work_seconds']=9999
         with patch('os.uname',return_value=SimpleNamespace(machine='unknown')):
             with self.assertRaisesRegex(RuntimeError,'Unsupported iPad host architecture'):
@@ -368,13 +444,13 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
         self.assertFalse(world.processes)
 
-    def test_intel_full_case_admission_retains_exact_1487_second_boundary(self):
+    def test_intel_full_case_admission_retains_exact_1517_second_boundary(self):
         driver,world=self.driver(architecture='x86_64')
-        world.t=4500-1487
+        world.t=4500-1517
         with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1517)
         self.assertFalse(world.processes)
-        admitted,world,error,validated=self.attempted_case(1,start_at=4500-1487-1,
+        admitted,world,error,validated=self.attempted_case(1,start_at=4500-1517-1,
                                                         architecture='x86_64',delay=1)
         self.assertEqual(admitted.report['cases'][0]['status'],'started')
         self.assertTrue(validated)
