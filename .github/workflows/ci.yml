@@ -15,12 +15,16 @@ jobs:
   validate:
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15-intel
-    timeout-minutes: 35
+    # 75m = checkout2 + toolchain5 + toolchain evidence2 + selector2
+    #       + Verify10 + package2 + integration35 + cancellation5
+    #       + raw evidence3 + optional extraction3/upload2 + Simulator2 + finalization2.
+    timeout-minutes: 75
     env:
       # Keep the Release producer and core tests on matched Xcode 26.2.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Toolchain
@@ -54,6 +58,7 @@ jobs:
           python3 -B scripts/test-select-simulator.py
           python3 -B scripts/test-prepare-guidance-files.py
       - name: Verify
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           TRIPDOCKET_VERIFY_COMMIT=$(git rev-parse HEAD)
@@ -61,10 +66,24 @@ jobs:
           test "$TRIPDOCKET_VERIFY_COMMIT" = "$(git rev-parse HEAD)"
           printf '%s\n' "$TRIPDOCKET_VERIFY_COMMIT" > build/ci-toolchain/verified-commit.txt
       - name: Package verified Simulator preview
+        timeout-minutes: 2
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
+        timeout-minutes: 35
         run: bash scripts/test-simulator.sh --require-sdk-match --cohort core-purchase
+      # Preserve raw results before optional failure extraction consumes its budget.
+      - name: Test evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -85,17 +104,8 @@ jobs:
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure-ax.txt
           if-no-files-found: warn
           retention-days: 7
-      - name: Test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/*.xcresult
-            build/ci-toolchain/simulator-selection.*/
-          if-no-files-found: warn
-          retention-days: 7
       - name: Simulator artifact
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-simulator-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

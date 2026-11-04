@@ -609,8 +609,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 35-minute limit, Recovery has 40 minutes, phone guidance has 65 minutes,
-and each iPad locale has 62 minutes, at most 264 aggregate job-minutes. Within this
+Core has a 75-minute limit, Recovery has 40 minutes, phone guidance has 65 minutes,
+and each iPad locale has 62 minutes, at most 304 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same
@@ -620,6 +620,28 @@ There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
 runner change requires fresh runtime evidence and does not validate old failures
 or guarantee available hosted capacity.
+
+In [Core run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897092),
+the English purchase-failure case exceeded its 180-second allowance while
+finishing the Free quota check and diagnostic captures. The trace continued to
+191 seconds, but that is not a clean pass. The following Russian case had a
+launch timeout and XCTest restarted the runner; the 35-minute job limit later
+cancelled the incomplete cohort. The trace does not establish that the first
+timeout caused the launch failure. The three failure-alert scenarios now request
+240 seconds in their shared helper. Both alert cycles, postconditions, Free
+quota checks, PNG/AX captures and teardown remain required; the ordinary
+180-second default and Core's 480-second maximum are unchanged.
+
+Core's integration step now has a separate 35-minute limit within the
+75-minute job. The job envelope is checkout 2, toolchain 5, toolchain evidence 2,
+selector checks 2, Verify 10, packaging 2, integration 35, cancellation grace 5,
+raw evidence 3, optional failure extraction/upload 3/2, Simulator upload 2 and
+finalization 2 minutes. Raw test evidence precedes optional failure extraction.
+This is a bounded policy, not a predicted duration: the failed Intel run spent
+6 minutes 45 seconds in Verify, about 8 minutes 28 seconds bootstrapping its
+first native worker, and 28 minutes 8 seconds in the incomplete integration
+step. No assertion or retry policy is changed, and new hosted results are
+required to establish completion.
 
 
 Files provider readiness uses only the unused part of the original `files-group`
