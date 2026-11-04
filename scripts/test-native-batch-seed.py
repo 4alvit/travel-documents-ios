@@ -371,6 +371,15 @@ class SeedGuards(unittest.TestCase):
                         before_rename.index('created.element.press(forDuration: 1)'))
         self.assertIn('created.count == 1 && created.element.frame == before',helper)
         self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',helper)
+        initial=helper[helper.index('var parentReturnAttempted = false'):helper.index('if let before = renameFrame {')]
+        self.assertEqual(initial.count('back.element.tap()'),1)
+        self.assertEqual(initial.count('Self.nativeFolderParentReturnFrame('),2)
+        self.assertIn('parentReturnAttempted = true\n                    parentReturnRejected = true',initial)
+        self.assertIn('guard !parentReturnRejected, ContinuousClock.now < initialDeadline',initial)
+        self.assertIn('!app.staticTexts["nativeSeed.failure"].exists',initial)
+        self.assertIn('"identifier BEGINSWITH %@", "nativeSeed.saved."',initial)
+        self.assertNotIn('newFolder.element.tap()',initial)
+        self.assertNotIn('openNativeFilesRoot(',initial)
 
 
 class ExportResultGuards(unittest.TestCase):

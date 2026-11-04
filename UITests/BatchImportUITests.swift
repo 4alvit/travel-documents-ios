@@ -166,6 +166,77 @@ final class BatchImportUITests: XCTestCase {
         return (frame != nil, frame)
     }
 
+    // Files can open the newly created empty child instead of its name editor.
+    // This is only an intention to return to the parent, never a ready folder.
+    @MainActor
+    private static func nativeFolderParentReturnFrame(
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot, localTitle: String
+    ) -> CGRect? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return nil }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func visibleFrame(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width > 0 && frame.height > 0
+        }
+        guard localTitle == "On My iPhone", snapshot.elementType == .other,
+              snapshot.identifier == "Browse View (Picker)", applicationSnapshot.elementType == .application,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
+              !(all + environment).contains(where: {
+                  $0.elementType == .cell || $0.elementType == .keyboard
+                      || $0.identifier == "DOC.inlineRenameField"
+                      || $0.identifier == "UIContinuousPathIntroductionView"
+              }) else { return nil }
+        let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: untitled folder"
+        let roots = all.filter { $0.identifier.hasPrefix("DOC.browsingRoot Source:") }
+        let environmentRoots = environment.filter { $0.identifier.hasPrefix("DOC.browsingRoot Source:") }
+        let pickers = all.filter { $0.identifier == "Browse View (Picker)" }
+        let navigations = all.filter {
+            $0.elementType == .navigationBar || $0.identifier == "FullDocumentManagerViewControllerNavigationBar"
+        }
+        let backs = all.filter { $0.identifier == "BackButton" || $0.label == localTitle }
+        let titles = all.filter { $0.label.hasSuffix(", Actions Menu") }
+        let empty = all.filter { $0.label == "Folder is Empty" }
+        let grids = all.filter { $0.elementType == .collectionView || $0.identifier == "File View" }
+        guard pickers.count == 1, roots.count == 1, roots[0].elementType == .other,
+              roots[0].identifier == rootID, environmentRoots.count <= 1,
+              environmentRoots.allSatisfy({ $0.elementType == .other && $0.identifier == rootID }),
+              navigations.count == 1, navigations[0].elementType == .navigationBar,
+              navigations[0].identifier == "FullDocumentManagerViewControllerNavigationBar",
+              backs.count == 1, backs[0].elementType == .button, backs[0].identifier == "BackButton",
+              backs[0].label == localTitle, backs[0].isEnabled,
+              titles.count == 1, titles[0].elementType == .button,
+              titles[0].label == "untitled folder, Actions Menu",
+              empty.count == 1, empty[0].elementType == .staticText, grids.count <= 1,
+              grids.allSatisfy({ $0.elementType == .collectionView && $0.identifier == "File View" }),
+              let rootNodes = nodes(roots[0]), let navigationNodes = nodes(navigations[0]),
+              rootNodes.filter({ $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
+              rootNodes.filter({ $0.label == "Folder is Empty" }).count == 1,
+              rootNodes.filter({ $0.identifier == "File View" }).count == grids.count,
+              navigationNodes.filter({ $0.identifier == "BackButton" }).count == 1,
+              navigationNodes.filter({ $0.label == "untitled folder, Actions Menu" }).count == 1 else { return nil }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
+        guard !windows.isEmpty, windows.allSatisfy({ visibleFrame($0.frame) }),
+              ([snapshot.frame, roots[0].frame, navigations[0].frame, backs[0].frame,
+                titles[0].frame, empty[0].frame] + grids.map(\.frame)).allSatisfy(visibleFrame) else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        guard visibleFrame(window), snapshot.frame.contains(roots[0].frame),
+              roots[0].frame.contains(navigations[0].frame), roots[0].frame.contains(empty[0].frame),
+              navigations[0].frame.contains(backs[0].frame), navigations[0].frame.contains(titles[0].frame),
+              window.contains(backs[0].frame), window.contains(titles[0].frame), window.contains(empty[0].frame),
+              grids.allSatisfy({ roots[0].frame.contains($0.frame) && window.contains($0.frame) }) else { return nil }
+        return backs[0].frame
+    }
+
     // Evidence storage only; none of these fields participate in readiness.
     // A new attempt clears partial inputs without erasing the last bound pair.
     private struct NativeFolderInitialObservation {
@@ -756,9 +827,15 @@ final class BatchImportUITests: XCTestCase {
         var keyboardIntroductionAcknowledged = false
         var renameFrame: CGRect?
         var initialObservation = NativeFolderInitialObservation()
+        var parentReturnAttempted = false
+        var parentReturnRejected = false
+        // Keep the existing polling allowance. Synchronous queries may finish
+        // late, but must not start Back or accept its result after this deadline.
+        let initialDeadline = ContinuousClock.now.advanced(by: .seconds(30))
         do {
             try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: .seconds(30)) {
                 renameFrame = nil
+                guard !parentReturnRejected, ContinuousClock.now < initialDeadline else { return false }
                 initialObservation.begin()
                 do {
                     let snapshots = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
@@ -772,7 +849,52 @@ final class BatchImportUITests: XCTestCase {
                         diagnostic: { initialObservation.rejections.append($0) }
                     )
                     renameFrame = state.renameFrame
-                    return state.ready
+                    if state.ready { return ContinuousClock.now < initialDeadline }
+                    guard let before = Self.nativeFolderParentReturnFrame(
+                        in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
+                    ) else { return false }
+                    guard !parentReturnAttempted else {
+                        // A completed Back can still expose the old child
+                        // as navigation settles. Wait, without another tap.
+                        return false
+                    }
+                    // Consume even a rejected opportunity. A changed target or
+                    // failed fresh query must never cause a later Back attempt.
+                    parentReturnAttempted = true
+                    parentReturnRejected = true
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    initialObservation.begin()
+                    let current = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
+                        initialObservation.stage = stage
+                        initialObservation.picker = picker
+                        initialObservation.application = application
+                    })
+                    initialObservation.lastBound = (initialObservation.attempt, current.picker, current.application)
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    guard Self.nativeFolderParentReturnFrame(
+                        in: current.picker, applicationSnapshot: current.application, localTitle: localTitle
+                    ) == before else {
+                        initialObservation.rejections.append("parent-return: fresh child proof changed")
+                        return false
+                    }
+                    let back = navigation.element.buttons.matching(NSPredicate(
+                        format: "identifier == %@ AND label == %@", "BackButton", localTitle
+                    ))
+                    guard navigation.count == 1, back.count == 1,
+                          back.element.frame == before, back.element.isEnabled, back.element.isHittable,
+                          app.staticTexts.matching(NSPredicate(
+                              format: "identifier BEGINSWITH %@", "nativeSeed.saved."
+                          )).count == 0, !app.staticTexts["nativeSeed.failure"].exists else {
+                        initialObservation.rejections.append("parent-return: live Back or unsaved fixture changed")
+                        return false
+                    }
+                    try Task.checkCancellation()
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    back.element.tap()
+                    parentReturnRejected = false
+                    // Child navigation is not readiness. The next observation
+                    // must prove the unchanged parent editor or unique cell.
+                    return false
                 } catch {
                     initialObservation.failed(error)
                     return false

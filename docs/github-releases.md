@@ -114,7 +114,13 @@ uses native New Folder, verifies the exact name and editor geometry, requests
 end-editing once, and terminates the app. Its capture explicitly says that
 host empty-folder verification is pending; it does not assert that the editor
 closed or that folder navigation succeeded. A separate canonical source UUID
-prevents reuse of the later seed source directory. Only after the case passes
+prevents reuse of the later seed source directory. If Files instead opens the
+new empty `untitled folder`, the helper permits one strictly verified return to
+its local parent, then requires
+the same parent editor or Rename checks. That return shares the original
+30-second initial deadline and never authorizes Save. See the
+[Recovery preparation contract](recovery-hosted.md) for this separate state and
+its retained failure evidence. Only after the case passes
 may the host adopt the exact empty, nonsymlink leaf with stable parent and
 leaf device/inode identities. The two synthetic source PDFs remain outside
 the provider; the host neither creates this leaf nor writes provider files.
