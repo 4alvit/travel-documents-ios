@@ -654,9 +654,10 @@ scheme and plan include only the UI-test target and its app dependencies. The
 core/purchase job continues to build and run all hosted AppTests through the
 unchanged default plan. Generated iPad metadata must contain exactly the UI-test
 target; a full-scheme result is rejected rather than silently accepted.
-The fixed EN/RU CI matrix has `max-parallel: 1` and `fail-fast: false`: a failed
-English lane cannot prevent Russian from running, and the existing CI gate
-requires the aggregate matrix result to be `success`. Each artifact includes its
+The fixed EN/RU CI matrix has `max-parallel: 2` and `fail-fast: false`: both
+independent locale jobs can become eligible together, and a failed English lane
+cannot prevent Russian from running. The existing CI gate requires the aggregate
+matrix result to be `success`. Each artifact includes its
 locale, source SHA, run ID and attempt; the receipt records the exact locale,
 method, one-case count, source manifests, built/installed bytes and owned UUID.
 No case is inferred from the other locale's result.
@@ -733,16 +734,31 @@ admission or finalization; no timeout or nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
 Core has a 75-minute limit, Recovery has 113 minutes, phone guidance has 95 minutes,
-and each iPad locale has 95 minutes, at most 473 aggregate job-minutes. Within this
-CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
-for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
-account runner capacity. All five macOS jobs use `macos-15-intel` with the same
+and each iPad locale has 95 minutes, at most 473 aggregate job-minutes. All five
+jobs can become eligible independently: phone guidance does not consume Core
+outputs, and each iPad locale creates its own checkout, build and owned device
+without consuming Recovery artifacts. All five use `macos-15-intel` with the same
 Xcode 26.2 and SDK-compatible runtime selection after repeated ARM runner
 acquisition failures.
 There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
 runner change requires fresh runtime evidence and does not validate old failures
 or guarantee available hosted capacity.
+
+Independent eligibility removes the former Core-to-Phone and
+Recovery-to-serial-iPad scheduling waits; it does not reserve runners. GitHub's
+[documented macOS concurrency limits](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners)
+are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
+account limits and other workflows share that capacity, including Swift CodeQL
+and separate Batch/Biometrics qualification. Jobs may queue, so the largest
+individual job limit of 113 minutes is not a completion-time guarantee.
+Per-job native tests remain serial, with unchanged timeouts, owned-process
+cleanup, `!cancelled()` conditions and the final gate's four result checks.
+
+A retry used for complete qualification must run the full CI workflow and
+verify all six fresh jobs in the same attempt. Retrying only failed jobs no
+longer reruns independent guidance jobs through the removed dependency edges;
+copied or earlier successful records are not fresh native evidence.
 
 The hosted Intel Phone guidance profile uses a 75-minute integration step within
 that 95-minute job. Its bootstrap remains bounded by 1,120 seconds, the nine
