@@ -97,14 +97,32 @@ The hosted Intel adapter selects the immutable `hosted-intel-v1` profile before
 creating output or deriving deadlines from the original entry clock. It requires
 the exact `macos-15-intel` / `X64` / `x86_64` hosted tuple. Unknown profiles,
 crossed host identities and changed timing policy are rejected before work.
-The selected profile cannot be replaced during the run. It allows 4,800 seconds
-total: 4,680 for work and the same 120 for cleanup. Prepare allows 1,200 command
+The selected profile cannot be replaced during the run. It allows 5,040 seconds
+total: 4,680 for work and 360 for cleanup. Prepare allows 1,200 command
 seconds and 300 native case seconds; export and restore each allow 900 command
 seconds and 600 native case seconds. Every command includes the unchanged
 eight-second stop reserve and is clipped to the original work deadline. The
 native allowances require an exact profile token, the existing Recovery opt-in,
 matching phase and canonical folder identity in a Debug Intel Simulator build.
 Without that token the standalone native allowances are unchanged.
+
+Only hosted cleanup gives each owned shutdown/delete action 90 seconds and
+each recovery/final inventory query 60 seconds, including the same eight-second
+stop reserve. Default cleanup retains 30-second actions, 20-second queries and
+its 120-second total. In run 41894677683 the shorter action and inventory work
+windows expired, while bounded process termination succeeded. Run 41896588489
+completed shutdown in 21.55 seconds and verified cleanup. In run 41899787568,
+an unobserved 44.23-second gap put shutdown's next observation beyond its entire
+30-second command deadline; no stop signal could then be sent. This does not
+identify the cause of the gap or prove that more time will complete cleanup.
+
+The hosted cleanup maximum includes optional ownership recovery 60, shutdown
+90, delete 90, final inventory 60 and final receipt 10: 310 seconds, leaving 50
+seconds for non-command work inside the 360-second window. It remains clipped
+to the original overall deadline. The work allocation remains 4,680 seconds
+for 4,515 seconds of command ceilings and 165 seconds of non-command margin.
+No extra attempt, signal retry, drain or ownership adoption is introduced.
+An unresolved process still prevents further commands and cleanup acceptance.
 
 In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126765257864),
 prepare spent 713.25 seconds before its test began, leaving only 58.75 seconds
@@ -188,8 +206,8 @@ qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
-Only the shared post-New-Folder readiness observation gets a 30-second polling
-allowance. In run 41805678990, about 18 seconds elapsed between the first live
+The shared post-New-Folder readiness observation defaults to a 30-second polling
+allowance for standalone and Batch callers. In run 41805678990, about 18 seconds elapsed between the first live
 picker-count query starting and the failure capture. That query did not report
 exactly one picker, and the previous 15-second window ended before a second
 sample. The later failure image showed an inline editor
@@ -198,6 +216,18 @@ The new allowance permits another fresh, fully validated picker/application
 pair. More and New Folder are still tapped once, and no other wait or outer
 case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
 wait semantics. It does not guarantee remote Files readiness.
+
+The already validated `hosted-intel-v1` Recovery opt-in selects 60 seconds for
+this observation only. In run 41899787568, the first bound picker/application
+pair included the supported inline editor and keyboard introduction, but its
+live binding finished at least 42 seconds after the observation began. The
+original 30-second deadline correctly rejected that late result. The hosted
+window now gives that same classifier more time; polling and action admission
+share one deadline that is never reset. A result arriving after the selected
+deadline still cannot authorize readiness or Back. The observation adjustment
+leaves initial picker presentation, the native 300-second prepare case and the
+1,200-second prepare command unchanged. This change does not establish native success
+or resolve the independent unconfirmed Simulator shutdown in that run.
 
 In [main run 41845526416](https://github.com/4alvit/travel-documents-ios/actions/runs/41845526416),
 the single New Folder action instead opened an empty `untitled folder` child.
@@ -208,7 +238,7 @@ with no cells, editor or keyboard. The remote snapshot may omit the empty
 collection view. A fresh bound observation and matching enabled, hittable Back
 control permit one return to `On My iPhone`; the child itself is never ready for
 rename. The return and subsequent unchanged parent checks share the original
-30-second deadline. A late query, changed control or repeated child state cannot
+selected observation deadline. A late query, changed control or repeated child state cannot
 initiate another Back. New Folder is not repeated, and Save is never pressed.
 Exact UUID naming,
 editor geometry, fixture termination and host empty-folder adoption remain
@@ -527,9 +557,9 @@ The 2 GiB xcresult content limit still checks both logical and allocated size;
 manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
-measurement. The native execution step allows 82 minutes, including two minutes
-beyond the 80-minute executor ceiling. The 109-minute job allocates two minutes
-to checkout, 15 to offline regressions, 82 to native recovery and five to evidence
+measurement. The native execution step allows 86 minutes, including two minutes
+beyond the 84-minute executor ceiling. The 113-minute job allocates two minutes
+to checkout, 15 to offline regressions, 86 to native recovery and five to evidence
 upload, plus five minutes for cancellation and step overhead. The executor still
 reserves its own cleanup time before the outer workflow deadline.
 
@@ -663,8 +693,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 109 minutes, phone guidance has 95 minutes,
-and each iPad locale has 95 minutes, at most 469 aggregate job-minutes. Within this
+Core has a 75-minute limit, Recovery has 113 minutes, phone guidance has 95 minutes,
+and each iPad locale has 95 minutes, at most 473 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same

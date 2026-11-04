@@ -28,7 +28,9 @@ def native_folder_execution():
     opening = "    ) async throws {\n"
     body = helper.split(opening, 1)[1]
     assert body.endswith("    }\n\n")
-    return caller.replace(call, body[:-len("    }\n\n")], 1)
+    default = re.search(r"initialObservationTimeout: Duration = (\.seconds\(\d+\))", helper).group(1)
+    return caller.replace(call, "        let initialObservationTimeout: Duration = " + default + "\n"
+                          + body[:-len("    }\n\n")], 1)
 
 
 SWIFT = r'''
@@ -690,8 +692,8 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)\n            throw error", initial)
         self.assertIn("renameFrame = state.renameFrame", initial)
         self.assertIn("if state.ready { return ContinuousClock.now < initialDeadline }", initial)
-        self.assertEqual(initial.count("timeout: .seconds(30)"), 1)
-        self.assertIn('app: app, timeout: .seconds(30)) {', initial.splitlines()[0])
+        self.assertEqual(initial.count("timeout: initialObservationTimeout"), 1)
+        self.assertIn('app: app, timeout: initialObservationTimeout) {', initial.splitlines()[0])
         for forbidden in ["nativeFolderRenameFrame(", ".press(", "sleep", "while "]:
             self.assertNotIn(forbidden, initial)
         self.assertNotIn("timeout:", "\n".join(initial.splitlines()[1:]))
@@ -1313,6 +1315,14 @@ CHILD_ROUTE_METHODS = r'''
         }
         if app.mode == "parent-cell" { pair = (parent.picker, parent.app) }
         if app.mode == "parent-editor" { pair = (editor.picker, editor.app) }
+        if app.mode.hasPrefix("slow-introduction") {
+            editor.mutate("introduction-overlay")
+            if app.mode == "slow-introduction-invalid" { editor.mutate("wrong-provider") }
+            pair = (editor.picker, editor.app)
+        }
+        if app.samples == 1 && (app.mode.hasPrefix("slow-introduction") || app.mode == "slow-child") {
+            ContinuousClock.now.seconds = app.mode == "slow-introduction-expired" ? 61 : 42
+        }
         if app.backs > 0 && app.mode != "repeated-child"
             && !(app.mode == "transient-child" && app.samples == 3) {
             pair = (parent.picker, parent.app)
@@ -1332,7 +1342,7 @@ CHILD_ROUTE_METHODS = r'''
         return pair
     }
     // ACTUAL_WAIT
-    func exerciseRoute(_ app: XCUIApplication) async -> [String: Any] {
+    func exerciseRoute(_ app: XCUIApplication, initialObservationTimeout: Duration = DEFAULT_INITIAL_TIMEOUT) async -> [String: Any] {
         let navigation = app.navigation, files = app.files
         let inlineNames = app.inlineNames, keyboardIntroduction = app.introduction
         let localTitle = "On My iPhone"
@@ -1368,7 +1378,8 @@ CHILD_ROUTE_MAIN = r'''
 @main struct RouteMain {
     @MainActor static func main() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
-        let row = args[0] == "proof" ? Harness.childProof(args[1]) : await Harness().exerciseRoute(XCUIApplication(args[1]))
+        let timeout: Duration = args.count > 2 ? .seconds(Int64(args[2])!) : DEFAULT_INITIAL_TIMEOUT
+        let row = args[0] == "proof" ? Harness.childProof(args[1]) : await Harness().exerciseRoute(XCUIApplication(args[1]), initialObservationTimeout: timeout)
         print(String(decoding: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), as: UTF8.self))
     }
 }
@@ -1385,11 +1396,12 @@ class ParentReturnTests(unittest.TestCase):
         helpers += section("    private static func nativeFolderConfiguration", "    private func acknowledgeNativeFolderKeyboardIntroduction(")
         helpers += section("    private static func combinedBatchConfiguration", "    private static func recordBatchProducer")
         case = section("    private func createNativeEmptyFilesFolder", "    func testNativeSaveSeedsBothSyntheticOriginals")
+        default = re.search(r"initialObservationTimeout: Duration = (\.seconds\(\d+\))", case).group(1)
         initial = case[case.index("        var renameFrame: CGRect?"):case.index("        // One shared acknowledgement")]
         methods = CHILD_ROUTE_METHODS.replace("    // ACTUAL_WAIT", section("    private func wait(_ message:", "    private func check("))
         methods = methods.replace("            // ACTUAL_INITIAL_AND_PRERENAME", initial)
         common = SWIFT[:SWIFT.index("@main struct Main")].replace("    // ACTUAL_HELPERS", helpers + methods)
-        cls.source = common + CHILD_RETURN_SUPPORT + CHILD_ROUTE_SUPPORT + CHILD_ROUTE_MAIN
+        cls.source = (common + CHILD_RETURN_SUPPORT + CHILD_ROUTE_SUPPORT + CHILD_ROUTE_MAIN).replace("DEFAULT_INITIAL_TIMEOUT", default)
         cls.binary = cls.compile(cls.source, "route")
 
     @classmethod
@@ -1402,8 +1414,9 @@ class ParentReturnTests(unittest.TestCase):
         if result.returncode: raise AssertionError(result.stdout + result.stderr)
         return binary
 
-    def probe(self, mode, command="route", binary=None):
-        return json.loads(subprocess.run([str(binary or self.binary), command, mode], check=True,
+    def probe(self, mode, command="route", binary=None, timeout=None):
+        args = [str(binary or self.binary), command, mode] + ([] if timeout is None else [str(timeout)])
+        return json.loads(subprocess.run(args, check=True,
                                          capture_output=True, text=True, timeout=5).stdout)
 
     def test_complete_child_pair_is_only_a_return_intention(self):
@@ -1493,6 +1506,38 @@ class ParentReturnTests(unittest.TestCase):
         row = self.probe("first-throws")
         self.assertEqual((row["outcome"], row["backs"], row["presses"]), ("rejected", 0, 0))
 
+    def test_hosted_window_accepts_bound_late_editor_but_default_and_expired_windows_reject(self):
+        hosted = self.probe("slow-introduction", timeout=60)
+        self.assertEqual((hosted["outcome"], hosted["backs"], hosted["presses"], hosted["samples"]),
+                         ("accepted", 0, 0, 1))
+        self.assertEqual(hosted["elapsed"], 42)
+        for mode, timeout in [("slow-introduction", None), ("slow-introduction-expired", 60),
+                              ("slow-introduction-invalid", 60)]:
+            with self.subTest(mode=mode, timeout=timeout):
+                row = self.probe(mode, timeout=timeout)
+                self.assertEqual((row["outcome"], row["backs"], row["presses"]), ("rejected", 0, 0))
+
+    def test_hosted_window_preserves_one_back_and_fresh_validation(self):
+        row = self.probe("slow-child", timeout=60)
+        self.assertEqual((row["outcome"], row["backs"], row["renames"]), ("accepted", 1, 1))
+        self.assertGreater(row["elapsed"], 42)
+        for mode, backs in [("fresh-wrong", 0), ("repeated-child", 1)]:
+            with self.subTest(mode=mode):
+                row = self.probe(mode, timeout=60)
+                self.assertEqual((row["outcome"], row["backs"], row["renames"]), ("rejected", backs, 0))
+                self.assertGreaterEqual(row["elapsed"], 60)
+                self.assertLess(row["elapsed"], 60.2)
+
+    def test_causal_old_deadline_or_polling_window_rejects_delayed_hosted_state(self):
+        for name, old, new, mode in [
+            ("old-deadline", "advanced(by: initialObservationTimeout)", "advanced(by: .seconds(30))", "slow-introduction"),
+            ("old-polling", "timeout: initialObservationTimeout)", "timeout: .seconds(30))", "slow-child"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.source.count(old), 1)
+                binary = self.compile(self.source.replace(old, new, 1), name)
+                self.assertEqual(self.probe(mode, binary=binary, timeout=60)["outcome"], "rejected")
+
     def test_causal_mutations_are_detected_by_transition_and_action_observations(self):
         mutations = [
             ("removed-return", "                    back.element.tap()", "                    // removed transition", "child-cell"),
@@ -1523,7 +1568,7 @@ class InitialFolderWaitTests(unittest.TestCase):
         wait = section("    private func wait(_ message:", "    private func check(")
         initial = section('            try await wait("Native folder has neither',
                           "        if let before = renameFrame")
-        default = re.search(r"timeout: Duration = \.seconds\((\d+)\)", wait).group(1)
+        default = re.search(r"initialObservationTimeout: Duration = \.seconds\((\d+)\)", UI).group(1)
         explicit = re.search(r"timeout: \.seconds\((\d+)\)", initial.splitlines()[0])
         selected = explicit.group(1) if explicit else default
         # Only substitute the clock/sleeper boundary; execute the real wait body.

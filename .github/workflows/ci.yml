@@ -229,9 +229,9 @@ jobs:
           retention-days: 7
   recovery:
     name: Free backup and recovery
-    # 109m = checkout 2 + regressions 15 + native 82 + evidence 5 + cancellation 5.
+    # 113m = checkout 2 + regressions 15 + native 86 + evidence 5 + cancellation 5.
     runs-on: macos-15-intel
-    timeout-minutes: 109
+    timeout-minutes: 113
     env:
       TRIPDOCKET_RUNNER_LABEL: macos-15-intel
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -258,7 +258,7 @@ jobs:
           python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-simulator-driver-inventory.py
       - name: One bounded recovery attempt
-        timeout-minutes: 82
+        timeout-minutes: 86
         env:
           TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
           TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}

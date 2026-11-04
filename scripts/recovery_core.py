@@ -38,10 +38,12 @@ PREPARE_PHASE_SECONDS = 780
 EXECUTION_PROFILES = MappingProxyType({
     'default': MappingProxyType(dict(name='default', total_seconds=1500,
         cleanup_seconds=120, prepare_command_seconds=780, phase_command_seconds=600,
-        prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None, boot_scan_seconds=15)),
-    'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=4800,
-        cleanup_seconds=120, prepare_command_seconds=1200, phase_command_seconds=900,
-        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1', boot_scan_seconds=60)),
+        prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None, boot_scan_seconds=15,
+        cleanup_action_seconds=30, cleanup_inventory_seconds=20)),
+    'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=5040,
+        cleanup_seconds=360, prepare_command_seconds=1200, phase_command_seconds=900,
+        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1', boot_scan_seconds=60,
+        cleanup_action_seconds=90, cleanup_inventory_seconds=60)),
 })
 
 
@@ -1231,7 +1233,8 @@ class Recovery:
             self.error('Unresolved process ownership; all further child processes withheld')
             return
         if self.create_attempted and self.owned is None and not self.recovered:
-            try: self.recover(json.loads(self.sim('recover-created','list','devices','--json',cap=20)))
+            try: self.recover(json.loads(self.sim('recover-created','list','devices','--json',
+                                                  cap=self.execution_profile['cleanup_inventory_seconds'])))
             except BaseException as error: self.error('Create recovery: '+repr(error))
         if self.owned:
             try:
@@ -1240,12 +1243,13 @@ class Recovery:
                     if self.active or self.unknown_spawn: break
                     try:
                         self.once(label)
-                        self.sim(label,label,self.owned,cap=30)
+                        self.sim(label,label,self.owned,cap=self.execution_profile['cleanup_action_seconds'])
                     except BaseException as error: self.error('Cleanup '+label+': '+repr(error))
             except BaseException as error: self.error('Owned root: '+repr(error))
         if self.create_attempted and not self.active and not self.unknown_spawn:
             try:
-                final = json.loads(self.sim('final-inventory','list','devices','--json',cap=20))
+                final = json.loads(self.sim('final-inventory','list','devices','--json',
+                                           cap=self.execution_profile['cleanup_inventory_seconds']))
                 self.report['final_inventory'] = final
                 root = Path.home()/'Library/Developer/CoreSimulator/Devices'/(self.owned or '')
                 self.report['cleanup_verified'] = (self.owned is not None and final==self.report['baseline']
