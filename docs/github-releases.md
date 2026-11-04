@@ -46,10 +46,16 @@ a separate invocation runs the hosted purchase prerequisite, then the batch-only
 `testBatchPrepareFilesProviderDirectly` case. This case opens the existing Debug
 Simulator synthetic-PDF exporter, verifies the exact local Files root and an
 absent probe folder, and terminates before Save. Its recorded preparation UUID
-must be canonical and distinct from the later native-seed UUID. The independent
-Recovery and phone preparation paths still exercise backup export through the
-share sheet. Batch qualification covers a preinitialized provider, not cold
-first use. The first result bundle must contain both exact
+must be canonical and distinct from the later native-seed UUID. Dedicated
+Recovery preparation and shared guidance Files preparation, including the Phone
+bootstrap, also open the Debug exporter without Save. Dedicated Recovery then
+requests creation of its owned folder through Files; the host must verify and
+adopt the empty folder after preparation stops the app. The later Recovery
+export case still checks the production disclosure, share-sheet Save to Files
+and destination Save, followed by restore selection and replacement
+confirmation. See [the Recovery preparation contract](recovery-hosted.md) for
+these separate paths. Batch qualification covers a preinitialized provider,
+not cold first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
 The direct preparation case uses a 30-second initial readiness polling
@@ -297,8 +303,10 @@ bundle explicitly instead of assuming every archive entry belongs to it.
 The phone guidance lane explicitly prepares the selected Simulator's local Files provider
 before running the unchanged UI cases. Preparation binds to the recorded
 selection and rechecks the complete inventory. It runs the existing recovery
-preparation case once: the synthetic app opens Export, Save to Files and the
-local provider, checks that its unique sentinel folder is absent, then stops.
+preparation case once: the Debug app opens its synthetic-ticket source in the
+native exporter without Save, reaches the local provider, checks that its
+unique sentinel folder is absent, then stops. This provider-only bootstrap is
+separate from the subsequent ordinary guidance cases.
 The same `xcodebuild` invocation starts the selected device within its existing
 phase budget. A separate `simctl bootstatus` call is not a prerequisite. The
 exact native case and result validation must pass before post-preparation
@@ -354,8 +362,10 @@ foreground state, and no Files navigation or picker. Missing, ambiguous,
 changed or incomplete observations permanently disable the retry. Each
 dispatch intent and any loss of eligibility records its proof or reason;
 the native tap event establishes actual execution. Cancellation is checked
-immediately before either tap. The preparation case retains one tap. Export confirmation and the destination's
-actual Save are never repeated. No new retry starts after the shared deadline;
+immediately before either tap. Preparation opens its synthetic export source
+once and does not invoke this Save to Files action. Export confirmation and the
+destination's actual Save are never repeated. No new retry starts after the
+shared deadline;
 a synchronous XCTest action already in flight may overrun it. Existing case,
 host and cleanup limits still apply. This permits bounded recovery from the
 observed non-transition; it does not establish whether the first native action
