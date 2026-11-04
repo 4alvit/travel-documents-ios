@@ -236,7 +236,7 @@ class ReadinessTests(unittest.TestCase):
         call = 'try await reachRecoveryLocalRoot(localTitle,'
         self.assertEqual(prepare.count(call), 1)
         self.assertEqual(native_folder.count(call), 0)
-        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app)"), 1)
+        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"), 1)
         self.assertNotIn("presentRecoverySave(app)", native_folder)
         self.assertEqual(source.count(call), 1)
         self.assertIn('timeout: Duration = .seconds(15)', source)
@@ -710,6 +710,7 @@ struct ShareFrame {
     var bounds = CGRect(x: 0, y: 0, width: 402, height: 874)
     var action = CGRect(x: 114, y: 295, width: 82, height: 134)
     var header = CGRect(x: 0, y: 78, width: 402, height: 95)
+    var headerLabel = ""
     var identifier = "actionGroupCell"
     var label = "Save to Files"
     var type = XCUIElement.ElementType.cell
@@ -770,7 +771,7 @@ struct ShareFrame {
         }
         children += (0..<f.fillers).map { _ in XCUIElementSnapshot(traversalCost: f.traversalCost) }
         for _ in 0..<f.headers {
-            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", frame: f.header))
+            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", label: f.headerLabel, frame: f.header))
         }
         if f.staticTextDecoy { children.append(XCUIElementSnapshot(.staticText, label: "Save to Files", frame: f.action)) }
         if let lateOverflow = f.lateOverflow {
@@ -858,6 +859,7 @@ struct ShareFrame {
         case "tolerance-boundary": moved.action.origin.y = ready.action.origin.y + 0.5; frames = [ready, moved]; expectedPolls = 3
         case "tolerance-exceeded": moved.action.origin.y = ready.action.origin.y + 0.5001; frames = [ready, ready, moved]; expectedPolls = 5
         case "header-resets": moved = ready; moved.header.origin.y += 5; frames = [ready, ready, moved]; expectedPolls = 5
+        case "header-label-resets": moved = ready; moved.headerLabel = "Different document"; frames = [ready, ready, moved]; expectedPolls = 5
         case "identity-resets": frames = [ready, ready, otherIdentity]; expectedPolls = 5
         case "unavailable-resets": invalid.actions = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
         case "disabled-resets": invalid.enabled = false; frames = [ready, ready, invalid, ready]; expectedPolls = 6
@@ -964,14 +966,211 @@ class ShareReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
-    def test_shared_export_path_waits_before_its_single_tap(self):
+    def test_header_label_is_part_of_original_share_proof(self):
+        result = subprocess.run([str(self.binary), 'header-label-resets'], capture_output=True,
+                                text=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.strip(), 'PASS header-label-resets')
+
+    def test_shared_export_path_retains_proof_before_bounded_navigation(self):
         source = SOURCE.read_text()
         start = source.index('    private func presentRecoverySave(')
         end = source.index('    private func waitForStableShareAction(', start)
         body = source[start:end]
-        self.assertEqual(body.count('saveToFiles.element.tap()'), 1)
+        self.assertEqual(body.count('export.tap()'), 1)
+        self.assertEqual(body.count('app.buttons["Export…"].tap()'), 1)
+        self.assertEqual(body.count('.action.tap()'), 3)
+        self.assertIn('retryNavigation: Bool = false', body)
         self.assertLess(body.index('try await waitForStableShareAction(saveToFiles, app: app)'),
-                        body.index('saveToFiles.element.tap()'))
+                        body.index('try await openRecoveryFilesFromShare(saveToFiles, app: app, first: proof)'))
+
+
+SHARE_TRANSITION_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        func duration(to other: Instant) -> Duration { other.time - time }
+        static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw CancellationError() } }
+    static func sleep(for value: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        ContinuousClock.elapsed += value
+    }
+}
+struct BatchTestFailure: Error { let message: String }
+typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
+@MainActor final class World {
+    let mode: String
+    var initial: Proof { ([CGRect(x: 114, y: 304, width: 82, height: 138.3),
+                           CGRect(x: 0, y: 78, width: 402, height: 95)], "75:actionGroupCell:Save to Files", XCUIElement(self)) }
+    var taps: [Duration] = []
+    var records: [String] = []
+    var captures = 0
+    var observations = 0
+    var eligibleObservations = 0
+    init(_ mode: String) { self.mode = mode }
+    var navigation: Int {
+        let now = ContinuousClock.elapsed
+        if mode == "slow-navigation-count" { ContinuousClock.elapsed += .seconds(31); return 1 }
+        if mode == "ambiguous-navigation" && now >= .seconds(1) && now < .seconds(2) { return 2 }
+        if mode == "immediate" || mode == "slow-navigation-exists" { return 1 }
+        if mode == "delayed-first" && now >= .seconds(10) { return 1 }
+        if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return 1 }
+        if mode == "retry-opens" && taps.count == 2 { return 1 }
+        return 0
+    }
+    func observation() -> Proof? {
+        observations += 1
+        if ContinuousClock.elapsed >= .seconds(15) { eligibleObservations += 1 }
+        if mode == "slow-snapshot" { ContinuousClock.elapsed += .seconds(31) }
+        if mode == "exact-deadline-snapshot" { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "exact-deadline-third" && eligibleObservations == 3 { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "slow-third-proof" && eligibleObservations == 3 { ContinuousClock.elapsed += .seconds(31) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot"].contains(mode) && observations == 2 { return nil }
+        if mode == "changed-geometry" && observations == 2 {
+            var changed = initial; changed.frames[0].origin.y += 1; return changed
+        }
+        if mode == "changed-header" && observations == 2 {
+            var changed = initial; changed.frames[1].size.height += 1; return changed
+        }
+        if mode == "changed-identity" && observations == 2 { return (initial.frames, "different", initial.action) }
+        if mode == "changed-header-label" && observations == 2 { return (initial.frames, initial.identity + "Different document", initial.action) }
+        return initial
+    }
+}
+@MainActor final class XCUIElement {
+    let world: World
+    init(_ world: World) { self.world = world }
+    var exists: Bool {
+        if world.mode == "slow-navigation-exists" { ContinuousClock.elapsed += .seconds(31) }
+        return true
+    }
+    func tap() {
+        world.taps.append(ContinuousClock.elapsed)
+        if world.mode == "slow-first-tap" { ContinuousClock.elapsed += .seconds(31) }
+    }
+}
+@MainActor final class XCUIElementQuery {
+    let world: World
+    let kind: String
+    init(_ world: World, kind: String = "actions") { self.world = world; self.kind = kind }
+    func matching(identifier: String) -> XCUIElementQuery { self }
+    var element: XCUIElement { XCUIElement(world) }
+    var count: Int {
+        if kind == "navigation" { return world.navigation }
+        if kind == "picker" && world.mode == "partial-picker"
+            && ContinuousClock.elapsed >= .seconds(1) && ContinuousClock.elapsed < .seconds(2) { return 1 }
+        return 0
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, background }
+    let world: World
+    init(_ world: World) { self.world = world }
+    var state: State {
+        if world.mode == "slow-final-state" && world.eligibleObservations >= 3 { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "background" && ContinuousClock.elapsed >= .seconds(1)
+            && ContinuousClock.elapsed < .seconds(2) { return .background }
+        return .runningForeground
+    }
+    var navigationBars: XCUIElementQuery { XCUIElementQuery(world, kind: "navigation") }
+    var otherElements: XCUIElementQuery { XCUIElementQuery(world, kind: "picker") }
+}
+@MainActor final class Harness {
+    let world: World
+    init(_ world: World) { self.world = world }
+    func recordRecoveryShareTransition(_ message: String) {
+        world.records.append(message)
+        if world.mode == "cancel-before-retry" && message.contains("dispatch intent 2") { Task.cancelled = true }
+        if world.mode == "slow-dispatch-record" && message.contains("dispatch intent 2") {
+            ContinuousClock.elapsed += .seconds(31)
+        }
+    }
+    func shareActionObservation(_ actions: XCUIElementQuery, app: XCUIApplication,
+                                before deadline: ContinuousClock.Instant) -> Proof? { world.observation() }
+    func capture(_ app: XCUIApplication, _ message: String, batchDiagnostic: Bool) { world.captures += 1 }
+    // ACTUAL_TRANSITION
+    func run() async throws {
+        try await openRecoveryFilesFromShare(XCUIElementQuery(world), app: XCUIApplication(world), first: world.initial)
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let mode = CommandLine.arguments[1]
+        let world = World(mode)
+        var failed = false
+        var cancelled = false
+        Task.cancelled = mode == "cancel-before-first"
+        do { try await Harness(world).run() } catch { failed = true; cancelled = error is CancellationError }
+        precondition(cancelled == mode.hasPrefix("cancel-"))
+        let succeeds = ["immediate", "delayed-first", "retry-opens", "navigation-during-retry-proof"].contains(mode)
+        precondition(failed != succeeds, "Wrong result for " + mode)
+        let twoTaps = ["retry-opens", "retry-still-pending"].contains(mode)
+        precondition(world.taps.count == (mode == "cancel-before-first" ? 0 : (twoTaps ? 2 : 1)), "Wrong tap count for " + mode)
+        precondition(world.taps.allSatisfy { $0 < .seconds(30) }, "Late tap")
+        if twoTaps { precondition(world.taps[1] >= .seconds(15) && world.eligibleObservations >= 3) }
+        if mode == "retry-still-pending" { precondition(ContinuousClock.elapsed >= .seconds(30) && ContinuousClock.elapsed < .seconds(31)) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot", "changed-geometry", "changed-header",
+            "changed-identity", "changed-header-label", "background", "partial-picker", "ambiguous-navigation"].contains(mode) {
+            precondition(world.records.filter { $0.contains("retry disabled:") }.count == 1)
+        }
+        precondition(world.captures == (succeeds || cancelled ? 0 : 1))
+        print("PASS " + mode)
+    }
+}
+'''
+
+
+class ShareTransitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        path = Path(cls.directory.name) / 'ShareTransition.swift'
+        path.write_text(SHARE_TRANSITION_FIXTURE.replace('    // ACTUAL_TRANSITION', source[start:end]))
+        cls.binary = Path(cls.directory.name) / 'share-transition-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_one_navigation_retry_requires_unchanged_share_and_original_deadline(self):
+        for name in ['immediate', 'delayed-first', 'retry-opens', 'retry-still-pending',
+                     'navigation-during-retry-proof', 'missing-share', 'ambiguous-share',
+                     'failed-snapshot', 'changed-geometry', 'changed-header', 'changed-identity', 'changed-header-label',
+                     'background', 'partial-picker', 'ambiguous-navigation', 'slow-snapshot',
+                     'slow-third-proof', 'slow-navigation-count', 'slow-navigation-exists', 'slow-dispatch-record',
+                     'slow-first-tap', 'exact-deadline-snapshot', 'exact-deadline-third',
+                     'slow-final-state', 'cancel-before-first', 'cancel-before-retry']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_retry_does_not_repeat_export_or_destination_save(self):
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        transition = source[start:end]
+        self.assertEqual(transition.count('.action.tap()'), 2)
+        for forbidden in ['Export…', 'export.tap()', 'save.tap()', 'launch()', 'terminate()']:
+            self.assertNotIn(forbidden, transition)
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        self.assertEqual(source[start:end].count('save.tap()'), 1)
+        self.assertIn('presentRecoverySave(app, retryNavigation: true)', source[start:end])
+        self.assertEqual(source.count('presentRecoverySave(app, retryNavigation: true)'), 1)
 
 PREVIEW_FIXTURE = r'''
 import Foundation

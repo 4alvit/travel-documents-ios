@@ -123,7 +123,13 @@ class SeedGuards(unittest.TestCase):
         self.assertEqual(case.count(".tap()"),1)
         self.assertIn("source.element.tap()",case)
         self.assertIn("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))",case)
-        self.assertEqual(UI.count("initialTimeout: .seconds(30)"),1)
+        self.assertEqual(UI.count("initialTimeout: .seconds(30)"),2)
+        folder=UI[UI.index("    func testNativeCreateOwnedFilesFolder"):
+                  UI.index("    func testNativeSaveSeedsBothSyntheticOriginals")]
+        self.assertEqual(folder.count("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"),1)
+        self.assertEqual(folder.count("source.element.tap()"),1)
+        self.assertLess(folder.index("source.element.tap()"),folder.index("openNativeFilesRoot(app, initialTimeout:"))
+        self.assertIn("executionTimeAllowance = 180",folder)
         self.assertIn("initialTimeout: Duration = .seconds(15)",UI)
         route=UI[UI.index("    private func openNativeFilesRoot"):
                  UI.index("    private func openLocalFilesFolder")]

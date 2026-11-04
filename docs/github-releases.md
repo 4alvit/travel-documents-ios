@@ -75,6 +75,18 @@ navigation predicate, subsequent 15-second waits, one exporter tap and the
 will recover or that its cause has been fixed. As above, an in-flight XCTest
 query can finish beyond the polling allowance; outer case and command bounds
 still apply.
+The separate native-folder creation case also uses the 30-second initial
+browser/Recents allowance. In [PR18 Batch attempt 1](https://github.com/4alvit/travel-documents-ios/actions/runs/41742187902),
+its single exporter tap led to a blank sheet throughout the 15-second initial
+polling window; no folder creation or seed test followed. The same run's
+successful direct preparation began polling at 12.94 seconds, reached the
+picker-existence query at 25.06 seconds, and proceeded past the initial
+predicate by 25.69 seconds. These are query-progression bounds, not exact
+rendering times. The extra margin applies only to this initial folder-case
+entry: the helper default and subsequent waits remain 15 seconds, all unique
+browser/root checks and the single exporter tap remain, and the 180-second
+case and enclosing command bounds are unchanged. It does not prove that the
+failed blank sheet would recover, and does not change Recovery presentation.
 Default Arm preparation has a 780-second build/test cap and an unchanged
 180-second case allowance. The Intel envelope is described below.
 A [retained qualification run](https://github.com/4alvit/travel-documents-ios/actions/runs/41415016371)
@@ -334,6 +346,20 @@ Recovery allows at most 780 seconds for its prepare command and retains
 reserve. Its 180-second preparation case and 300-second export/restore cases
 share the unchanged 1,380-second work deadline and 120-second cleanup reserve.
 This accommodates measured cold runner startup without guaranteeing completion.
+Only the full Recovery export case may retry the native **Save to Files**
+navigation action once. Its first action and any retry share a 30-second
+polling allowance; retry eligibility begins after 15 seconds and requires
+three fresh, stable observations matching the original action/header proof,
+foreground state, and no Files navigation or picker. Missing, ambiguous,
+changed or incomplete observations permanently disable the retry. Each
+dispatch intent and any loss of eligibility records its proof or reason;
+the native tap event establishes actual execution. Cancellation is checked
+immediately before either tap. The preparation case retains one tap. Export confirmation and the destination's
+actual Save are never repeated. No new retry starts after the shared deadline;
+a synchronous XCTest action already in flight may overrun it. Existing case,
+host and cleanup limits still apply. This permits bounded recovery from the
+observed non-transition; it does not establish whether the first native action
+was ignored or delayed.
 Batch release qualification preparation has the profile-specific cap described above. The guidance test
 deadlines and 30-second cleanup budget are unchanged. The phone integration step
 has a 45-minute cap within a 65-minute job. Its planning envelope leaves one
