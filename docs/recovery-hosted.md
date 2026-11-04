@@ -8,9 +8,10 @@ or payment acceptance.
 
 ## Profile and dependencies
 
-The job uses the existing standard `macos-15` runner class. The reviewed profile
-requires the actual runner context to report `github-hosted` and `ARM64`, and
-Python to observe `arm64`. Image OS/version are recorded. The profile is a
+The job uses the standard `macos-15-intel` runner class after repeated hosted
+ARM runner acquisition failures. The reviewed profile requires the actual
+runner context to report `github-hosted` and `X64`, and Python to observe
+`x86_64`. Image OS/version are recorded. The profile is a
 requirement checked in the job, not evidence that the future host satisfies it.
 
 Only the image's already selected Xcode is used. The job records and freezes its
@@ -25,12 +26,12 @@ This job does not run XcodeGen, Homebrew, pip, `verify.sh`, or another preparato
 build. Python 3.11+ and its standard library, Git and Xcode must already exist.
 The other CI jobs retain their existing generation and dependency steps.
 
-GitHub currently documents `macos-15` as standard ARM64 and standard macOS storage
+GitHub currently documents `macos-15-intel` as standard Intel and macOS storage
 as 14 GB. Consequently **16 GiB free is not guaranteed**. The job measures the
 actual filesystem and refuses admission below 16 GiB; it never lowers the guard
 or removes preinstalled/unrelated data. Official references:
 [runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
-[image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md).
+[image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md).
 Image inventories change and do not substitute for the measurements in this job.
 
 ## Source identity
@@ -582,12 +583,12 @@ Core and Recovery have 35-minute limits, phone guidance has 65 minutes, and
 each iPad locale has 46 minutes, at most 227 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
-account runner capacity. Core and Recovery retain `macos-15` ARM runners;
-phone and iPad guidance use `macos-15-intel` with the same Xcode 26.2 and
-SDK-compatible runtime selection after repeated ARM runner acquisition failures.
+account runner capacity. All five macOS jobs use `macos-15-intel` with the same
+Xcode 26.2 and SDK-compatible runtime selection after repeated ARM runner
+acquisition failures.
 There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
-runner split requires fresh runtime evidence and does not validate old failures
+runner change requires fresh runtime evidence and does not validate old failures
 or guarantee available hosted capacity.
 
 
