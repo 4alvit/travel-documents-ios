@@ -164,10 +164,19 @@ exactly one picker, and the previous 15-second window ended before a second
 sample. The later failure image showed an inline editor
 and keyboard introduction; it does not establish when either became ready.
 The new allowance permits another fresh, fully validated picker/application
-pair. More and New Folder are still tapped once, all readiness predicates stay
-unchanged, and no other wait or outer case/host cap increases. This is a polling
-allowance: an in-flight synchronous XCTest query can overrun it under the existing
+pair. More and New Folder are still tapped once, and no other wait or outer
+case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
 wait semantics. It does not guarantee remote Files readiness.
+
+The explicit keyboard-introduction state accepts zero or one Keyboard node:
+its first-use overlay can be present in a bound application snapshot without a
+separate Keyboard node. The unique introduction must have finite, positive bounds
+inside the application window, clear of the exact inline editor and local-root
+title. Any present keyboard must retain its existing geometry checks. Ordinary
+editing still requires exactly one keyboard. The nonediting Rename fallback
+rejects an introduction in either snapshot, including when no Keyboard is exposed.
+This changes only readiness classification; the single Continue acknowledgment, exact explanation and button,
+subsequent dismissal/editor checks, and all action budgets remain required.
 
 The shared guidance preparation invoked by `test-simulator.sh` omits this flag
 and uses the same existing Debug Simulator exporter for provider-only preparation. Both prepare modes
