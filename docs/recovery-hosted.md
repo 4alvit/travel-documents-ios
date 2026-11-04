@@ -265,6 +265,17 @@ and never requests folder creation. Ordinary UI cases and actual Recovery
 export/restore still use the production Free gate, disclosure, Save-to-Files
 and import/replacement paths.
 
+After the single Save tap, the validated `hosted-intel-v1` export case allows
+60 seconds for the picker to disappear and Settings to be present; other callers
+retain 15 seconds. In run 41928330972, the retained failure image and accessibility
+snapshot still showed the owned destination with an in-progress indicator. That
+state remains pending, never completion. The extra polling allowance does not
+change the predicate, repeat Save or reset the wait deadline. The native
+600-second case and 900-second host command remain bounded, and synchronous
+XCTest queries retain their existing overrun behavior. This is finite headroom,
+not proof that the pending export will finish. A dismissed picker still requires
+the host's complete backup metadata and original-byte verification before reset.
+
 After the prepare case passes and its process group closes, the host adopts
 exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
 and inode checks, and complete empty-directory check must all pass before export.

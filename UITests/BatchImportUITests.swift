@@ -1627,6 +1627,10 @@ final class BatchImportUITests: XCTestCase {
 
     func testRecoveryExportFullBackupThroughFiles() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "export")
+        // recoveryConfiguration has already validated the hosted Intel opt-in.
+        let saveCompletionTimeout: Duration =
+            ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+                ? .seconds(60) : .seconds(15)
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -1682,7 +1686,7 @@ final class BatchImportUITests: XCTestCase {
         try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
                   "Files left the confirmed owned destination before Save")
         save.tap()
-        try await wait("Save to Files did not return to Settings", app: app) {
+        try await wait("Save to Files did not return to Settings", app: app, timeout: saveCompletionTimeout) {
             !picker.exists && app.navigationBars["Settings"].exists
         }
         capture(app, "Recovery export — UI completed, host file verification still required")
