@@ -157,6 +157,18 @@ qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
+Only the shared post-New-Folder readiness observation gets a 30-second polling
+allowance. In run 41805678990, about 18 seconds elapsed between the first live
+picker-count query starting and the failure capture. That query did not report
+exactly one picker, and the previous 15-second window ended before a second
+sample. The later failure image showed an inline editor
+and keyboard introduction; it does not establish when either became ready.
+The new allowance permits another fresh, fully validated picker/application
+pair. More and New Folder are still tapped once, all readiness predicates stay
+unchanged, and no other wait or outer case/host cap increases. This is a polling
+allowance: an in-flight synchronous XCTest query can overrun it under the existing
+wait semantics. It does not guarantee remote Files readiness.
+
 The shared guidance preparation invoked by `test-simulator.sh` omits this flag
 and uses the same existing Debug Simulator exporter for provider-only preparation. Both prepare modes
 require the isolated Recovery opt-in, prepare phase and canonical destination

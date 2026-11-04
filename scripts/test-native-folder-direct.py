@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual folder identity/snapshot gates without a Simulator or XCTest."""
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -617,7 +618,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertLess(helper.index('more.element.tap()'), helper.index('newFolder.element.tap()'))
         self.assertLess(helper.index('newFolder.element.tap()'), helper.index('inlineNames.element.typeText(ownedFolder)'))
 
-    def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
+    def test_initial_wait_uses_one_pair_with_one_scoped_polling_allowance(self):
         case = native_folder_execution()
         initial = case[case.index('try await wait("Native folder has neither'):case.index("if let before = renameFrame")]
         self.assertEqual(initial.count("try self.nativeFolderSnapshots(app, diagnostic:"), 1)
@@ -629,9 +630,12 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)\n            throw error", initial)
         self.assertIn("renameFrame = state.renameFrame", initial)
         self.assertIn("return state.ready", initial)
+        self.assertEqual(initial.count("timeout: .seconds(30)"), 1)
+        self.assertIn('app: app, timeout: .seconds(30)) {', initial.splitlines()[0])
         for forbidden in [".count", ".isHittable", ".isEnabled", "nativeFolderRenameFrame(",
-                          "timeout:", ".tap(", ".press(", "sleep", "while "]:
+                          ".tap(", ".press(", "sleep", "while "]:
             self.assertNotIn(forbidden, initial)
+        self.assertNotIn("timeout:", "\n".join(initial.splitlines()[1:]))
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = native_folder_execution()
@@ -1027,6 +1031,108 @@ class PreRenameActionTests(unittest.TestCase):
         for mode in ["live-root", "live-duplicate", "live-frame", "live-disabled", "live-hidden"]:
             with self.subTest(mode=mode): self.assertEqual(self.probe(mode), "rejected,0,0,0")
         self.assertEqual(self.probe("menu-hidden"), "rejected,1,0,1")
+
+class InitialFolderWaitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="folder-initial-wait-")
+        cls.addClassCleanup(cls.temp.cleanup)
+        root = Path(cls.temp.name)
+        wait = section("    private func wait(_ message:", "    private func check(")
+        initial = section('            try await wait("Native folder has neither',
+                          "        if let before = renameFrame")
+        default = re.search(r"timeout: Duration = \.seconds\((\d+)\)", wait).group(1)
+        explicit = re.search(r"timeout: \.seconds\((\d+)\)", initial.splitlines()[0])
+        selected = explicit.group(1) if explicit else default
+        # Only substitute the clock/sleeper boundary; execute the real wait body.
+        wait = wait.replace("ContinuousClock.now", "clock.now")
+        wait = wait.replace("Task.sleep(for:", "clock.sleep(for:")
+        swift = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Instant: Comparable {
+    var seconds: Double
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.seconds < rhs.seconds }
+    func advanced(by duration: Duration) -> Self {
+        let parts = duration.components
+        return Self(seconds: seconds + Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
+    }
+}
+@MainActor final class Clock {
+    var now = Instant(seconds: 0)
+    var cancelled = false
+    func sleep(for duration: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        now = now.advanced(by: duration)
+    }
+}
+@MainActor final class XCUIApplication {}
+@MainActor final class Harness {
+    let clock = Clock()
+    var captures = 0
+    func capture(_ app: XCUIApplication, _ message: String,
+                 springboard: XCUIApplication?, batchDiagnostic: Bool) { captures += 1 }
+    // ACTUAL_WAIT
+    func run(timeout: Duration, validSecond: Bool, cancel: Bool = false) async -> [String: Any] {
+        var observations = 0
+        var outcome = "passed"
+        do {
+            try await wait("initial", app: XCUIApplication(), timeout: timeout) {
+                observations += 1
+                // Model the observed slow negative first acquisition, not a UI action.
+                self.clock.now = self.clock.now.advanced(by: .seconds(observations == 1 ? 18 : 1))
+                if cancel { self.clock.cancelled = true }
+                return validSecond && observations == 2
+            }
+        } catch is CancellationError { outcome = "cancelled" }
+        catch { outcome = "failed" }
+        return ["outcome": outcome, "observations": observations,
+                "captures": captures, "elapsed": clock.now.seconds]
+    }
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        let rows = [
+            "selected": await Harness().run(timeout: .seconds(SELECTED), validSecond: true),
+            "old15": await Harness().run(timeout: .seconds(15), validSecond: true),
+            "invalid": await Harness().run(timeout: .seconds(SELECTED), validSecond: false),
+            "cancel": await Harness().run(timeout: .seconds(SELECTED), validSecond: true, cancel: true)
+        ]
+        print(String(decoding: try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+'''.replace("    // ACTUAL_WAIT", wait).replace("SELECTED", selected)
+        path = root / "InitialWait.swift"
+        path.write_text(swift)
+        binary = root / "InitialWait"
+        compiled = subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-strict-concurrency=complete",
+                                   "-parse-as-library", str(path), "-o", str(binary)],
+                                  capture_output=True, text=True, timeout=60)
+        if compiled.returncode: raise AssertionError(compiled.stdout + compiled.stderr)
+        cls.rows = json.loads(subprocess.run([str(binary)], check=True, capture_output=True,
+                                             text=True, timeout=5).stdout)
+
+    def test_slow_negative_then_valid_acquisition_needs_scoped_allowance(self):
+        self.assertEqual(self.rows["selected"]["outcome"], "passed")
+        self.assertEqual(self.rows["selected"]["observations"], 2)
+        self.assertEqual(self.rows["selected"]["captures"], 0)
+        self.assertEqual(self.rows["old15"]["outcome"], "failed")
+        self.assertEqual(self.rows["old15"]["observations"], 1)
+        self.assertEqual(self.rows["old15"]["captures"], 1)
+
+    def test_persistent_invalid_acquisition_exhausts_polling_allowance(self):
+        row = self.rows["invalid"]
+        self.assertEqual(row["outcome"], "failed")
+        self.assertEqual(row["captures"], 1)
+        self.assertGreaterEqual(row["elapsed"], 30)
+        self.assertLess(row["elapsed"], 31.2)
+
+    def test_cancellation_stops_before_another_acquisition(self):
+        row = self.rows["cancel"]
+        self.assertEqual(row["outcome"], "cancelled")
+        self.assertEqual(row["observations"], 1)
+        self.assertEqual(row["captures"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
