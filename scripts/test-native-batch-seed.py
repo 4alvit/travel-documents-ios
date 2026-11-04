@@ -122,17 +122,30 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('"--ui-testing-native-batch-token", token',case)
         self.assertEqual(case.count(".tap()"),1)
         self.assertIn("source.element.tap()",case)
-        self.assertIn("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))",case)
-        self.assertEqual(UI.count("initialTimeout: .seconds(30)"),2)
+        initial_call = "let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"
         folder=UI[UI.index("    func testNativeCreateOwnedFilesFolder"):
-                  UI.index("    func testNativeSaveSeedsBothSyntheticOriginals")]
-        self.assertEqual(folder.count("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"),1)
+                  UI.index("    private func createNativeEmptyFilesFolder(")]
+        recovery=UI[UI.index("    func testRecoveryPrepareFilesProvider()"):
+                    UI.index("    // Batch-only provider initialization.")]
+        create, provider_only = recovery.split("        } else {",1)
+        create = create.split("        if createFolder {",1)[1]
+        # These three callers own the larger initial allowance. The generic
+        # provider-only route and every other caller retain their own defaults.
+        remaining = UI
+        for name, caller in (("batch prepare",case),("batch folder",folder),("recovery create",create)):
+            with self.subTest(caller=name):
+                self.assertEqual(caller.count(initial_call),1)
+                self.assertLess(caller.index("source.element.tap()"),caller.index(initial_call))
+                remaining = remaining.replace(caller,"",1)
+        self.assertNotIn("initialTimeout: .seconds(30)",remaining)
+        self.assertNotIn("openNativeFilesRoot(",provider_only)
+        self.assertIn('try await wait("Real Files preparation picker did not open", app: app)',provider_only)
         self.assertEqual(folder.count("source.element.tap()"),1)
         self.assertLess(folder.index("source.element.tap()"),folder.index("openNativeFilesRoot(app, initialTimeout:"))
         self.assertIn("executionTimeAllowance = 180",folder)
-        self.assertIn("initialTimeout: Duration = .seconds(15)",UI)
         route=UI[UI.index("    private func openNativeFilesRoot"):
                  UI.index("    private func openLocalFilesFolder")]
+        self.assertIn("initialTimeout: Duration = .seconds(15)",route)
         self.assertEqual(route.count("timeout: initialTimeout"),1)
         self.assertNotIn("timeout:",route[route.index("        if !browserReady()"):])
         self.assertIn("isNativeFilesRoot(app)",case)
@@ -284,6 +297,8 @@ class SeedGuards(unittest.TestCase):
 
     def test_native_folder_case_is_separate_opt_in_one_creation_without_save(self):
         case=UI[UI.index("func testNativeCreateOwnedFilesFolder"):
+                UI.index("private func createNativeEmptyFilesFolder(")]
+        helper=UI[UI.index("private func createNativeEmptyFilesFolder("):
                 UI.index("func testNativeSaveSeedsBothSyntheticOriginals")]
         configuration=UI[UI.index("private static func nativeFolderConfiguration"):
                          UI.index("func testNativeCreateOwnedFilesFolder")]
@@ -293,30 +308,54 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('UUID(uuidString: token)?.uuidString.lowercased() == token',configuration)
         self.assertIn('environment["TRIPDOCKET_BATCH_FOLDER"] == "TripDocket-Batch-QA-" + token',configuration)
         self.assertIn("executionTimeAllowance = 180",case)
+        recovery=UI[UI.index("func testRecoveryPrepareFilesProvider()"):
+                    UI.index("// Batch-only provider initialization.")]
+        create=recovery.split("        if createFolder {",1)[1].split("        } else {",1)[0]
+        stop=recovery[recovery.index("// Dedicated Recovery adopts"):]
+        for name, caller, target in (("batch",case,"ownedFolder"),("recovery",create+stop,"recoveryFolder")):
+            with self.subTest(caller=name):
+                call="try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: " + target + ")"
+                self.assertEqual(caller.count(call),1)
+                self.assertEqual(caller.count(".tap()"),1)
+                self.assertLess(caller.index("source.element.tap()"),caller.index("openNativeFilesRoot("))
+                before,handoff=caller.split(call,1)
+                self.assertIn("saved.count == 0 && !failed.exists",before)
+                self.assertNotIn("remainingEditors",handoff)
+                self.assertNotIn("directory.element.tap()",handoff)
+                self.assertIn("host empty-folder verification pending",handoff)
+                self.assertLess(handoff.index("saved.count == 0 && !failed.exists"),handoff.index("app.terminate()"))
+                self.assertLess(handoff.index("app.terminate()"),handoff.index("app.state == .notRunning"))
+                for forbidden in ('buttons["Save"]','save.tap()','createDirectory','write(','removeItem','coordinate('):
+                    self.assertNotIn(forbidden,caller)
+        self.assertIn('capture(app, "Native folder rename requested; host empty-folder verification pending")',case)
+        self.assertIn("defer { app.terminate() }",case)
+        self.assertIn("defer { app.terminate() }",recovery)
+        # Native editing belongs to the shared helper; launch, no-export proof,
+        # and termination belong to each caller after that helper returns.
         for action in ("more.element.tap()","newFolder.element.tap()",
                        "files.element.coordinate(withNormalizedOffset: current.normalized).tap()"):
-            self.assertEqual(case.count(action),1)
-        handoff=case[case.index("files.element.coordinate(withNormalizedOffset: current.normalized).tap()")+len("files.element.coordinate(withNormalizedOffset: current.normalized).tap()") :]
-        self.assertNotIn("remainingEditors",handoff)
-        self.assertNotIn("directory.element.tap()",handoff)
-        self.assertIn('capture(app, "Native folder rename requested; host empty-folder verification pending")',handoff)
-        self.assertLess(handoff.index("saved.count == 0 && !failed.exists"),handoff.index("app.terminate()"))
-        self.assertLess(handoff.index("app.terminate()"),handoff.index("app.state == .notRunning"))
-        self.assertIn('app.state == .notRunning',case)
-        self.assertNotIn('buttons["Save"]',case)
-        self.assertEqual(case.count('coordinate('),1)
-        self.assertNotIn("create.element.tap()",case)
-        self.assertEqual(case.count("nativeFolderBlankPoint(in:"),2)
+            self.assertEqual(helper.count(action),1)
+        after_edit=helper.split("files.element.coordinate(withNormalizedOffset: current.normalized).tap()",1)[1]
+        self.assertNotIn("remainingEditors",after_edit)
+        self.assertNotIn("directory.element.tap()",after_edit)
+        actions=[helper.index(action) for action in ("more.element.tap()","newFolder.element.tap()",
+                  "inlineNames.element.typeText(ownedFolder)","files.element.coordinate(withNormalizedOffset: current.normalized).tap()")]
+        self.assertEqual(actions,sorted(actions))
+        for forbidden in ('buttons["Save"]','save.tap()','createDirectory','write(','removeItem','app.launch(','app.terminate()'):
+            self.assertNotIn(forbidden,helper)
+        self.assertEqual(helper.count('coordinate('),1)
+        self.assertNotIn("create.element.tap()",helper)
+        self.assertEqual(helper.count("nativeFolderBlankPoint(in:"),2)
         for name in ("beforeBlankSnapshots", "currentBlankSnapshots"):
-            self.assertIn(name + " = try nativeFolderSnapshots(app)",case)
-            self.assertIn("in: " + name + ".picker",case)
-            self.assertIn("applicationSnapshot: " + name + ".application",case)
-        self.assertIn("current.point == before.point, current.normalized == before.normalized",case)
-        self.assertIn("inlineNames.element.value as? String == ownedFolder",case)
-        self.assertEqual(case.count('press(forDuration'),1)
-        self.assertIn('created.element.press(forDuration: 1)',case)
-        before_rename=case[case.index('if let before = renameFrame {'):
-                           case.index('// One shared acknowledgement covers')]
+            self.assertIn(name + " = try nativeFolderSnapshots(app)",helper)
+            self.assertIn("in: " + name + ".picker",helper)
+            self.assertIn("applicationSnapshot: " + name + ".application",helper)
+        self.assertIn("current.point == before.point, current.normalized == before.normalized",helper)
+        self.assertIn("inlineNames.element.value as? String == ownedFolder",helper)
+        self.assertEqual(helper.count('press(forDuration'),1)
+        self.assertIn('created.element.press(forDuration: 1)',helper)
+        before_rename=helper[helper.index('if let before = renameFrame {'):
+                           helper.index('// One shared acknowledgement covers')]
         self.assertEqual(before_rename.count('let snapshots = try nativeFolderSnapshots(app)'),1)
         self.assertIn('let currentState = Self.nativeFolderInitialState(\n'
                       '                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle\n'
@@ -329,8 +368,8 @@ class SeedGuards(unittest.TestCase):
                         before_rename.index('if currentState.renameFrame != nil {'))
         self.assertLess(before_rename.index('if currentState.renameFrame != nil {'),
                         before_rename.index('created.element.press(forDuration: 1)'))
-        self.assertIn('created.count == 1 && created.element.frame == before',case)
-        self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',case)
+        self.assertIn('created.count == 1 && created.element.frame == before',helper)
+        self.assertIn('rename.count == 1 && rename.element.isEnabled && rename.element.isHittable',helper)
 
 
 class ExportResultGuards(unittest.TestCase):

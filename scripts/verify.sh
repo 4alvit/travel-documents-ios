@@ -6,6 +6,14 @@ python3 -B scripts/test-purchase-load.py
 python3 -B scripts/test-batch-import-diagnostics.py
 python3 -B scripts/test-batch-scroll-container.py
 python3 -B scripts/test-localization-snapshots.py
+# Validate native fixture contracts before building the Release preview.
+python3 -B scripts/test-native-batch-seed.py
+python3 -B scripts/test-native-root-fixture.py
+python3 -B scripts/test-native-root-ui.py
+python3 -B scripts/test-native-folder-geometry.py
+python3 -B scripts/test-native-folder-direct.py
+python3 -B scripts/test-native-folder-control.py
+python3 -B scripts/test-biometric-handshake.py
 swift test
 xcodegen generate
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \
