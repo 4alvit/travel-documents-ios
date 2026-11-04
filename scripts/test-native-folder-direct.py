@@ -709,7 +709,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("#if DEBUG && targetEnvironment(simulator)", case)
         self.assertIn('"--ui-testing-native-batch-token", configuration.sourceToken', case)
         self.assertEqual(case.count("source.element.tap()"), 1)
-        self.assertIn("let picker = try await openNativeFilesRoot(app)", case)
+        self.assertIn("let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))", case)
         self.assertIn("files.element.cells.count == 0", case)
         self.assertEqual(case.count("more.element.tap()"), 1)
         self.assertEqual(case.count("newFolder.element.tap()"), 1)
