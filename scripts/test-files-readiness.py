@@ -6,6 +6,7 @@ wait and tap boundaries so delayed root arrival exercises the real control flow.
 """
 from pathlib import Path
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -1237,6 +1238,91 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertEqual(source.count('app.snapshot()'), 1)
         self.assertNotIn('actions.count', source)
         self.assertIn('return phase == "prepare" ? 180 : 300', SOURCE.read_text())
+
+
+class HostedPhoneTimingTests(unittest.TestCase):
+    """Execute actual allowance branches with only environment/device/build stubs."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        definitions = [
+            ('AccessibilityUITests.swift', 'testMaximumTypeFreeCardAndProDismissal', 'let app =', ''),
+            ('AccessibilityUITests.swift', 'testMaximumTypeCompleteBackupWarningAndCancellation', 'let app =', ''),
+            ('LocalizationUITests.swift', 'testRussianMaximumTypeCompleteBackupWarningAndCancellation', 'let app =', ''),
+            ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = false; let maximumType = false'),
+            ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = true; let maximumType = true'),
+        ]
+        code = '''import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["PHONE_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        '''
+        for index, (filename, method, stop, locals_) in enumerate(definitions):
+            source = (ROOT / 'UITests' / filename).read_text()
+            start = source.index('    private enum PhoneTimingError:')
+            end = source.index('\n    private ', source.index('    private func useHostedPhoneTiming()', start) + 10)
+            helper = source[start:end]
+            condition = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+            assert helper.count(condition) == 1
+            # Native build conditions are separately SDK-typechecked. This fixture
+            # executes both actual bodies on any host, without launching XCTest.
+            helper = helper.replace(condition, '#if PHONE_TEST_SUPPORTED_BUILD')
+            start = source.index('func ' + method + '(')
+            start = source.index('{', start) + 1
+            prefix = source[start:source.index(stop, start)]
+            code += f'\n@MainActor final class Case{index} {{\nvar executionTimeAllowance: Double = 777\n'
+            code += helper + '\nfunc run() throws -> Double {\n' + locals_ + prefix
+            code += '\nreturn executionTimeAllowance\n}\n}\n'
+        code += '''
+        @main enum Main {
+            @MainActor static func main() {
+                func capture(_ action: () throws -> Double) -> String {
+                    do { return String(try action()) }
+                    catch { return "rejected" }
+                }
+                let values = [capture { try Case0().run() }, capture { try Case1().run() },
+                              capture { try Case2().run() }, capture { try Case3().run() },
+                              capture { try Case4().run() }]
+                print("[" + values.joined(separator: ", ") + "]")
+            }
+        }
+        '''
+        path = Path(cls.directory.name) / 'PhoneTiming.swift'; path.write_text(code)
+        cls.binaries = {}
+        for supported in (False, True):
+            binary = Path(cls.directory.name) / ('supported' if supported else 'unsupported')
+            flags = ['-D', 'PHONE_TEST_SUPPORTED_BUILD'] if supported else []
+            result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
+                                     *flags, str(path), '-o', str(binary)], capture_output=True, text=True, timeout=60)
+            if result.returncode != 0: raise AssertionError(result.stderr)
+            cls.binaries[supported] = binary
+
+    def invoke(self, supported, token=None, idiom='phone'):
+        env = dict(os.environ); env.pop('TRIPDOCKET_PHONE_TIMING', None)
+        env['PHONE_TEST_IDIOM'] = idiom
+        if token is not None: env['TRIPDOCKET_PHONE_TIMING'] = token
+        result = subprocess.run([str(self.binaries[supported])], env=env, capture_output=True,
+                                text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_absent_token_preserves_explicit_and_inherited_defaults(self):
+        for supported in (False, True):
+            for idiom in ('phone', 'pad'):
+                self.assertEqual(self.invoke(supported, idiom=idiom), '[777.0, 180.0, 120.0, 480.0, 600.0]')
+
+    def test_exact_supported_phone_profile_changes_only_four_case_branches(self):
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[240.0, 240.0, 240.0, 720.0, 600.0]')
+
+    def test_invalid_token_wrong_build_or_ipad_rejects_before_any_case_body(self):
+        for token in ('', 'wrong', 'hosted-intel-phone-v1 '):
+            self.assertEqual(self.invoke(True, token), '[rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(False, 'hosted-intel-phone-v1'), '[rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', 'pad'), '[rejected, rejected, rejected, rejected, rejected]')
 
 
 class SDKSourceTests(unittest.TestCase):

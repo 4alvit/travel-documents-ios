@@ -33,8 +33,8 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # 180s case allowance. The 960s command cap includes its 8s stop reserve;
 # all postprocessing still shares the fixed 1080s work deadline. This is a
 # bounded combined allowance, not a separately enforced launch deadline.
-# The 45m integration / 65m job budget preserves time for the measured 24m
-# guidance invocation plus cleanup and evidence. Completion is not guaranteed.
+# The 75m integration / 95m job budget includes this unchanged1120s envelope,
+# nine case ceilings totaling2700s, and680s other-work margin. Completion is not guaranteed.
 # Recovery allows 780s for prepare and 600s for export/restore; batch has separate caps.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")

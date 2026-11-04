@@ -17,6 +17,19 @@ if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && ( "$TRIPFOLIO_REQUIRE_SDK_MATCH" != 1 |
   echo "Files preparation requires CI --require-sdk-match --cohort ui-guidance" >&2
   exit 2
 fi
+# A caller cannot carry hosted Phone scope into preparation or another cohort.
+if [[ ${TEST_RUNNER_TRIPDOCKET_PHONE_TIMING+x} || ${TRIPDOCKET_PHONE_TIMING+x} ]]; then
+  echo "Phone timing profile must be selected by this script" >&2
+  exit 2
+fi
+TRIPFOLIO_HOSTED_PHONE_TIMING=0
+if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && "${RUNNER_ARCH:-}" == X64 ]]; then
+  if [[ "${RUNNER_OS:-}" != macOS || "${RUNNER_ENVIRONMENT:-}" != github-hosted || "${GITHUB_WORKFLOW:-}" != CI || "${GITHUB_JOB:-}" != ui_guidance || "$(uname -m)" != x86_64 ]]; then
+    echo "Hosted Phone timing requires the exact Intel CI runner" >&2
+    exit 2
+  fi
+  TRIPFOLIO_HOSTED_PHONE_TIMING=1
+fi
 TEST_ARGUMENTS=(test)
 MAXIMUM_TEST_SECONDS=480
 if [[ $# -ne 0 ]]; then
@@ -74,9 +87,13 @@ print(phones[0]["udid"])
 ')
 fi
 mkdir -p build
-# Keep the default at 180s. Only the guidance cohort permits the Russian
-# maximum-type flow to request 600s; other individual allowances are unchanged.
-# Core/local cohorts and the dedicated iPad driver retain their 480s ceilings.
+# Only the final invocation receives the validated hosted Phone profile.
+# Preparation and ordinary/local/Core/iPad defaults remain unchanged.
+if [[ "$TRIPFOLIO_HOSTED_PHONE_TIMING" == 1 ]]; then
+  test "$(cat "$TRIPFOLIO_SELECTION_DIR/architecture.txt")" = x86_64
+  export TEST_RUNNER_TRIPDOCKET_PHONE_TIMING=hosted-intel-phone-v1
+  MAXIMUM_TEST_SECONDS=720
+fi
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \
   -configuration Debug -destination "platform=iOS Simulator,id=$TRIPFOLIO_SIMULATOR_ID" \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \

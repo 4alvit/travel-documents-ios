@@ -391,18 +391,16 @@ a synchronous XCTest action already in flight may overrun it. Existing case,
 host and cleanup limits still apply. This permits bounded recovery from the
 observed non-transition; it does not establish whether the first native action
 was ignored or delayed.
-Batch release qualification preparation has the profile-specific cap described above. The guidance test
-deadlines and 30-second cleanup budget are unchanged. The phone integration step
-has a 45-minute cap within a 65-minute job. Its planning envelope leaves one
-minute for initial selection, 1,080 seconds for preparation work plus 30 seconds
-for cleanup and ten for its receipt, 24 minutes for the measured guidance
-invocation, and 80 seconds of margin. These are planning allocations within the
-step limit, not separate enforced timers. The existing 20-minute job allowance
-outside that step is unchanged. A [retained run](https://github.com/4alvit/travel-documents-ios/actions/runs/41440392190)
-completed its integration step in 37 minutes 56 seconds but exceeded the former
-35-minute job limit. Raw test artifacts upload before optional failure extraction
-so that extraction cannot consume the time reserved for preserving the original
-results.
+Batch release qualification preparation has the profile-specific cap described above.
+Phone bootstrap retains its 960-second preparation command and 1,080-second work,
+30-second cleanup and ten-second receipt limits. The Phone integration step has
+75 minutes within a 95-minute job: 1,120 seconds for the complete bootstrap,
+2,700 seconds for the nine case ceilings and 680 seconds for selection, generation,
+main build/session startup, skipped-case bookkeeping and result finalization.
+These are planning allocations under one step timer, not independent guarantees.
+The surrounding 20 minutes retain checkout, toolchain, cancellation, raw evidence,
+optional failure extraction/upload and finalization. Raw test artifacts upload
+before optional extraction to preserve originals even if extraction fails.
 The original navigation-readiness, single Cancel action, and dismissal checks
 remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
@@ -424,17 +422,30 @@ acceptance and coverage checks. Short text must fit completely in that reading
 viewport; tall text still requires overlapping coverage. Action-control tolerance,
 real hittability, screenshots and hierarchy captures remain required.
 
-The English guidance case requests 480 seconds on both Phone and iPad. An
-[observed Intel iPad run](https://github.com/4alvit/travel-documents-ios/actions/runs/41867727747/job/126715831251)
-exceeded its former 360-second allowance during the fourth Cancel action. Its
-stdout continued through a final Trips capture operation at about 382 seconds,
-but those post-timeout attachments were not retained; the run remains failed.
-Russian maximum-type retains its 600-second source allowance. The dedicated
-iPad command still clamps either case to 480 seconds, within its unchanged
-900-second command limit. Its work/cleanup budget is 2,100/180 seconds on ARM
-or 4,500/360 seconds on Intel.
-Every text, privacy, Cancel and final Trips check remains required. This allowance
-does not guarantee completion; a fresh successful native result is required.
+A [retained Intel Phone run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126785199272)
+exceeded four native deadlines before its former 45-minute integration limit.
+The complete-warning test reached its final checks at179.23 seconds, then crossed
+180 seconds during its final hierarchy capture; a separate termination failure
+followed. The Free-card test reached its final hierarchy only at196.27 seconds.
+The Russian warning crossed120 seconds before completing all text coverage and
+continued diagnostically to150.57 seconds. English guidance crossed480 seconds
+after its third cancellation and was interrupted during the fourth confirmation.
+None of these post-timeout observations is a successful result.
+
+Only the explicit hosted Intel Phone profile now selects240 seconds for those
+three short cases and720 seconds for English guidance. The runner validates its
+host/cohort and selected iPhone before passing a token only to the final test
+invocation. The test-side selector requires the exact token, a Debug x86_64
+Simulator build and iPhone idiom. Missing tokens preserve previous defaults;
+invalid or incompatible tokens fail before app launch. Local and Core runs,
+ARM, and dedicated iPad tests receive no token. The inherited Free-card allowance
+remains untouched outside this profile. Russian Phone guidance stays600 seconds;
+the ordinary test default stays180. The dedicated iPad command still clamps both
+guidance cases to480 seconds within its900-second command limit. Its work/cleanup
+budget remains2,100/180 seconds on ARM or4,500/360 seconds on Intel.
+All text, privacy, Cancel, final Trips, screenshot, hierarchy and termination
+checks remain required. These finite margins do not establish the cause of slow
+host observations or guarantee a pass; fresh complete native evidence is required.
 
 The iPad driver allows up to 480 seconds on ARM or 1,200 seconds on Intel for
 its single fresh build, within its selected work and separate cleanup budgets.

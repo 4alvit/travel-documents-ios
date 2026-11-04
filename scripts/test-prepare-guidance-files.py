@@ -422,8 +422,8 @@ class ShellBoundary(s.ShellTests):
         text = (HERE.parent / ".github/workflows/ci.yml").read_text()
         guidance = text.split("  ui_guidance:\n", 1)[1].split("  privacy_ipad:\n", 1)[0]
         integration = guidance.split("      - name: Simulator integration and StoreKit tests\n", 1)[1]
-        self.assertIn("    timeout-minutes: 65\n", guidance)
-        self.assertIn("        timeout-minutes: 45\n", integration)
+        self.assertIn("    timeout-minutes: 95\n", guidance)
+        self.assertIn("        timeout-minutes: 75\n", integration)
         core = text.split("  validate:\n", 1)[1].split("  ui_guidance:\n", 1)[0]
         core_integration = core.split("      - name: Simulator integration and StoreKit tests\n", 1)[1].split(
             "      - name:", 1)[0]
@@ -431,10 +431,10 @@ class ShellBoundary(s.ShellTests):
                           if line.startswith("    timeout-minutes:")], ["    timeout-minutes: 75"])
         self.assertEqual([line for line in core_integration.splitlines()
                           if line.startswith("        timeout-minutes:")], ["        timeout-minutes: 35"])
-        # Planning envelope: 60s selection, bounded bootstrap including final
-        # receipts, 24m previously observed guidance, 80s remaining margin.
-        self.assertEqual(60 + m.WORK + m.STOP + m.WRITE + 24 * 60 + 80, 45 * 60)
-        self.assertEqual(2 + 3 + 45 + 5 + 3 + 3 + 2 + 2, 65)
+        # Bootstrap includes its960s preparation; nine native cases have2700s
+        # combined ceilings, leaving680s for other work under the same timer.
+        self.assertEqual(m.WORK + m.STOP + m.WRITE + 2700 + 680, 75 * 60)
+        self.assertEqual(2 + 3 + 75 + 5 + 3 + 3 + 2 + 2, 95)
         self.assertEqual(guidance.count("        timeout-minutes: 3\n"), 3)
         self.assertEqual(guidance.count("        timeout-minutes: 2\n"), 2)
 

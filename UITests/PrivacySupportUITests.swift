@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Feature navigation/layout only. DEBUG authentication bypass is intentional.
 /// This suite does not establish real authentication, denied-network behavior,
@@ -11,6 +12,21 @@ final class PrivacySupportUITests: XCTestCase {
 
     func testRussianMaximumTypeFreeGuidanceAndCancelledLinks() async throws {
         try await verifyGuidance(russian: true, maximumType: true)
+    }
+
+    private enum PhoneTimingError: Error { case invalidProfile }
+
+    private func useHostedPhoneTiming() throws -> Bool {
+        guard let profile = ProcessInfo.processInfo.environment["TRIPDOCKET_PHONE_TIMING"] else {
+            return false
+        }
+        guard profile == "hosted-intel-phone-v1" else { throw PhoneTimingError.invalidProfile }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw PhoneTimingError.invalidProfile }
+        return true
+        #else
+        throw PhoneTimingError.invalidProfile
+        #endif
     }
 
     private struct Copy {
@@ -28,10 +44,10 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        // English exceeded 360s while still performing required UI checks on Intel.
-        // Allow 480s for the complete Phone/iPad flow without removing checks.
-        // Russian maximum-type retains 600s; the iPad command clamps both to 480s.
-        executionTimeAllowance = russian && maximumType ? 600 : 480
+        // Hosted Intel Phone needs time for all four confirmations and captures.
+        // Other runs retain their allowances; the dedicated iPad cap remains 480s.
+        let hostedPhone = try useHostedPhoneTiming()
+        executionTimeAllowance = russian && maximumType ? 600 : (hostedPhone ? 720 : 480)
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()
