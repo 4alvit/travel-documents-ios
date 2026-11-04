@@ -14,7 +14,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = '5e9d2b1d7d1702bade1cd44abdf2b5ebbe143e8f72a86014f8a6575265792bcc'
+HELPER_SHA = 'a56462471af54a95085b0484e1c7f0ca54e801101548d63addc0d1b66a7e5e7d'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
@@ -406,9 +406,9 @@ class Recovery:
 
     def monitor(self, *, command_owner=None):
         started = self.ops.now()
-        # A pending command's work deadline applies during admission, execution
-        # and finalization, including a capability probe delegating its scan.
-        # Pass context per checkpoint; never install a sticky parent deadline.
+        # Admission and active work retain the stop reserve. Only the command's
+        # transient, verified post-success context can use its original total
+        # deadline for final accounting; no receipt field grants that authority.
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
@@ -425,7 +425,14 @@ class Recovery:
                      CAPS['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
-            deadline = min(deadline, owner.t0+pending['work_deadline'])
+            context = getattr(owner, '_finalizing_success', None)
+            finalized = (context is not None and context[0] is pending
+                         and context[1].pid == pending.get('pgid')
+                         and context[1].returncode == 0
+                         and not owner.active and not owner.unknown_spawn
+                         and context[1].pid in owner.absent_groups)
+            deadline = min(deadline, owner.t0+pending[
+                'command_deadline' if finalized else 'work_deadline'])
         primary = self.report['commands'][-1] if self.report['commands'] else None
         if owner is not self and primary is not None and 'finish' not in primary:
             # A delegated child cannot spend the still-running primary's stop

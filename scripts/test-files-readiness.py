@@ -35,6 +35,10 @@ final class World {
     var transitionOccurrence = 1
     var transitionReachesRoot = true
     var reads: [String: Int] = [:]
+    var rootDelayAfterLocation: Int?
+    var locationTapped = false
+    var finalWaitElapsed = 0
+    var waitSeconds: [Int64] = []
     init(_ frames: [Snapshot]) { self.frames = frames }
     var current: Snapshot { frames[index] }
     func advance() { index = min(index + 1, frames.count - 1) }
@@ -48,6 +52,8 @@ final class World {
         taps.append(kind)
         if kind == "browse" {
             frames = [Snapshot(location: Control(count: 1))]
+        } else if rootDelayAfterLocation != nil {
+            locationTapped = true
         } else {
             frames = [Snapshot(root: true)]
         }
@@ -110,7 +116,20 @@ final class Harness {
             world.frames = [Snapshot(root: true)]; world.index = 0
         }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.waitSeconds.append(timeout.components.seconds)
+        if world.locationTapped, let delay = world.rootDelayAfterLocation {
+            // Controlled seconds exercise the actual helper's timeout argument
+            // without real sleeps or claiming XCTest reads cannot overrun it.
+            for second in 0..<Int(timeout.components.seconds) {
+                world.finalWaitElapsed = second
+                if second >= delay { world.frames = [Snapshot(root: true)]; world.index = 0 }
+                if condition() { return }
+            }
+            world.finalWaitElapsed = Int(timeout.components.seconds)
+            throw FixtureFailure()
+        }
         // Advance fake native state between checks, not a second route algorithm.
         for _ in 0..<8 {
             if condition() { return }
@@ -138,6 +157,10 @@ final class Harness {
         case "delayed-root": world = World([Snapshot(), Snapshot(), Snapshot(root: true)])
         case "location":
             world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+        case "location-root-after-20-seconds", "location-root-after-31-seconds":
+            world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+            world.rootDelayAfterLocation = name == "location-root-after-20-seconds" ? 20 : 31
+            mustFail = name == "location-root-after-31-seconds"
         case "browse":
             world = World([Snapshot(browse: Control(count: 1))]); expected = ["browse", "location"]
         case "root-before-action":
@@ -173,6 +196,10 @@ final class Harness {
         var failed = false
         do { try await Harness(world).run() } catch { failed = true }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
+        if let delay = world.rootDelayAfterLocation {
+            guard world.waitSeconds == [15, 15, 30], world.finalWaitElapsed == min(delay, 30)
+            else { print("FAIL allowance " + name); exit(1) }
+        }
         print("PASS " + name)
     }
 }
@@ -203,6 +230,10 @@ class ReadinessTests(unittest.TestCase):
     def test_already_at_verified_root_never_navigates(self): self.run_case('already-root')
     def test_delayed_verified_root_arrival_never_requires_browse(self): self.run_case('delayed-root')
     def test_existing_location_route_taps_once(self): self.run_case('location')
+    def test_post_tap_root_can_arrive_after_fifteen_seconds_without_retapping(self):
+        self.run_case('location-root-after-20-seconds')
+    def test_post_tap_root_still_fails_after_thirty_second_allowance(self):
+        self.run_case('location-root-after-31-seconds')
     def test_existing_browse_route_remains_bounded(self): self.run_case('browse')
     def test_verified_root_before_action_prevents_redundant_tap(self): self.run_case('root-before-action')
     def test_route_can_disappear_between_query_and_read_without_spurious_failure(self):
@@ -236,7 +267,7 @@ class ReadinessTests(unittest.TestCase):
         call = 'try await reachRecoveryLocalRoot(localTitle,'
         self.assertEqual(prepare.count(call), 1)
         self.assertEqual(native_folder.count(call), 0)
-        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app)"), 1)
+        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"), 1)
         self.assertNotIn("presentRecoverySave(app)", native_folder)
         self.assertEqual(source.count(call), 1)
         self.assertIn('timeout: Duration = .seconds(15)', source)
@@ -358,6 +389,7 @@ final class World {
     var frames: [State]
     var index = 0
     var taps: [String] = []
+    var timeouts: [Duration] = []
     var browseFrames = [State(location: true)]
     init(_ frames: [State]) { self.frames = frames }
     var current: State { frames[index] }
@@ -439,11 +471,19 @@ final class Harness {
     func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
         if !condition { throw FixtureFailure() }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.timeouts.append(timeout)
         for _ in 0..<8 { if condition() { return }; world.advance() }
         throw FixtureFailure()
     }
-    func run() async throws { _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world)) }
+    func run(seedAllowance: Bool = false) async throws {
+        if seedAllowance {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world), initialNavigationTimeout: .seconds(30))
+        } else {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world))
+        }
+    }
     // ACTUAL_HELPER
 }
 @main struct Main {
@@ -453,6 +493,9 @@ final class Harness {
         var expected: [String] = []
         var mustFail = false
         switch name {
+        case "seed-ready": world = World([State(destination: true)])
+        case "seed-absent": world = World([State(navigationCount: 0)]); mustFail = true
+        case "seed-ambiguous": world = World([State(navigationCount: 2)]); mustFail = true
         case "already-current": world = World([State(destination: true)])
         case "delayed-current": world = World([State(), State(destination: true)])
         case "recents-route":
@@ -505,7 +548,11 @@ final class Harness {
         default: fatalError("Unknown fixture")
         }
         var failed = false
-        do { try await Harness(world).run() } catch { failed = true }
+        let seedAllowance = name.hasPrefix("seed-")
+        do { try await Harness(world).run(seedAllowance: seedAllowance) } catch { failed = true }
+        precondition(world.timeouts.first == (seedAllowance ? .seconds(30) : .seconds(15)))
+        precondition(world.timeouts.dropFirst().allSatisfy { $0 == .seconds(15) })
+        if name == "seed-absent" || name == "seed-ambiguous" { precondition(world.timeouts.count == 1) }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
         print("PASS " + name)
     }
@@ -542,6 +589,13 @@ class OpenFolderTests(unittest.TestCase):
                      'wrong-recents-source', 'wrong-recents-heading', 'ambiguous-native-tabs',
                      'wrong-native-tabs', 'wrong-browse-label', 'ambiguous-browse',
                      'disabled-browse', 'unhittable-browse']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_initial_seed_allowance_preserves_later_waits_and_rejects_absent_or_ambiguous_navigation(self):
+        for name in ['seed-ready', 'seed-absent', 'seed-ambiguous']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
@@ -687,6 +741,7 @@ struct ShareFrame {
     var bounds = CGRect(x: 0, y: 0, width: 402, height: 874)
     var action = CGRect(x: 114, y: 295, width: 82, height: 134)
     var header = CGRect(x: 0, y: 78, width: 402, height: 95)
+    var headerLabel = ""
     var identifier = "actionGroupCell"
     var label = "Save to Files"
     var type = XCUIElement.ElementType.cell
@@ -747,7 +802,7 @@ struct ShareFrame {
         }
         children += (0..<f.fillers).map { _ in XCUIElementSnapshot(traversalCost: f.traversalCost) }
         for _ in 0..<f.headers {
-            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", frame: f.header))
+            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", label: f.headerLabel, frame: f.header))
         }
         if f.staticTextDecoy { children.append(XCUIElementSnapshot(.staticText, label: "Save to Files", frame: f.action)) }
         if let lateOverflow = f.lateOverflow {
@@ -835,6 +890,7 @@ struct ShareFrame {
         case "tolerance-boundary": moved.action.origin.y = ready.action.origin.y + 0.5; frames = [ready, moved]; expectedPolls = 3
         case "tolerance-exceeded": moved.action.origin.y = ready.action.origin.y + 0.5001; frames = [ready, ready, moved]; expectedPolls = 5
         case "header-resets": moved = ready; moved.header.origin.y += 5; frames = [ready, ready, moved]; expectedPolls = 5
+        case "header-label-resets": moved = ready; moved.headerLabel = "Different document"; frames = [ready, ready, moved]; expectedPolls = 5
         case "identity-resets": frames = [ready, ready, otherIdentity]; expectedPolls = 5
         case "unavailable-resets": invalid.actions = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
         case "disabled-resets": invalid.enabled = false; frames = [ready, ready, invalid, ready]; expectedPolls = 6
@@ -941,14 +997,211 @@ class ShareReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
-    def test_shared_export_path_waits_before_its_single_tap(self):
+    def test_header_label_is_part_of_original_share_proof(self):
+        result = subprocess.run([str(self.binary), 'header-label-resets'], capture_output=True,
+                                text=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.strip(), 'PASS header-label-resets')
+
+    def test_shared_export_path_retains_proof_before_bounded_navigation(self):
         source = SOURCE.read_text()
         start = source.index('    private func presentRecoverySave(')
         end = source.index('    private func waitForStableShareAction(', start)
         body = source[start:end]
-        self.assertEqual(body.count('saveToFiles.element.tap()'), 1)
+        self.assertEqual(body.count('export.tap()'), 1)
+        self.assertEqual(body.count('app.buttons["Export…"].tap()'), 1)
+        self.assertEqual(body.count('.action.tap()'), 3)
+        self.assertIn('retryNavigation: Bool = false', body)
         self.assertLess(body.index('try await waitForStableShareAction(saveToFiles, app: app)'),
-                        body.index('saveToFiles.element.tap()'))
+                        body.index('try await openRecoveryFilesFromShare(saveToFiles, app: app, first: proof)'))
+
+
+SHARE_TRANSITION_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        func duration(to other: Instant) -> Duration { other.time - time }
+        static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw CancellationError() } }
+    static func sleep(for value: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        ContinuousClock.elapsed += value
+    }
+}
+struct BatchTestFailure: Error { let message: String }
+typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
+@MainActor final class World {
+    let mode: String
+    var initial: Proof { ([CGRect(x: 114, y: 304, width: 82, height: 138.3),
+                           CGRect(x: 0, y: 78, width: 402, height: 95)], "75:actionGroupCell:Save to Files", XCUIElement(self)) }
+    var taps: [Duration] = []
+    var records: [String] = []
+    var captures = 0
+    var observations = 0
+    var eligibleObservations = 0
+    init(_ mode: String) { self.mode = mode }
+    var navigation: Int {
+        let now = ContinuousClock.elapsed
+        if mode == "slow-navigation-count" { ContinuousClock.elapsed += .seconds(31); return 1 }
+        if mode == "ambiguous-navigation" && now >= .seconds(1) && now < .seconds(2) { return 2 }
+        if mode == "immediate" || mode == "slow-navigation-exists" { return 1 }
+        if mode == "delayed-first" && now >= .seconds(10) { return 1 }
+        if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return 1 }
+        if mode == "retry-opens" && taps.count == 2 { return 1 }
+        return 0
+    }
+    func observation() -> Proof? {
+        observations += 1
+        if ContinuousClock.elapsed >= .seconds(15) { eligibleObservations += 1 }
+        if mode == "slow-snapshot" { ContinuousClock.elapsed += .seconds(31) }
+        if mode == "exact-deadline-snapshot" { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "exact-deadline-third" && eligibleObservations == 3 { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "slow-third-proof" && eligibleObservations == 3 { ContinuousClock.elapsed += .seconds(31) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot"].contains(mode) && observations == 2 { return nil }
+        if mode == "changed-geometry" && observations == 2 {
+            var changed = initial; changed.frames[0].origin.y += 1; return changed
+        }
+        if mode == "changed-header" && observations == 2 {
+            var changed = initial; changed.frames[1].size.height += 1; return changed
+        }
+        if mode == "changed-identity" && observations == 2 { return (initial.frames, "different", initial.action) }
+        if mode == "changed-header-label" && observations == 2 { return (initial.frames, initial.identity + "Different document", initial.action) }
+        return initial
+    }
+}
+@MainActor final class XCUIElement {
+    let world: World
+    init(_ world: World) { self.world = world }
+    var exists: Bool {
+        if world.mode == "slow-navigation-exists" { ContinuousClock.elapsed += .seconds(31) }
+        return true
+    }
+    func tap() {
+        world.taps.append(ContinuousClock.elapsed)
+        if world.mode == "slow-first-tap" { ContinuousClock.elapsed += .seconds(31) }
+    }
+}
+@MainActor final class XCUIElementQuery {
+    let world: World
+    let kind: String
+    init(_ world: World, kind: String = "actions") { self.world = world; self.kind = kind }
+    func matching(identifier: String) -> XCUIElementQuery { self }
+    var element: XCUIElement { XCUIElement(world) }
+    var count: Int {
+        if kind == "navigation" { return world.navigation }
+        if kind == "picker" && world.mode == "partial-picker"
+            && ContinuousClock.elapsed >= .seconds(1) && ContinuousClock.elapsed < .seconds(2) { return 1 }
+        return 0
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, background }
+    let world: World
+    init(_ world: World) { self.world = world }
+    var state: State {
+        if world.mode == "slow-final-state" && world.eligibleObservations >= 3 { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "background" && ContinuousClock.elapsed >= .seconds(1)
+            && ContinuousClock.elapsed < .seconds(2) { return .background }
+        return .runningForeground
+    }
+    var navigationBars: XCUIElementQuery { XCUIElementQuery(world, kind: "navigation") }
+    var otherElements: XCUIElementQuery { XCUIElementQuery(world, kind: "picker") }
+}
+@MainActor final class Harness {
+    let world: World
+    init(_ world: World) { self.world = world }
+    func recordRecoveryShareTransition(_ message: String) {
+        world.records.append(message)
+        if world.mode == "cancel-before-retry" && message.contains("dispatch intent 2") { Task.cancelled = true }
+        if world.mode == "slow-dispatch-record" && message.contains("dispatch intent 2") {
+            ContinuousClock.elapsed += .seconds(31)
+        }
+    }
+    func shareActionObservation(_ actions: XCUIElementQuery, app: XCUIApplication,
+                                before deadline: ContinuousClock.Instant) -> Proof? { world.observation() }
+    func capture(_ app: XCUIApplication, _ message: String, batchDiagnostic: Bool) { world.captures += 1 }
+    // ACTUAL_TRANSITION
+    func run() async throws {
+        try await openRecoveryFilesFromShare(XCUIElementQuery(world), app: XCUIApplication(world), first: world.initial)
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let mode = CommandLine.arguments[1]
+        let world = World(mode)
+        var failed = false
+        var cancelled = false
+        Task.cancelled = mode == "cancel-before-first"
+        do { try await Harness(world).run() } catch { failed = true; cancelled = error is CancellationError }
+        precondition(cancelled == mode.hasPrefix("cancel-"))
+        let succeeds = ["immediate", "delayed-first", "retry-opens", "navigation-during-retry-proof"].contains(mode)
+        precondition(failed != succeeds, "Wrong result for " + mode)
+        let twoTaps = ["retry-opens", "retry-still-pending"].contains(mode)
+        precondition(world.taps.count == (mode == "cancel-before-first" ? 0 : (twoTaps ? 2 : 1)), "Wrong tap count for " + mode)
+        precondition(world.taps.allSatisfy { $0 < .seconds(30) }, "Late tap")
+        if twoTaps { precondition(world.taps[1] >= .seconds(15) && world.eligibleObservations >= 3) }
+        if mode == "retry-still-pending" { precondition(ContinuousClock.elapsed >= .seconds(30) && ContinuousClock.elapsed < .seconds(31)) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot", "changed-geometry", "changed-header",
+            "changed-identity", "changed-header-label", "background", "partial-picker", "ambiguous-navigation"].contains(mode) {
+            precondition(world.records.filter { $0.contains("retry disabled:") }.count == 1)
+        }
+        precondition(world.captures == (succeeds || cancelled ? 0 : 1))
+        print("PASS " + mode)
+    }
+}
+'''
+
+
+class ShareTransitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        path = Path(cls.directory.name) / 'ShareTransition.swift'
+        path.write_text(SHARE_TRANSITION_FIXTURE.replace('    // ACTUAL_TRANSITION', source[start:end]))
+        cls.binary = Path(cls.directory.name) / 'share-transition-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_one_navigation_retry_requires_unchanged_share_and_original_deadline(self):
+        for name in ['immediate', 'delayed-first', 'retry-opens', 'retry-still-pending',
+                     'navigation-during-retry-proof', 'missing-share', 'ambiguous-share',
+                     'failed-snapshot', 'changed-geometry', 'changed-header', 'changed-identity', 'changed-header-label',
+                     'background', 'partial-picker', 'ambiguous-navigation', 'slow-snapshot',
+                     'slow-third-proof', 'slow-navigation-count', 'slow-navigation-exists', 'slow-dispatch-record',
+                     'slow-first-tap', 'exact-deadline-snapshot', 'exact-deadline-third',
+                     'slow-final-state', 'cancel-before-first', 'cancel-before-retry']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_retry_does_not_repeat_export_or_destination_save(self):
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        transition = source[start:end]
+        self.assertEqual(transition.count('.action.tap()'), 2)
+        for forbidden in ['Export…', 'export.tap()', 'save.tap()', 'launch()', 'terminate()']:
+            self.assertNotIn(forbidden, transition)
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        self.assertEqual(source[start:end].count('save.tap()'), 1)
+        self.assertIn('presentRecoverySave(app, retryNavigation: true)', source[start:end])
+        self.assertEqual(source.count('presentRecoverySave(app, retryNavigation: true)'), 1)
 
 PREVIEW_FIXTURE = r'''
 import Foundation
@@ -1886,6 +2139,303 @@ class RestoreFolderNavigation(unittest.TestCase):
         self.assertIn('retryRecoveryFolderEntry: Bool = false', UI)
 
 
+
+
+RECOVERY_PERSON_INTRODUCTION = r'''
+import Foundation
+import CoreGraphics
+struct NSPredicate {
+    let value: String
+    init(format: String, _ value: String) { precondition(format == "label == %@"); self.value = value }
+}
+struct Rejected: Error {}
+struct Cancelled: Error {}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw Cancelled() } }
+}
+@MainActor final class PersonWorld {
+    var introduction = 1, alerts = 1, matchingAlerts = 1, fields = 1, matchingFields = 1
+    var explanations = 1, buttons = 1
+    var value = "Recovery Sentinel"
+    var fieldEnabled = true, explanationHittable = true, buttonEnabled = true, buttonHittable = true
+    var foreground = true
+    var taps = 0, captures = 0, waits = 0, elementTaps = 0
+    var rootFrame = CGRect(x: 0, y: 0, width: 402, height: 874)
+    var introFrame = CGRect(x: 0, y: 539, width: 402, height: 335)
+    var buttonFrame = CGRect(x: 89, y: 819, width: 224, height: 21)
+    var appAnchor = false, point = CGPoint.zero
+    let mode: String
+    init(_ mode: String) {
+        self.mode = mode
+        switch mode {
+        case "absent", "late": introduction = 0
+        case "duplicate-intro": introduction = 2
+        case "extra-alert": alerts = 2
+        case "wrong-alert": matchingAlerts = 0
+        case "extra-field": fields = 2
+        case "wrong-field": matchingFields = 0
+        case "wrong-value": value = "Foreign person"
+        case "partial-value": value = "Recovery"
+        case "disabled-field": fieldEnabled = false
+        case "missing-explanation": explanations = 0
+        case "duplicate-explanation": explanations = 2
+        case "hidden-explanation": explanationHittable = false
+        case "missing-continue": buttons = 0
+        case "duplicate-continue": buttons = 2
+        case "disabled-continue": buttonEnabled = false
+        case "hidden-continue": buttonHittable = false
+        case "background": foreground = false
+        case "cancelled": Task.cancelled = true
+        case "empty-button": buttonFrame.size.width = 0
+        case "nan-button": buttonFrame.origin.x = .nan
+        case "infinite-intro": introFrame.size.height = .infinity
+        case "button-outside-intro": buttonFrame.origin.y = 500
+        case "intro-outside-app": introFrame.size.height = 400
+        case "empty-root": rootFrame.size.height = 0
+        case "invalid-root": rootFrame.origin.x = .infinity
+        case "app-origin":
+            rootFrame = rootFrame.offsetBy(dx: 101, dy: 203)
+            introFrame = introFrame.offsetBy(dx: 101, dy: 203)
+            buttonFrame = buttonFrame.offsetBy(dx: 101, dy: 203)
+        default: break
+        }
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, runningBackground }
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    var state: State { world.foreground ? .runningForeground : .runningBackground }
+    var otherElements: PersonQuery { PersonQuery(world, "other") }
+    var alerts: PersonQuery { PersonQuery(world, "alerts") }
+    var frame: CGRect { world.rootFrame }
+    func coordinate(withNormalizedOffset offset: CGVector) -> PersonCoordinate {
+        precondition(offset == .zero)
+        world.appAnchor = true
+        return PersonCoordinate(world)
+    }
+}
+@MainActor final class PersonCoordinate {
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    func withOffset(_ offset: CGVector) -> PersonCoordinate {
+        world.point = CGPoint(x: offset.dx, y: offset.dy)
+        return self
+    }
+    func tap() {
+        precondition(world.appAnchor && world.elementTaps == 0)
+        precondition(world.point == CGPoint(x: world.buttonFrame.midX - world.rootFrame.minX,
+                                          y: world.buttonFrame.midY - world.rootFrame.minY))
+        world.taps += 1
+        if world.mode != "stays-open" { world.introduction = 0 }
+        if world.mode == "changed-after-tap" { world.value = "Foreign person" }
+        if world.mode == "form-dismissed" { world.alerts = 0 }
+    }
+}
+@MainActor final class PersonQuery {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var count: Int {
+        switch kind {
+        case "intro": return world.introduction
+        case "alerts": return world.alerts
+        case "alert": return world.matchingAlerts
+        case "fields": return world.fields
+        case "field": return world.matchingFields
+        case "explanation": return world.explanations
+        case "continue": return world.buttons
+        default: preconditionFailure("Unscoped query")
+        }
+    }
+    var element: PersonElement { PersonElement(world, kind) }
+    func matching(identifier: String) -> PersonQuery {
+        switch (kind, identifier) {
+        case ("other", "UIContinuousPathIntroductionView"): return PersonQuery(world, "intro")
+        case ("alerts", "Add a person"): return PersonQuery(world, "alert")
+        case ("fields", "Name or nickname"): return PersonQuery(world, "field")
+        default: preconditionFailure("Unexpected identity")
+        }
+    }
+    func matching(_ predicate: NSPredicate) -> PersonQuery {
+        if kind == "texts" {
+            precondition(predicate.value == "Speed up your typing by sliding your finger across the letters to compose a word.")
+            return PersonQuery(world, "explanation")
+        }
+        precondition(kind == "buttons" && predicate.value == "Continue")
+        return PersonQuery(world, "continue")
+    }
+}
+@MainActor final class PersonElement {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var textFields: PersonQuery { precondition(kind == "alert"); return PersonQuery(world, "fields") }
+    var staticTexts: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "texts") }
+    var buttons: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "buttons") }
+    var value: Any? { precondition(kind == "field"); return world.value }
+    var isEnabled: Bool { kind == "field" ? world.fieldEnabled : world.buttonEnabled }
+    var isHittable: Bool {
+        switch kind {
+        case "field": return world.introduction == 0
+        case "explanation": return world.explanationHittable
+        case "continue": return world.buttonHittable
+        default: preconditionFailure("Unexpected hit test")
+        }
+    }
+    var frame: CGRect {
+        precondition(kind == "intro" || kind == "continue")
+        return kind == "intro" ? world.introFrame : world.buttonFrame
+    }
+    func tap() {
+        // Model the observed XCTest default handler cancelling the expected
+        // form before the Continue element can receive its event.
+        precondition(kind == "continue"); world.elementTaps += 1
+        world.alerts = 0; world.introduction = 0
+    }
+}
+@MainActor final class PersonHarness {
+    func check(_ value: Bool, app: XCUIApplication, _ message: String) throws { if !value { throw Rejected() } }
+    func capture(_ app: XCUIApplication, _ name: String) {
+        app.world.captures += 1
+        if app.world.mode == "changed-after-capture" { app.world.value = "Foreign person" }
+        if app.world.mode == "cancel-after-capture" { Task.cancelled = true }
+        if app.world.mode == "changed-button-frame" { app.world.buttonFrame.origin.x += 1 }
+        if app.world.mode == "changed-intro-frame" { app.world.introFrame.origin.y -= 1 }
+        if app.world.mode == "changed-root-frame" { app.world.rootFrame.size.width += 1 }
+    }
+    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+        app.world.waits += 1
+        if !condition() { throw Rejected() }
+    }
+    // ACTUAL_RECOVERY_PERSON_HELPER
+    func run(_ app: XCUIApplication, expectedName: String, acknowledged: inout Bool) async throws {
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(app, expectedName: expectedName, acknowledged: &acknowledged)
+    }
+}
+@main struct PersonMain {
+    @MainActor static func main() async throws {
+        let mode = CommandLine.arguments[1], world = PersonWorld(CommandLine.arguments[1])
+        let app = XCUIApplication(world), harness = PersonHarness()
+        var acknowledged = false, outcome = "returned"
+        do {
+            if ["pretype", "placeholder", "late", "repeated"].contains(mode) {
+                world.value = mode == "placeholder" ? "Name or nickname" : ""
+                try await harness.run(app, expectedName: world.value, acknowledged: &acknowledged)
+                world.value = "Recovery Sentinel"
+                if mode == "late" || mode == "repeated" { world.introduction = 1 }
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            } else {
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            }
+        } catch is Cancelled { outcome = "cancelled" }
+        catch { outcome = "rejected" }
+        var result: [String: Any] = ["outcome": outcome, "acknowledged": acknowledged,
+            "taps": world.taps, "captures": world.captures, "waits": world.waits]
+        if mode == "app-origin" {
+            result["appAnchor"] = world.appAnchor; result["elementTaps"] = world.elementTaps
+            result["point"] = [world.point.x, world.point.y]
+        }
+        print(String(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
+    }
+}
+'''
+
+
+class RecoveryPersonIntroductionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix='recovery-person-introduction-')
+        cls.addClassCleanup(cls.scratch.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func acknowledgeRecoveryPersonKeyboardIntroduction(')
+        end = source.index('    private func localStoreSession(', start)
+        swift = Path(cls.scratch.name) / 'Person.swift'
+        swift.write_text(RECOVERY_PERSON_INTRODUCTION.replace('    // ACTUAL_RECOVERY_PERSON_HELPER', source[start:end]))
+        cls.binary = Path(cls.scratch.name) / 'person-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-strict-concurrency=complete',
+                                 '-parse-as-library', str(swift), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def probe(self, mode):
+        import json
+        result = subprocess.run([str(self.binary), mode], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_absent_introduction_has_no_action_or_wait(self):
+        self.assertEqual(self.probe('absent'), {'outcome': 'returned', 'acknowledged': False,
+                                              'taps': 0, 'captures': 0, 'waits': 0})
+
+    def test_first_use_at_focus_or_during_typing_uses_one_acknowledgement(self):
+        for mode in ['pretype', 'placeholder', 'late']:
+            with self.subTest(mode=mode):
+                self.assertEqual(self.probe(mode), {'outcome': 'returned', 'acknowledged': True,
+                                                   'taps': 1, 'captures': 1, 'waits': 1})
+
+    def test_only_unique_expected_intro_form_and_value_can_be_acknowledged(self):
+        for mode in ['duplicate-intro', 'extra-alert', 'wrong-alert', 'extra-field', 'wrong-field',
+                     'wrong-value', 'partial-value', 'disabled-field', 'missing-explanation',
+                     'duplicate-explanation', 'hidden-explanation', 'missing-continue',
+                     'duplicate-continue', 'disabled-continue', 'hidden-continue', 'background']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_changed_form_and_cancellation_do_not_tap(self):
+        for mode, outcome in [('changed-after-capture', 'rejected'), ('cancelled', 'cancelled'),
+                              ('cancel-after-capture', 'cancelled')]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 (outcome, False, 0))
+
+    def test_reappearance_or_failed_dismissal_never_repeats_continue(self):
+        for mode in ['repeated', 'stays-open', 'changed-after-tap']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', True, 1))
+
+    def test_coordinate_uses_application_origin_and_avoids_element_interruption(self):
+        self.assertEqual(self.probe('app-origin'), {
+            'outcome': 'returned', 'acknowledged': True, 'taps': 1, 'captures': 1, 'waits': 1,
+            'appAnchor': True, 'elementTaps': 0, 'point': [201, 829.5]})
+
+    def test_invalid_or_changed_geometry_never_authorizes_continue(self):
+        for mode in ['empty-button', 'nan-button', 'infinite-intro', 'button-outside-intro',
+                     'intro-outside-app', 'empty-root', 'invalid-root',
+                     'changed-button-frame', 'changed-intro-frame', 'changed-root-frame']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_disappeared_expected_form_is_not_accepted_as_acknowledgement(self):
+        result = self.probe('form-dismissed')
+        self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                         ('rejected', True, 1))
+
+    def test_recovery_retains_single_type_and_add_with_pre_post_intro_checks(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        case = source[start:end]
+        self.assertEqual(case.count('var keyboardIntroductionAcknowledged = false'), 1)
+        self.assertEqual(case.count('acknowledgeRecoveryPersonKeyboardIntroduction('), 2)
+        self.assertEqual(case.count('name.typeText("Recovery Sentinel")'), 1)
+        self.assertEqual(case.count('confirm.tap()'), 1)
+        first = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(')
+        second = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(', first + 1)
+        self.assertLess(first, case.index('name.typeText("Recovery Sentinel")'))
+        self.assertLess(case.index('name.typeText("Recovery Sentinel")'), second)
+        self.assertLess(second, case.index('confirm.tap()'))
+        self.assertIn('name.value as? String == "Recovery Sentinel"', case[second:case.index('confirm.tap()')])
+        self.assertIn('UIContinuousPathIntroductionView").count == 0', case[second:case.index('confirm.tap()')])
+        self.assertIn('app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists', case)
+        self.assertIn('recoveryCounts(trips: 1, people: 2, documents: 1, app: app)', case)
+        self.assertNotIn('timeout:', case)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

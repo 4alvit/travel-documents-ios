@@ -233,8 +233,14 @@ including its admission and finalization, the explicit ceiling is thirty
 seconds. An active owned `boot-ready` process waiting for
 `simctl bootstatus <owned UUID> -b` retains its separate fifteen-second ceiling;
 its admission and post-process samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
-owner's limit and its original work deadline, preserving the stop reserve. The
-one fixed deadline covers both free-space reads and the full uncached output
+owner's limit and its original work deadline, preserving the stop reserve
+during admission and execution. After a zero exit status, verified leader/group
+closure, successful pipe and log closure, and successful stdout read, the
+existing conditional final checkpoint may use the original total command
+deadline. This short-lived in-memory context belongs to that exact command and
+process; saved receipt fields cannot grant it. It is cleared even on an exception.
+The five/fifteen/thirty-second sample ceilings and total command/global caps do
+not change, and no additional sample is forced. One fixed deadline covers both free-space reads and the full uncached output
 traversal; its deadline is never renewed within a sample. Capability, other preparation and
 evidence commands retain five seconds; a finished phase grants no later sample
 an extended allowance. The next ordinary sample remains due one
@@ -305,10 +311,13 @@ the allocated output cap was not reached. Per-file sparse/compression attributio
 is unavailable because build intermediates were not retained.
 
 Capability commands keep their own pending-command context when delegating a
-resource checkpoint to the parent output scanner. Their admission, execution
-and finalization scans use the probe's original work deadline and the parent's
-preparation limit. This context is passed for each call, so it cannot leave a
-stale deadline on later parent work or change the process-stop grace.
+resource checkpoint to the parent output scanner. Their admission and execution
+scans use the probe's original work deadline and the parent's preparation
+limit. Verified successful finalization may use the probe's original total
+command deadline as described above, but an unfinished parent still imposes
+its own work deadline. Failed commands, accepted nonzero exits and unresolved
+ownership retain the prior limits. This context cannot leave a stale deadline
+on later parent work or change the process-stop grace.
 
 A failed sample is never appended to completed resource accounting. The first
 failure retains one bounded diagnostic record: stage, partial counts, relative

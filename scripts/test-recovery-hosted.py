@@ -711,7 +711,9 @@ class BoundaryTests(unittest.TestCase):
             try:return original_stop(subject,p,deadline,record)
             finally:
                 stop_intervals.append((began,r.ops.t,deadline));stopping=False
-                if stage=='finalization':r.ops.t=106.
+                if stage=='finalization':
+                    r.ops.t=106.
+                    r.report['commands'].append({'id':'selected-tests','work_deadline':107.})
         def usage(_):
             nonlocal fired
             self.assertFalse(stopping,'Resource sampling must not enter process-stop grace')
@@ -743,6 +745,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(stop_intervals[0][2],115.)
             self.assertLessEqual(stop_intervals[0][1],115.)
         # No probe deadline remains installed on parent work after finally.
+        if stage=='finalization':r.report['commands'][-1]['finish']=r.ops.t
         deadlines=[];original_scan=hosted.core.live_sizes
         def scan(*args,**kwargs):
             deadlines.append(args[3]);return original_scan(*args,**kwargs)
@@ -2591,6 +2594,142 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual((r.report['resources'][0]['elapsed'],r.next_scan),(6.,7.))
         self.assertNotIn('resource_scan_failure',r.report)
         self.assertEqual(r.ops.processes,[])
+
+    def final_accounting_command(self, *, closed_at=111.4, scan_seconds=1.2,
+                                 fault=None, owner_limit=None, delegated=False):
+        r=self.runner(Ops({'exit':7} if fault=='accepted-nonzero' else {}))
+        r.owned='10000000-0000-0000-0000-000000000001'
+        owner=r
+        if delegated:
+            owner=hosted.core.Recovery(r.ops,r.out/'child',r.plan,r.host,'child',0,
+                candidate=r.candidate,source_manifest=r.source_manifest)
+            owner.checkpoint=lambda *,force_resources=False:r.checkpoint(
+                force_resources=force_resources,command_owner=owner)
+            r.report['commands']=[{'id':'selected-tests','work_deadline':112.,'command_deadline':120.}]
+            if delegated=='idle':r.report['commands'][-1]['finish']=0.
+            else:r.active[999]=SimpleNamespace(pid=999)
+        close=r.ops.close;scan=hosted.core.live_sizes;observations=[];log_handles=[]
+        original_open=Path.open
+        def opened(path,*args,**kwargs):
+            stream=original_open(path,*args,**kwargs)
+            if path.parent==owner.out and args and args[0]=='wb':log_handles.append(stream)
+            return stream
+        def closed(process):
+            close(process)
+            r.ops.t=closed_at;r.next_scan=0.
+            if owner_limit is not None:owner.limit=owner_limit
+            row=owner.report['commands'][-1]
+            if fault=='unknown':owner.unknown_spawn=True
+            if fault=='active':owner.active[999]=SimpleNamespace(pid=999)
+            if fault=='identity':row['pgid']=999
+            if fault=='unreaped':row['stop']['leader_reaped']=False
+            if fault=='unconfirmed':row['stop']['group_absent']=False
+            if fault=='unattempted':row['stop']['attempted']=False
+            if fault=='absence-cache':owner.absent_groups.clear()
+            if fault=='close':raise OSError('synthetic pipe close failure')
+            if fault=='cancel':r.signal()
+        def scanned(*args,**kwargs):
+            if r.ops.t>=closed_at:
+                context=getattr(owner,'_finalizing_success',None)
+                if context is not None:
+                    self.assertEqual(len(log_handles),2)
+                    self.assertTrue(all(stream.closed for stream in log_handles))
+                observations.append((args[3],context))
+                r.ops.t+=scan_seconds
+            return scan(*args,**kwargs)
+        owner.accept_nonzero_exit=lambda *_:fault=='accepted-nonzero'
+        with patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(Path,'open',opened), \
+             patch.object(hosted.core,'live_sizes',side_effect=scanned):
+            try:
+                owner.command('boot-ready',['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b'],120)
+                succeeded=True
+            except RuntimeError:succeeded=False
+        self.assertIsNone(getattr(owner,'_finalizing_success',None))
+        row=owner.report['commands'][-1]
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),(112.,120.,8))
+        self.assertEqual(len(r.ops.processes),1)
+        return r,owner,row,observations,succeeded
+
+    def test_closed_success_accounting_can_finish_after_work_before_original_total(self):
+        r,owner,row,scans,ok=self.final_accounting_command()
+        self.assertTrue(ok);self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(len(scans),1);self.assertAlmostEqual(scans[0][0],116.4)
+        self.assertIs(scans[0][1][0],row);self.assertIs(scans[0][1][1],r.ops.processes[0])
+        self.assertAlmostEqual(row['finish'],112.6)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[]);self.assertFalse(r.active)
+        sample=r.report['resources'][-1]
+        self.assertGreaterEqual(sample['entries'],2)
+        self.assertEqual(sample['scan']['requested_scan_seconds'],5)
+        # Context ends with this checkpoint; later work cannot reuse its allowance.
+        with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):
+            r.report['commands'].append({'id':'new','work_deadline':112.,'command_deadline':120.})
+            r.monitor()
+
+    def test_closed_child_accounting_uses_total_without_leaking_into_idle_parent(self):
+        r,owner,row,scans,ok=self.final_accounting_command(delegated='idle')
+        self.assertTrue(ok);self.assertIsNot(owner,r)
+        self.assertAlmostEqual(scans[0][0],116.4)
+        self.assertIs(scans[0][1][0],row)
+        self.assertIsNone(getattr(r,'_finalizing_success',None))
+        self.assertEqual((owner.limit,r.limit),(1380.,1380.))
+        r.monitor()
+        self.assertAlmostEqual(r.report['resources'][-1]['scan']['deadline_elapsed'],117.6)
+
+    def test_closed_accounting_keeps_total_scan_owner_and_parent_deadlines(self):
+        cases=[('total',dict(closed_at=119.,scan_seconds=1.),120.),
+               ('scan',dict(scan_seconds=5.),116.4),
+               ('owner',dict(owner_limit=112.),112.),
+               ('parent',dict(delegated=True),112.)]
+        for name,options,end in cases:
+            with self.subTest(name=name):
+                old=self.root;self.root=old/name;self.root.mkdir()
+                try:
+                    r,owner,row,scans,ok=self.final_accounting_command(**options)
+                    self.assertFalse(ok);self.assertIn('finalization_error',row)
+                    self.assertAlmostEqual(scans[0][0],end)
+                    self.assertIsNotNone(scans[0][1])
+                    self.assertEqual(row['outcome'],'failed')
+                finally:self.root=old
+
+    def test_final_accounting_never_uses_receipt_only_or_unverified_closure(self):
+        for fault in ('accepted-nonzero','unknown','active','identity','unreaped','unconfirmed','unattempted','absence-cache','close','cancel'):
+            with self.subTest(fault=fault):
+                old=self.root;self.root=old/fault;self.root.mkdir()
+                try:
+                    r,owner,row,scans,ok=self.final_accounting_command(fault=fault)
+                    self.assertFalse(ok);self.assertEqual(row['outcome'],'failed')
+                    for end,context in scans:
+                        self.assertEqual(end,112.);self.assertIsNone(context)
+                    if fault in ('close','cancel'):self.assertEqual(scans,[])
+                finally:self.root=old
+        r=self.runner();r.ops.t=111.4
+        r.report['commands']=[{'id':'boot-ready','pgid':123,'returncode':0,
+            'work_deadline':112.,'command_deadline':120.,'stop':{
+                'attempted':True,'leader_reaped':True,'group_absent':True},
+            '_finalizing_success':True}]
+        r.absent_groups.add(123)
+        with patch.object(hosted.core.shutil,'disk_usage',side_effect=lambda _: (
+                setattr(r.ops,'t',112.) or SimpleNamespace(free=32*hosted.core.GIB))):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],112.)
+
+    def test_final_accounting_context_is_conditional_and_cleared_on_base_exception(self):
+        r=self.runner();original=r.checkpoint;seen=[]
+        def checkpoint(**kwargs):
+            context=getattr(r,'_finalizing_success',None)
+            if context is not None:
+                seen.append(context);raise KeyboardInterrupt('synthetic cancellation')
+            return original(**kwargs)
+        with patch.object(r,'checkpoint',side_effect=checkpoint):
+            with self.assertRaises(RuntimeError):r.command('normal',['synthetic'],120)
+        self.assertEqual(len(seen),1);self.assertIsNone(r._finalizing_success)
+        self.assertIn('KeyboardInterrupt',r.report['commands'][-1]['finalization_error'])
+        # A fast command does not force another resource sample at finalization.
+        r.command('normal-again',['synthetic'],120)
+        self.assertIsNone(r._finalizing_success)
+        self.assertEqual(len(r.report['resources']),3)
 
     def test_boot_scan_15_requires_active_exact_owned_wait_and_keeps_restart_disabled(self):
         r=self.runner();r.owned='10000000-0000-0000-0000-000000000001'
