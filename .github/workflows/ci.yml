@@ -217,7 +217,12 @@ jobs:
         # 75m Intel work + 6m cleanup + 2m startup/finalization headroom.
         # Job: checkout 2 + toolchain 3 + driver 83 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
-        run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
+        run: |
+          args=(--locale '${{ matrix.locale }}')
+          if [[ '${{ matrix.locale }}' == en-US ]]; then
+            args+=(--hosted-intel-timing)
+          fi
+          bash scripts/test-privacy-support-ipad.sh "${args[@]}"
       - name: iPad test evidence
         if: always()
         timeout-minutes: 2

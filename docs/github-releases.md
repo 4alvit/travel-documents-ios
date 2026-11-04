@@ -442,11 +442,12 @@ host/cohort and selected iPhone before passing a token only to the final test
 invocation. The test-side selector requires the exact token, a Debug x86_64
 Simulator build and iPhone idiom. Missing tokens preserve previous defaults;
 invalid or incompatible tokens fail before app launch. Local and Core runs,
-ARM, and dedicated iPad tests receive no token. The inherited Free-card allowance
+ARM, and dedicated iPad tests receive no Phone token. The inherited Free-card allowance
 remains untouched outside this profile. Russian Phone guidance stays600 seconds;
-the ordinary test default stays180. The dedicated iPad command still clamps both
-guidance cases to480 seconds within its900-second command limit. Its work/cleanup
-budget remains2,100/180 seconds on ARM or4,500/360 seconds on Intel.
+the ordinary test default stays180. By default, dedicated iPad commands clamp
+guidance cases to480 seconds within a900-second command limit. The explicit
+hosted English iPad policy described below uses900/1,200 seconds instead. Its
+work/cleanup budget remains2,100/180 seconds on ARM or4,500/360 seconds on Intel.
 All text, privacy, Cancel, final Trips, screenshot, hierarchy and termination
 checks remain required. These finite margins do not establish the cause of slow
 host observations or guarantee a pass; fresh complete native evidence is required.
@@ -466,17 +467,31 @@ Intel uses 4,500 and 600 seconds. Captured architecture must match that initial
 profile before a device is created. Two Intel runs exhausted the former
 180-second boot wait during data migration, while another completed in
 118.663 seconds. The added headroom does not establish that delayed boots will
-finish. It preserves exact runtime selection, the 1,487-second full-case
-admission and separate cleanup; it never resets a clock or retries a boot.
+finish. It preserves exact runtime selection, full-case admission
+(1,487 seconds by default or1,787 for hosted English) and separate cleanup; it never resets a clock or retries a boot.
 A later [Intel run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116)
 completed boot in 312.7 seconds but exhausted the 480-second fresh-build limit
 before any test. Its final log showed asset catalog compilation, not a compiler
-error. The larger Intel build/work profile leaves 387 seconds beyond the 4,113
-seconds of command and complete-case ceilings for parsing and byte verification.
+error. The Intel build/work profile leaves387 seconds beyond the default4,113-second
+command/case envelope, or87 seconds beyond4,413 with hosted English timing,
+for parsing and byte verification.
 Intel cleanup includes final evidence in its 360-second reserve. These finite
 margins do not guarantee completion; source, product, original-result and owned
 cleanup checks remain mandatory. Phone and separate Batch/Biometric qualification
 retain their own existing profiles.
+An English iPad case later reached its480-second native limit during retained
+second-cancellation evidence; its raw log continued through fourth Cancel near660
+seconds but the native result remained failed, without final Trips evidence.
+Only the explicit `--hosted-intel-timing` CI option now selects a fixed900-second
+English native allowance and1,200-second command. It requires GitHub-hosted
+macOS/X64, exact locale/architecture and a Debug x86_64 iPad consumer. The fixed
+`hosted-intel-ipad-en-v1` token goes only to the test runner; inherited/conflicting
+Phone/iPad tokens fail before launch, and the app receives none. Standalone,
+Phone and Russian iPad timing stay unchanged. Full1,787-second admission and
+238-second post-validation reserve protect the original4,500/360 work/cleanup
+windows; all text, cancellation, final navigation and original-evidence checks
+remain mandatory. This finite policy does not guarantee a future pass.
+
 Hosted iPad steps allow 83 minutes, with 95-minute jobs covering checkout,
 toolchain setup, artifact upload and cancellation. Fresh complete native results
 remain required.

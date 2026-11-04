@@ -1285,10 +1285,12 @@ class HostedPhoneTimingTests(unittest.TestCase):
         for index, (filename, method, stop, locals_) in enumerate(definitions):
             source = (ROOT / 'UITests' / filename).read_text()
             start = source.index('    private enum PhoneTimingError:')
-            end = source.index('\n    private ', source.index('    private func useHostedPhoneTiming()', start) + 10)
+            end = (source.index('    private struct Copy {', start)
+                   if filename == 'PrivacySupportUITests.swift' else
+                   source.index('\n    private ', source.index('    private func useHostedPhoneTiming()', start) + 10))
             helper = source[start:end]
             condition = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
-            assert helper.count(condition) == 1
+            assert helper.count(condition) == (2 if filename == 'PrivacySupportUITests.swift' else 1)
             # Native build conditions are separately SDK-typechecked. This fixture
             # executes both actual bodies on any host, without launching XCTest.
             helper = helper.replace(condition, '#if PHONE_TEST_SUPPORTED_BUILD')
@@ -1324,6 +1326,7 @@ class HostedPhoneTimingTests(unittest.TestCase):
 
     def invoke(self, supported, token=None, idiom='phone'):
         env = dict(os.environ); env.pop('TRIPDOCKET_PHONE_TIMING', None)
+        env.pop('TRIPDOCKET_IPAD_TIMING', None)
         env['PHONE_TEST_IDIOM'] = idiom
         if token is not None: env['TRIPDOCKET_PHONE_TIMING'] = token
         result = subprocess.run([str(self.binaries[supported])], env=env, capture_output=True,
@@ -1343,6 +1346,107 @@ class HostedPhoneTimingTests(unittest.TestCase):
             self.assertEqual(self.invoke(True, token), '[rejected, rejected, rejected, rejected, rejected]')
         self.assertEqual(self.invoke(False, 'hosted-intel-phone-v1'), '[rejected, rejected, rejected, rejected, rejected]')
         self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', 'pad'), '[rejected, rejected, rejected, rejected, rejected]')
+
+
+class HostedIPadTimingTests(unittest.TestCase):
+    """Execute the actual pre-launch selector, including its existing Phone path."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
+        start = source.index('    private enum PhoneTimingError:')
+        helper = source[start:source.index('    private struct Copy {', start)]
+        condition = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+        assert helper.count(condition) == 2
+        helper = helper.replace(condition, '#if IPAD_TEST_SUPPORTED_BUILD')
+        start = source.index('    private func verifyGuidance(')
+        start = source.index('{', start) + 1
+        prefix = source[start:source.index('        continueAfterFailure =', start)]
+        assert 'XCUIApplication' not in helper + prefix
+        cls.code = '''import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["IPAD_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        @MainActor final class Harness {
+            var executionTimeAllowance: Double = 777
+        ''' + helper + '''
+            func run(russian: Bool, maximumType: Bool) throws -> Double {
+        ''' + prefix + '''
+                return executionTimeAllowance
+            }
+        }
+        @main enum Main {
+            @MainActor static func main() {
+                do {
+                    let value = try Harness().run(russian: CommandLine.arguments[1] == "true",
+                                                  maximumType: CommandLine.arguments[2] == "true")
+                    print(value)
+                } catch { print("rejected") }
+            }
+        }
+        '''
+        cls.binaries = {supported: cls.compile(cls.code, str(supported), supported)
+                        for supported in (False, True)}
+
+    @classmethod
+    def compile(cls, code, name, supported):
+        path = Path(cls.directory.name) / (name + '.swift'); path.write_text(code)
+        binary = Path(cls.directory.name) / name
+        flags = ['-D', 'IPAD_TEST_SUPPORTED_BUILD'] if supported else []
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
+                                 *flags, str(path), '-o', str(binary)], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode != 0: raise AssertionError(result.stderr)
+        return binary
+
+    def invoke(self, supported=True, token=None, phone=None, idiom='pad',
+               russian=False, maximum=False, binary=None):
+        env = dict(os.environ)
+        for key in ('TRIPDOCKET_PHONE_TIMING', 'TRIPDOCKET_IPAD_TIMING'):
+            env.pop(key, None)
+        env['IPAD_TEST_IDIOM'] = idiom
+        if token is not None: env['TRIPDOCKET_IPAD_TIMING'] = token
+        if phone is not None: env['TRIPDOCKET_PHONE_TIMING'] = phone
+        result = subprocess.run([str(binary or self.binaries[supported]),
+                                 str(russian).lower(), str(maximum).lower()],
+                                env=env, capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_exact_hosted_intel_english_ipad_selector_sets_900(self):
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1'), '900.0')
+
+    def test_missing_ipad_token_preserves_phone_and_both_default_locales(self):
+        for supported in (False, True):
+            for idiom in ('pad', 'phone'):
+                self.assertEqual(self.invoke(supported=supported, idiom=idiom), '480.0')
+                self.assertEqual(self.invoke(supported=supported, idiom=idiom,
+                                             russian=True, maximum=True), '600.0')
+        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone'), '720.0')
+        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone',
+                                     russian=True, maximum=True), '600.0')
+
+    def test_invalid_conflicting_or_out_of_scope_ipad_tokens_reject(self):
+        for token in ('', 'wrong', 'hosted-intel-ipad-en-v1 ', 'hosted-intel-ipad-ru-v1'):
+            with self.subTest(token=token):
+                self.assertEqual(self.invoke(token=token), 'rejected')
+        for kwargs in ({'supported': False}, {'idiom': 'phone'}, {'russian': True},
+                       {'maximum': True}, {'russian': True, 'maximum': True},
+                       {'phone': ''}, {'phone': 'hosted-intel-phone-v1'}, {'phone': 'wrong'}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', **kwargs), 'rejected')
+
+    def test_removing_only_native_allowance_loses_required_hosted_behavior(self):
+        needle = 'executionTimeAllowance = hostedIPad ? 900 :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle, 'executionTimeAllowance = hostedIPad ? 480 :'),
+                               'without-native-allowance', True)
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '480.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
 
 
 class SDKSourceTests(unittest.TestCase):

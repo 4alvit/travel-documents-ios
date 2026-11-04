@@ -2,6 +2,7 @@
 import errno
 import importlib.util
 import json
+import os
 from pathlib import Path
 import signal
 import tempfile
@@ -51,6 +52,7 @@ class World:
         assert kwargs['start_new_session'] is True
         self.calls.append(('spawn', self.t))
         process = Process(self, self.plan)
+        process.argv, process.environment = list(argv), dict(kwargs.get('env', {}))
         self.processes.append(process)
         kwargs['stdout'].write(self.plan.get('output', b'')); kwargs['stdout'].flush()
         if self.on_spawn:
@@ -96,14 +98,14 @@ class DriverTests(unittest.TestCase):
         for guard in self.guards:
             guard.assert_not_called()
 
-    def driver(self, locale="en-US", architecture="arm64", **plan):
+    def driver(self, locale="en-US", architecture="arm64", hosted_timing=False, **plan):
         world = World(**plan)
         for name, value in [('time.monotonic', world.clock), ('time.sleep', world.sleep),
                             ('os.uname', lambda: SimpleNamespace(machine=architecture)),
                             ('subprocess.Popen', world.spawn), ('os.killpg', world.killpg)]:
             injected = patch(name, side_effect=value)
             injected.start(); self.addCleanup(injected.stop)
-        return ipad.Driver(self.root, locale), world
+        return ipad.Driver(self.root, locale, hosted_timing), world
 
     def row(self, driver):
         return driver.report['commands'][-1]
@@ -117,6 +119,7 @@ class DriverTests(unittest.TestCase):
     def attempted_case(self, index, start_at=0, preparation_seconds=0, **plan):
         case = ipad.CASES[index]; locale, method, size, _ = case
         driver, world = self.driver(locale=locale, **plan)
+        case = driver.case
         world.t = start_at
         driver.owned = 'synthetic-owned-device'
         driver.products = {'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app','xctestrun':self.root/'synthetic.xctestrun'}
@@ -139,6 +142,115 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.row(driver)['argv'][-1],
             '-only-testing:TripfolioUITests/PrivacySupportUITests/'+method)
         return driver,world,failure.exception,validate.called
+
+    def hosted_environment(self):
+        environment = {'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'X64',
+                       'RUNNER_ENVIRONMENT': 'github-hosted', 'GITHUB_JOB': 'privacy_ipad',
+                       'GITHUB_WORKFLOW': 'CI', 'GITHUB_REPOSITORY': '4alvit/travel-documents-ios'}
+        guard = patch.dict(os.environ, environment, clear=True)
+        guard.start(); self.addCleanup(guard.stop)
+        return environment
+
+    def test_hosted_timing_requires_explicit_opt_in_and_preserves_standalone_defaults(self):
+        environment = self.hosted_environment()
+        for arch, locale in [('arm64', 'en-US'), ('x86_64', 'en-US'), ('arm64', 'ru-RU'), ('x86_64', 'ru-RU')]:
+            policy = ipad.timing_policy(arch, locale, False, environment)
+            self.assertEqual(dict(policy), {'name': 'default', 'xcode_case_max_seconds': 480,
+                                           'command_seconds': 900, 'runner_token': None})
+        driver, _ = self.driver(architecture='x86_64', hosted_timing=True)
+        self.assertEqual(driver.case[3], 1200)
+        self.assertEqual(driver.timing['xcode_case_max_seconds'], 900)
+        self.assertEqual(driver.report['timing_policy'], dict(driver.timing))
+        with self.assertRaises(TypeError): driver.timing['command_seconds'] = 900
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_timing_rejects_wrong_context_architecture_and_locale_before_output(self):
+        environment = self.hosted_environment()
+        cases = [(key, 'unexpected') for key in environment] + [('RUNNER_ENVIRONMENT', None)]
+        for index, (key, value) in enumerate(cases):
+            wrong = dict(environment)
+            if value is None: wrong.pop(key)
+            else: wrong[key] = value
+            root = self.root / str(index)
+            with patch.dict(os.environ, wrong, clear=True), patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
+                with self.assertRaisesRegex(RuntimeError, 'exact GitHub-hosted'): ipad.Driver(root, 'en-US', True)
+            self.assertFalse(root.exists())
+        for arch, locale in [('arm64', 'en-US'), ('x86_64', 'ru-RU')]:
+            with patch('os.uname', return_value=SimpleNamespace(machine=arch)):
+                with self.assertRaisesRegex(RuntimeError, 'English Intel'): ipad.Driver(self.root / arch, locale, True)
+            self.assertFalse((self.root / arch).exists())
+
+    def test_all_inherited_phone_and_ipad_timing_tokens_fail_before_output(self):
+        environment = self.hosted_environment()
+        for index, key in enumerate(ipad.TIMING_ENV_KEYS):
+            root = self.root / str(index)
+            for enabled in [False, True]:
+                with patch.dict(os.environ, {**environment, key: 'hosted-intel-ipad-en-v1'}, clear=True), \
+                     patch('os.uname', return_value=SimpleNamespace(machine='x86_64')):
+                    with self.assertRaisesRegex(RuntimeError, 'Inherited'): ipad.Driver(root, 'en-US', enabled)
+                self.assertFalse(root.exists())
+
+    def test_hosted_actual_case_propagates_only_runner_token_and_full_fixed_budget(self):
+        self.hosted_environment()
+        before = dict(os.environ)
+        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True)
+        self.assertEqual(str(error), 'Synthetic result validation withheld')
+        self.assertTrue(parsed)
+        process = world.processes[0]
+        self.assertEqual(process.environment['TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'], 'hosted-intel-ipad-en-v1')
+        self.assertFalse(any(key in process.environment for key in ipad.TIMING_ENV_KEYS
+                             if key != 'TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'))
+        self.assertEqual(os.environ, before)
+        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '900')
+        self.assertEqual(process.argv[process.argv.index('-default-test-execution-time-allowance') + 1], '180')
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1200)
+        self.assertEqual(self.row(driver)['timing_policy'], dict(driver.timing))
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1787)
+        self.assertEqual(driver.report['cases'][0]['admission']['post_validation_seconds'], 238)
+        driver.command(['xcodebuild', 'build-for-testing'], 'build-for-testing', timeout=1200)
+        self.assertFalse(any(key in world.processes[-1].environment for key in ipad.TIMING_ENV_KEYS))
+        self.assertNotIn('timing_policy', self.row(driver))
+
+    def test_hosted_actual_case_rejects_exit65_despite_available_result(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True, exit=65)
+        self.assertIn('xcodebuild failed', str(error)); self.assertFalse(parsed)
+        self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'], 65)
+        self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
+
+    def test_hosted_case_admission_is_exact_and_does_not_reset_original_clock(self):
+        self.hosted_environment()
+        driver, world = self.driver(architecture='x86_64', hosted_timing=True)
+        world.t = 4500 - 1787
+        with self.assertRaisesRegex(RuntimeError, 'no case started'): driver.run_case(*driver.case)
+        self.assertEqual(world.processes, [])
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1787)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_hosted_case_just_above_full_admission_finishes_without_borrowing_cleanup(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(0, start_at=4500-1787-1,
+                                                         architecture='x86_64', hosted_timing=True, delay=1199)
+        self.assertTrue(parsed); self.assertEqual(str(error), 'Synthetic result validation withheld')
+        self.assertLess(world.t + 238, driver.work_deadline)
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
+
+    def test_late_hosted_case_timeout_and_contaminated_environment_fail_closed(self):
+        self.hosted_environment()
+        driver, world, error, parsed = self.attempted_case(0, architecture='x86_64', hosted_timing=True, delay=1201)
+        self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
+        self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
+        with patch.dict(os.environ, {'SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING': 'unexpected'}):
+            with self.assertRaisesRegex(RuntimeError, 'Inherited'):
+                driver.command(['xcodebuild', 'test-without-building'], 'en-US-test', native_timing=True)
+        self.assertEqual(len(world.processes), 1)
+        with patch.dict(os.environ, {'GITHUB_JOB': 'another_job'}):
+            with self.assertRaisesRegex(RuntimeError, 'context changed'):
+                driver.command(['xcodebuild', 'test-without-building'], 'en-US-test', native_timing=True)
+        self.assertEqual(len(world.processes), 1)
+        with self.assertRaisesRegex(RuntimeError, 'restricted'):
+            driver.command(['xcodebuild', 'build-for-testing'], 'build-for-testing', native_timing=True)
+        self.assertEqual(len(world.processes), 1)
 
     def sdk_fixture(self):
         types = {'devicetypes': [
@@ -535,7 +647,12 @@ class DriverTests(unittest.TestCase):
         self.assertIn('        timeout-minutes: 3\n',lane)
         self.assertEqual(lane.count('- locale:'),2)
         self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
-        self.assertIn("run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'",lane)
+        self.assertIn("""args=(--locale '${{ matrix.locale }}')
+          if [[ '${{ matrix.locale }}' == en-US ]]; then
+            args+=(--hosted-intel-timing)
+          fi
+          bash scripts/test-privacy-support-ipad.sh "${args[@]}"
+""", lane)
         self.assertIn('name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',lane)
         self.assertIn('path: build/PrivacySupport-iPad/${{ matrix.locale }}/',lane)
         self.assertIn('timeout-minutes: ${{ matrix.job_minutes }}',lane)
