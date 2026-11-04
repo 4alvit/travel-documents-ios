@@ -516,8 +516,17 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.report['execution_profile'],dict(r.execution_profile))
         with self.assertRaises(TypeError):r.execution_profile['total_seconds']=9999
         with self.assertRaises(AttributeError):r.execution_profile=hosted.core.execution_profile()
-        with self.assertRaisesRegex(RuntimeError,'reselected'):r._execution_profile=hosted.core.execution_profile()
-        with self.assertRaisesRegex(RuntimeError,'removed'):del r._execution_profile
+        selected=r.execution_profile;deadlines=(r.t0,r.limit,r.final)
+        with self.assertRaisesRegex(AttributeError,'reselected'):r._execution_profile=hosted.core.execution_profile()
+        self.assertIs(r.execution_profile,selected)
+        self.assertEqual((r.t0,r.limit,r.final),deadlines)
+        with self.assertRaisesRegex(AttributeError,'removed'):del r._execution_profile
+        self.assertIs(r.execution_profile,selected)
+        self.assertEqual((r.t0,r.limit,r.final),deadlines)
+        r.ordinary_attribute='allowed'
+        self.assertEqual(r.ordinary_attribute,'allowed')
+        del r.ordinary_attribute
+        self.assertFalse(hasattr(r,'ordinary_attribute'))
         for name in ('unknown','',None,True):
             with self.subTest(name=name),self.assertRaises(RuntimeError):hosted.core.execution_profile(name)
         out=self.root/'unadmitted'

@@ -393,12 +393,12 @@ class Recovery:
 
     def __setattr__(self, name, value):
         if name == '_execution_profile' and hasattr(self, name):
-            raise RuntimeError('Recovery execution profile cannot be reselected')
+            raise AttributeError('Recovery execution profile cannot be reselected')
         super().__setattr__(name, value)
 
     def __delattr__(self, name):
         if name == '_execution_profile':
-            raise RuntimeError('Recovery execution profile cannot be removed')
+            raise AttributeError('Recovery execution profile cannot be removed')
         super().__delattr__(name)
 
     @property
