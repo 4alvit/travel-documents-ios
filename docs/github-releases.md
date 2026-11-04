@@ -323,17 +323,25 @@ phase budget. A separate `simctl bootstatus` call is not a prerequisite. The
 exact native case and result validation must pass before post-preparation
 identity checks. Xcode may leave a device it started in `Shutdown` after testing.
 If the same selected device and data-root inode are unchanged, preparation then
-runs one `simctl bootstatus <UUID> -b` command with a 180-second cap and verifies
+runs one `simctl bootstatus <UUID> -b` command with a 300-second Intel cap
+(180 seconds on Arm) and verifies
 a fresh complete inventory, Booted state and unchanged root before container
 lookup. An already-Booted device receives no additional boot command. These
-steps share the fixed 1,080-second work budget; failures are not retried.
+steps share the original 1,440-second Intel work deadline (1,080 seconds on Arm).
+The immutable profile is selected from matching recorded and actual host
+architectures before output creation. Failures are not retried.
 The receipt records the observed post-test state, whether a warm boot was needed,
 and the resulting state. Final checks still reject changes to any other device.
 The preparation creates no backup or Files folder and does not erase or delete
 the selected device. Its separate result bundle records this case; the following
 guidance cohort retains its own result bundle and reuses the same build products.
 The preparation receipt distinguishes owned host-command cleanup from the
-Simulator services that remain running for the tests.
+Simulator services that remain running for the tests. If the failed warm-boot
+child's first stop cannot probe its group because of `EPERM`, final cleanup may
+observe that same owned child until the original cleanup deadline. It sends no
+further signal or command. Only a fresh reap result and positive group absence
+clear ownership; the original failed command, stop record and overall failure
+remain unchanged. Terminal-looking stdout alone is never closure evidence.
 When the native Settings list reports a non-hittable wrapper, its scroll helper
 first filters geometrically aligned containers by a live, visible descendant,
 then requires exactly one active container. Covered containers cannot create
@@ -396,11 +404,13 @@ host and cleanup limits still apply. This permits bounded recovery from the
 observed non-transition; it does not establish whether the first native action
 was ignored or delayed.
 Batch release qualification preparation has the profile-specific cap described above.
-Phone bootstrap retains its 960-second preparation command and 1,080-second work,
-30-second cleanup and ten-second receipt limits. The Phone integration step has
-75 minutes within a 95-minute job: 1,120 seconds for the complete bootstrap,
-2,700 seconds for the nine case ceilings and 680 seconds for selection, generation,
+Phone bootstrap retains its 960-second preparation command, 180-second native
+preparation allowance, 30-second cleanup and ten-second receipt limits. Intel
+gets 1,440 seconds of work; Arm retains 1,080. The Phone integration step has
+75 minutes within a 95-minute job: 1,480 seconds for the complete Intel bootstrap,
+2,700 seconds for the nine case ceilings and 320 seconds for selection, generation,
 main build/session startup, skipped-case bookkeeping and result finalization.
+The Arm allocation remains 1,120 seconds for bootstrap and 680 seconds for other work.
 These are planning allocations under one step timer, not independent guarantees.
 The surrounding 20 minutes retain checkout, toolchain, cancellation, raw evidence,
 optional failure extraction/upload and finalization. Raw test artifacts upload
