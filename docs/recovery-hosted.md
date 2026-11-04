@@ -124,22 +124,61 @@ preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
 not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
-Files preparation first runs the real provider initialization UI case, which
-reaches the exact local root, proves the run-UUID name absent and stops the
-fixture. After its exact PASS and process cleanup, the host performs one exact
-owned DocumentsApp group-container lookup with the existing 60-second cap
-(52 seconds of work plus the 8-second stop reserve). It pins the existing local
-provider, exclusively creates only an empty run-UUID leaf and independently
-rechecks its original inode, all ancestors and complete emptiness before export.
-It does not launch or terminate Files separately, create Apple roots, adopt an
-existing name or prepare any backup bytes. Provider readiness uses only the
-unused lookup work budget. No total, case or cleanup limit is increased.
+Dedicated Recovery preparation sets `TRIPDOCKET_RECOVERY_CREATE_FOLDER=1`
+only for its existing prepare case. This mode requires the existing Recovery
+opt-in, prepare phase and canonical run UUID, with no competing fixture modes.
+It opens the existing Debug Simulator direct exporter using one generated,
+canonical source UUID distinct from the Recovery destination UUID. It requires
+one enabled, hittable synthetic-ticket source and opens it once, then reaches
+the exact local root using the existing 30-second initial presentation allowance.
+It proves the canonical destination name absent and requests New Folder and
+rename through the unchanged bounded Files action sequence shared with Batch
+qualification. No Save is requested: the direct fixture must report neither an
+exported file nor a failure before or after folder creation. Preparation stops
+the app before the host can adopt the empty folder.
 
-Native Apple Files New Folder/name-commit remains unverified; failed diagnostic
-attempts are not product acceptance. Folder creation is now deterministic test
-setup, while the actual app Save-to-Files, import/restore, catalog/original-byte
-comparisons and rendered PDF checks remain mandatory. This source policy is
-still pending native end-to-end acceptance.
+The shared guidance preparation invoked by `test-simulator.sh` omits this flag
+and uses the same existing Debug Simulator exporter for provider-only preparation. Both prepare modes
+require the isolated Recovery opt-in, prepare phase and canonical destination
+probe UUID. A separate canonical source UUID opens the synthetic-ticket source
+once; preparation never saves it. Provider-only preparation retains its generic
+phone/iPad local-root navigation, absent-folder probe and explicit app shutdown,
+and never requests folder creation. Ordinary UI cases and actual Recovery
+export/restore still use the production Free gate, disclosure, Save-to-Files
+and import/replacement paths.
+
+After the prepare case passes and its process group closes, the host adopts
+exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
+and inode checks, and complete empty-directory check must all pass before export.
+Recovery does not create a provider directory on the host, fall back to host
+creation, retry the UI action or prepare backup bytes. The three cases, 180-second
+prepare allowance, global work deadline and cleanup reserve are unchanged.
+
+Run 41771491849 failed when native Files could not resolve the selected backup
+bookmark and returned no usable URL. This boundary precedes application restore;
+it does not by itself prove the folder's creation method caused the failure.
+The changed setup therefore requires new native end-to-end acceptance. Actual
+app Save-to-Files, import/restore, catalog/original-byte comparisons and rendered
+PDF checks remain mandatory; a passing folder setup alone is not acceptance.
+
+Run 41773899588 attempts 1 and 2 both stopped during dedicated preparation at
+the same live-binding check after the single New Folder action, before keyboard
+acknowledgement, name entry, host adoption, export or restore. The direct-exporter
+setup removes duplicated Settings/share navigation from preparation; it does
+not establish the OS cause of those failures or prove that the changed route
+fixes them. In run 41777826319 attempt 1, dedicated preparation and production
+export passed, including native empty-folder adoption and complete-original
+backup equality. Restore reached file selection and replacement confirmation,
+but the coordinated read received Cocoa 4101 with an underlying failure to
+connect to Apple's LocalStorage File Provider extension. That result is not
+successful recovery and does not establish a deterministic application defect.
+
+The same run's second-attempt Phone bootstrap failed before the ordinary UI
+suite: a single correctly targeted Settings tap left Trips selected. Its
+provider-only setup now opens the direct exporter without that preliminary
+application navigation. This changes preparation, not the ordinary Settings
+checks, and does not establish the cause of the native tab non-transition.
+The revised shared preparation requires fresh native CI acceptance.
 
 The export/restore AUT app and data container lookups and all other default
 command caps remain 30 seconds. Global time, ownership and cancellation checks
