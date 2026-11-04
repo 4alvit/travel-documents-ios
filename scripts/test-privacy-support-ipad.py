@@ -40,8 +40,10 @@ def execution_profile(architecture, locale):
     intel = architecture == "x86_64"
     return MappingProxyType({"name": "intel-ipad" if intel else "arm-ipad",
                              "architecture": architecture,
-                             "work_seconds": 3000 if intel else WORK_SECONDS[locale],
-                             "boot_seconds": 600 if intel else 180})
+                             "work_seconds": 4500 if intel else WORK_SECONDS[locale],
+                             "boot_seconds": 600 if intel else 180,
+                             "build_seconds": 1200 if intel else 480,
+                             "cleanup_seconds": 360 if intel else CLEANUP_SECONDS})
 
 
 def selected_case(locale):
@@ -183,7 +185,7 @@ class Driver:
         require(not self.derived.exists(), "DerivedData must be fresh; no build reuse")
         self.start = time.monotonic()
         self.work_deadline = self.start + self.profile["work_seconds"]
-        self.final_deadline = self.work_deadline + CLEANUP_SECONDS
+        self.final_deadline = self.work_deadline + self.profile["cleanup_seconds"]
         self.cleaning = False
         self.discovery_deadline = None
         self.active = {}
@@ -200,7 +202,7 @@ class Driver:
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
                        "execution_profile": dict(self.profile),
-                       "work_seconds": self.profile["work_seconds"], "cleanup_reserve_seconds": CLEANUP_SECONDS,
+                       "work_seconds": self.profile["work_seconds"], "cleanup_reserve_seconds": self.profile["cleanup_seconds"],
                        "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
         self.save()
@@ -546,7 +548,7 @@ class Driver:
                       "-testPlan", "Tripfolio-iPad",
                       "-configuration", "Debug", "-derivedDataPath", self.derived,
                       "-only-testing:TripfolioUITests/PrivacySupportUITests/" + self.case[1],
-                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=480, stream=True)
+                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=self.profile["build_seconds"], stream=True)
         self.discover_products()
         self.built = self.product_snapshot("products-after-build")
 
@@ -670,7 +672,7 @@ class Driver:
 
     def cleanup(self):
         self.cleaning = True
-        self.final_deadline = min(self.final_deadline, time.monotonic() + CLEANUP_SECONDS)
+        self.final_deadline = min(self.final_deadline, time.monotonic() + self.profile["cleanup_seconds"])
         cleanup = self.report["cleanup"]
         cleanup["started_at"] = self.now()
         stop_errors = []

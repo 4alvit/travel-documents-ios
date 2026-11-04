@@ -1254,7 +1254,7 @@ class SDKSourceTests(unittest.TestCase):
                      '-target', target + '-apple-ios17.0-simulator', '-sdk', sdk,
                      '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
                      '-I', str(Path(platform) / 'Developer/usr/lib'), *flags, str(source)],
-                    capture_output=True, text=True, timeout=45)
+                    capture_output=True, text=True, timeout=180)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 SHARE_FIXTURE = r'''

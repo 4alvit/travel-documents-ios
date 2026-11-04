@@ -231,11 +231,13 @@ class DriverTests(unittest.TestCase):
         self.assertFalse((self.root/'build').exists())
 
     def test_host_profiles_are_immutable_and_unknown_architecture_creates_no_output(self):
-        for architecture,work,boot in [('arm64',2100,180),('x86_64',3000,600)]:
+        for architecture,work,boot in [('arm64',2100,180),('x86_64',4500,600)]:
             for locale in ('en-US','ru-RU'):
                 profile=ipad.execution_profile(architecture,locale)
                 self.assertEqual((profile['architecture'],profile['work_seconds'],profile['boot_seconds']),
                                  (architecture,work,boot))
+                self.assertEqual((profile['build_seconds'],profile['cleanup_seconds']),
+                                 (1200,360) if architecture == 'x86_64' else (480,180))
                 with self.assertRaises(TypeError):profile['work_seconds']=9999
         with patch('os.uname',return_value=SimpleNamespace(machine='unknown')):
             with self.assertRaisesRegex(RuntimeError,'Unsupported iPad host architecture'):
@@ -246,26 +248,26 @@ class DriverTests(unittest.TestCase):
         driver,world=self.driver(architecture='x86_64')
         self.assertEqual(driver.report['execution_profile'],dict(driver.profile))
         self.assertEqual(driver.report['execution_profile']['name'],'intel-ipad')
-        self.assertEqual((driver.start,driver.work_deadline,driver.final_deadline),(0,3000,3180))
-        world.t=3000;driver.cleanup()
+        self.assertEqual((driver.start,driver.work_deadline,driver.final_deadline),(0,4500,4860))
+        world.t=4500;driver.cleanup()
         self.assertTrue(driver.report['cleanup']['verified'])
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
-        world.t=3180
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(4500,4860))
+        world.t=4860
         with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
         self.assertFalse(world.processes)
 
     def test_intel_full_case_admission_retains_exact_1487_second_boundary(self):
         driver,world=self.driver(architecture='x86_64')
-        world.t=3000-1487
+        world.t=4500-1487
         with self.assertRaisesRegex(RuntimeError,'no case started'):driver.run_case(*driver.case)
         self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'],1487)
         self.assertFalse(world.processes)
-        admitted,world,error,validated=self.attempted_case(1,start_at=3000-1487-1,
+        admitted,world,error,validated=self.attempted_case(1,start_at=4500-1487-1,
                                                         architecture='x86_64',delay=1)
         self.assertEqual(admitted.report['cases'][0]['status'],'started')
         self.assertTrue(validated)
         self.assertIn('Synthetic result validation withheld',str(error))
-        self.assertEqual((admitted.work_deadline,admitted.final_deadline),(3000,3180))
+        self.assertEqual((admitted.work_deadline,admitted.final_deadline),(4500,4860))
 
     def test_fresh_locale_driver_runs_exactly_one_case_and_requires_its_success(self):
         for locale in ('en-US', 'ru-RU'):
@@ -408,6 +410,83 @@ class DriverTests(unittest.TestCase):
         self.assertTrue(driver.report['process_stops'][-1]['group_absent'])
         self.assertEqual(len(world.processes), 1)
 
+    def test_same_cold_build_requires_intel_profile_and_preserves_native_limits(self):
+        original = self.root
+        for architecture, succeeds in [('arm64', False), ('x86_64', True)]:
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory(dir=original) as root:
+                self.root = Path(root)
+                driver, world = self.driver(architecture=architecture, delay=900)
+                profile = driver.profile
+                driver.owned = 'synthetic-owned-device'
+                actual = driver.command
+                def command(argv, label, **kwargs):
+                    return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+                with patch.object(driver, 'command', side_effect=command), \
+                     patch.object(driver, 'discover_products') as discover, \
+                     patch.object(driver, 'product_snapshot', return_value={'synthetic':'manifest'}):
+                    if succeeds:
+                        driver.build_once(); discover.assert_called_once_with()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'build-for-testing exceeded its finite timeout'):
+                            driver.build_once()
+                        discover.assert_not_called()
+                row = self.row(driver)
+                self.assertEqual(row['timeout_seconds'], 1200 if succeeds else 480)
+                self.assertEqual(row['argv'][row['argv'].index('-default-test-execution-time-allowance')+1], '180')
+                self.assertEqual(row['argv'][row['argv'].index('-maximum-test-execution-time-allowance')+1], '480')
+                self.assertEqual(driver.case[3], 900)
+                self.assertIs(driver.profile, profile)
+                self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
+                self.assertTrue(driver.report['process_stops'][-1]['group_absent'])
+        self.root = original
+
+    def test_intel_build_still_fails_at_1200_without_starting_case(self):
+        driver, world = self.driver(architecture='x86_64', delay=1201)
+        driver.owned = 'synthetic-owned-device'; actual = driver.command
+        def command(argv, label, **kwargs):
+            return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'discover_products') as discover:
+            with self.assertRaisesRegex(RuntimeError, 'build-for-testing exceeded its finite timeout'):
+                driver.build_once()
+        discover.assert_not_called()
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 1200)
+        self.assertLessEqual(world.t, 1207); self.assertFalse(driver.active)
+        self.assertEqual(driver.report['cases'], [])
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (4500,4860))
+
+    def test_intel_build_is_clipped_to_original_work_and_cannot_borrow_cleanup(self):
+        driver, world = self.driver(architecture='x86_64', delay=100)
+        world.t = 4490; driver.owned = 'synthetic-owned-device'; actual = driver.command
+        def command(argv, label, **kwargs):
+            return (0, '') if label == 'xcodegen' else actual(argv, label, **kwargs)
+        with patch.object(driver, 'command', side_effect=command), \
+             patch.object(driver, 'discover_products') as discover:
+            with self.assertRaisesRegex(RuntimeError, 'build-for-testing exceeded its finite timeout'):
+                driver.build_once()
+        discover.assert_not_called()
+        self.assertEqual((self.row(driver)['timeout_seconds'],self.row(driver)['wait_deadline_monotonic']), (1200,4493))
+        self.assertLessEqual(world.t,4500); self.assertFalse(driver.active)
+        self.assertEqual(len(world.processes),1)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(4500,4860))
+
+    def test_intel_cleanup_and_final_evidence_share_one_clipped_deadline(self):
+        driver, world = self.driver(architecture='x86_64')
+        world.t = 4490; driver.cleanup()
+        self.assertEqual(driver.final_deadline,4850)
+        driver.source_before = {'synthetic':'source'}
+        def snapshot(label):
+            self.assertEqual(label,'source-after')
+            world.t = 4849; driver.checkpoint()
+            return driver.source_before
+        with patch.object(driver,'source_snapshot',side_effect=snapshot):
+            driver.final_evidence()
+        self.assertTrue(driver.report['source_unchanged'])
+        self.assertEqual(driver.final_deadline,4850)
+        world.t = 4850
+        with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.final_evidence()
+        self.assertFalse(world.processes)
+
     def post_failure_case(self, locale='en-US', **process_plan):
         driver,world=self.driver(locale=locale,**process_plan);case=driver.case;locale,method,size,_=case
         driver.owned='synthetic-owned-device';driver.products={'aut':self.root/'Synthetic.app','runner':self.root/'SyntheticRunner.app','xctestrun':self.root/'synthetic.xctestrun'}
@@ -447,11 +526,11 @@ class DriverTests(unittest.TestCase):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 1',lane)
-        for locale,step,job in [('en-US',55,62),('ru-RU',55,62)]:
+        for locale,step,job in [('en-US',83,95),('ru-RU',83,95)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
-            work=ipad.execution_profile('x86_64',locale)['work_seconds']
-            self.assertGreater(step*60,work+ipad.CLEANUP_SECONDS)
-            self.assertEqual(job,2+3+step+2)
+            profile=ipad.execution_profile('x86_64',locale)
+            self.assertEqual(step*60-profile['work_seconds']-profile['cleanup_seconds'],120)
+            self.assertEqual(job,2+3+step+2+5)
         self.assertEqual(lane.count('        timeout-minutes: 2\n'),2)
         self.assertIn('        timeout-minutes: 3\n',lane)
         self.assertEqual(lane.count('- locale:'),2)
@@ -1086,8 +1165,8 @@ class DriverTests(unittest.TestCase):
             try:driver.prepare()
             except RuntimeError as failure:error=failure
         self.assertIsNone(driver.discovery_deadline)
-        work = 3000 if architecture == 'x86_64' else 2100
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+180))
+        work = 4500 if architecture == 'x86_64' else 2100
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+(360 if architecture == 'x86_64' else 180)))
         return driver,world,reached,error
 
     def test_complete_discovery_near_boundary_has_one_deadline_and_fixed_global_origin(self):
@@ -1110,7 +1189,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(boot[0]['timeout_seconds'],600)
         self.assertEqual(boot[0]['argv'],['xcrun','simctl','bootstatus',driver.owned,'-b'])
         self.assertGreaterEqual(world.t,599);self.assertLess(world.t,600)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(4500,4860))
         self.assertFalse(driver.active)
 
     def test_intel_boot_timeout_stays_failed_and_closes_only_owned_group(self):
@@ -1119,16 +1198,16 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(reached.count('bootstatus'),1)
         self.assertEqual(driver.report['cases'],[])
         self.assertFalse(driver.active)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(4500,4860))
         self.assertLessEqual(world.t,607)
 
     def test_intel_boot_cap_is_clipped_by_original_work_not_cleanup(self):
-        driver,world,reached,error=self.complete_discovery(architecture='x86_64',boot_delay=10,start_at=2990)
+        driver,world,reached,error=self.complete_discovery(architecture='x86_64',boot_delay=10,start_at=4490)
         self.assertIn('bootstatus exceeded its finite timeout',str(error))
         boot=next(r for r in driver.report['commands'] if r['label']=='bootstatus')
-        self.assertEqual((boot['timeout_seconds'],boot['wait_deadline_monotonic']),(600,2993))
-        self.assertLessEqual(world.t,3000);self.assertFalse(driver.active)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(3000,3180))
+        self.assertEqual((boot['timeout_seconds'],boot['wait_deadline_monotonic']),(600,4493))
+        self.assertLessEqual(world.t,4500);self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(4500,4860))
 
     def test_profile_and_captured_architecture_mismatch_refuses_creation(self):
         original=self.root

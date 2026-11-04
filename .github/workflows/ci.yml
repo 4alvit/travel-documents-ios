@@ -191,11 +191,11 @@ jobs:
       matrix:
         include:
           - locale: en-US
-            step_minutes: 55
-            job_minutes: 62
+            step_minutes: 83
+            job_minutes: 95
           - locale: ru-RU
-            step_minutes: 55
-            job_minutes: 62
+            step_minutes: 83
+            job_minutes: 95
     runs-on: macos-15-intel
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -214,7 +214,8 @@ jobs:
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
-        # 50m Intel work + 3m cleanup + 2m startup/finalization headroom.
+        # 75m Intel work + 6m cleanup + 2m startup/finalization headroom.
+        # Job: checkout 2 + toolchain 3 + driver 83 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
         run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
       - name: iPad test evidence
@@ -228,9 +229,9 @@ jobs:
           retention-days: 7
   recovery:
     name: Free backup and recovery
-    # 100m = checkout 2 + regressions 6 + native 82 + evidence 5 + cancellation 5.
+    # 109m = checkout 2 + regressions 15 + native 82 + evidence 5 + cancellation 5.
     runs-on: macos-15-intel
-    timeout-minutes: 100
+    timeout-minutes: 109
     env:
       TRIPDOCKET_RUNNER_LABEL: macos-15-intel
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -241,7 +242,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
       - name: Hosted adapter regression checks
-        timeout-minutes: 6
+        timeout-minutes: 15
         run: |
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py

@@ -323,11 +323,11 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(environment.splitlines(),[
             '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 100\n',recovery)
+        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 109\n',recovery)
         checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 2\n',checkout)
         regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
-        self.assertIn('        timeout-minutes: 6\n',regressions)
+        self.assertIn('        timeout-minutes: 15\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 82\n',attempt)
         self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
@@ -336,7 +336,7 @@ class BoundaryTests(unittest.TestCase):
         step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
                       for step in (checkout,regressions,attempt,evidence)]
         job_minutes=int(re.search(r'^    timeout-minutes: (\d+)$',recovery,re.M).group(1))
-        self.assertEqual(step_minutes,[2,6,82,5])
+        self.assertEqual(step_minutes,[2,15,82,5])
         self.assertEqual(sum(step_minutes)+5,job_minutes)
         self.assertEqual(PROFILE['total_seconds'],4800)
         self.assertEqual(step_minutes[2]*60-PROFILE['total_seconds'],120)

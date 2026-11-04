@@ -370,8 +370,11 @@ Debug Intel Simulator opt-in; unrelated callers keep their defaults. A retained
 Intel run spent 713 seconds before the prepare case began and was stopped during
 app launch. This profile budgets all three phases, result inspection and cleanup;
 it provides bounded startup and native performance margin without guaranteeing
-completion. The Recovery workflow reserves 82 native minutes inside a 100-minute
-job, including checkout, all offline guards, evidence upload and cancellation.
+completion. The Recovery workflow reserves 82 native minutes inside a 109-minute
+job, including checkout, 15 minutes for all offline guards, evidence upload and
+cancellation. Complete-file SDK typechecks allow 180 seconds each after two
+hosted compiler commands exceeded their former 45-second limits; fixture
+compilation and execution limits remain unchanged.
 Only the full Recovery export case may retry the native **Save to Files**
 navigation action once. Its first action and any retry share a 30-second
 polling allowance; retry eligibility begins after 15 seconds and requires
@@ -428,13 +431,13 @@ stdout continued through a final Trips capture operation at about 382 seconds,
 but those post-timeout attachments were not retained; the run remains failed.
 Russian maximum-type retains its 600-second source allowance. The dedicated
 iPad command still clamps either case to 480 seconds, within its unchanged
-900-second command limit and 180-second cleanup reserve. Its work budget is
-2,100 seconds on ARM or 3,000 seconds on Intel.
+900-second command limit. Its work/cleanup budget is 2,100/180 seconds on ARM
+or 4,500/360 seconds on Intel.
 Every text, privacy, Cancel and final Trips check remains required. This allowance
 does not guarantee completion; a fresh successful native result is required.
 
-The iPad driver allows up to 480 seconds for its single fresh build, within its
-selected work budget and separate 180-second cleanup reserve.
+The iPad driver allows up to 480 seconds on ARM or 1,200 seconds on Intel for
+its single fresh build, within its selected work and separate cleanup budgets.
 An [observed Russian run](https://github.com/4alvit/travel-documents-ios/actions/runs/41417736277/job/125185590697)
 was still compiling when its former 360-second build cap expired. This allocation does not guarantee completion or admission: that
 run had about 1,539 seconds left, only 52.1 seconds beyond the mandatory
@@ -444,14 +447,24 @@ no build or test is retried or reused from another run.
 
 The driver selects an immutable host profile before allocating its deadline:
 ARM retains 2,100 seconds of work and 180 seconds for initial boot readiness;
-Intel uses 3,000 and 600 seconds. Captured architecture must match that initial
+Intel uses 4,500 and 600 seconds. Captured architecture must match that initial
 profile before a device is created. Two Intel runs exhausted the former
 180-second boot wait during data migration, while another completed in
 118.663 seconds. The added headroom does not establish that delayed boots will
 finish. It preserves exact runtime selection, the 1,487-second full-case
 admission and separate cleanup; it never resets a clock or retries a boot.
-Hosted iPad steps allow 55 minutes, with 62-minute jobs covering checkout,
-toolchain setup and artifact upload. Fresh complete native results remain required.
+A later [Intel run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116)
+completed boot in 312.7 seconds but exhausted the 480-second fresh-build limit
+before any test. Its final log showed asset catalog compilation, not a compiler
+error. The larger Intel build/work profile leaves 387 seconds beyond the 4,113
+seconds of command and complete-case ceilings for parsing and byte verification.
+Intel cleanup includes final evidence in its 360-second reserve. These finite
+margins do not guarantee completion; source, product, original-result and owned
+cleanup checks remain mandatory. Phone and separate Batch/Biometric qualification
+retain their own existing profiles.
+Hosted iPad steps allow 83 minutes, with 95-minute jobs covering checkout,
+toolchain setup, artifact upload and cancellation. Fresh complete native results
+remain required.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
