@@ -1812,12 +1812,32 @@ final class BatchImportUITests: XCTestCase {
                 && explanation.count == 1 && explanation.element.isHittable
                 && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable
         }
+        @MainActor func geometry() throws -> (root: CGRect, introduction: CGRect, button: CGRect) {
+            let root = app.frame, introductionFrame = introduction.element.frame
+            let button = acknowledge.element.frame
+            let valid = [root, introductionFrame, button].allSatisfy { frame in
+                !frame.isEmpty && !frame.isNull && !frame.isInfinite
+                    && [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            }
+            try check(valid && root.contains(introductionFrame) && introductionFrame.contains(button),
+                      app: app, "Keyboard Continue has no contained finite frame")
+            return (root, introductionFrame, button)
+        }
         try check(ready(), app: app, "Native keyboard introduction has no unique expected person form")
+        let original = try geometry()
         capture(app, "Recovery person keyboard introduction before the single Continue")
         try check(ready(), app: app, "Recovery person form changed before Continue")
+        let current = try geometry()
+        try check(current.root == original.root && current.introduction == original.introduction
+                    && current.button == original.button, app: app, "Keyboard Continue moved before the single action")
+        // An element tap can make XCTest cancel the expected Add-person alert
+        // as an interruption. Target only the freshly proved button's center
+        // from the app origin; disappearance of the form still fails below.
+        let target = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+            dx: current.button.midX - current.root.minX, dy: current.button.midY - current.root.minY))
         try Task.checkCancellation()
         acknowledged = true
-        acknowledge.element.tap()
+        target.tap()
         try await wait("Native keyboard introduction did not return to the expected person form", app: app) {
             introduction.count == 0 && expectedForm() && names.element.isHittable
         }
