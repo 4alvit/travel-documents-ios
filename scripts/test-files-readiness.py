@@ -1260,6 +1260,169 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertIn('return phase == "prepare" ? 180 : 300', SOURCE.read_text())
 
 
+SAVE_COMPLETION_FIXTURE = r'''
+import Foundation
+
+struct BatchTestFailure: Error { let message: String }
+func XCTSkipUnless(_ condition: Bool, _ message: String) throws {
+    if !condition { throw BatchTestFailure(message: message) }
+}
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        @MainActor func advanced(by duration: Duration) -> Instant {
+            ContinuousClock.deadlines += 1
+            return Instant(time: time + duration)
+        }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.time < rhs.time }
+    }
+    static var elapsed: Duration = .seconds(9)
+    static var deadlines = 0
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static func sleep(for duration: Duration) async throws { ContinuousClock.elapsed += duration }
+}
+@MainActor final class World {
+    let scenario: String
+    var taps = 0
+    var savedAt: Duration = .zero
+    init(_ scenario: String) { self.scenario = scenario }
+    var completed: Bool { ContinuousClock.elapsed - savedAt >= .seconds(26) }
+}
+@MainActor struct Element {
+    let world: World
+    let kind: String
+    var exists: Bool {
+        if kind == "picker" {
+            return world.scenario != "no-settings" && (world.scenario == "pending" || !world.completed)
+        }
+        return kind == "Settings" && world.scenario != "no-settings"
+    }
+    func tap() { world.taps += 1; world.savedAt = ContinuousClock.elapsed }
+}
+@MainActor struct NavigationBars {
+    let world: World
+    subscript(_ name: String) -> Element { Element(world: world, kind: name) }
+}
+@MainActor struct XCUIApplication {
+    let world: World
+    var navigationBars: NavigationBars { NavigationBars(world: world) }
+}
+@MainActor final class Harness {
+    var executionTimeAllowance: TimeInterval = 0
+    var continueAfterFailure = true
+    var captures = 0
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?,
+                 batchDiagnostic: Bool = false) { captures += 1 }
+    // ACTUAL_CONFIGURATION
+    // ACTUAL_WAIT
+    func run(_ scenario: String) async {
+        let world = World(scenario)
+        var outcome = "passed"
+        do {
+            // ACTUAL_POLICY
+            _ = recoveryFolder
+            let app = XCUIApplication(world: world)
+            let picker = Element(world: world, kind: "picker")
+            let save = Element(world: world, kind: "Save")
+            // ACTUAL_SAVE_AND_WAIT
+        } catch { outcome = "rejected" }
+        let elapsed = (ContinuousClock.elapsed - .seconds(9)).components
+        print("\(outcome) \(world.taps) \(captures) \(ContinuousClock.deadlines) \(elapsed.seconds)")
+    }
+}
+@main struct Main {
+    @MainActor static func main() async { await Harness().run(CommandLine.arguments[1]) }
+}
+'''
+
+
+class RecoverySaveCompletionTests(unittest.TestCase):
+    """Run actual configuration, selected allowance and wait with a synthetic clock."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        cls.export = source[start:end]
+        policy = cls.export[cls.export.index('        let recoveryFolder ='):
+                            cls.export.index('        let app =')]
+        save = cls.export[cls.export.index('        save.tap()'):
+                          cls.export.index('        capture(app, "Recovery export — UI completed')]
+        start = source.index('    private func recoveryConfiguration(')
+        end = source.index('    private func recoveryTab(', start)
+        configuration = source[start:end]
+        # Stub only the compile-time host boundary; validation itself is unchanged.
+        configuration = configuration.replace('#if DEBUG && targetEnvironment(simulator) && arch(x86_64)',
+                                              '#if HOSTED_FIXTURE')
+        start = source.index('    private func wait(')
+        end = source.index('    private func check(', start)
+        fixture = (SAVE_COMPLETION_FIXTURE.replace('            // ACTUAL_POLICY', policy)
+                   .replace('            // ACTUAL_SAVE_AND_WAIT', save)
+                   .replace('    // ACTUAL_CONFIGURATION', configuration)
+                   .replace('    // ACTUAL_WAIT', source[start:end]))
+        cls.binaries = {}
+        for name, flags, text in (
+            ('hosted', ['-D', 'HOSTED_FIXTURE'], fixture),
+            ('unsupported', [], fixture),
+            ('old-cap', ['-D', 'HOSTED_FIXTURE'], fixture.replace(
+                '? .seconds(60) : .seconds(15)', '? .seconds(15) : .seconds(15)')),
+        ):
+            path = Path(cls.directory.name) / (name + '.swift')
+            path.write_text(text)
+            cls.binaries[name] = path.with_suffix('')
+            subprocess.run(['/usr/bin/swiftc', '-parse-as-library', *flags, str(path),
+                            '-o', str(cls.binaries[name])], capture_output=True, check=True, timeout=60)
+
+    def probe(self, scenario='delayed', binary='hosted', profile='hosted-intel-v1', **overrides):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith('TRIPDOCKET_')}
+        environment.update(RecoveryNativeFolderModeTests.environment())
+        environment['TRIPDOCKET_RECOVERY_PHASE'] = 'export'
+        del environment['TRIPDOCKET_RECOVERY_CREATE_FOLDER']
+        if profile is not None:
+            environment['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = profile
+        environment.update(overrides)
+        result = subprocess.run([str(self.binaries[binary]), scenario], env=environment,
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_hosted_late_completion_passes_once_and_old_cap_mutation_rejects(self):
+        self.assertEqual(self.probe(), 'passed 1 0 1 26')
+        self.assertEqual(self.probe(binary='old-cap'), 'rejected 1 1 1 15')
+
+    def test_default_stays_fifteen_seconds_on_supported_and_unsupported_builds(self):
+        for binary in ('hosted', 'unsupported'):
+            with self.subTest(binary=binary):
+                self.assertEqual(self.probe(binary=binary, profile=None), 'rejected 1 1 1 15')
+
+    def test_pending_picker_with_settings_behind_never_completes(self):
+        self.assertEqual(self.probe(scenario='pending'), 'rejected 1 1 1 60')
+
+    def test_absent_picker_without_settings_never_completes(self):
+        self.assertEqual(self.probe(scenario='no-settings'), 'rejected 1 1 1 60')
+
+    def test_invalid_opt_in_rejects_before_save_or_deadline(self):
+        for arguments in (
+            {'binary': 'unsupported'}, {'profile': 'hosted-intel-v1 '},
+            {'TRIPDOCKET_RECOVERY_PHASE': 'restore'},
+            {'TRIPDOCKET_RECOVERY_FOLDER': 'TripDocket-Recovery-not-a-uuid'},
+            {'TRIPDOCKET_RECOVERY_CREATE_FOLDER': '1'},
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.probe(**arguments), 'rejected 0 0 0 0')
+
+    def test_policy_is_scoped_after_configuration_before_single_save(self):
+        self.assertLess(self.export.index('try recoveryConfiguration(phase: "export")'),
+                        self.export.index('let saveCompletionTimeout: Duration'))
+        self.assertLess(self.export.index('let saveCompletionTimeout: Duration'), self.export.index('save.tap()'))
+        self.assertEqual(self.export.count('save.tap()'), 1)
+        self.assertEqual(SOURCE.read_text().count('timeout: saveCompletionTimeout'), 1)
+
+
 class HostedPhoneTimingTests(unittest.TestCase):
     """Execute actual allowance branches with only environment/device/build stubs."""
     @classmethod
@@ -3184,7 +3347,7 @@ class RecoveryPersonIntroductionTests(unittest.TestCase):
         self.assertIn('UIContinuousPathIntroductionView").count == 0', case[second:case.index('confirm.tap()')])
         self.assertIn('app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists', case)
         self.assertIn('recoveryCounts(trips: 1, people: 2, documents: 1, app: app)', case)
-        self.assertNotIn('timeout:', case)
+        self.assertNotIn('timeout:', case[:case.index('save.tap()')])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
