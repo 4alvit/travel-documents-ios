@@ -444,6 +444,18 @@ final class BatchImportUITests: XCTestCase {
         return true
     }
 
+    private static func recoveryNativeSourceArguments(folder: String, sourceToken: String) throws -> [String] {
+        let prefix = "TripDocket-Recovery-"
+        let folderToken = String(folder.dropFirst(prefix.count))
+        guard folder.hasPrefix(prefix),
+              UUID(uuidString: folderToken)?.uuidString.lowercased() == folderToken,
+              UUID(uuidString: sourceToken)?.uuidString.lowercased() == sourceToken,
+              sourceToken != folderToken else {
+            throw BatchTestFailure(message: "Recovery preparation requires distinct canonical source and folder identities")
+        }
+        return ["--ui-testing-native-batch-seed", "--ui-testing-native-batch-token", sourceToken]
+    }
+
     // Opt-in prepare/export/restore phases. Dedicated Recovery preparation
     // creates its folder through Files before host empty-leaf verification. Export/restore
     // retain the file and library snapshot boundary. No StoreKit transaction is created.
@@ -460,33 +472,53 @@ final class BatchImportUITests: XCTestCase {
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
-        app.launchArguments = recoveryArguments + ["--demo"]
-        app.launch()
-        try await wait("The preparation demo did not finish loading", app: app) {
-            app.staticTexts["Coast weekend"].exists
-        }
-        try await recoveryTab("Settings", app: app)
-        try await recoveryFreeCard(app)
-        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
-        try await presentRecoverySave(app)
-        let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
-        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
-        try await wait("Real Files preparation picker did not open", app: app) {
-            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
-        }
-        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
-        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
-        let location = app.cells.matching(NSPredicate(
-            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
-        ))
-        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
-        let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
-        try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
         if createFolder {
-            try await createNativeEmptyFilesFolder(app, picker: picker.element, ownedFolder: recoveryFolder)
+            let sourceToken = UUID().uuidString.lowercased()
+            let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
+            app.launchArguments = recoveryArguments + sourceArguments
+            app.launch()
+            let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+            let failed = app.staticTexts["nativeSeed.failure"]
+            let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+            try await wait("Recovery native-folder export source is unavailable", app: app) {
+                failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
+            }
+            capture(app, "Recovery prepare — direct native exporter; no Save performed")
+            try check(!failed.exists && saved.count == 0 && source.count == 1
+                      && source.element.isEnabled && source.element.isHittable,
+                      app: app, "Recovery preparation has no unique live, unsaved export source")
+            source.element.tap()
+            let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Recovery preparation unexpectedly exported a destination")
+            try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder)
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Recovery preparation unexpectedly exported a destination")
             capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
         } else {
-            // Shared Phone/qualifier callers request only provider readiness.
+            // Shared Phone/qualifier callers retain their production provider-readiness path.
+            app.launchArguments = recoveryArguments + ["--demo"]
+            app.launch()
+            try await wait("The preparation demo did not finish loading", app: app) {
+                app.staticTexts["Coast weekend"].exists
+            }
+            try await recoveryTab("Settings", app: app)
+            try await recoveryFreeCard(app)
+            try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
+            try await presentRecoverySave(app)
+            let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+            let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
+            try await wait("Real Files preparation picker did not open", app: app) {
+                navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
+            }
+            let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+            let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+            let location = app.cells.matching(NSPredicate(
+                format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
+            ))
+            try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
+            let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
+            try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
             capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
         }
         // Dedicated Recovery adopts the native-created empty leaf only after

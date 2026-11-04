@@ -125,11 +125,23 @@ not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
 Dedicated Recovery preparation sets `TRIPDOCKET_RECOVERY_CREATE_FOLDER=1`
-only for its existing prepare case. The Debug Simulator fixture reaches the
-exact local root, proves its canonical run-UUID name absent and requests New
-Folder and rename through native Files UI. It shares the bounded folder action
-sequence with Batch qualification. Shared Phone and qualifier callers omit this
-flag and retain provider initialization only.
+only for its existing prepare case. This mode requires the existing Recovery
+opt-in, prepare phase and canonical run UUID, with no competing fixture modes.
+It opens the existing Debug Simulator direct exporter using one generated,
+canonical source UUID distinct from the Recovery destination UUID. It requires
+one enabled, hittable synthetic-ticket source and opens it once, then reaches
+the exact local root using the existing 30-second initial presentation allowance.
+It proves the canonical destination name absent and requests New Folder and
+rename through the unchanged bounded Files action sequence shared with Batch
+qualification. No Save is requested: the direct fixture must report neither an
+exported file nor a failure before or after folder creation. Preparation stops
+the app before the host can adopt the empty folder.
+
+Shared Phone and qualifier callers omit this flag and retain their existing
+provider-only preparation through the app's Settings, disclosure and share
+route. The dedicated setup shortcut does not replace actual Recovery export
+or restore: those cases still use the production Free gate, disclosure,
+Save-to-Files and import/replacement paths.
 
 After the prepare case passes and its process group closes, the host adopts
 exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
@@ -144,6 +156,13 @@ it does not by itself prove the folder's creation method caused the failure.
 The changed setup therefore requires new native end-to-end acceptance. Actual
 app Save-to-Files, import/restore, catalog/original-byte comparisons and rendered
 PDF checks remain mandatory; a passing folder setup alone is not acceptance.
+
+Run 41773899588 attempts 1 and 2 both stopped during dedicated preparation at
+the same live-binding check after the single New Folder action, before keyboard
+acknowledgement, name entry, host adoption, export or restore. The direct-exporter
+setup removes duplicated Settings/share navigation from preparation; it does
+not establish the OS cause of those failures or prove that the changed route
+fixes them. Native acceptance of this revised setup remains pending.
 
 The export/restore AUT app and data container lookups and all other default
 command caps remain 30 seconds. Global time, ownership and cancellation checks
