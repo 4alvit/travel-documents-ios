@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual folder identity/snapshot gates without a Simulator or XCTest."""
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -118,6 +119,11 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "editor-present": cell.children.append(XCUIElementSnapshot(.textView, "DOC.inlineRenameField"))
         case "editor-outside-grid": window.children.append(XCUIElementSnapshot(.textView, "DOC.inlineRenameField"))
         case "keyboard-present": window.children.append(XCUIElementSnapshot(.keyboard))
+        case "introduction-without-keyboard":
+            window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+                CGRect(x: 0, y: 539, width: 402, height: 335)))
+        case "introduction-in-picker": picker.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "wrong-type-introduction": window.children.append(XCUIElementSnapshot(.button, "UIContinuousPathIntroductionView"))
         case "wrong-provider": root.identifier = "DOC.browsingRoot Source: com.apple.CloudDocs, Title: On My iPhone"
         case "wrong-root-title": root.identifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: Other"
         case "duplicate-root": picker.children.append(root)
@@ -162,6 +168,11 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         root.children = [nav, grid]; picker.children = [root]; window.children = [keyboard]; app.children = [window]
     }
     func mutate(_ name: String) {
+        if name.hasPrefix("without-keyboard:") {
+            mutate("missing-keyboard")
+            mutate(String(name.dropFirst("without-keyboard:".count)))
+            return
+        }
         switch name {
         case "exact", "application-as-picker", "root-as-picker", "picker-as-application", "window-as-application": break
         case "application-also-includes-picker": window.children.append(picker)
@@ -189,15 +200,30 @@ enum Kind: Int { case application, window, other, collectionView, navigationBar,
         case "nonfinite-editor": editor.frame.origin.x = .infinity
         case "second-cell": grid.children.append(XCUIElementSnapshot(.cell))
         case "cell-outside-grid": cell.frame.origin.y = 0
-        case "missing-keyboard": window.children = []
+        case "missing-keyboard": window.children.removeAll { $0 === keyboard }
         case "missing-window": app.children = [keyboard]
         case "duplicate-keyboard": window.children.append(keyboard)
         case "root-outside-picker": picker.children = []; window.children.append(root)
         case "nav-outside-root": root.children = [grid]; picker.children.append(nav)
         case "grid-outside-root": root.children = [nav]; picker.children.append(grid)
-        case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
+        case "introduction-overlay": window.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+            CGRect(x: 0, y: 539, width: 402, height: 335)))
         case "introduction-in-picker": picker.children.append(XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView"))
         case "wrong-introduction-type": window.children.last!.elementType = .button
+        case "nested-introduction-and-window":
+            let introduction = window.children.removeLast()
+            window.children.append(XCUIElementSnapshot(.window, "", "", window.frame, [introduction]))
+            app.children.append(XCUIElementSnapshot(.window, "", "", window.frame))
+        case "dismissed-introduction":
+            window.children.removeAll { $0.identifier == "UIContinuousPathIntroductionView" }
+        case "empty-introduction": window.children.last!.frame.size.height = 0
+        case "nonfinite-introduction": window.children.last!.frame.origin.x = .nan
+        case "introduction-outside-window": window.children.last!.frame.origin.y = 600
+        case "introduction-over-editor": window.children.last!.frame = editor.frame
+        case "introduction-over-title": window.children.last!.frame = title.frame
+        case "empty-keyboard": keyboard.frame.size.height = 0
+        case "nonfinite-keyboard": keyboard.frame.origin.x = .infinity
+        case "keyboard-over-title": keyboard.frame = title.frame
         case "remote-placeholder": picker.children = [XCUIElementSnapshot(.other, "RemotePlaceholder")]
         case "non-string-value": editor.value = 5
         case "long-strings": editor.label = String(repeating: "x", count: 10000)
@@ -336,13 +362,15 @@ INTRODUCTION_SWIFT = r'''
         precondition(node.label == "Continue")
         app.taps += 1
         if app.mode != "dismissal-stalls" { app.tree.window.children.removeAll { $0 === app.introduction } }
+        if app.mode == "without-keyboard" { app.tree.window.children.append(app.tree.keyboard) }
         app.tree.editor.isHittable = true
         if app.mode == "wrong-value-after-tap" { app.tree.editor.value = "foreign" }
     }
 }
 @MainActor final class XCUIApplication {
     let tree = EditorTree("untitled folder")
-    let introduction = XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView")
+    let introduction = XCUIElementSnapshot(.other, "UIContinuousPathIntroductionView", "",
+        CGRect(x: 0, y: 539, width: 402, height: 335))
     let explanation = XCUIElementSnapshot(.staticText, "", "Speed up your typing by sliding your finger across the letters to compose a word.")
     let button = XCUIElementSnapshot(.button, "", "Continue")
     let mode: String
@@ -366,6 +394,7 @@ INTRODUCTION_SWIFT = r'''
     }
     func mutate() {
         switch mode {
+        case "without-keyboard": tree.mutate("missing-keyboard")
         case "duplicate-introduction": tree.window.children.append(introduction)
         case "wrong-explanation": explanation.label = "unrelated"
         case "duplicate-explanation": introduction.children.append(explanation)
@@ -556,9 +585,35 @@ class FolderDirectTests(unittest.TestCase):
             for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
                          "wrong-provider", "duplicate-root", "duplicate-picker", "duplicate-editor",
                          "missing-editor", "wrong-value", "disabled-editor", "editor-outside-cell-ancestry",
-                         "editor-outside-grid", "editor-under-keyboard", "duplicate-keyboard", "missing-keyboard"]:
+                         "editor-outside-grid", "editor-under-keyboard", "duplicate-keyboard"]:
                 with self.subTest(expected=expected, case=case):
                     self.assertEqual(self.probe("introduction-editor", case, expected), "rejected")
+
+    def test_visible_introduction_accepts_zero_or_one_keyboard_only_when_opted_in(self):
+        for shape in ["exact", "missing-keyboard", "nested-introduction-and-window",
+                      "without-keyboard:nested-introduction-and-window"]:
+            for expected in ["untitled folder", "TripDocket-Batch-QA-" + TOKEN]:
+                with self.subTest(shape=shape, expected=expected):
+                    self.assertEqual(self.probe("introduction-editor", shape, expected), "accepted")
+            self.assertEqual(self.probe("initial-introduction", shape), "editor")
+        self.assertEqual(self.probe("editor", "missing-keyboard", "untitled folder"), "rejected")
+        self.assertEqual(self.probe("initial-introduction", "without-keyboard:dismissed-introduction"), "rejected")
+        self.assertEqual(self.probe("initial-introduction", "dismissed-introduction"), "editor")
+
+    def test_introduction_geometry_and_any_present_keyboard_remain_required(self):
+        for keyboard in ["", "without-keyboard:"]:
+            for invalid in ["empty-introduction", "nonfinite-introduction", "introduction-outside-window",
+                            "introduction-over-editor", "introduction-over-title", "introduction-overlay",
+                            "wrong-introduction-type", "introduction-in-picker", "wrong-value", "wrong-provider",
+                            "duplicate-editor", "disabled-editor", "missing-editor", "editor-outside-cell-ancestry"]:
+                shape = keyboard + invalid
+                with self.subTest(shape=shape):
+                    self.assertEqual(self.probe("introduction-editor", shape, "untitled folder"), "rejected")
+                    self.assertEqual(self.probe("initial-introduction", shape), "rejected")
+        for shape in ["empty-keyboard", "nonfinite-keyboard", "keyboard-over-title", "duplicate-keyboard"]:
+            with self.subTest(shape=shape):
+                self.assertEqual(self.probe("introduction-editor", shape, "untitled folder"), "rejected")
+                self.assertEqual(self.probe("initial-introduction", shape), "rejected")
 
     def test_actual_initial_classifier_recognizes_both_editors_and_exact_rename(self):
         for mode in ["initial-editor", "initial-introduction"]:
@@ -580,13 +635,19 @@ class FolderDirectTests(unittest.TestCase):
 
     def test_actual_initial_classifier_rejects_ambiguous_introduction_and_rename(self):
         for case in ["introduction-overlay", "wrong-introduction-type", "introduction-in-picker",
-                     "missing-editor", "wrong-value", "missing-keyboard"]:
+                     "missing-editor", "wrong-value"]:
             with self.subTest(case=case):
                 self.assertEqual(self.probe("initial-introduction", case), "rejected")
         for case in ["missing-folder", "duplicate-folder", "wrong-name", "nonempty-folder",
                      "save-as-cell", "disabled-folder", "editor-present", "keyboard-present", "wrong-provider"]:
             with self.subTest(case=case):
                 self.assertEqual(self.probe("initial-rename", case), "rejected")
+
+    def test_introduction_without_editor_cannot_fall_back_to_rename(self):
+        for shape in ["introduction-without-keyboard", "introduction-in-picker", "wrong-type-introduction"]:
+            with self.subTest(shape=shape):
+                self.assertEqual(self.probe("shape", shape), "rejected")
+                self.assertEqual(self.probe("initial-rename", shape), "rejected")
 
     def test_actual_initial_classifier_changes_state_without_stale_rename_frame(self):
         self.assertEqual(self.probe("initial-transition"), "rename,editor,editor,rejected,rename")
@@ -617,7 +678,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertLess(helper.index('more.element.tap()'), helper.index('newFolder.element.tap()'))
         self.assertLess(helper.index('newFolder.element.tap()'), helper.index('inlineNames.element.typeText(ownedFolder)'))
 
-    def test_initial_wait_uses_one_pair_without_earlier_live_branch_or_new_deadline(self):
+    def test_initial_wait_uses_one_pair_with_one_scoped_polling_allowance(self):
         case = native_folder_execution()
         initial = case[case.index('try await wait("Native folder has neither'):case.index("if let before = renameFrame")]
         self.assertEqual(initial.count("try self.nativeFolderSnapshots(app, diagnostic:"), 1)
@@ -629,9 +690,12 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)\n            throw error", initial)
         self.assertIn("renameFrame = state.renameFrame", initial)
         self.assertIn("return state.ready", initial)
+        self.assertEqual(initial.count("timeout: .seconds(30)"), 1)
+        self.assertIn('app: app, timeout: .seconds(30)) {', initial.splitlines()[0])
         for forbidden in [".count", ".isHittable", ".isEnabled", "nativeFolderRenameFrame(",
-                          "timeout:", ".tap(", ".press(", "sleep", "while "]:
+                          ".tap(", ".press(", "sleep", "while "]:
             self.assertNotIn(forbidden, initial)
+        self.assertNotIn("timeout:", "\n".join(initial.splitlines()[1:]))
 
     def test_editing_checks_keep_live_editor_actions_and_normal_navigation_hittability(self):
         case = native_folder_execution()
@@ -865,6 +929,10 @@ class KeyboardIntroductionTests(unittest.TestCase):
                 self.assertEqual(self.probe(phase), {"outcome": "returned", "acknowledged": True,
                                                    "taps": 1, "captures": 1, "waits": 1, "samples": 2})
 
+    def test_introduction_without_keyboard_uses_one_acknowledgment_then_normal_editor(self):
+        self.assertEqual(self.probe("without-keyboard"), {"outcome": "returned", "acknowledged": True,
+                                                        "taps": 1, "captures": 1, "waits": 1, "samples": 2})
+
     def test_ambiguous_or_wrong_introduction_never_taps(self):
         for mode in ["duplicate-introduction", "wrong-explanation", "duplicate-explanation", "hidden-explanation",
                      "wrong-button", "duplicate-button", "disabled-button", "hidden-button", "wrong-value",
@@ -1027,6 +1095,108 @@ class PreRenameActionTests(unittest.TestCase):
         for mode in ["live-root", "live-duplicate", "live-frame", "live-disabled", "live-hidden"]:
             with self.subTest(mode=mode): self.assertEqual(self.probe(mode), "rejected,0,0,0")
         self.assertEqual(self.probe("menu-hidden"), "rejected,1,0,1")
+
+class InitialFolderWaitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="folder-initial-wait-")
+        cls.addClassCleanup(cls.temp.cleanup)
+        root = Path(cls.temp.name)
+        wait = section("    private func wait(_ message:", "    private func check(")
+        initial = section('            try await wait("Native folder has neither',
+                          "        if let before = renameFrame")
+        default = re.search(r"timeout: Duration = \.seconds\((\d+)\)", wait).group(1)
+        explicit = re.search(r"timeout: \.seconds\((\d+)\)", initial.splitlines()[0])
+        selected = explicit.group(1) if explicit else default
+        # Only substitute the clock/sleeper boundary; execute the real wait body.
+        wait = wait.replace("ContinuousClock.now", "clock.now")
+        wait = wait.replace("Task.sleep(for:", "clock.sleep(for:")
+        swift = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Instant: Comparable {
+    var seconds: Double
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.seconds < rhs.seconds }
+    func advanced(by duration: Duration) -> Self {
+        let parts = duration.components
+        return Self(seconds: seconds + Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
+    }
+}
+@MainActor final class Clock {
+    var now = Instant(seconds: 0)
+    var cancelled = false
+    func sleep(for duration: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        now = now.advanced(by: duration)
+    }
+}
+@MainActor final class XCUIApplication {}
+@MainActor final class Harness {
+    let clock = Clock()
+    var captures = 0
+    func capture(_ app: XCUIApplication, _ message: String,
+                 springboard: XCUIApplication?, batchDiagnostic: Bool) { captures += 1 }
+    // ACTUAL_WAIT
+    func run(timeout: Duration, validSecond: Bool, cancel: Bool = false) async -> [String: Any] {
+        var observations = 0
+        var outcome = "passed"
+        do {
+            try await wait("initial", app: XCUIApplication(), timeout: timeout) {
+                observations += 1
+                // Model the observed slow negative first acquisition, not a UI action.
+                self.clock.now = self.clock.now.advanced(by: .seconds(observations == 1 ? 18 : 1))
+                if cancel { self.clock.cancelled = true }
+                return validSecond && observations == 2
+            }
+        } catch is CancellationError { outcome = "cancelled" }
+        catch { outcome = "failed" }
+        return ["outcome": outcome, "observations": observations,
+                "captures": captures, "elapsed": clock.now.seconds]
+    }
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        let rows = [
+            "selected": await Harness().run(timeout: .seconds(SELECTED), validSecond: true),
+            "old15": await Harness().run(timeout: .seconds(15), validSecond: true),
+            "invalid": await Harness().run(timeout: .seconds(SELECTED), validSecond: false),
+            "cancel": await Harness().run(timeout: .seconds(SELECTED), validSecond: true, cancel: true)
+        ]
+        print(String(decoding: try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+'''.replace("    // ACTUAL_WAIT", wait).replace("SELECTED", selected)
+        path = root / "InitialWait.swift"
+        path.write_text(swift)
+        binary = root / "InitialWait"
+        compiled = subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-strict-concurrency=complete",
+                                   "-parse-as-library", str(path), "-o", str(binary)],
+                                  capture_output=True, text=True, timeout=60)
+        if compiled.returncode: raise AssertionError(compiled.stdout + compiled.stderr)
+        cls.rows = json.loads(subprocess.run([str(binary)], check=True, capture_output=True,
+                                             text=True, timeout=5).stdout)
+
+    def test_slow_negative_then_valid_acquisition_needs_scoped_allowance(self):
+        self.assertEqual(self.rows["selected"]["outcome"], "passed")
+        self.assertEqual(self.rows["selected"]["observations"], 2)
+        self.assertEqual(self.rows["selected"]["captures"], 0)
+        self.assertEqual(self.rows["old15"]["outcome"], "failed")
+        self.assertEqual(self.rows["old15"]["observations"], 1)
+        self.assertEqual(self.rows["old15"]["captures"], 1)
+
+    def test_persistent_invalid_acquisition_exhausts_polling_allowance(self):
+        row = self.rows["invalid"]
+        self.assertEqual(row["outcome"], "failed")
+        self.assertEqual(row["captures"], 1)
+        self.assertGreaterEqual(row["elapsed"], 30)
+        self.assertLess(row["elapsed"], 31.2)
+
+    def test_cancellation_stops_before_another_acquisition(self):
+        row = self.rows["cancel"]
+        self.assertEqual(row["outcome"], "cancelled")
+        self.assertEqual(row["observations"], 1)
+        self.assertEqual(row["captures"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
