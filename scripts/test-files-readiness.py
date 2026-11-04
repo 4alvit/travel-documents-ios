@@ -2112,6 +2112,7 @@ class RestoreFolderNavigation(unittest.TestCase):
 
 RECOVERY_PERSON_INTRODUCTION = r'''
 import Foundation
+import CoreGraphics
 struct NSPredicate {
     let value: String
     init(format: String, _ value: String) { precondition(format == "label == %@"); self.value = value }
@@ -2128,7 +2129,11 @@ struct Cancelled: Error {}
     var value = "Recovery Sentinel"
     var fieldEnabled = true, explanationHittable = true, buttonEnabled = true, buttonHittable = true
     var foreground = true
-    var taps = 0, captures = 0, waits = 0
+    var taps = 0, captures = 0, waits = 0, elementTaps = 0
+    var rootFrame = CGRect(x: 0, y: 0, width: 402, height: 874)
+    var introFrame = CGRect(x: 0, y: 539, width: 402, height: 335)
+    var buttonFrame = CGRect(x: 89, y: 819, width: 224, height: 21)
+    var appAnchor = false, point = CGPoint.zero
     let mode: String
     init(_ mode: String) {
         self.mode = mode
@@ -2151,6 +2156,17 @@ struct Cancelled: Error {}
         case "hidden-continue": buttonHittable = false
         case "background": foreground = false
         case "cancelled": Task.cancelled = true
+        case "empty-button": buttonFrame.size.width = 0
+        case "nan-button": buttonFrame.origin.x = .nan
+        case "infinite-intro": introFrame.size.height = .infinity
+        case "button-outside-intro": buttonFrame.origin.y = 500
+        case "intro-outside-app": introFrame.size.height = 400
+        case "empty-root": rootFrame.size.height = 0
+        case "invalid-root": rootFrame.origin.x = .infinity
+        case "app-origin":
+            rootFrame = rootFrame.offsetBy(dx: 101, dy: 203)
+            introFrame = introFrame.offsetBy(dx: 101, dy: 203)
+            buttonFrame = buttonFrame.offsetBy(dx: 101, dy: 203)
         default: break
         }
     }
@@ -2162,6 +2178,29 @@ struct Cancelled: Error {}
     var state: State { world.foreground ? .runningForeground : .runningBackground }
     var otherElements: PersonQuery { PersonQuery(world, "other") }
     var alerts: PersonQuery { PersonQuery(world, "alerts") }
+    var frame: CGRect { world.rootFrame }
+    func coordinate(withNormalizedOffset offset: CGVector) -> PersonCoordinate {
+        precondition(offset == .zero)
+        world.appAnchor = true
+        return PersonCoordinate(world)
+    }
+}
+@MainActor final class PersonCoordinate {
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    func withOffset(_ offset: CGVector) -> PersonCoordinate {
+        world.point = CGPoint(x: offset.dx, y: offset.dy)
+        return self
+    }
+    func tap() {
+        precondition(world.appAnchor && world.elementTaps == 0)
+        precondition(world.point == CGPoint(x: world.buttonFrame.midX - world.rootFrame.minX,
+                                          y: world.buttonFrame.midY - world.rootFrame.minY))
+        world.taps += 1
+        if world.mode != "stays-open" { world.introduction = 0 }
+        if world.mode == "changed-after-tap" { world.value = "Foreign person" }
+        if world.mode == "form-dismissed" { world.alerts = 0 }
+    }
 }
 @MainActor final class PersonQuery {
     let world: PersonWorld, kind: String
@@ -2212,10 +2251,15 @@ struct Cancelled: Error {}
         default: preconditionFailure("Unexpected hit test")
         }
     }
+    var frame: CGRect {
+        precondition(kind == "intro" || kind == "continue")
+        return kind == "intro" ? world.introFrame : world.buttonFrame
+    }
     func tap() {
-        precondition(kind == "continue"); world.taps += 1
-        if world.mode != "stays-open" { world.introduction = 0 }
-        if world.mode == "changed-after-tap" { world.value = "Foreign person" }
+        // Model the observed XCTest default handler cancelling the expected
+        // form before the Continue element can receive its event.
+        precondition(kind == "continue"); world.elementTaps += 1
+        world.alerts = 0; world.introduction = 0
     }
 }
 @MainActor final class PersonHarness {
@@ -2224,6 +2268,9 @@ struct Cancelled: Error {}
         app.world.captures += 1
         if app.world.mode == "changed-after-capture" { app.world.value = "Foreign person" }
         if app.world.mode == "cancel-after-capture" { Task.cancelled = true }
+        if app.world.mode == "changed-button-frame" { app.world.buttonFrame.origin.x += 1 }
+        if app.world.mode == "changed-intro-frame" { app.world.introFrame.origin.y -= 1 }
+        if app.world.mode == "changed-root-frame" { app.world.rootFrame.size.width += 1 }
     }
     func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
         app.world.waits += 1
@@ -2251,8 +2298,12 @@ struct Cancelled: Error {}
             }
         } catch is Cancelled { outcome = "cancelled" }
         catch { outcome = "rejected" }
-        let result: [String: Any] = ["outcome": outcome, "acknowledged": acknowledged,
+        var result: [String: Any] = ["outcome": outcome, "acknowledged": acknowledged,
             "taps": world.taps, "captures": world.captures, "waits": world.waits]
+        if mode == "app-origin" {
+            result["appAnchor"] = world.appAnchor; result["elementTaps"] = world.elementTaps
+            result["point"] = [world.point.x, world.point.y]
+        }
         print(String(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
     }
 }
@@ -2315,6 +2366,25 @@ class RecoveryPersonIntroductionTests(unittest.TestCase):
                 result = self.probe(mode)
                 self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
                                  ('rejected', True, 1))
+
+    def test_coordinate_uses_application_origin_and_avoids_element_interruption(self):
+        self.assertEqual(self.probe('app-origin'), {
+            'outcome': 'returned', 'acknowledged': True, 'taps': 1, 'captures': 1, 'waits': 1,
+            'appAnchor': True, 'elementTaps': 0, 'point': [201, 829.5]})
+
+    def test_invalid_or_changed_geometry_never_authorizes_continue(self):
+        for mode in ['empty-button', 'nan-button', 'infinite-intro', 'button-outside-intro',
+                     'intro-outside-app', 'empty-root', 'invalid-root',
+                     'changed-button-frame', 'changed-intro-frame', 'changed-root-frame']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_disappeared_expected_form_is_not_accepted_as_acknowledgement(self):
+        result = self.probe('form-dismissed')
+        self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                         ('rejected', True, 1))
 
     def test_recovery_retains_single_type_and_add_with_pre_post_intro_checks(self):
         source = SOURCE.read_text()
