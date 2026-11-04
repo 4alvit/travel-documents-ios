@@ -424,7 +424,13 @@ class ShellBoundary(s.ShellTests):
         integration = guidance.split("      - name: Simulator integration and StoreKit tests\n", 1)[1]
         self.assertIn("    timeout-minutes: 65\n", guidance)
         self.assertIn("        timeout-minutes: 45\n", integration)
-        self.assertIn("    timeout-minutes: 35\n", text.split("  ui_guidance:\n", 1)[0])
+        core = text.split("  validate:\n", 1)[1].split("  ui_guidance:\n", 1)[0]
+        core_integration = core.split("      - name: Simulator integration and StoreKit tests\n", 1)[1].split(
+            "      - name:", 1)[0]
+        self.assertEqual([line for line in core.splitlines()
+                          if line.startswith("    timeout-minutes:")], ["    timeout-minutes: 75"])
+        self.assertEqual([line for line in core_integration.splitlines()
+                          if line.startswith("        timeout-minutes:")], ["        timeout-minutes: 35"])
         # Planning envelope: 60s selection, bounded bootstrap including final
         # receipts, 24m previously observed guidance, 80s remaining margin.
         self.assertEqual(60 + m.WORK + m.STOP + m.WRITE + 24 * 60 + 80, 45 * 60)
