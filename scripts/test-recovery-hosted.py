@@ -213,8 +213,8 @@ class BoundaryTests(unittest.TestCase):
 
     def env(self):
         return {'CI':'true','GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':PROFILE['repository'],'GITHUB_JOB':'recovery',
-                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':'macos-15','TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
-                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':'ARM64','ImageOS':'macos15','ImageVersion':'test-image',
+                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':'macos-15-intel','TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
+                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':'X64','ImageOS':'macos15','ImageVersion':'test-image',
                 'GITHUB_RUN_ATTEMPT':'1','GITHUB_RUN_ID':'123','GITHUB_EVENT_NAME':'pull_request',
                 'GITHUB_SHA':SHA,'GITHUB_REF':'refs/pull/1/merge'}
 
@@ -227,32 +227,45 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(hosted.main(['--run']),1);boundary.assert_not_called()
 
     def test_job_requires_matching_host_profile_and_valid_attempt(self):
-        env=self.env();hosted.job_context(env,PROFILE,'arm64')
+        env=self.env();hosted.job_context(env,PROFILE,'x86_64')
         for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_REPOSITORY','other/repo'),('GITHUB_JOB','validate'),
-                          ('TRIPDOCKET_RUNNER_LABEL','macos-15-intel'),('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted'),
-                          ('TRIPDOCKET_RUNNER_ARCH','X64'),('GITHUB_RUN_ATTEMPT','0'),('ImageVersion',''),
+                          ('TRIPDOCKET_RUNNER_LABEL','macos-15'),('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted'),
+                          ('TRIPDOCKET_RUNNER_ARCH','ARM64'),('GITHUB_RUN_ATTEMPT','0'),('ImageVersion',''),
                           ('ImageOS','macos14'),('GITHUB_EVENT_NAME','pull_request_target'),('GITHUB_SHA','bad'),
                           ('SIMCTL_CHILD_TEST','1'),('DYLD_INSERT_LIBRARIES','/tmp/example')]:
-            with self.subTest(key=key),self.assertRaises(RuntimeError):hosted.job_context({**env,key:value},PROFILE,'arm64')
-        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'x86_64')
+            with self.subTest(key=key),self.assertRaises(RuntimeError):hosted.job_context({**env,key:value},PROFILE,'x86_64')
+        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'arm64')
+
+    def test_intel_job_requires_all_three_host_identity_fields(self):
+        env=self.env();job=hosted.job_context(env,PROFILE,'x86_64')
+        self.assertEqual((job['TRIPDOCKET_RUNNER_LABEL'],job['TRIPDOCKET_RUNNER_ARCH'],PROFILE['machine']),
+                         ('macos-15-intel','X64','x86_64'))
+        for label in ('macos-15-intel','macos-15'):
+            for architecture in ('X64','ARM64'):
+                for machine in ('x86_64','arm64'):
+                    if (label,architecture,machine)==('macos-15-intel','X64','x86_64'):
+                        continue
+                    crossed={**env,'TRIPDOCKET_RUNNER_LABEL':label,'TRIPDOCKET_RUNNER_ARCH':architecture}
+                    with self.subTest(label=label,architecture=architecture,machine=machine),self.assertRaises(RuntimeError):
+                        hosted.job_context(crossed,PROFILE,machine)
 
     def test_explicit_workflow_attempt_metadata_is_positive_and_canonical(self):
         for attempt in ('1', '2', '17'):
             with self.subTest(attempt=attempt):
                 env={**self.env(),'GITHUB_RUN_ATTEMPT':attempt}
-                self.assertEqual(hosted.job_context(env,PROFILE,'arm64')['GITHUB_RUN_ATTEMPT'],attempt)
+                self.assertEqual(hosted.job_context(env,PROFILE,'x86_64')['GITHUB_RUN_ATTEMPT'],attempt)
         for attempt in (None, '', '0', '-1', '+2', '02', '2.0', '2 ', ' 2', '2\n', '٢', 2):
             with self.subTest(attempt=attempt),self.assertRaises(RuntimeError):
-                hosted.job_context({**self.env(),'GITHUB_RUN_ATTEMPT':attempt},PROFILE,'arm64')
+                hosted.job_context({**self.env(),'GITHUB_RUN_ATTEMPT':attempt},PROFILE,'x86_64')
         env=self.env();del env['GITHUB_RUN_ATTEMPT']
-        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'arm64')
+        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'x86_64')
 
     def test_explicit_attempts_keep_distinct_owned_identity_and_receipts(self):
         workspace=self.root/'repo';workspace.mkdir()
         runners=[];original=[]
         for run,attempt in [('123','1'),('123','2'),('124','2')]:
             env={**self.env(),'GITHUB_RUN_ID':run,'GITHUB_RUN_ATTEMPT':attempt}
-            job=hosted.job_context(env,PROFILE,'arm64')
+            job=hosted.job_context(env,PROFILE,'x86_64')
             out=hosted.attempt_output(workspace,job)
             r=hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0)
             receipt=(out/'receipt.json').read_bytes()
@@ -270,7 +283,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(r.ops.processes,[])
 
     def test_attempt_output_rejects_dangling_evidence_and_symlink_parent(self):
-        workspace=self.root/'repo';workspace.mkdir();job=hosted.job_context(self.env(),PROFILE,'arm64')
+        workspace=self.root/'repo';workspace.mkdir();job=hosted.job_context(self.env(),PROFILE,'x86_64')
         out=hosted.attempt_output(workspace,job)
         out.symlink_to(self.root/'missing')
         with self.assertRaisesRegex(RuntimeError,'never reused'):hosted.attempt_output(workspace,job)
@@ -303,9 +316,9 @@ class BoundaryTests(unittest.TestCase):
         recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
         environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
         self.assertEqual(environment.splitlines(),[
-            '      TRIPDOCKET_RUNNER_LABEL: macos-15',
+            '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 35\n',recovery)
+        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 35\n',recovery)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 27\n',attempt)
         self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
@@ -400,7 +413,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_runtime_unknown_ambiguous_or_incompatible_fails(self):
         row=self.runtime()
-        variants=[[],[row,row],[{**row,'isAvailable':False}],[{**row,'supportedArchitectures':['x86_64']}],
+        variants=[[],[row,row],[{**row,'isAvailable':False}],[{**row,'supportedArchitectures':['arm64']}],
                   [{**row,'supportedArchitectures':'arm64'}],[{**row,'supportedDeviceTypes':[]}],
                   [{**row,'supportedDeviceTypes':row['supportedDeviceTypes']*2}]]
         for values in variants:
@@ -869,7 +882,7 @@ class BoundaryTests(unittest.TestCase):
         developer=self.root/'Xcode_26.2.app/Contents/Developer'
         sdk_path=developer/'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator26.2.sdk'
         sdk_path.mkdir(parents=True)
-        selected={**self.runtime('26.2'),'buildversion':'23C54'}
+        selected={**self.runtime('26.2'),'buildversion':'23C54','supportedArchitectures':['x86_64']}
         older=self.runtime('18.5')
         texts=[str(developer),'Xcode 26.2\nBuild version 17C52','26.2',str(sdk_path),
                json.dumps({'runtimes':[older,self.runtime('27.0'),selected]})]
@@ -879,12 +892,14 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(resolved['runtime'],selected)
         self.assertEqual(resolved['host']['xcode_version'],'Xcode 26.2\nBuild version 17C52')
         self.assertEqual(resolved['host']['sdk_version'],'26.2')
+        self.assertEqual(resolved['host']['machine'],'x86_64')
         self.assertEqual(r.ops.env['DEVELOPER_DIR'],str(developer))
         self.assertEqual(r.plan['runtime'],selected['identifier'])
         self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],
                          [20,20,20,20,300])
         self.assertEqual((r.t0,r.limit,r.final),(0,300,1500))
-        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected]]:
+        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected],
+                         [{**selected,'supportedArchitectures':['arm64']},older]]:
             with self.subTest(runtimes=runtimes),self.assertRaises(RuntimeError):
                 hosted.select_runtime('26.2',{'runtimes':runtimes},PROFILE)
 

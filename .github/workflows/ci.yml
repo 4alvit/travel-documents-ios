@@ -14,7 +14,7 @@ concurrency:
 jobs:
   validate:
     name: Swift, hosted tests and purchase UI
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 35
     env:
       # Keep the Release producer and core tests on matched Xcode 26.2.
@@ -108,7 +108,7 @@ jobs:
   ui_guidance:
     name: Accessibility, localization and guidance UI
     # Limit this workflow to two eligible macOS jobs during hosted capacity shortages.
-    # Phone and iPad use Intel after repeated ARM runner assignment timeouts.
+    # All macOS jobs use Intel after repeated ARM runner assignment timeouts.
     needs: validate
     if: ${{ !cancelled() }}
     runs-on: macos-15-intel
@@ -215,10 +215,10 @@ jobs:
           retention-days: 7
   recovery:
     name: Free backup and recovery
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 35
     env:
-      TRIPDOCKET_RUNNER_LABEL: macos-15
+      TRIPDOCKET_RUNNER_LABEL: macos-15-intel
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
