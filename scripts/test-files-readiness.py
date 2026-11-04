@@ -292,6 +292,10 @@ import Foundation
 struct BatchTestFailure: Error { let message: String }
 struct Harness {
     // ACTUAL_HELPER
+    // ACTUAL_PROFILE_HELPER
+    static func allowance(_ environment: [String: String], _ phase: String, _ debug: Bool) throws -> TimeInterval {
+        try recoveryExecutionTimeAllowance(environment, phase: phase, debugIntelSimulator: debug)
+    }
     static func run(_ environment: [String: String], _ debug: Bool) throws -> Bool {
         try recoveryNativeFolderCreation(environment, debugSimulator: debug)
     }
@@ -302,7 +306,9 @@ struct Harness {
 let data = Data(CommandLine.arguments[1].utf8)
 let environment = try JSONDecoder().decode([String: String].self, from: data)
 do {
-    if CommandLine.arguments.count == 4 {
+    if CommandLine.arguments.count == 5 {
+        print(try Harness.allowance(environment, CommandLine.arguments[3], CommandLine.arguments[2] == "true"))
+    } else if CommandLine.arguments.count == 4 {
         let arguments = try Harness.sourceArguments(environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? "",
                                                     CommandLine.arguments[3])
         print(String(data: try JSONEncoder().encode(arguments), encoding: .utf8)!)
@@ -324,7 +330,10 @@ class RecoveryNativeFolderModeTests(unittest.TestCase):
         helper = source[start:end]
         root = Path(cls.directory.name)
         path = root / 'RecoveryMode.swift'
-        path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper))
+        profile_start = source.index('    private static func recoveryExecutionTimeAllowance(')
+        profile_end = source.index('    private func recoveryTab(', profile_start)
+        path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper)
+                        .replace('    // ACTUAL_PROFILE_HELPER', source[profile_start:profile_end]))
         cls.binary = root / 'recovery-mode-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
                        capture_output=True, check=True, timeout=60)
@@ -342,6 +351,40 @@ class RecoveryNativeFolderModeTests(unittest.TestCase):
         result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower()],
                                 capture_output=True, text=True, check=True, timeout=5)
         return result.stdout.strip()
+
+    def allowance(self, environment, phase, debug=True):
+        result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower(), phase, 'allowance'],
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_default_native_allowances_do_not_depend_on_host_architecture(self):
+        for debug in (False, True):
+            for phase, expected in (('prepare', '180.0'), ('export', '300.0'), ('restore', '300.0')):
+                with self.subTest(debug=debug, phase=phase):
+                    self.assertEqual(self.allowance({}, phase, debug), expected)
+
+    def test_hosted_native_allowances_require_exact_debug_intel_opt_in(self):
+        environment = self.environment() | {'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': 'hosted-intel-v1'}
+        for phase, expected in (('prepare', '300.0'), ('export', '600.0'), ('restore', '600.0')):
+            current = environment | {'TRIPDOCKET_RECOVERY_PHASE': phase}
+            with self.subTest(phase=phase):
+                self.assertEqual(self.allowance(current, phase), expected)
+                self.assertEqual(self.allowance(current, phase, False), 'rejected')
+        for key, values in {
+            'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': ['', 'default', 'hosted-intel-v1 ', 'HOSTED-INTEL-V1'],
+            'TRIPDOCKET_RECOVERY_UI': ['', '0', 'true'],
+            'TRIPDOCKET_RECOVERY_PHASE': ['', 'export', 'prepare '],
+            'TRIPDOCKET_RECOVERY_FOLDER': ['', 'TripDocket-Recovery-provider-probe',
+                'TripDocket-Recovery-12345678-1234-4234-8234-123456789ABC',
+                'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc/child'],
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.allowance(environment | {key: value}, 'prepare'), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            current = environment.copy(); del current[key]
+            self.assertEqual(self.allowance(current, 'prepare'), 'rejected')
+        self.assertEqual(self.allowance(environment, 'other'), 'rejected')
 
     def test_only_explicit_debug_prepare_can_create(self):
         self.assertEqual(self.probe(self.environment()), 'create')
@@ -409,7 +452,9 @@ class RecoveryNativeFolderModeTests(unittest.TestCase):
         source = SOURCE.read_text()
         config = source[source.index('    private func recoveryConfiguration('):source.index('    private func recoveryTab(')]
         self.assertIn('env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare"', config)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', config)
+        self.assertIn('#if DEBUG && targetEnvironment(simulator) && arch(x86_64)', config)
+        self.assertIn('executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(', config)
+        self.assertIn('return phase == "prepare" ? 180 : 300', config)
         self.assertEqual(source.count('try await createNativeEmptyFilesFolder('), 2)
         cases = [line.strip().split('(')[0] for line in source.splitlines() if line.strip().startswith('func testRecovery')]
         self.assertEqual(cases, ['func testRecoveryPrepareFilesProvider', 'func testRecoveryExportFullBackupThroughFiles',
@@ -1191,7 +1236,7 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertIn('liveAction.isHittable', source)
         self.assertEqual(source.count('app.snapshot()'), 1)
         self.assertNotIn('actions.count', source)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', SOURCE.read_text())
+        self.assertIn('return phase == "prepare" ? 180 : 300', SOURCE.read_text())
 
 
 class SDKSourceTests(unittest.TestCase):
@@ -1201,13 +1246,14 @@ class SDKSourceTests(unittest.TestCase):
         platform = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-platform-path'],
                                   capture_output=True, text=True, check=True, timeout=15).stdout.strip()
         frameworks = str(Path(platform) / 'Developer/Library/Frameworks')
-        for source in (SOURCE, ROOT / 'UITests/PrivacySupportUITests.swift'):
-            with self.subTest(source=source.name):
+        for source, target, flags in ((SOURCE, 'arm64', []), (SOURCE, 'x86_64', ['-D', 'DEBUG']),
+                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'arm64', [])):
+            with self.subTest(source=source.name, target=target, flags=flags):
                 result = subprocess.run(
                     ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
-                     '-target', 'arm64-apple-ios17.0-simulator', '-sdk', sdk,
+                     '-target', target + '-apple-ios17.0-simulator', '-sdk', sdk,
                      '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
-                     '-I', str(Path(platform) / 'Developer/usr/lib'), str(source)],
+                     '-I', str(Path(platform) / 'Developer/usr/lib'), *flags, str(source)],
                     capture_output=True, text=True, timeout=45)
                 self.assertEqual(result.returncode, 0, result.stderr)
 

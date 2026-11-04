@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import time
+from types import MappingProxyType
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +33,29 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
 # The separate cold-start command allowance shares the original work deadline.
 PREPARE_CASE_SECONDS = 180
 PREPARE_PHASE_SECONDS = 780
+# Immutable scheduling policies. Standalone callers keep the original defaults;
+# only the hosted adapter can select its separately validated Intel policy.
+EXECUTION_PROFILES = MappingProxyType({
+    'default': MappingProxyType(dict(name='default', total_seconds=1500,
+        cleanup_seconds=120, prepare_command_seconds=780, phase_command_seconds=600,
+        prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None)),
+    'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=4800,
+        cleanup_seconds=120, prepare_command_seconds=1200, phase_command_seconds=900,
+        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1')),
+})
+
+
+def execution_profile(name='default'):
+    require(type(name) is str and name in EXECUTION_PROFILES, 'Unknown Recovery execution profile')
+    return EXECUTION_PROFILES[name]
+
+
+def validated_execution_profile(profile):
+    require(any(profile is value for value in EXECUTION_PROFILES.values()),
+            'Recovery execution profile must be an immutable known policy')
+    return profile
+
+
 CASES = {
     'prepare': 'BatchImportUITests/testRecoveryPrepareFilesProvider()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -367,13 +391,32 @@ class Recovery:
     devices = staticmethod(base.Smoke.devices)
     recover = base.Smoke.recover
 
-    def __init__(self, ops, out, plan, host, run_id, started=None, *, candidate, source_manifest):
+    def __setattr__(self, name, value):
+        if name == '_execution_profile' and hasattr(self, name):
+            raise RuntimeError('Recovery execution profile cannot be reselected')
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name == '_execution_profile':
+            raise RuntimeError('Recovery execution profile cannot be removed')
+        super().__delattr__(name)
+
+    @property
+    def execution_profile(self):
+        return self._execution_profile
+
+    def __init__(self, ops, out, plan, host, run_id, started=None, *, candidate, source_manifest,
+                 execution_profile=None):
+        self._execution_profile = validated_execution_profile(
+            EXECUTION_PROFILES['default'] if execution_profile is None else execution_profile)
+        require(self.execution_profile['name'] == 'default' or host.get('machine') == 'x86_64',
+                'Hosted Recovery execution profile requires an Intel host')
         self.ops, self.out, self.plan, self.host = ops, Path(out), plan, host
         self.candidate = Path(candidate)
         self.source_manifest = source_manifest
         self.t0 = ops.now() if started is None else started
-        self.final = self.t0 + CAPS['total_seconds']
-        self.limit = self.final - CAPS['cleanup_seconds']
+        self.final = self.t0 + self.execution_profile['total_seconds']
+        self.limit = self.final - self.execution_profile['cleanup_seconds']
         self.write_deadline, self.phase = self.final, 'work'
         self.active, self.absent_groups = {}, set()
         self.log_total, self.interrupted, self.cleaning = 0, False, False
@@ -386,6 +429,7 @@ class Recovery:
         self.report = {'status':'running','commands':[],'errors':[],'attempts':{},'resources':[],
                        'cleanup_verified':False,'ui_runtime_accepted':False,'pixel_review_accepted':False,
                        'runtime_accepted':False,'started_epoch':time.time(),'whole_device_allocation':'NOT_MEASURED'}
+        self.report['execution_profile'] = dict(self.execution_profile)
         self.out.mkdir(mode=0o700)
         self.output_id = identity_of(self.out)
         self.save()
@@ -1034,7 +1078,7 @@ class Recovery:
         return root
 
     def phase_argv(self, phase):
-        testcase = str(PREPARE_CASE_SECONDS) if phase=='prepare' else '300'
+        testcase = str(self.execution_profile['prepare_case_seconds' if phase=='prepare' else 'phase_case_seconds'])
         return [self.host['developer_dir']+'/usr/bin/xcodebuild','-project','Tripfolio.xcodeproj','-scheme','Tripfolio',
                 '-configuration','Debug','-destination','platform=iOS Simulator,id='+self.owned,
                 '-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1',
@@ -1046,7 +1090,7 @@ class Recovery:
 
     def run_phase(self, phase):
         require(phase in CASES,'Unknown phase')
-        phase_cap = PREPARE_PHASE_SECONDS if phase=='prepare' else CAPS['phase_seconds']
+        phase_cap = self.execution_profile['prepare_command_seconds' if phase=='prepare' else 'phase_command_seconds']
         if phase=='restore': self.authorize_restore()
         if phase=='prepare':
             require(self.folder is None and self.report.get('files_ui_baseline',{}).get('absent') is True,
@@ -1065,7 +1109,7 @@ class Recovery:
                   'original_work_deadline_elapsed':self.limit-self.t0,
                   'remaining_work_before_seconds':self.limit-started,
                   'requested_command_cap_seconds':phase_cap,
-                  'selected_case_max_seconds':PREPARE_CASE_SECONDS if phase=='prepare' else 300,
+                  'selected_case_max_seconds':self.execution_profile['prepare_case_seconds' if phase=='prepare' else 'phase_case_seconds'],
                   'stop_reserve_seconds':8,
                   'command_deadline_ceiling_elapsed':min(self.limit,started+phase_cap)-self.t0}
         self.report.setdefault('phase_budget',{})[phase] = budget
@@ -1074,6 +1118,9 @@ class Recovery:
                         'TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE':phase,'TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER':self.folder_name,
                         'TEST_RUNNER_NSUnbufferedIO':'YES','NSUnbufferedIO':'YES'}
         self.ops.env.pop('TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER',None)
+        self.ops.env.pop('TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE',None)
+        if self.execution_profile['ui_profile'] is not None:
+            self.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = self.execution_profile['ui_profile']
         if phase=='prepare':
             self.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER']='1'
             self.report['native_files_preparation'] = {
@@ -1177,7 +1224,7 @@ class Recovery:
 
     def cleanup(self):
         self.cleaning,self.phase = True,'cleanup'
-        self.write_deadline = min(self.final,self.ops.now()+CAPS['cleanup_seconds'])
+        self.write_deadline = min(self.final,self.ops.now()+self.execution_profile['cleanup_seconds'])
         self.limit = self.write_deadline-CAPS['receipt_seconds']
         if self.active or self.unknown_spawn:
             self.error('Unresolved process ownership; all further child processes withheld')

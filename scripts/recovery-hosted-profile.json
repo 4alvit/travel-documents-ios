@@ -19,7 +19,8 @@
     "export": 1,
     "restore": 1
   },
-  "total_seconds": 1500,
+  "execution_profile": "hosted-intel-v1",
+  "total_seconds": 4800,
   "cleanup_seconds": 120,
   "prep_seconds": 60,
   "minimum_admission_free_GiB": 16,
