@@ -763,7 +763,12 @@ copied or earlier successful records are not fresh native evidence.
 The hosted Intel Phone guidance profile uses a 75-minute integration step within
 that 95-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
 30 cleanup and ten receipt), including a 300-second post-preparation warm-boot
-command. Arm retains 1,080 seconds of work and its 180-second warm-boot cap.
+command and a 1,080-second combined preparation command. Arm retains 1,080 seconds
+of work, a 960-second preparation command and its 180-second warm-boot cap.
+Both preparation commands retain the 180-second native allowance. The Intel
+increase addresses an outer command timeout before the native allowance elapsed;
+it does not change native assertions or guarantee completion. All commands share
+the original work deadline and must clip to it, including the later warm boot.
 The nine required native case allowances total 2,700 seconds, and 320 seconds remain for
 selection, generation, main build/session startup and result finalization. This
 is an allocation policy rather than a measured worst-case guarantee. Only the
