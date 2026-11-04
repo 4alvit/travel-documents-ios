@@ -35,6 +35,10 @@ final class World {
     var transitionOccurrence = 1
     var transitionReachesRoot = true
     var reads: [String: Int] = [:]
+    var rootDelayAfterLocation: Int?
+    var locationTapped = false
+    var finalWaitElapsed = 0
+    var waitSeconds: [Int64] = []
     init(_ frames: [Snapshot]) { self.frames = frames }
     var current: Snapshot { frames[index] }
     func advance() { index = min(index + 1, frames.count - 1) }
@@ -48,6 +52,8 @@ final class World {
         taps.append(kind)
         if kind == "browse" {
             frames = [Snapshot(location: Control(count: 1))]
+        } else if rootDelayAfterLocation != nil {
+            locationTapped = true
         } else {
             frames = [Snapshot(root: true)]
         }
@@ -110,7 +116,20 @@ final class Harness {
             world.frames = [Snapshot(root: true)]; world.index = 0
         }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.waitSeconds.append(timeout.components.seconds)
+        if world.locationTapped, let delay = world.rootDelayAfterLocation {
+            // Controlled seconds exercise the actual helper's timeout argument
+            // without real sleeps or claiming XCTest reads cannot overrun it.
+            for second in 0..<Int(timeout.components.seconds) {
+                world.finalWaitElapsed = second
+                if second >= delay { world.frames = [Snapshot(root: true)]; world.index = 0 }
+                if condition() { return }
+            }
+            world.finalWaitElapsed = Int(timeout.components.seconds)
+            throw FixtureFailure()
+        }
         // Advance fake native state between checks, not a second route algorithm.
         for _ in 0..<8 {
             if condition() { return }
@@ -138,6 +157,10 @@ final class Harness {
         case "delayed-root": world = World([Snapshot(), Snapshot(), Snapshot(root: true)])
         case "location":
             world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+        case "location-root-after-20-seconds", "location-root-after-31-seconds":
+            world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+            world.rootDelayAfterLocation = name == "location-root-after-20-seconds" ? 20 : 31
+            mustFail = name == "location-root-after-31-seconds"
         case "browse":
             world = World([Snapshot(browse: Control(count: 1))]); expected = ["browse", "location"]
         case "root-before-action":
@@ -173,6 +196,10 @@ final class Harness {
         var failed = false
         do { try await Harness(world).run() } catch { failed = true }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
+        if let delay = world.rootDelayAfterLocation {
+            guard world.waitSeconds == [15, 15, 30], world.finalWaitElapsed == min(delay, 30)
+            else { print("FAIL allowance " + name); exit(1) }
+        }
         print("PASS " + name)
     }
 }
@@ -203,6 +230,10 @@ class ReadinessTests(unittest.TestCase):
     def test_already_at_verified_root_never_navigates(self): self.run_case('already-root')
     def test_delayed_verified_root_arrival_never_requires_browse(self): self.run_case('delayed-root')
     def test_existing_location_route_taps_once(self): self.run_case('location')
+    def test_post_tap_root_can_arrive_after_fifteen_seconds_without_retapping(self):
+        self.run_case('location-root-after-20-seconds')
+    def test_post_tap_root_still_fails_after_thirty_second_allowance(self):
+        self.run_case('location-root-after-31-seconds')
     def test_existing_browse_route_remains_bounded(self): self.run_case('browse')
     def test_verified_root_before_action_prevents_redundant_tap(self): self.run_case('root-before-action')
     def test_route_can_disappear_between_query_and_read_without_spurious_failure(self):

@@ -1697,7 +1697,8 @@ final class BatchImportUITests: XCTestCase {
                 }
             }
         }
-        try await wait("Files preparation did not reach the local root", app: app) { atRoot() }
+        try await wait("Files preparation did not reach the local root", app: app,
+                       timeout: .seconds(30)) { atRoot() }
     }
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
