@@ -710,10 +710,14 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(error,'Synthetic installed-after budget exhausted')
         self.assertEqual(driver.report['cases'][0]['status'],'started')
 
-    def test_ci_fixed_two_locale_matrix_serializes_ipads_and_gates_both(self):
+    def test_ci_fixed_two_locale_matrix_runs_independently_and_gates_both(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
-        self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 1',lane)
+        phone=workflow.split('  ui_guidance:',1)[1].split('  privacy_ipad:',1)[0]
+        for independent_lane in (phone,lane):
+            self.assertNotRegex(independent_lane,r'(?m)^\s+needs:')
+            self.assertIn('if: ${{ !cancelled() }}',independent_lane)
+        self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 2',lane)
         for locale,step,job in [('en-US',83,95),('ru-RU',83,95)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
             profile=ipad.execution_profile('x86_64',locale)

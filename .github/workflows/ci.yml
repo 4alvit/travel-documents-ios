@@ -117,9 +117,7 @@ jobs:
           retention-days: 7
   ui_guidance:
     name: Accessibility, localization and guidance UI
-    # Limit this workflow to two eligible macOS jobs during hosted capacity shortages.
-    # All macOS jobs use Intel after repeated ARM runner assignment timeouts.
-    needs: validate
+    # Independent checkout and Simulator; the final gate still requires every cohort.
     if: ${{ !cancelled() }}
     runs-on: macos-15-intel
     # 75m integration covers1120s bootstrap +2700s case ceilings +680s other work.
@@ -182,12 +180,11 @@ jobs:
           retention-days: 7
   privacy_ipad:
     name: iPad privacy and support (${{ matrix.locale }})
-    # Keep iPad diagnostics eligible after ordinary Recovery failures.
-    needs: recovery
+    # Each locale owns a fresh checkout and Simulator; both remain required by the gate.
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - locale: en-US
