@@ -300,8 +300,8 @@ creation. If the deadline expires after creation, the existing cleanup still
 owns that exact device.
 
 Overall work deadlines remain fixed at driver start, including discovery:
-2,100 seconds on ARM and 3,000 seconds on Intel for either locale. Both reserve
-180 seconds for cleanup. The immutable profile is selected from the host
+2,100 seconds on ARM and 4,500 seconds on Intel for either locale. ARM reserves
+180 seconds for cleanup and Intel reserves 360 seconds, including final evidence. The immutable profile is selected from the host
 architecture before allocating the deadline, and recorded in the receipt.
 The later captured `uname` must match it before device creation; an unknown
 architecture or mismatch fails closed. Discovery never changes the profile.
@@ -335,16 +335,33 @@ On Intel, initial boot readiness allows 600 seconds, clipped to the original
 work deadline; ARM retains 180 seconds. Two Intel runs exhausted 180 seconds
 while reporting data migration. A separate run completed boot readiness in
 118.663 seconds. These observations support bounded cold-start headroom, not a
-claim that a larger allowance cures a service failure. The Intel 3,000/600-second
-work/boot envelope follows the existing fresh-Simulator Batch profile, with no
-inherited result or retry. The 480-second build, 900-second test command,
-1,487-second full-case admission and all cleanup requirements remain unchanged.
+claim that a larger allowance cures a service failure. Initial boot retains
+600 seconds on Intel and 180 on ARM; the 900-second test command and 1,487-second
+full-case admission are unchanged.
 
-Both hosted locales use 55-minute steps: 50 minutes of Intel work, three of
-cleanup and two for startup/finalization. Their 62-minute jobs allocate two
-minutes to checkout, three to toolchain setup, 55 to the owned driver and two
-to artifact upload. Longer boot consumes work time and can still leave too
-little time to admit a case; insufficient admission remains a failure.
+In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116),
+Intel boot completed in 312.7 seconds, but the fresh build reached its 480-second
+limit before any UI case started. The last logged operation was asset catalog
+compilation; no compiler error was reported. That log does not identify the
+underlying cause of the delay. All 26 process groups closed and the complete
+127-device baseline was restored after deleting the owned device.
+
+The selected Intel profile now permits a 1,200-second fresh build inside its
+4,500-second work window; ARM retains its 480-second build. Preflight, discovery,
+boot, project generation, the build and the complete case admission have combined
+command ceilings of 4,113 seconds on Intel, leaving 387 seconds for manifests,
+product discovery, parsing and receipt writes. This is engineering headroom,
+not a measured requirement or a guarantee that the next build will complete.
+The 360-second Intel cleanup window includes final source/product/original checks:
+normal cleanup and four final Git commands have 249 seconds of command ceilings.
+An optional ownership recovery and one outstanding group stop add 34 seconds.
+Multiple unresolved groups may still exhaust the window and must remain failures.
+No command is retried, no clock is reset, and no native assertion is removed.
+
+Both hosted locales use 83-minute steps: 75 minutes of Intel work, six of cleanup
+and two for startup/finalization. Their 95-minute jobs allocate two minutes to
+checkout, three to toolchain setup, 83 to the driver, two to artifact upload and
+five to cancellation/overhead. Insufficient remaining case admission still fails.
 
 Guidance tab transitions retain a five-second observation deadline and one tap.
 A failed English run showed a fully rendered Settings screen: the selected-tab
@@ -355,7 +372,7 @@ The existing bounded traversal and strict deadline checks remain; a late
 snapshot, ambiguous title or missing navigation bar still fails. Fixture tests
 execute the actual Swift helper and reject those states without another remote
 query or another tap.
-The step limits include each locale's work and 180-second cleanup budgets; the
+The step limits include each locale's selected work and cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
 can pass; partial testcase progress is not acceptance.
@@ -500,8 +517,8 @@ manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
 measurement. The native execution step allows 82 minutes, including two minutes
-beyond the 80-minute executor ceiling. The 100-minute job allocates two minutes
-to checkout, six to offline regressions, 82 to native recovery and five to evidence
+beyond the 80-minute executor ceiling. The 109-minute job allocates two minutes
+to checkout, 15 to offline regressions, 82 to native recovery and five to evidence
 upload, plus five minutes for cancellation and step overhead. The executor still
 reserves its own cleanup time before the outer workflow deadline.
 
@@ -510,7 +527,12 @@ the first synthetic Swift fixture compilation exceeded its 30-second timeout.
 The first three regression suites then reported 125.137 seconds combined,
 already exceeding the former two-minute step before the other ten suites ran.
 The Files readiness fixture compilers now consistently allow 60 seconds;
-five-second fixture executions and 45-second SDK typechecks retain their limits.
+five-second fixture executions retain their limit. The three complete-file SDK
+typechecks now allow 180 seconds each. A later hosted run exhausted 45 seconds
+for both Batch UI checks (ARM default and Intel Debug); this is a compiler-command
+timeout, not a native test failure. The 15-minute regression step includes
+headroom beyond a conservative 688-second estimate from that run and the other
+retained suites. It remains finite and does not guarantee future compiler speed.
 These offline allowances do not change native case limits or accept incomplete
 regressions. All 13 suites and the subsequent native recovery still require a
 fresh passing hosted run; the larger envelope does not guarantee completion.
@@ -599,8 +621,8 @@ This corrects an observed allocation defect: English took 590 seconds including
 bootstrap; Russian was then admitted with only 357 seconds of work even though
 its requested command allowance was 570 seconds. Its timeout was subsequently
 masked by an installed-AUT lookup that could not fit. Fresh drivers use separate
-work budgets of 2,100 seconds on ARM or 3,000 on Intel and the same 180-second
-cleanup reserve.
+work budgets of 2,100 seconds on ARM or 4,500 on Intel and respective cleanup
+reserves of 180 and 360 seconds.
 Both command waits are 900 seconds; XCTest's 480-second maximum is unchanged. Before
 case preparation, the driver requires the full command budgets and each 7-second
 stop reserve, plus 30 seconds for local manifests/copy/validation: 1,487 seconds
@@ -630,8 +652,8 @@ or readback failure cannot become test success. The original generated xctestrun
 are unchanged. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 100 minutes, phone guidance has 65 minutes,
-and each iPad locale has 62 minutes, at most 364 aggregate job-minutes. Within this
+Core has a 75-minute limit, Recovery has 109 minutes, phone guidance has 65 minutes,
+and each iPad locale has 95 minutes, at most 439 aggregate job-minutes. Within this
 CI workflow, phone guidance waits for Core, and the serial iPad matrix waits
 for Recovery, leaving at most two macOS jobs eligible concurrently, subject to
 account runner capacity. All five macOS jobs use `macos-15-intel` with the same
