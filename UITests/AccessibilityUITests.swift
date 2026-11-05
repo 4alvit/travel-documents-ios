@@ -1,13 +1,30 @@
 import XCTest
+import UIKit
 
 /// Layout/reachability checks only. The launch flags install synthetic fixtures
 /// and bypass authentication; passing this suite is NOT evidence of privacy,
 /// biometric behavior, payment routing, or physical-device accessibility.
 @MainActor
 final class AccessibilityUITests: XCTestCase {
+    private enum PhoneTimingError: Error { case invalidProfile }
+
+    private func useHostedPhoneTiming() throws -> Bool {
+        guard let profile = ProcessInfo.processInfo.environment["TRIPDOCKET_PHONE_TIMING"] else {
+            return false
+        }
+        guard profile == "hosted-intel-phone-v1" else { throw PhoneTimingError.invalidProfile }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw PhoneTimingError.invalidProfile }
+        return true
+        #else
+        throw PhoneTimingError.invalidProfile
+        #endif
+    }
+
     private let backupWarningText = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
 
     func testMaximumTypeFreeCardAndProDismissal() async throws {
+        if try useHostedPhoneTiming() { executionTimeAllowance = 360 }
         let app = try launchFixture()
         defer { app.terminate() }
 
@@ -49,6 +66,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testMaximumTypeReadinessAndImportCancellation() async throws {
+        if try useHostedPhoneTiming() { executionTimeAllowance = 360 }
         let app = try launchFixture()
         defer { app.terminate() }
 
@@ -92,7 +110,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testMaximumTypeCompleteBackupWarningAndCancellation() async throws {
-        executionTimeAllowance = 180
+        executionTimeAllowance = try useHostedPhoneTiming() ? 360 : 180
         let app = try launchFixture()
         defer { app.terminate() }
         try selectTab("Settings", in: app)

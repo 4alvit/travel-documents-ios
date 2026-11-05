@@ -1,6 +1,7 @@
 import Foundation
 import StoreKit
 import StoreKitTest
+import UIKit
 import XCTest
 
 /// Keep this suite serial with the other StoreKit tests: SKTestSession changes
@@ -10,6 +11,8 @@ final class PurchaseUITests: XCTestCase {
     private let productID = "com.4alvit.tripfolio.pro"
 
     func testCancellingSystemPurchaseSheetKeepsFreeAccess() async throws {
+        let hostedCoreTiming = try useHostedCoreTiming()
+        if hostedCoreTiming { executionTimeAllowance = 360 }
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
@@ -47,8 +50,12 @@ final class PurchaseUITests: XCTestCase {
         // Require positive evidence of Xcode's payment UI. Never interact with
         // an Apple Account login or a Sandbox/production payment sheet.
         do {
-            try await require("No Xcode payment sheet appeared", app: app, springboard: springboard) {
-                self.xcodeMarker(in: app).exists || self.xcodeMarker(in: springboard).exists
+            guard try await waitForSystemPurchaseSheet(
+                app: app, springboard: springboard,
+                timeout: hostedCoreTiming ? .seconds(120) : .seconds(15)
+            ) else {
+                attachDiagnostics(app: app, springboard: springboard, name: "No Xcode payment sheet appeared")
+                throw PurchaseTestError(message: "No Xcode payment sheet appeared")
             }
         } catch {
             // A complete, allowlisted value avoids debugDescription truncation.
@@ -105,7 +112,32 @@ final class PurchaseUITests: XCTestCase {
         try await verifyPurchaseFailureAlert(russian: false, diagnostics: false)
     }
 
+    private func failureAlertExecutionTimeAllowance() throws -> TimeInterval {
+        try useHostedCoreTiming() ? 360 : 240
+    }
+
+    private func useHostedCoreTiming() throws -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        guard let token = environment["TRIPDOCKET_CORE_TIMING"] else { return false }
+        guard token == "hosted-intel-core-v1",
+              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
+              environment["TRIPDOCKET_IPAD_TIMING"] == nil else {
+            throw PurchaseTestError(message: "Invalid or conflicting Core timing profile")
+        }
+        #if DEBUG && targetEnvironment(simulator) && arch(x86_64)
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw PurchaseTestError(message: "Core timing requires the hosted Intel iPhone Simulator")
+        }
+        return true
+        #else
+        throw PurchaseTestError(message: "Core timing requires a Debug Intel Simulator build")
+        #endif
+    }
+
     private func verifyPurchaseFailureAlert(russian: Bool, diagnostics: Bool) async throws {
+        // Only the validated Core invocation selects the hosted Intel margin.
+        // Keep ordinary runs and all other test allowances unchanged.
+        executionTimeAllowance = try failureAlertExecutionTimeAllowance()
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
@@ -143,7 +175,8 @@ final class PurchaseUITests: XCTestCase {
             let ok = alert.buttons[russian ? "ОК" : "OK"]
             var completedAttempts = 0
             for attempt in 1...ExpectedFailureHistory.requiredAttempts {
-                try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard) {
+                try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard,
+                                  timeout: attempt == 1 ? .seconds(60) : .seconds(15)) {
                     buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
                 }
                 try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
@@ -419,11 +452,35 @@ final class PurchaseUITests: XCTestCase {
         app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Xcode")).firstMatch
     }
 
+    private func waitForSystemPurchaseSheet(
+        app: XCUIApplication, springboard: XCUIApplication, timeout: Duration
+    ) async throws -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            guard clock.now < deadline else { return false }
+            let inApp = xcodeMarker(in: app).exists
+            try Task.checkCancellation()
+            guard clock.now < deadline else { return false }
+            if inApp { return true }
+
+            try Task.checkCancellation()
+            guard clock.now < deadline else { return false }
+            let inSpringboard = xcodeMarker(in: springboard).exists
+            try Task.checkCancellation()
+            guard clock.now < deadline else { return false }
+            if inSpringboard { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     private func require(
         _ message: String, app: XCUIApplication, springboard: XCUIApplication,
+        timeout: Duration = .seconds(15),
         condition: @MainActor () -> Bool
     ) async throws {
-        guard try await waitUntil(condition, timeout: .seconds(15)) else {
+        guard try await waitUntil(condition, timeout: timeout) else {
             attachDiagnostics(app: app, springboard: springboard, name: message)
             throw PurchaseTestError(message: message)
         }

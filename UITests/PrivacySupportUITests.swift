@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Feature navigation/layout only. DEBUG authentication bypass is intentional.
 /// This suite does not establish real authentication, denied-network behavior,
@@ -11,6 +12,43 @@ final class PrivacySupportUITests: XCTestCase {
 
     func testRussianMaximumTypeFreeGuidanceAndCancelledLinks() async throws {
         try await verifyGuidance(russian: true, maximumType: true)
+    }
+
+    private enum PhoneTimingError: Error { case invalidProfile }
+
+    private func useHostedPhoneTiming() throws -> Bool {
+        guard let profile = ProcessInfo.processInfo.environment["TRIPDOCKET_PHONE_TIMING"] else {
+            return false
+        }
+        guard profile == "hosted-intel-phone-v1" else { throw PhoneTimingError.invalidProfile }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw PhoneTimingError.invalidProfile }
+        return true
+        #else
+        throw PhoneTimingError.invalidProfile
+        #endif
+    }
+
+    private enum IPadTimingError: Error { case invalidProfile }
+
+    private func useHostedIPadTiming(russian: Bool, maximumType: Bool) throws -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        guard let profile = environment["TRIPDOCKET_IPAD_TIMING"] else { return false }
+        guard environment["TRIPDOCKET_PHONE_TIMING"] == nil else { throw IPadTimingError.invalidProfile }
+        switch profile {
+        case "hosted-intel-ipad-en-v1":
+            guard !russian, !maximumType else { throw IPadTimingError.invalidProfile }
+        case "hosted-intel-ipad-ru-v1":
+            guard russian, maximumType else { throw IPadTimingError.invalidProfile }
+        default:
+            throw IPadTimingError.invalidProfile
+        }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw IPadTimingError.invalidProfile }
+        return true
+        #else
+        throw IPadTimingError.invalidProfile
+        #endif
     }
 
     private struct Copy {
@@ -28,10 +66,11 @@ final class PrivacySupportUITests: XCTestCase {
     }
 
     private func verifyGuidance(russian: Bool, maximumType: Bool) async throws {
-        // The complete Russian maximum-type flow reached Trips at 493.61s in
-        // main CI. Keep every action/readability check and allow finalization.
-        // Dedicated iPad runs retain their separate 480s command-line ceiling.
-        executionTimeAllowance = russian && maximumType ? 600 : 360
+        // Explicit hosted timing profiles preserve all four confirmations and captures.
+        // Runs without an iPad opt-in retain their existing Phone/default allowances.
+        let hostedIPad = try useHostedIPadTiming(russian: russian, maximumType: maximumType)
+        let hostedPhone = try useHostedPhoneTiming()
+        executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) : (hostedPhone ? (russian && maximumType ? 1500 : 1080) : (russian && maximumType ? 600 : 480))
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()
@@ -48,7 +87,7 @@ final class PrivacySupportUITests: XCTestCase {
         try require(app.navigationBars["TripDocket"].waitForExistence(timeout: 15),
                     app: app, "Fresh library did not open")
         try await selectTab(copy.settings, navigationTitle: copy.settings,
-                            failure: "Settings did not open", in: app)
+                            failure: "Settings did not open", in: app, hostedTiming: hostedIPad || hostedPhone)
         // Resetting library data does not reset StoreKit entitlements. Fail this
         // precondition explicitly rather than revoking or fabricating an entitlement.
         let free = app.staticTexts[copy.freeTitle]
@@ -182,7 +221,7 @@ final class PrivacySupportUITests: XCTestCase {
                            snapshotMatch: SnapshotMatch(type: .staticText, key: copy.freeTitle))
         try require(free.exists && free.isHittable, app: app, "Free state changed during guidance")
         try await selectTab(copy.trips, navigationTitle: "TripDocket",
-                            failure: "Trips did not return after guidance", in: app)
+                            failure: "Trips did not return after guidance", in: app, hostedTiming: hostedIPad || hostedPhone)
         attach(app, name: "Guidance completed and returned to Trips")
     }
 
@@ -271,18 +310,85 @@ final class PrivacySupportUITests: XCTestCase {
         throw LayoutFailure(message: "Did not expose the entire text after 20 bounded slices: " + name)
     }
 
+    private struct TabObservationTrace: Encodable {
+        struct Sample: Encodable {
+            let phase: String
+            let startedSeconds: Double
+            let finishedSeconds: Double
+            let selected: Bool?
+            let navigationVisible: Bool?
+            let reason: String
+        }
+        let schemaVersion = 1
+        let target: String
+        let budgetSeconds: Int
+        var outcome = "incomplete"
+        var tapAttempted = false
+        var observations = 0
+        var samples: [Sample] = []
+        var truncated: Bool { observations > samples.count }
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion, target, budgetSeconds, outcome, tapAttempted, observations, samples, truncated
+        }
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(schemaVersion, forKey: .schemaVersion)
+            try values.encode(target, forKey: .target)
+            try values.encode(budgetSeconds, forKey: .budgetSeconds)
+            try values.encode(outcome, forKey: .outcome)
+            try values.encode(tapAttempted, forKey: .tapAttempted)
+            try values.encode(observations, forKey: .observations)
+            try values.encode(samples, forKey: .samples)
+            try values.encode(truncated, forKey: .truncated)
+        }
+    }
+
     private func selectTab(
-        _ title: String, navigationTitle: String, failure: String, in app: XCUIApplication
+        _ title: String, navigationTitle: String, failure: String, in app: XCUIApplication,
+        hostedTiming: Bool = false
     ) async throws {
         let clock = ContinuousClock()
-        func observation(until deadline: ContinuousClock.Instant)
+        // The caller passes only the already validated hosted Phone/iPad policy.
+        let budgetSeconds = hostedTiming ? 30 : 5
+        let started = clock.now
+        var trace = TabObservationTrace(target: navigationTitle == "TripDocket" ? "trips" : "settings",
+                                        budgetSeconds: budgetSeconds)
+        func elapsed() -> Double {
+            let parts = started.duration(to: clock.now).components
+            return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+        }
+        defer {
+            // Fixed strings/scalars and the first 16 observations; never query AX here.
+            let fallback = Data("{\"schemaVersion\":1,\"encodingError\":true}".utf8)
+            let encoded = (try? JSONEncoder().encode(trace)) ?? fallback
+            let bounded = encoded.count <= 8_192 ? encoded : fallback
+            let attachment = XCTAttachment(string: String(decoding: bounded, as: UTF8.self))
+            attachment.name = "Guidance tab observation"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        func observation(until deadline: ContinuousClock.Instant, phase: String)
             throws -> (element: XCUIElement, selected: Bool, navigationVisible: Bool)? {
-            // One AX snapshot supplies all hierarchy/geometry facts. Repeated
-            // exists/count calls previously spent the five-second readiness
-            // budget before the unique visible iPad action could be tapped.
+            let observationStarted = elapsed()
+            var selected: Bool?
+            var navigationVisible: Bool?
+            var reason = "deadline-before-snapshot"
+            defer {
+                trace.observations += 1
+                if trace.samples.count < 16 {
+                    trace.samples.append(.init(phase: phase, startedSeconds: observationStarted,
+                                               finishedSeconds: elapsed(), selected: selected,
+                                               navigationVisible: navigationVisible, reason: reason))
+                }
+            }
+            // One AX snapshot supplies all hierarchy/geometry facts.
             guard clock.now < deadline else { return nil }
+            reason = "snapshot-error"
             let root = try app.snapshot()
+            reason = "deadline-after-snapshot"
             guard clock.now < deadline else { return nil }
+            reason = "traversal-rejected"
             var visited = 0
             var matches = 0
             var leaves: [(node: XCUIElementSnapshot, parent: XCUIElementSnapshot?)] = []
@@ -307,8 +413,11 @@ final class PrivacySupportUITests: XCTestCase {
                 return matching || descendantMatches
             }
             guard visit(root, parent: nil, depth: 0) != nil else { return nil }
+            reason = "target-not-unique-or-late"
             guard clock.now < deadline, leaves.count == 1, let leaf = leaves.first else { return nil }
+            selected = leaf.node.isSelected
             let frame = leaf.node.frame
+            reason = "target-geometry-or-disabled"
             guard !frame.isNull, !frame.isInfinite, frame.width > 0, frame.height > 0,
                   root.frame.contains(frame), leaf.node.isEnabled else { return nil }
             // Native tabs can acquire their symbol identifier after the
@@ -319,6 +428,7 @@ final class PrivacySupportUITests: XCTestCase {
                 : NSPredicate(format: "label == %@ AND identifier == %@", title, leaf.node.identifier)
             let buttons = app.buttons.matching(exactAction)
             let action: XCUIElementQuery
+            reason = "action-shape"
             if matches == 1 {
                 action = buttons
             } else if matches == 2, let parent = leaf.parent,
@@ -330,20 +440,23 @@ final class PrivacySupportUITests: XCTestCase {
             } else {
                 return nil
             }
+            reason = "deadline-after-identity"
             guard clock.now < deadline else { return nil }
-            let navigationVisible = navigationFrames.count == 1 && navigationFrames.allSatisfy {
+            let visible = navigationFrames.count == 1 && navigationFrames.allSatisfy {
                 !$0.isNull && !$0.isInfinite && $0.width > 0 && $0.height > 0 && root.frame.contains($0)
             }
+            navigationVisible = visible
+            reason = leaf.node.isSelected ? (visible ? "selected-navigation" : "navigation-absent") : "unselected"
             // .element preserves the query's unique-match requirement; no
             // index, firstMatch or coordinate substitutes for the actual action.
-            return (action.element, leaf.node.isSelected, navigationVisible)
+            return (action.element, leaf.node.isSelected, visible)
         }
         // The bounded snapshot already verifies the exact leaf is enabled.
         // Resolve the same unique live action for hittability without another enabled RPC.
-        let readinessDeadline = clock.now.advanced(by: .seconds(5))
+        let readinessDeadline = clock.now.advanced(by: .seconds(budgetSeconds))
         var target: XCUIElement?
         while clock.now < readinessDeadline {
-            if let current = try observation(until: readinessDeadline),
+            if let current = try observation(until: readinessDeadline, phase: "readiness"),
                clock.now < readinessDeadline && current.element.isHittable,
                clock.now < readinessDeadline {
                 target = current.element
@@ -353,20 +466,24 @@ final class PrivacySupportUITests: XCTestCase {
             if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
         }
         guard let target, clock.now < readinessDeadline else {
+            trace.outcome = "readiness-deadline"
             try require(false, app: app, title + " tab is not uniquely reachable")
             return
         }
+        trace.tapAttempted = true
         target.tap() // One real action; never retry an ignored tap or use coordinates.
-        let transitionDeadline = clock.now.advanced(by: .seconds(5))
+        let transitionDeadline = clock.now.advanced(by: .seconds(budgetSeconds))
         while clock.now < transitionDeadline {
-            if let current = try observation(until: transitionDeadline), current.selected,
+            if let current = try observation(until: transitionDeadline, phase: "transition"), current.selected,
                current.navigationVisible,
                clock.now < transitionDeadline {
+                trace.outcome = "completed"
                 return
             }
             let remaining = clock.now.duration(to: transitionDeadline)
             if remaining > .zero { try await Task.sleep(for: min(.milliseconds(100), remaining)) }
         }
+        trace.outcome = "transition-deadline"
         try require(false, app: app, failure)
     }
 
