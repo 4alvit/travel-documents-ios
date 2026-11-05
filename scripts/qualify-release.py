@@ -1229,32 +1229,37 @@ class Qualification:
             "start": time.monotonic() - self.started, "deadline": end - self.started}
         self.commands.limit = min(previous_limit, end)
         try:
-            # Query only the owned AUT. A producer PASS is insufficient by itself:
-            # require its exact current executable absent from a complete ps output.
+            # A producer PASS is insufficient. Verify the owned executable, then
+            # reject any Tripfolio accounting name in a complete process snapshot.
+            # Darwin ucomm reads p_comm; comm/command retrieve per-process argv.
             raw = command("checkpoint-app", ["xcrun", "simctl", "get_app_container", self.owned, APP_ID, "app"])
             bundle = self.container_path(raw.strip(), "Bundle", "Application")
             require(bundle.name == "Tripfolio.app", "Wrong checkpoint app bundle")
             executable = bundle / "Tripfolio"
             require(stat.S_ISREG(executable.lstat().st_mode) and executable.resolve(strict=True) == executable,
                     "Invalid checkpoint app executable")
-            listing = command("checkpoint-app-stopped", ["/bin/ps", "-axww", "-o", "pid=,command="])
+            listing = command("checkpoint-app-stopped", ["/bin/ps", "-ax", "-o", "pid=,ucomm="])
             rows = [row for row in self.commands.report["commands"] if row["id"] == "checkpoint-app-stopped"]
-            require(len(rows) == 1 and rows[0]["returncode"] == 0, "Unbound checkpoint process listing")
-            reader = rows[0]["pgid"]; reader_seen = False
-            owned_apps = Path.home() / "Library/Developer/CoreSimulator/Devices" / self.owned / "data/Containers/Bundle/Application"
-            owned_executable = re.compile(re.escape(str(owned_apps))
-                + r"/[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/Tripfolio\.app/Tripfolio(?: |$)")
-            require(listing.strip(), "Empty process listing")
+            require(len(rows) == 1 and rows[0]["returncode"] == 0
+                    and rows[0]["bytes"] == {"stdout": len(listing.encode("utf-8")), "stderr": 0},
+                    "Unbound or incomplete checkpoint process listing")
+            reader = rows[0]["pgid"]; reader_seen = False; seen = set()
+            require(type(reader) is int and reader > 0 and listing.strip() and listing.endswith("\n")
+                    and "\ufffd" not in listing, "Empty or incomplete process listing")
             for line in listing.splitlines():
-                active(); match = re.fullmatch(r"\s*([0-9]+)\s+(.*)", line)
+                active(); match = re.fullmatch(r"[ \t]*([0-9]+)[ \t]+([^\r\n]+)", line)
                 require(match is not None, "Malformed process listing")
-                pid, cmd = int(match[1]), match[2]
+                pid, name = int(match[1]), match[2].strip(" \t")
+                require(pid > 0 and pid not in seen and name
+                        and all(ord(c) >= 32 and ord(c) != 127 for c in name)
+                        and len(name.encode("utf-8")) <= 16, "Malformed or duplicate process row")
+                seen.add(pid)
                 if pid == reader:
-                    require(cmd.startswith("/bin/ps ") or cmd.startswith("ps "), "Wrong process reader")
+                    require(name == "ps", "Wrong process reader")
                     reader_seen = True
-                require(cmd != str(executable) and not cmd.startswith(str(executable) + " ")
-                        and owned_executable.match(cmd) is None
-                        and cmd != "Tripfolio" and not cmd.startswith("Tripfolio "), "AUT still running or ambiguous")
+                # Tripfolio fits Darwin's 16-byte p_comm without truncation.
+                # Another device or zombie with that name is conservatively rejected.
+                require(name != "Tripfolio", "AUT still running or ambiguous")
             require(reader_seen, "Process listing omitted its own reader")
             self.native_seed_files(driver)
             for name, identity in self.before["files"].items():

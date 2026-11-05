@@ -134,18 +134,18 @@ the main-actor-isolated, non-Sendable action. No recovery case executed. All
 owned process groups stopped and the complete Simulator inventory was restored.
 A successful local compile with a newer SDK did not establish this compatibility.
 
-The Pro screen instead retains a weak reference to its own attached UIKit
-controller. Purchases use that controller on iOS 18.2 and later, or its attached
-window scene on iOS 17 through 18.1. These are Apple's
+The subsequent UIKit candidate retained a weak reference to the Pro screen's
+own attached controller. Purchases used that controller on iOS 18.2 and later,
+or its attached window scene on iOS 17 through 18.1. These are Apple's
 [explicit-context purchase APIs](https://developer.apple.com/documentation/storekit/product/purchase(confirmin:options:)-6dj6y).
-Missing, inactive or dismissing presentation context fails through the existing
-purchase-error path; there is no global scene lookup or contextless fallback.
-The manager retains its busy guard, verified-entitlement checks, transaction
-finishing and error handling; non-UI hosted calls retain their existing default.
-No unsafe Sendable conformance or concurrency-check suppression is added.
+Missing, inactive or dismissing presentation context failed through the existing
+purchase-error path, without a global scene lookup or contextless fallback.
+The manager retained its busy guard, verified-entitlement checks, transaction
+finishing and error handling; non-UI hosted calls kept their existing default.
+No unsafe Sendable conformance or concurrency-check suppression was added.
 The earlier payment-service error did not establish a missing scene as its
-precise cause. This correction still requires fresh native validation; it adds
-no automatic purchase retry and does not relax payment or Files assertions.
+precise cause. The candidate added no automatic purchase retry and did not
+relax payment or Files assertions.
 
 The [following batch run](https://github.com/4alvit/travel-documents-ios/actions/runs/41416599960)
 at `afd2dc1` passed preparation, native seeding and the hosted purchase prerequisite.
@@ -206,6 +206,38 @@ deadline before draining output or scanning resources. The eight-second stop
 reserve, genuine scan failures and complete process-cleanup requirements remain.
 Offline boundary tests cover both an exact-deadline wakeup and an oversleep; they
 do not substitute for a successful hosted recovery run.
+
+On 5 November, [PR #28 Core testing at `4f04f2b`](https://github.com/4alvit/travel-documents-ios/actions/runs/42111359763/job/127539460236)
+failed the unchanged system-purchase cancellation case. The original result
+bundle's app console recorded `AMSErrorDomain` code 10, `Payment Sheet Failed /
+Presentation failed`, wrapped by `ASDErrorDomain` code 5115. The app displayed
+its purchase-failure alert and no transaction was returned. Entry and return
+observations showed an active, attached controller in a visible key window,
+empty bridge bounds, and a nonempty parent without a recorded transition.
+The empty bounds do not establish the cause of the presentation failure. This
+case did not reach Cancel or its cancellation, transaction and quota checks.
+
+The [SwiftUI candidate `c31c7d6`](https://github.com/4alvit/travel-documents-ios/commit/c31c7d60d4cd3586d02975df02715a183fd2fb15)
+replaces that custom UIKit bridge with the Pro view's environment
+`PurchaseAction`, passed through the same purchase-manager closure. It preserves
+the busy guard, verified-entitlement handling, error feedback and one purchase
+action, with no automatic retry or contextless fallback. The
+[separate targeted hosted diagnostic](https://github.com/4alvit/travel-documents-ios/actions/runs/42118698520)
+confirmed the actual Xcode 26.2 SDK declaration: `PurchaseAction`, its call and
+`EnvironmentValues.purchase` are main-actor isolated. Its focused
+`build-for-testing` succeeded in 76.573 seconds. The run then failed before any
+UI test: the separate `simctl install` command exhausted its 112-second work
+allowance within a 120-second envelope, including an eight-second stop reserve.
+Both command streams were empty. This establishes compilation compatibility,
+not successful installation or any purchase, cancellation or runtime result;
+it does not establish why installation stalled.
+
+The next validation uses normal full CI on the integrated candidate, including
+the unchanged ARM cancellation case with its 15-second sheet observation and
+180-second case allowance, plus the required Batch qualification. No additional
+diagnostic retry or timing change is part of this candidate. The targeted run
+remains failed; fresh full CI and all required final-source qualifications must
+pass before release acceptance.
 
 ## Release preparation — 1 November 2026
 

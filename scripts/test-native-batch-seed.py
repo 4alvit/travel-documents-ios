@@ -359,13 +359,14 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('created.element.press(forDuration: 1)',helper)
         before_rename=helper[helper.index('if let before = renameFrame {'):
                            helper.index('// One shared acknowledgement covers')]
-        self.assertEqual(before_rename.count('let snapshots = try nativeFolderSnapshots(app)'),1)
+        self.assertNotIn('try nativeFolderSnapshots(app)',before_rename)
+        self.assertEqual(before_rename.count('guard let snapshots = renameSnapshots'),1)
         self.assertIn('let currentState = Self.nativeFolderInitialState(\n'
                       '                in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle\n'
                       '            )',before_rename)
         self.assertIn('try check(currentState.ready\n'
                       '                      && (currentState.renameFrame == nil || currentState.renameFrame == before),',before_rename)
-        self.assertLess(before_rename.index('let snapshots = try nativeFolderSnapshots(app)'),
+        self.assertLess(before_rename.index('guard let snapshots = renameSnapshots'),
                         before_rename.index('let currentState = Self.nativeFolderInitialState('))
         self.assertLess(before_rename.index('try check(currentState.ready'),
                         before_rename.index('if currentState.renameFrame != nil {'))
@@ -377,7 +378,10 @@ class SeedGuards(unittest.TestCase):
         self.assertEqual(initial.count('back.element.tap()'),1)
         self.assertEqual(initial.count('Self.nativeFolderParentReturnFrame('),2)
         self.assertIn('parentReturnAttempted = true\n                    parentReturnRejected = true',initial)
-        self.assertIn('guard !parentReturnRejected, ContinuousClock.now < initialDeadline',initial)
+        self.assertIn('guard !parentReturnRejected, !renameCandidateRejected,',initial)
+        self.assertIn('guard frame == pending else {',initial)
+        self.assertIn('renameSnapshots = snapshots',initial)
+        self.assertEqual(initial.count('try self.nativeFolderSnapshots(app, diagnostic:'),2)
         self.assertIn('!app.staticTexts["nativeSeed.failure"].exists',initial)
         self.assertIn('"identifier BEGINSWITH %@", "nativeSeed.saved."',initial)
         self.assertNotIn('newFolder.element.tap()',initial)
