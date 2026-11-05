@@ -97,8 +97,8 @@ The hosted Intel adapter selects the immutable `hosted-intel-v1` profile before
 creating output or deriving deadlines from the original entry clock. It requires
 the exact `macos-15-intel` / `X64` / `x86_64` hosted tuple. Unknown profiles,
 crossed host identities and changed timing policy are rejected before work.
-The selected profile cannot be replaced during the run. It allows 5,040 seconds
-total: 4,680 for work and 360 for cleanup. Prepare allows 1,200 command
+The selected profile cannot be replaced during the run. It allows 5,340 seconds
+total: 4,980 for work and 360 for cleanup. Prepare allows 1,200 command
 seconds and 300 native case seconds; export and restore each allow 900 command
 seconds and 600 native case seconds. Every command includes the unchanged
 eight-second stop reserve and is clipped to the original work deadline. The
@@ -119,8 +119,8 @@ identify the cause of the gap or prove that more time will complete cleanup.
 The hosted cleanup maximum includes optional ownership recovery 60, shutdown
 90, delete 90, final inventory 60 and final receipt 10: 310 seconds, leaving 50
 seconds for non-command work inside the 360-second window. It remains clipped
-to the original overall deadline. The work allocation remains 4,680 seconds
-for 4,515 seconds of command ceilings and 165 seconds of non-command margin.
+to the original overall deadline. The work allocation remains 4,980 seconds
+for 4,815 seconds of command ceilings and 165 seconds of non-command margin.
 No extra attempt, signal retry, drain or ownership adoption is introduced.
 An unresolved process still prevents further commands and cleanup acceptance.
 
@@ -133,18 +133,27 @@ increases provide performance margin for slower Intel execution; they do not
 prove an application defect or guarantee completion.
 
 The complete hosted work envelope includes 110 seconds for source Git commands,
-80 for toolchain checks, 300 for shared discovery, 330 for boot commands, 3,000
+80 for toolchain checks, 300 for shared discovery, 630 for boot commands, 3,000
 for the three phase commands, 360 for result readers, 160 for app-state checks,
 135 for result comparators and 40 for final Git checks. Those command ceilings
-total 4,515 seconds, leaving 165 for source copying, manifests, parsing and other
+total 4,815 seconds, leaving 165 for source copying, manifests, parsing and other
 in-process verification before cleanup. They remain ceilings rather than new
 per-phase clocks. No phase retries or additional workers are introduced.
+Only the validated hosted adapter gives the initial owned `bootstatus` command
+600 seconds, including the unchanged eight-second stop reserve. Two successive
+hosted runs exhausted the earlier 300-second command before native tests. The
+second retained Data Migration progress without a terminal ready result; its
+last resource scan had only 6.96 seconds left in the command window. This does
+not show that the 60-second scan allowance was exhausted or that 600 seconds
+will complete every boot. The additional 300 seconds are included in the work
+and outer budgets above. Standalone boot remains 120 seconds, discovery remains
+300 seconds, and owned cleanup and all resource checks are unchanged.
 The immutable hosted Intel profile allows up to 60 seconds for one complete
 resource scan during an exact active owned boot wait; the portable profile
 retains 15 seconds. Two Intel attempts exceeded 15 seconds before native tests,
 including one measured 25.86-second file-stat operation span. These spans include
 scheduling and do not establish the underlying cause. The scan still shares the
-original 300-second boot command, its eight-second stop reserve and the global
+original 600-second hosted boot command, its eight-second stop reserve and the global
 work deadline. Repeated scans cannot renew those clocks. Admission and other
 ordinary scans retain five seconds, native phase scans retain 30 seconds, and
 all files, byte limits and ownership checks remain required. A synchronous
@@ -571,9 +580,9 @@ The 2 GiB xcresult content limit still checks both logical and allocated size;
 manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
-measurement. The native execution step allows 86 minutes, including two minutes
-beyond the 84-minute executor ceiling. The 113-minute job allocates two minutes
-to checkout, 15 to offline regressions, 86 to native recovery and five to evidence
+measurement. The native execution step allows 91 minutes, including two minutes
+beyond the 89-minute executor ceiling. The 118-minute job allocates two minutes
+to checkout, 15 to offline regressions, 91 to native recovery and five to evidence
 upload, plus five minutes for cancellation and step overhead. The executor still
 reserves its own cleanup time before the outer workflow deadline.
 
@@ -764,8 +773,8 @@ text checks, four Cancels, zero Open actions and final Free/Trips evidence remai
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 113 minutes, phone guidance has 95 minutes,
-and each iPad locale has 95 minutes, at most 473 aggregate job-minutes. All five
+Core has a 75-minute limit, Recovery has 118 minutes, phone guidance has 95 minutes,
+and each iPad locale has 95 minutes, at most 478 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. All five use `macos-15-intel` with the same
@@ -782,7 +791,7 @@ Recovery-to-serial-iPad scheduling waits; it does not reserve runners. GitHub's
 are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
 account limits and other workflows share that capacity, including Swift CodeQL
 and separate Batch/Biometrics qualification. Jobs may queue, so the largest
-individual job limit of 113 minutes is not a completion-time guarantee.
+individual job limit of 118 minutes is not a completion-time guarantee.
 Per-job native tests remain serial, with unchanged timeouts, owned-process
 cleanup, `!cancelled()` conditions and the final gate's four result checks.
 

@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = '85a19835d1146c33c9711df2bba08c9d5d7bd7c320a64726d0dea53d5dae54c1'
+CORE_SHA = 'a33e0ce057f9cb3981a492a441f10f4d4de38f3b26c10cb6584f5e09ed457e41'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -262,9 +262,10 @@ class HostedRecovery(core.Recovery):
             require(not self.cleaning and self.owned
                     and args==('bootstatus',self.owned,'-b') and cap==120,
                     'Unexpected hosted boot readiness command')
-            # Cold hosted startup shares the original work/global deadline.
-            # command() still reserves eight seconds for this one owned wait.
-            cap=300
+            # Two hosted attempts exhausted 300s before native work; retained
+            # migration progress supports finite headroom, not a readiness guarantee.
+            # This one owned wait keeps the original work deadline and eight-second stop reserve.
+            cap=600
         # Only the initial owned Files preparation gets a larger command cap.
         action={'files-launch':'launch','files-terminate':'terminate'}.get(label)
         if action:

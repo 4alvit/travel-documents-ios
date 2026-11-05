@@ -376,7 +376,7 @@ absent and its leader reaped; neither result proves the startup delay fixed.
 Standalone Recovery retains its 780-second prepare command, 600-second later
 commands and 180/300-second native allowances. The hosted Intel adapter selects
 one immutable, validated `hosted-intel-v1` profile before deriving deadlines from
-its original clock: 4,680 seconds of work plus 360 for cleanup, prepare command/case
+its original clock: 4,980 seconds of work plus 360 for cleanup, prepare command/case
 caps of 1,200/300 seconds and export/restore caps of 900/600 seconds. Commands
 retain their eight-second stop reserve. Hosted cleanup alone allows 90 seconds
 per owned shutdown/delete action and 60 per recovery/final inventory query;
@@ -387,7 +387,11 @@ Debug Intel Simulator opt-in; unrelated callers keep their defaults. A retained
 Intel run spent 713 seconds before the prepare case began and was stopped during
 app launch. This profile budgets all three phases, result inspection and cleanup;
 it provides bounded startup and native performance margin without guaranteeing
-completion. The Recovery workflow reserves 86 native minutes inside a 113-minute
+completion. Only the validated hosted adapter gives its initial owned boot wait
+600 seconds, including eight seconds for stopping; standalone boot remains 120.
+Two prior 300-second waits expired before native tests. The extra 300 seconds
+are included in the work and outer envelopes, with unchanged scans and cleanup.
+The Recovery workflow reserves 91 native minutes inside a 118-minute
 job, including checkout, 15 minutes for all offline guards, evidence upload and
 cancellation. Complete-file SDK typechecks allow 180 seconds each after two
 hosted compiler commands exceeded their former 45-second limits; fixture
