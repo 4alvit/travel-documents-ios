@@ -2328,6 +2328,7 @@ import CoreGraphics
     struct Instant: Comparable {
         let time: Duration
         func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        func duration(to other: Instant) -> Duration { other.time - time }
         static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
     }
     static var elapsed: Duration = .zero
@@ -2435,7 +2436,7 @@ final class XCTAttachment {
 @MainActor final class PreviewHarness {
     var failures = 0
     var attachments: [XCTAttachment] = []
-    func add(_ attachment: XCTAttachment) { precondition(failures == 1); attachments.append(attachment) }
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
     func failure(_ message: String, app: XCUIApplication) -> FixtureFailure {
         precondition(message == "Restored original PDF content did not render")
         failures += 1
@@ -2453,6 +2454,33 @@ final class XCTAttachment {
         var expected = false
         var expectedCaptures = 1
         switch name {
+        case "hosted-45", "default-45":
+            world.images[0].ocrTime = .seconds(45); expected = name == "hosted-45"
+        case "hosted-at-deadline", "hosted-overrun":
+            world.images[0].ocrTime = .seconds(name == "hosted-at-deadline" ? 60 : 61)
+        case "hosted-two-attempts":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(25)), FakeImage(lines: positive.lines, ocrTime: .seconds(40))]
+            expectedCaptures = 2
+        case "hosted-trace-bound":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(8))]; expectedCaptures = 8
+        case "hosted-trace-truncated":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(2))]; expectedCaptures = 29
+        case "trace-max-fields":
+            var trace = PreviewAttemptTrace()
+            for _ in 0..<10 {
+                var attempt = PreviewAttempt()
+                attempt.startedSeconds = Double.greatestFiniteMagnitude
+                attempt.querySeconds = Double.greatestFiniteMagnitude
+                attempt.captureSeconds = Double.greatestFiniteMagnitude
+                attempt.ocrSeconds = Double.greatestFiniteMagnitude
+                attempt.totalSeconds = Double.greatestFiniteMagnitude
+                trace.append(attempt)
+            }
+            let data = Data(trace.json().utf8)
+            let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            precondition(data.count <= 8192 && (object["attempts"] as! [Any]).count == 8)
+            precondition(object["truncated"] as! Bool && object["totalAttempts"] as! Int == 10)
+            print("PASS " + name); return
         case "rendered": expected = true
         case "normalized":
             world.images = [FakeImage(lines: [" SYNTHETIC  DEMO – NOT VALID FOR TRAVEL ", "Sample\treservation ABC-000"])]; expected = true
@@ -2486,14 +2514,33 @@ final class XCTAttachment {
         default: fatalError("Unknown fixture")
         }
         let app = XCUIApplication(nodes, world)
-        if ["blank-then-rendered", "ocr-overrun", "ocr-at-deadline", "capture-overrun", "error-until-deadline", "bounded-lines"].contains(name) {
+        if name.hasPrefix("hosted-") || name == "default-45" || ["blank-then-rendered", "ocr-overrun", "ocr-at-deadline", "capture-overrun", "error-until-deadline", "bounded-lines"].contains(name) {
             var acceptedToken: Int?
-            do { acceptedToken = try await waitForRenderedSyntheticOriginal(app).screenshot.token }
+            let timeout = Self.recoveryPreviewObservationTimeout(hosted: name.hasPrefix("hosted-"))
+            do { acceptedToken = try await waitForRenderedSyntheticOriginal(app, timeout: timeout).screenshot.token }
             catch { precondition(!expected) }
             precondition((acceptedToken != nil) == expected)
-            if expected { precondition(acceptedToken == 2 && failures == 0) }
+            let timing = attachments.last!
+            precondition(timing.name == "Recovery original preview — attempt timings" && timing.lifetime == .keepAlways)
+            let data = Data(timing.text.utf8)
+            let trace = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let attempts = trace["attempts"] as! [[String: Any]]
+            precondition(data.count <= 8192 && attempts.count == min(expectedCaptures, 8))
+            precondition(trace["totalAttempts"] as! Int == expectedCaptures)
+            precondition(trace["truncated"] as! Bool == (expectedCaptures > 8))
+            precondition(attempts[0]["number"] as! Int == 1 && attempts[0]["startedSeconds"] as! Double == 0)
+            if name == "hosted-45" || name == "default-45" {
+                precondition(attempts[0]["ocrSeconds"] as! Double == 45)
+                precondition(attempts[0]["outcome"] as! String == (expected ? "accepted" : "ocrLate"))
+            }
+            if name == "hosted-two-attempts" {
+                precondition(attempts[0]["outcome"] as! String == "markersRejected")
+                precondition(attempts[1]["outcome"] as! String == "ocrLate")
+                precondition(attempts[1]["startedSeconds"] as! Double >= 25)
+            }
+            if expected { precondition(acceptedToken == (name == "hosted-45" ? 1 : 2) && failures == 0) }
             else {
-                precondition(failures == 1 && attachments.count == 1)
+                precondition(failures == 1 && attachments.count == 2)
                 let text = attachments[0].text
                 precondition(text.utf8.count <= 2048 && attachments[0].lifetime == .keepAlways)
                 if name == "error-until-deadline" { precondition(text.contains("Vision error: domain=") && text.contains("code=")) }
@@ -2512,7 +2559,7 @@ final class XCTAttachment {
             let index = order.firstIndex(of: String(name.dropFirst(5)))!
             precondition(world.reads == Array(order[...index]) && world.requests == 0)
         }
-        if expected { precondition(attachments.isEmpty) }
+        if expected { precondition(attachments.count == (name == "hosted-45" || name == "blank-then-rendered" ? 1 : 0)) }
         if ["capture-overrun", "missing-pixels", "already-expired"].contains(name) {
             precondition(world.requests == 0)
         }
@@ -2556,12 +2603,57 @@ class PreviewReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
+    def test_hosted_preview_deadline_and_bounded_attempt_diagnostics(self):
+        for name in ['hosted-45', 'default-45', 'hosted-at-deadline', 'hosted-overrun',
+                     'hosted-two-attempts', 'hosted-trace-bound', 'hosted-trace-truncated',
+                     'trace-max-fields']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_preview_policy_and_late_acceptance_mutations_are_detected(self):
+        source = SOURCE.read_text()
+        start = source.index('    private struct RenderedOriginalEvidence {')
+        end = source.index('    private func reachRecoveryLocalRoot(', start)
+        helper = source[start:end]
+        old_policy = 'hosted ? .seconds(60) : .seconds(40)'
+        self.assertEqual(helper.count(old_policy), 1)
+        mutations = [
+            ('old-hosted-window', helper.replace(old_policy, 'hosted ? .seconds(40) : .seconds(40)'), 'hosted-45'),
+            ('late-acceptance', helper.replace('guard ContinuousClock.now < deadline else { return nil }',
+                                               'guard true else { return nil }')
+                                      .replace('ContinuousClock.now < deadline else { return nil }',
+                                               'true else { return nil }'), 'hosted-at-deadline'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label, mutated, case in mutations:
+                with self.subTest(label=label):
+                    swift = root / (label + '.swift')
+                    binary = root / label
+                    swift.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', mutated))
+                    subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(swift), '-o', str(binary)],
+                                   check=True, capture_output=True, text=True, timeout=60)
+                    result = subprocess.run([str(binary), case], capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+
+    def test_preview_policy_is_selected_after_existing_profile_validation(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
+        end = source.index('    private struct RenderedOriginalEvidence {', start)
+        body = source[start:end]
+        self.assertLess(body.index('try recoveryConfiguration(phase: "restore")'),
+                        body.index('Self.recoveryPreviewObservationTimeout('))
+        self.assertIn('ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"', body)
+        self.assertEqual(body.count('timeout: previewObservationTimeout'), 1)
+
     def test_recovery_attaches_the_screenshot_that_satisfied_ocr(self):
         source = SOURCE.read_text()
         start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
         end = source.index('    private struct RenderedOriginalEvidence {', start)
         body = source[start:end]
-        self.assertIn('let rendered = try await waitForRenderedSyntheticOriginal(app)', body)
+        self.assertIn('let rendered = try await waitForRenderedSyntheticOriginal(app, timeout: previewObservationTimeout)', body)
         self.assertIn('XCTAttachment(screenshot: rendered.screenshot)', body)
         self.assertLess(body.index('add(renderedScreenshot)'),
                         body.index('capture(app, "Recovery restored original'))

@@ -983,3 +983,27 @@ as the xcresult writer. The scan remains limited to five seconds and to both
 the primary and child original work deadlines; neither stop reserve may be
 borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
+
+
+The hosted Intel Recovery restore phase allows 60 seconds for observing the
+rendered original PDF; the default observation remains 40 seconds. This selection
+follows the existing validated Recovery profile. One deadline covers the existing
+preview queries, fresh screenshot and synchronous Vision recognition. A screenshot
+or OCR result that finishes too late is still rejected, and both exact synthetic
+markers must occur once in the recognized preview pixels.
+
+A failed hosted run reached the rendered PDF but recorded that Vision completed
+after the 40-second deadline. The later failure screenshot contained both markers;
+it does not establish what the earlier OCR input or recognition result contained.
+The 60-second choice is bounded engineering headroom, not proof of completion.
+The restore case remains capped at 600 seconds, its command at 900 seconds, and
+all work, cleanup and workflow limits remain unchanged.
+
+The preview observer retains one diagnostic JSON attachment of at most 8 KiB on
+success or failure. It records the first eight attempts with relative start,
+query, screenshot, OCR and total durations and fixed outcomes, plus the total
+attempt count and an explicit truncation flag. It makes no additional accessibility
+queries or OCR calls. The existing bounded last-observation attachment remains
+separate on failure. Serialization never truncates JSON bytes; an unexpected
+encoding failure is explicitly reported. These diagnostics do not authorize
+success or replace the subsequent host comparison of restored catalog and bytes.
