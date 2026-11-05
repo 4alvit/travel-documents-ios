@@ -784,8 +784,8 @@ text checks, four Cancels, zero Open actions and final Free/Trips evidence remai
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 95 minutes,
-and each iPad locale has 95 minutes, at most 485 aggregate job-minutes. All five
+Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 125 minutes,
+and each iPad locale has 95 minutes, at most 515 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. All five use `macos-15-intel` with the same
@@ -802,7 +802,7 @@ Recovery-to-serial-iPad scheduling waits; it does not reserve runners. GitHub's
 are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
 account limits and other workflows share that capacity, including Swift CodeQL
 and separate Batch/Biometrics qualification. Jobs may queue, so the largest
-individual job limit of 118 minutes is not a completion-time guarantee.
+individual job limit of 125 minutes is not a completion-time guarantee.
 Per-job native tests remain serial, with explicit finite timeouts, owned-process
 cleanup, `!cancelled()` conditions and the final gate's four result checks.
 
@@ -811,8 +811,33 @@ verify all six fresh jobs in the same attempt. Retrying only failed jobs no
 longer reruns independent guidance jobs through the removed dependency edges;
 copied or earlier successful records are not fresh native evidence.
 
-The hosted Intel Phone guidance profile uses a 75-minute integration step within
-that 95-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
+Run `41940543243` reached all nine Phone cases after successful preparation, but
+four exceeded their native allowances. The first complete-warning case crossed
+240 seconds during its final dismissal check; a later AUT termination failed.
+Free-card dismissal and AUT shutdown completed by 239.600 seconds, but diagnostic
+recording finalization crossed 240. English guidance reached its fourth link
+confirmation before 720 seconds; Russian maximum-type guidance reached only its
+first confirmation before 600. Post-timeout actions are diagnostic evidence,
+not passing results. The explicit hosted Phone profile now gives the two affected
+accessibility cases 360 seconds each, English guidance 1,080 and Russian guidance
+1,500. The five other cases and every action, assertion, capture and teardown stay
+unchanged. The final hosted Phone invocation alone uses a 1,500-second CLI maximum.
+Missing native tokens retain the original defaults, including English 480,
+Russian 600 and the inherited Free-card allowance. Dedicated iPad policies remain
+separate. All three inherited Phone token aliases are rejected at shell entry;
+the strict hosted Phone branch also requires the exact repository and rejects
+all three iPad aliases before native tools.
+
+The 600-second non-case allocation exceeds the current approximately 351 seconds
+outside failure-associated windows and the earlier accepted Arm run's approximately
+464 seconds. The current extra 426 seconds includes post-timeout continuation and
+runner restarts; it is neither ordinary overhead nor guaranteed removable cost.
+The main command shares DerivedData with preparation but still runs `xcodebuild test`.
+It can therefore incur further build, install and runner-startup work. The policy
+does not guarantee that future host delays fit the step.
+
+The hosted Intel Phone guidance profile uses a 105-minute integration step within
+that 125-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
 30 cleanup and ten receipt), including a 300-second post-preparation warm-boot
 command and a 1,080-second combined preparation command. Arm retains 1,080 seconds
 of work, a 960-second preparation command and its 180-second warm-boot cap.
@@ -820,11 +845,12 @@ Both preparation commands retain the 180-second native allowance. The Intel
 increase addresses an outer command timeout before the native allowance elapsed;
 it does not change native assertions or guarantee completion. All commands share
 the original work deadline and must clip to it, including the later warm boot.
-The nine required native case allowances total 2,700 seconds, and 320 seconds remain for
-selection, generation, main build/session startup and result finalization. This
-is an allocation policy rather than a measured worst-case guarantee. Only the
-three short cases that timed out and English guidance receive the explicit
-Phone allowances; ordinary runs, Core, ARM and dedicated iPad limits stay intact.
+The nine required native case allowances total 4,200 seconds. The step allocates
+600 seconds for selection, generation, main build/session startup, transitions
+and result finalization, plus 20 seconds for rounding. This is an engineering
+allocation rather than a measured worst-case guarantee. The explicit Phone
+allowances apply to the two accessibility cases, the Russian warning and both
+guidance cases; ordinary runs, Core, ARM and dedicated iPad limits stay intact.
 All assertions, diagnostic captures and app termination remain required; see
 [the release qualification policy](github-releases.md) for selection and evidence.
 

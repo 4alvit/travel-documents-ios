@@ -417,11 +417,11 @@ Phone bootstrap selects an immutable 1,080-second Intel or 960-second Arm prepar
 command cap, with the same 180-second native preparation allowance, 30-second
 cleanup and ten-second receipt limits. Intel
 gets 1,440 seconds of work; Arm retains 1,080. The Phone integration step has
-75 minutes within a 95-minute job: 1,480 seconds for the complete Intel bootstrap,
-2,700 seconds for the nine case ceilings and 320 seconds for selection, generation,
-main build/session startup, skipped-case bookkeeping and result finalization.
-The Arm allocation remains 1,120 seconds for bootstrap and 680 seconds for other work.
-These are planning allocations under one step timer, not independent guarantees.
+105 minutes within a 125-minute job: 1,480 seconds for the complete Intel bootstrap,
+4,200 seconds for the nine case ceilings, 600 seconds for selection, generation,
+main build/session startup, skipped-case bookkeeping and result finalization,
+and 20 seconds for rounding. The Arm bootstrap and ordinary case defaults remain
+unchanged. These are planning allocations under one step timer, not independent guarantees.
 For example, 1,080 seconds of preparation plus historical other work of 19.4 seconds,
 a 78-second warm boot and 58 seconds of final checks total about 1,235 seconds.
 If that warm boot instead consumes its full 300-second cap, the projection exceeds
@@ -469,18 +469,33 @@ continued diagnostically to150.57 seconds. English guidance crossed480 seconds
 after its third cancellation and was interrupted during the fourth confirmation.
 None of these post-timeout observations is a successful result.
 
-Only the explicit hosted Intel Phone profile now selects240 seconds for those
-three short cases and720 seconds for English guidance. The runner validates its
-host/cohort and selected iPhone before passing a token only to the final test
-invocation. The test-side selector requires the exact token, a Debug x86_64
-Simulator build and iPhone idiom. Missing tokens preserve previous defaults;
-invalid or incompatible tokens fail before app launch. Local and Core runs,
-ARM, and dedicated iPad tests receive no Phone token. The inherited Free-card allowance
-remains untouched outside this profile. Russian Phone guidance stays600 seconds;
-the ordinary test default stays180. By default, dedicated iPad commands clamp
-guidance cases to480 seconds within a900-second command limit. The explicit
-hosted English iPad policy described below uses900/1,200 seconds instead. Its
-work/cleanup budget remains2,100/180 seconds on ARM or4,500/360 seconds on Intel.
+The later [Phone run 41940543243](https://github.com/4alvit/travel-documents-ios/actions/runs/41940543243/job/126959918553)
+completed preparation but exceeded four native allowances: complete-warning 240,
+Free-card 240, English guidance 720 and Russian guidance 600 seconds. Free-card
+body and AUT shutdown completed by 239.600 seconds, before diagnostic recording
+finalization crossed its limit. English reached the fourth confirmation; Russian
+reached only the first. Post-timeout continuation is not a passing result.
+
+Only the explicit hosted Intel Phone profile now selects 360 seconds for the
+complete-warning and Free-card cases, 1,080 for English guidance and 1,500 for
+Russian guidance. The Russian warning remains 240; the five unaffected case
+allowances stay unchanged. The runner requires the exact repository, host/cohort
+and selected iPhone before passing its token only to the final test invocation,
+whose CLI maximum is 1,500 seconds. All three inherited Phone token aliases are
+rejected at entry; the strict hosted Phone branch also rejects all three iPad
+aliases before native tools. The test selector requires the exact token, a Debug
+x86_64 Simulator build and iPhone idiom. Missing tokens preserve prior defaults,
+including English 480, Russian 600 and the inherited Free-card allowance; invalid
+or incompatible tokens fail before app launch. Local and Core runs, ARM, and
+dedicated iPad tests receive no Phone token. The ordinary test default stays 180,
+and the dedicated iPad policies below remain unchanged.
+
+The 600-second non-case allocation is engineering headroom over approximately
+351 seconds outside the current failure-associated windows and approximately
+464 seconds in an earlier accepted Arm run. It does not presume that the current
+post-timeout continuation and restart time is ordinary overhead or will disappear.
+The main `test` command shares DerivedData but may still build, install and start
+its runner. No measured worst-case completion guarantee is implied.
 All text, privacy, Cancel, final Trips, screenshot, hierarchy and termination
 checks remain required. These finite margins do not establish the cause of slow
 host observations or guarantee a pass; fresh complete native evidence is required.

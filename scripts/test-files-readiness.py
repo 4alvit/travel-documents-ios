@@ -1477,22 +1477,28 @@ class HostedPhoneTimingTests(unittest.TestCase):
             }
         }
         '''
-        path = Path(cls.directory.name) / 'PhoneTiming.swift'; path.write_text(code)
+        cls.code = code
         cls.binaries = {}
         for supported in (False, True):
-            binary = Path(cls.directory.name) / ('supported' if supported else 'unsupported')
-            flags = ['-D', 'PHONE_TEST_SUPPORTED_BUILD'] if supported else []
-            result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
-                                     *flags, str(path), '-o', str(binary)], capture_output=True, text=True, timeout=60)
-            if result.returncode != 0: raise AssertionError(result.stderr)
-            cls.binaries[supported] = binary
+            cls.binaries[supported] = cls.compile(code, str(supported), supported)
 
-    def invoke(self, supported, token=None, idiom='phone'):
+    @classmethod
+    def compile(cls, code, name, supported=True):
+        path = Path(cls.directory.name) / (name + '.swift'); path.write_text(code)
+        binary = Path(cls.directory.name) / name
+        flags = ['-D', 'PHONE_TEST_SUPPORTED_BUILD'] if supported else []
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
+                                 *flags, str(path), '-o', str(binary)], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode != 0: raise AssertionError(result.stderr)
+        return binary
+
+    def invoke(self, supported, token=None, idiom='phone', binary=None):
         env = dict(os.environ); env.pop('TRIPDOCKET_PHONE_TIMING', None)
         env.pop('TRIPDOCKET_IPAD_TIMING', None)
         env['PHONE_TEST_IDIOM'] = idiom
         if token is not None: env['TRIPDOCKET_PHONE_TIMING'] = token
-        result = subprocess.run([str(self.binaries[supported])], env=env, capture_output=True,
+        result = subprocess.run([str(binary or self.binaries[supported])], env=env, capture_output=True,
                                 text=True, check=True, timeout=5)
         return result.stdout.strip()
 
@@ -1502,7 +1508,25 @@ class HostedPhoneTimingTests(unittest.TestCase):
                 self.assertEqual(self.invoke(supported, idiom=idiom), '[777.0, 180.0, 120.0, 480.0, 600.0]')
 
     def test_exact_supported_phone_profile_changes_only_four_case_branches(self):
-        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[240.0, 240.0, 240.0, 720.0, 600.0]')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[360.0, 360.0, 240.0, 1080.0, 1500.0]')
+
+    def test_reverting_each_changed_phone_policy_loses_only_its_allowances(self):
+        cases = [
+            ('executionTimeAllowance = 360', 'executionTimeAllowance = 240',
+             '[240.0, 360.0, 240.0, 1080.0, 1500.0]'),
+            ('useHostedPhoneTiming() ? 360 : 180', 'useHostedPhoneTiming() ? 240 : 180',
+             '[360.0, 240.0, 240.0, 1080.0, 1500.0]'),
+            ('hostedPhone ? (russian && maximumType ? 1500 : 1080)',
+             'hostedPhone ? (russian && maximumType ? 600 : 720)',
+             '[360.0, 360.0, 240.0, 720.0, 600.0]'),
+        ]
+        for index, (new, old, expected) in enumerate(cases):
+            with self.subTest(policy=new):
+                self.assertEqual(self.code.count(new), 2 if index == 2 else 1)
+                mutant = self.compile(self.code.replace(new, old), 'old-phone-' + str(index))
+                self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', binary=mutant), expected)
+                self.assertEqual(self.invoke(True, binary=mutant),
+                                 '[777.0, 180.0, 120.0, 480.0, 600.0]')
 
     def test_invalid_token_wrong_build_or_ipad_rejects_before_any_case_body(self):
         for token in ('', 'wrong', 'hosted-intel-phone-v1 '):
@@ -1593,9 +1617,9 @@ class HostedIPadTimingTests(unittest.TestCase):
                 self.assertEqual(self.invoke(supported=supported, idiom=idiom), '480.0')
                 self.assertEqual(self.invoke(supported=supported, idiom=idiom,
                                              russian=True, maximum=True), '600.0')
-        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone'), '720.0')
+        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone'), '1080.0')
         self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone',
-                                     russian=True, maximum=True), '600.0')
+                                     russian=True, maximum=True), '1500.0')
 
     def test_invalid_conflicting_or_out_of_scope_ipad_tokens_reject(self):
         for token in ('', 'wrong', 'hosted-intel-ipad-en-v1 ', 'hosted-intel-ipad-ru-v1 '):

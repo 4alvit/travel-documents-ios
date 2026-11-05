@@ -18,7 +18,7 @@ if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && ( "$TRIPFOLIO_REQUIRE_SDK_MATCH" != 1 |
   exit 2
 fi
 # A caller cannot carry hosted Phone scope into preparation or another cohort.
-if [[ ${TEST_RUNNER_TRIPDOCKET_PHONE_TIMING+x} || ${TRIPDOCKET_PHONE_TIMING+x} ]]; then
+if [[ ${TEST_RUNNER_TRIPDOCKET_PHONE_TIMING+x} || ${TRIPDOCKET_PHONE_TIMING+x} || ${SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING+x} ]]; then
   echo "Phone timing profile must be selected by this script" >&2
   exit 2
 fi
@@ -29,8 +29,12 @@ fi
 TRIPFOLIO_HOSTED_CORE_TIMING=0
 TRIPFOLIO_HOSTED_PHONE_TIMING=0
 if [[ "$TRIPFOLIO_PREPARE_FILES" == 1 && "${RUNNER_ARCH:-}" == X64 ]]; then
-  if [[ "${RUNNER_OS:-}" != macOS || "${RUNNER_ENVIRONMENT:-}" != github-hosted || "${GITHUB_WORKFLOW:-}" != CI || "${GITHUB_JOB:-}" != ui_guidance || "$(uname -m)" != x86_64 ]]; then
+  if [[ "${RUNNER_OS:-}" != macOS || "${RUNNER_ENVIRONMENT:-}" != github-hosted || "${GITHUB_WORKFLOW:-}" != CI || "${GITHUB_JOB:-}" != ui_guidance || "${GITHUB_REPOSITORY:-}" != 4alvit/travel-documents-ios || "$(uname -m)" != x86_64 ]]; then
     echo "Hosted Phone timing requires the exact Intel CI runner" >&2
+    exit 2
+  fi
+  if [[ ${TEST_RUNNER_TRIPDOCKET_IPAD_TIMING+x} || ${TRIPDOCKET_IPAD_TIMING+x} || ${SIMCTL_CHILD_TRIPDOCKET_IPAD_TIMING+x} ]]; then
+    echo "Hosted Phone timing cannot inherit an iPad profile" >&2
     exit 2
   fi
   TRIPFOLIO_HOSTED_PHONE_TIMING=1
@@ -108,7 +112,7 @@ mkdir -p build
 if [[ "$TRIPFOLIO_HOSTED_PHONE_TIMING" == 1 ]]; then
   test "$(cat "$TRIPFOLIO_SELECTION_DIR/architecture.txt")" = x86_64
   export TEST_RUNNER_TRIPDOCKET_PHONE_TIMING=hosted-intel-phone-v1
-  MAXIMUM_TEST_SECONDS=720
+  MAXIMUM_TEST_SECONDS=1500
 fi
 if [[ "$TRIPFOLIO_HOSTED_CORE_TIMING" == 1 ]]; then
   test "$(cat "$TRIPFOLIO_SELECTION_DIR/architecture.txt")" = x86_64
