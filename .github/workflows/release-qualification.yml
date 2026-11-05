@@ -15,6 +15,12 @@ on:
         description: Exact Simulator artifact ID from that CI run and attempt
         type: string
         required: true
+      runner:
+        description: Explicit reviewed macOS 15 runner profile
+        type: choice
+        required: true
+        default: macos-15-intel
+        options: [macos-15-intel, macos-15]
 permissions:
   contents: read
   actions: read
@@ -23,8 +29,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   smoke:
-    if: github.ref == 'refs/heads/diagnostic/release-smoke'
-    runs-on: macos-15-intel
+    if: github.ref == 'refs/heads/diagnostic/release-smoke' && (inputs.runner == 'macos-15-intel' || inputs.runner == 'macos-15')
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 32
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -44,6 +50,7 @@ jobs:
         timeout-minutes: 6
         env:
           GH_TOKEN: ${{ github.token }}
+          SMOKE_RUNNER: ${{ inputs.runner }}
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_RUN_ID: ${{ inputs.ci_run_id }}
           CANDIDATE_ARTIFACT_ID: ${{ inputs.artifact_id }}

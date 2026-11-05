@@ -48,7 +48,7 @@ class CloudTests(unittest.TestCase):
                     'GITHUB_RUN_ID': '100', 'GITHUB_RUN_ATTEMPT': '1',
                     'GITHUB_REF': 'refs/heads/diagnostic/release-smoke', 'RUNNER_OS': 'macOS',
                     'RUNNER_ARCH': 'X64', 'ImageOS': 'macos15', 'DEVELOPER_DIR': c.DEVELOPER_DIR,
-                    'GH_TOKEN': 'synthetic-secret-never-retain'}
+                    'GH_TOKEN': 'synthetic-secret-never-retain', 'SMOKE_RUNNER': 'macos-15-intel'}
         self.host_architecture = 'x86_64'
         self.report, self.calls = {}, []
         self.ancestor = True
@@ -120,6 +120,45 @@ class CloudTests(unittest.TestCase):
 
     def test_intel_runner_metadata_does_not_accept_arm_host(self):
         self.host_architecture = 'arm64'
+        with self.assertRaisesRegex(ValueError, 'hosted architecture'): self.prepare()
+        self.assertEqual(self.report['stage'], 'host-profile')
+        self.assertNotEqual(self.report.get('status'), 'prepared_pending_ordinary_smoke')
+        self.assertEqual([argv for argv in self.calls if argv[0] != 'git'], [['uname', '-m']])
+        self.assertEqual(self.report['host'], {})
+
+    def test_explicit_arm_profile_preserves_exact_product_and_metadata(self):
+        self.env.update(SMOKE_RUNNER='macos-15', RUNNER_ARCH='ARM64')
+        self.host_architecture = 'arm64'
+        self.assertEqual(self.prepare(), self.f.tree)
+        self.assertEqual(self.report['status'], 'prepared_pending_ordinary_smoke')
+        self.assertEqual(self.report['runner']['SMOKE_RUNNER'], 'macos-15')
+        self.assertEqual(self.report['runner']['RUNNER_ARCH'], 'ARM64')
+        self.assertEqual(self.report['host']['architecture'], 'arm64')
+        for name, body in self.f.files.items():
+            self.assertEqual((self.out / 'inputs' / name).read_bytes(), body)
+        self.assertEqual(stat.S_IMODE((self.out / 'inputs/Tripfolio.app/Tripfolio').stat().st_mode), 0o755)
+        self.assertFalse(p.decode_json((self.out / 'inputs/provenance.json').read_bytes())['status']['runtime_accepted'])
+        self.assertTrue(all(method == 'GET' for method, _ in self.api.calls))
+        self.assertNotIn(self.env['GH_TOKEN'], json.dumps(self.report))
+
+    def test_unknown_or_missing_runner_selection_stops_before_commands(self):
+        for runner in (None, '', 'macos-14', 'macos-latest', 'ARM64'):
+            with self.subTest(runner=runner):
+                if runner is None: self.env.pop('SMOKE_RUNNER', None)
+                else: self.env['SMOKE_RUNNER'] = runner
+                with self.assertRaisesRegex(ValueError, 'hosted toolchain profile'): self.prepare()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.api.calls, [])
+                self.assertFalse((self.out / 'inputs').exists())
+
+    def test_arm_selection_rejects_intel_metadata_before_commands(self):
+        self.env['SMOKE_RUNNER'] = 'macos-15'
+        with self.assertRaisesRegex(ValueError, 'hosted toolchain profile'): self.prepare()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.api.calls, [])
+
+    def test_arm_metadata_rejects_intel_uname(self):
+        self.env.update(SMOKE_RUNNER='macos-15', RUNNER_ARCH='ARM64')
         with self.assertRaisesRegex(ValueError, 'hosted architecture'): self.prepare()
         self.assertEqual(self.report['stage'], 'host-profile')
         self.assertNotEqual(self.report.get('status'), 'prepared_pending_ordinary_smoke')
