@@ -24,7 +24,7 @@ final class AccessibilityUITests: XCTestCase {
     private let backupWarningText = "The backup includes every original document, person and trip in readable, unencrypted form. Anyone with a copy can access them. Keep it in a trusted location. Previously shared copies cannot be revoked."
 
     func testMaximumTypeFreeCardAndProDismissal() async throws {
-        if try useHostedPhoneTiming() { executionTimeAllowance = 240 }
+        if try useHostedPhoneTiming() { executionTimeAllowance = 360 }
         let app = try launchFixture()
         defer { app.terminate() }
 
@@ -109,7 +109,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testMaximumTypeCompleteBackupWarningAndCancellation() async throws {
-        executionTimeAllowance = try useHostedPhoneTiming() ? 240 : 180
+        executionTimeAllowance = try useHostedPhoneTiming() ? 360 : 180
         let app = try launchFixture()
         defer { app.terminate() }
         try selectTab("Settings", in: app)

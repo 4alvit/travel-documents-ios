@@ -185,20 +185,21 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
                 self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
                 self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], ceiling)
         source = (Path(__file__).resolve().parents[1] / "UITests/PrivacySupportUITests.swift").read_text()
-        self.assertIn("executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))", source)
+        self.assertIn("executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) : (hostedPhone ? (russian && maximumType ? 1500 : 1080) : (russian && maximumType ? 600 : 480))", source)
         self.assertEqual(source.count("executionTimeAllowance ="), 1)
 
     def test_hosted_phone_profile_is_final_invocation_only(self):
         self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
                         RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
-                        GITHUB_JOB="ui_guidance", FAKE_ARCH="x86_64")
+                        GITHUB_JOB="ui_guidance", GITHUB_REPOSITORY="4alvit/travel-documents-ios",
+                        FAKE_ARCH="x86_64")
         (self.root / "scripts/prepare-guidance-files.py").write_text(
             "import os\nassert 'TEST_RUNNER_TRIPDOCKET_PHONE_TIMING' not in os.environ\n"
             "assert 'TRIPDOCKET_PHONE_TIMING' not in os.environ\n")
         result = self.run_script("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = json.loads(self.output.read_text())
-        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "720")
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "1500")
         self.assertEqual(argv[argv.index("-default-test-execution-time-allowance") + 1], "180")
         exported = json.loads(Path(str(self.output) + ".env").read_text())
         self.assertEqual(exported, {"TEST_RUNNER_TRIPDOCKET_PHONE_TIMING": "hosted-intel-phone-v1"})
@@ -208,19 +209,23 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
             self.assertEqual(json.loads(Path(str(self.output) + ".env").read_text()), {})
 
     def test_hosted_phone_rejects_inherited_tokens_and_crossed_host_before_tools(self):
-        for name in ["TEST_RUNNER_TRIPDOCKET_PHONE_TIMING", "TRIPDOCKET_PHONE_TIMING"]:
+        for name in ["TEST_RUNNER_TRIPDOCKET_PHONE_TIMING", "TRIPDOCKET_PHONE_TIMING",
+                     "SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING"]:
             for value in ["", "wrong", "hosted-intel-phone-v1"]:
                 with self.subTest(name=name, value=value):
                     self.env[name] = value
                     result = self.run_script()
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertFalse(self.output.exists())
+                    self.assertFalse(self.tool_log.exists())
                     del self.env[name]
         self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
                         RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
-                        GITHUB_JOB="ui_guidance", FAKE_ARCH="x86_64")
+                        GITHUB_JOB="ui_guidance", GITHUB_REPOSITORY="4alvit/travel-documents-ios",
+                        FAKE_ARCH="x86_64")
         for name, wrong in [("RUNNER_OS", "Linux"), ("RUNNER_ENVIRONMENT", "self-hosted"),
                             ("GITHUB_WORKFLOW", "Other"), ("GITHUB_JOB", "recovery"),
+                            ("GITHUB_REPOSITORY", "other/repository"),
                             ("FAKE_ARCH", "arm64")]:
             with self.subTest(name=name):
                 old = self.env[name]; self.env[name] = wrong
@@ -228,6 +233,85 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse(self.output.exists())
                 self.env[name] = old
+
+    def test_hosted_phone_rejects_ipad_aliases_but_local_path_remains_unchanged(self):
+        self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                        RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                        GITHUB_JOB="ui_guidance", GITHUB_REPOSITORY="4alvit/travel-documents-ios",
+                        FAKE_ARCH="x86_64")
+        for name in ("TRIPDOCKET_IPAD_TIMING", "TEST_RUNNER_TRIPDOCKET_IPAD_TIMING",
+                     "SIMCTL_CHILD_TRIPDOCKET_IPAD_TIMING"):
+            for value in ("", "wrong", "hosted-intel-ipad-en-v1", "hosted-intel-ipad-ru-v1"):
+                with self.subTest(name=name, value=value):
+                    self.env[name] = value
+                    self.tool_log.unlink(missing_ok=True)
+                    result = self.run_script("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse(self.output.exists())
+                    tools = ([json.loads(line)["tool"] for line in self.tool_log.read_text().splitlines()]
+                             if self.tool_log.exists() else [])
+                    self.assertTrue(all(tool == "uname" for tool in tools), tools)
+                    del self.env[name]
+        # Ordinary invocation does not opt into the Phone producer; retain its
+        # existing treatment of unrelated caller-provided iPad environment.
+        self.env["TRIPDOCKET_IPAD_TIMING"] = "unrelated-local-value"
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(self.output.read_text())
+        self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "480")
+
+    def test_hosted_phone_rejects_missing_or_other_repository_before_tools(self):
+        self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                        RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                        GITHUB_JOB="ui_guidance", FAKE_ARCH="x86_64")
+        for repository in (None, "", "other/repository"):
+            self.env.pop("GITHUB_REPOSITORY", None)
+            if repository is not None: self.env["GITHUB_REPOSITORY"] = repository
+            self.tool_log.unlink(missing_ok=True)
+            result = self.run_script("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertFalse(self.output.exists())
+            self.assertFalse(self.tool_log.exists())
+
+    def test_removing_each_phone_isolation_guard_reopens_its_actual_shell_path(self):
+        script = self.root / "scripts/test-simulator.sh"
+        original = script.read_text()
+        (self.root / "scripts/prepare-guidance-files.py").write_text("pass\n")
+        environment = dict(self.env)
+        cases = [
+            (" || ${SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING+x}", "",
+             {"SIMCTL_CHILD_TRIPDOCKET_PHONE_TIMING": "hosted-intel-phone-v1"}, ()),
+            (' || "${GITHUB_REPOSITORY:-}" != 4alvit/travel-documents-ios', "",
+             {"GITHUB_REPOSITORY": "other/repository"},
+             ("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")),
+            ('  if [[ ${TEST_RUNNER_TRIPDOCKET_IPAD_TIMING+x} || ${TRIPDOCKET_IPAD_TIMING+x} || ${SIMCTL_CHILD_TRIPDOCKET_IPAD_TIMING+x} ]]; then\n'
+             '    echo "Hosted Phone timing cannot inherit an iPad profile" >&2\n'
+             '    exit 2\n  fi\n', "",
+             {"TRIPDOCKET_IPAD_TIMING": "hosted-intel-ipad-en-v1"},
+             ("--require-sdk-match", "--prepare-files", "--cohort", "ui-guidance")),
+        ]
+        try:
+            for needle, replacement, overrides, args in cases:
+                with self.subTest(guard=needle):
+                    self.assertIn(needle, original)
+                    self.env = dict(environment)
+                    self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                                    RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                                    GITHUB_JOB="ui_guidance", GITHUB_REPOSITORY="4alvit/travel-documents-ios",
+                                    FAKE_ARCH="x86_64")
+                    self.env.update(overrides)
+                    script.write_text(original)
+                    self.output.unlink(missing_ok=True)
+                    fixed = self.run_script(*args)
+                    self.assertEqual(fixed.returncode, 2, fixed.stderr)
+                    self.assertFalse(self.output.exists())
+                    script.write_text(original.replace(needle, replacement, 1))
+                    mutant = self.run_script(*args)
+                    self.assertEqual(mutant.returncode, 0, mutant.stderr)
+                    self.assertTrue(self.output.exists())
+        finally:
+            script.write_text(original)
+            self.env = environment
 
     def test_strict_wrong_requested_uuid_prevents_native_test_command(self):
         result = self.run_script("--require-sdk-match", requested=SECOND)

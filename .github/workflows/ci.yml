@@ -120,11 +120,12 @@ jobs:
     # Independent checkout and Simulator; the final gate still requires every cohort.
     if: ${{ !cancelled() }}
     runs-on: macos-15-intel
-    # 75m integration covers1120s bootstrap +2700s case ceilings +680s other work.
+    # 105m integration covers1480s bootstrap +4200s case ceilings +600s other work,
+    # plus20s rounding; other work is an engineering allocation, not a guarantee.
     # Hosted Phone case limits preserve all assertions, captures and cleanup.
-    # 95m = checkout2 + toolchain3 + integration75 + cancellation5
+    # 125m = checkout2 + toolchain3 + integration105 + cancellation5
     #       + raw evidence3 + optional extraction3/upload2 + finalization2.
-    timeout-minutes: 95
+    timeout-minutes: 125
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
@@ -143,7 +144,7 @@ jobs:
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        timeout-minutes: 75
+        timeout-minutes: 105
         # Provider initialization is explicit; this is not cold Files first-use coverage.
         run: bash scripts/test-simulator.sh --require-sdk-match --prepare-files --cohort ui-guidance
       # Preserve raw results before optional failure extraction consumes its budget.
