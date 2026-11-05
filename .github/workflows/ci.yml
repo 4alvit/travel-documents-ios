@@ -14,7 +14,7 @@ concurrency:
 jobs:
   validate:
     name: Swift, hosted tests and purchase UI
-    runs-on: macos-15-intel
+    runs-on: macos-15
     # 85m = checkout2 + toolchain5 + toolchain evidence2 + selector2
     #       + Verify10 + package2 + integration45 + cancellation5
     #       + raw evidence3 + optional extraction3/upload2 + Simulator2 + finalization2.
@@ -119,7 +119,7 @@ jobs:
     name: Accessibility, localization and guidance UI
     # Independent checkout and Simulator; the final gate still requires every cohort.
     if: ${{ !cancelled() }}
-    runs-on: macos-15-intel
+    runs-on: macos-15
     # 108m integration covers1480s bootstrap +4380s case ceilings +600s other work,
     # plus20s rounding; other work is an engineering allocation, not a guarantee.
     # Hosted Phone case limits preserve all assertions, captures and cleanup.

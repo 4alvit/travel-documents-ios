@@ -69,8 +69,10 @@ device. The result bundle is written under `build/`.
 Pass `--require-sdk-match` before any `--cohort` option to require an available
 iPhone in the selected Xcode's exact Simulator SDK runtime; a supplied device
 UUID is checked against the same requirements. Ordinary local use keeps its
-existing selection behavior. Core/purchase and phone guidance CI use Xcode 26.2
-(17C52) and require its matching Simulator runtime. Their test artifacts retain
+existing selection behavior. Core/purchase and phone guidance CI use standard
+`macos-15` ARM runners with Xcode 26.2 (17C52) and require its matching Simulator
+runtime. They retain the existing ordinary ARM test and preparation limits;
+iPad guidance and recovery remain on Intel. Their test artifacts retain
 the selected device and captured inventories. The Release preview is built with
 the same Xcode version; its provenance records the actual producer. The separate
 recovery compatibility job keeps its own toolchain/profile.
