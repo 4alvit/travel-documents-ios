@@ -228,8 +228,9 @@ qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
-The shared post-New-Folder readiness observation defaults to a 30-second polling
-allowance for standalone and Batch callers. In run 41805678990, about 18 seconds elapsed between the first live
+The non-hosted Recovery caller explicitly retains a 30-second post-New-Folder
+polling allowance. Batch now uses the 60-second shared-helper default described
+below. In run 41805678990, about 18 seconds elapsed between the first live
 picker-count query starting and the failure capture. That query did not report
 exactly one picker, and the previous 15-second window ended before a second
 sample. The later failure image showed an inline editor
@@ -266,6 +267,25 @@ Exact UUID naming,
 editor geometry, fixture termination and host empty-folder adoption remain
 required. This handles the observed transition; it does not establish why Files
 chose it or prove native acceptance of a new candidate.
+
+In [ARM Batch run 42098515308](https://github.com/4alvit/travel-documents-ios/actions/runs/42098515308),
+the initial observation selected a Rename candidate, but both the candidate
+capture and later failure capture showed the opened empty child. No Rename or
+typing occurred. The exact earlier classifier snapshots were not retained, so
+a mixed snapshot pair is not established. The helper now keeps a candidate
+pending until a second strict observation confirms the same frame. A late
+child instead enters the existing single-Back path in the same resolution loop.
+Batch uses one explicit 60-second window: the failed run had already spent
+about 33.34 seconds by the failure capture after fresh validation, before any
+required return.
+Recovery still supplies its existing 60-second hosted or 30-second non-hosted
+value. The clock never resets, candidate capture occurs at most once, and the
+live target, cancellation and remaining deadline are checked before long press.
+Changed candidate geometry rejects the attempt. Existing frozen-snapshot
+diagnostics record the classification on failure. Batch retains its 180-second
+case, 240-second native-folder work budget plus its eight-second stop reserve,
+2,400-second overall work budget and 15-second text observation.
+These bounds do not guarantee completion or establish the cause of Files timing.
 
 The explicit keyboard-introduction state accepts zero or one Keyboard node:
 its first-use overlay can be present in a bound application snapshot without a
