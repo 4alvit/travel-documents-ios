@@ -1039,7 +1039,9 @@ success or replace the subsequent host comparison of restored catalog and bytes.
 
 
 The native folder-name entry keeps one `typeText` action and then observes the
-result for at most 15 seconds. Each observation checks the foreground app and
+result for at most 60 seconds only in the native-folder preparation branch after
+validation of the hosted Intel Recovery profile. Ordinary Recovery and dedicated
+Batch preparation retain 15 seconds. Each observation checks the foreground app and
 uses a separate frozen Files picker snapshot and application snapshot; the app
 snapshot alone can omit the remote Files subtree. Exact ownership, ancestry and
 visible editor geometry remain required. An empty value, the selected default
@@ -1052,8 +1054,13 @@ no-Save rule, fixture shutdown and host exact empty-folder proof are unchanged.
 A retained text attachment records the first eight observations, total count,
 explicit truncation and final outcome as valid JSON of at most 8 KiB. Each value
 is compared in full; diagnostic value bytes are limited to a 128-byte UTF-8 hex
-prefix with an explicit length/truncation indicator. The 15-second window is
-local to this shared helper and does not change either caller's native allowance,
+prefix with an explicit length/truncation indicator. Two hosted failures returned
+from the foreground/picker observation after about 39 seconds, before application
+snapshot or value validation; those intervals do not isolate one RPC or prove
+when the full name became available. Successful controls took about 1.4 and
+7.4 seconds. The 60-second choice is bounded tolerance for that observed variation,
+not a demonstrated fix to its underlying cause. The selected window is local to
+this shared helper and does not change either caller's native allowance,
 the generic UI wait, Recovery command/work/cleanup limits or workflow timeouts.
 It does not establish whether the observed unchanged default name was caused by
 delayed processing or an input event that had no effect.
