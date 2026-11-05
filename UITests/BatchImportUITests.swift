@@ -1696,6 +1696,10 @@ final class BatchImportUITests: XCTestCase {
 
     func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "restore")
+        // The existing configuration validation admits this hosted-only policy.
+        let previewObservationTimeout = Self.recoveryPreviewObservationTimeout(
+            hosted: ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+        )
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -1802,7 +1806,7 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Restored original preview did not open", app: app) {
             app.navigationBars["Original document"].exists && app.otherElements["QLPreviewControllerView"].exists
         }
-        let rendered = try await waitForRenderedSyntheticOriginal(app)
+        let rendered = try await waitForRenderedSyntheticOriginal(app, timeout: previewObservationTimeout)
         let renderedScreenshot = XCTAttachment(screenshot: rendered.screenshot)
         renderedScreenshot.name = "Recovery restored original — accepted preview pixels"
         renderedScreenshot.lifetime = .keepAlways
@@ -1824,14 +1828,77 @@ final class BatchImportUITests: XCTestCase {
         let lines: [String]
     }
 
-    private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication) async throws -> RenderedOriginalEvidence {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
+    private static func recoveryPreviewObservationTimeout(hosted: Bool) -> Duration {
+        hosted ? .seconds(60) : .seconds(40)
+    }
+
+    private struct PreviewAttempt: Encodable {
+        enum Outcome: String, Encodable {
+            case queryRejected, captureRejected, ocrError, ocrLate, markersRejected, accepted
+        }
+        var number = 0
+        var startedSeconds = 0.0
+        var querySeconds: Double?
+        var captureSeconds: Double?
+        var ocrSeconds: Double?
+        var totalSeconds = 0.0
+        var outcome = Outcome.queryRejected
+    }
+
+    private struct PreviewAttemptTrace: Encodable {
+        let version = 1
+        var totalAttempts = 0
+        var truncated = false
+        var attempts: [PreviewAttempt] = []
+
+        mutating func append(_ attempt: PreviewAttempt) {
+            totalAttempts += 1
+            if attempts.count < 8 {
+                var numbered = attempt
+                numbered.number = totalAttempts
+                attempts.append(numbered)
+            } else { truncated = true }
+        }
+
+        func json() -> String {
+            // Fixed fields, six enum values and at most eight records. Never cut
+            // serialized JSON bytes; unexpected encoding failure is explicit.
+            guard let data = try? JSONEncoder().encode(self), data.count <= 8192,
+                  let text = String(data: data, encoding: .utf8) else {
+                return "{\"version\":1,\"diagnosticEncodingFailed\":true}"
+            }
+            return text
+        }
+    }
+
+    private static func previewSeconds(from start: ContinuousClock.Instant,
+                                       to end: ContinuousClock.Instant) -> Double {
+        let value = start.duration(to: end).components
+        return Double(value.seconds) + Double(value.attoseconds) / 1e18
+    }
+
+    private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication,
+                                                  timeout: Duration = .seconds(40)) async throws -> RenderedOriginalEvidence {
+        let started = ContinuousClock.now
+        let deadline = started.advanced(by: timeout)
+        var trace = PreviewAttemptTrace()
+        defer {
+            let timing = XCTAttachment(string: trace.json())
+            timing.name = "Recovery original preview — attempt timings"
+            timing.lifetime = .keepAlways
+            add(timing)
+        }
         var lastObservation = "No preview observation completed"
         while ContinuousClock.now < deadline {
+            let attemptStarted = ContinuousClock.now
             if let rendered = renderedSyntheticOriginal(app, before: deadline, observe: { message in
                 var bytes = Array(message.utf8.prefix(2048))
                 while !bytes.isEmpty, String(bytes: bytes, encoding: .utf8) == nil { bytes.removeLast() }
                 lastObservation = String(decoding: bytes, as: UTF8.self)
+            }, record: { attempt in
+                var relative = attempt
+                relative.startedSeconds = Self.previewSeconds(from: started, to: attemptStarted)
+                trace.append(relative)
             }) { return rendered }
             if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
         }
@@ -1845,7 +1912,15 @@ final class BatchImportUITests: XCTestCase {
 
     private func renderedSyntheticOriginal(_ app: XCUIApplication,
                                            before deadline: ContinuousClock.Instant,
-                                           observe: (String) -> Void = { _ in }) -> RenderedOriginalEvidence? {
+                                           observe: (String) -> Void = { _ in },
+                                           record: (PreviewAttempt) -> Void = { _ in }) -> RenderedOriginalEvidence? {
+        let started = ContinuousClock.now
+        var attempt = PreviewAttempt()
+        defer {
+            attempt.totalSeconds = Self.previewSeconds(from: started, to: ContinuousClock.now)
+            if attempt.querySeconds == nil { attempt.querySeconds = attempt.totalSeconds }
+            record(attempt)
+        }
         func read<T>(_ value: @autoclosure () -> T) -> T? {
             guard ContinuousClock.now < deadline else { return nil }
             return value()
@@ -1862,7 +1937,12 @@ final class BatchImportUITests: XCTestCase {
               let appFrame = read(app.frame), appFrame.contains(frame) else { return nil }
         // Some Quick Look versions render the PDF without exposing its text to
         // accessibility. Read only fresh pixels from the visible preview itself.
-        guard let screenshot = read(preview.screenshot()) else { return nil }
+        attempt.querySeconds = Self.previewSeconds(from: started, to: ContinuousClock.now)
+        attempt.outcome = .captureRejected
+        let captureStarted = ContinuousClock.now
+        let captured = read(preview.screenshot())
+        attempt.captureSeconds = Self.previewSeconds(from: captureStarted, to: ContinuousClock.now)
+        guard let screenshot = captured else { return nil }
         observe("Preview screenshot unavailable or capture exceeded the observation deadline")
         guard let image = screenshot.image.cgImage, ContinuousClock.now < deadline else { return nil }
         let request = VNRecognizeTextRequest()
@@ -1870,12 +1950,17 @@ final class BatchImportUITests: XCTestCase {
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = false
         request.revision = VNRecognizeTextRequestRevision3
+        let ocrStarted = ContinuousClock.now
         do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([request]) }
         catch {
+            attempt.ocrSeconds = Self.previewSeconds(from: ocrStarted, to: ContinuousClock.now)
+            attempt.outcome = .ocrError
             let failure = error as NSError
             observe("Vision error: domain=\(failure.domain), code=\(failure.code)")
             return nil
         }
+        attempt.ocrSeconds = Self.previewSeconds(from: ocrStarted, to: ContinuousClock.now)
+        attempt.outcome = .ocrLate
         // A synchronous Vision call can overrun; late success is not accepted.
         observe("Vision completed after the observation deadline")
         guard ContinuousClock.now < deadline else { return nil }
@@ -1887,9 +1972,11 @@ final class BatchImportUITests: XCTestCase {
         let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
             .flatMap { $0.components(separatedBy: .newlines) }.map(normalized)
         observe("Recognized preview lines:\n" + lines.joined(separator: "\n"))
+        attempt.outcome = .markersRejected
         let markers = ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL", "Sample reservation ABC-000"]
         guard markers.allSatisfy({ marker in lines.filter { $0 == marker }.count == 1 }),
               ContinuousClock.now < deadline else { return nil }
+        attempt.outcome = .accepted
         return RenderedOriginalEvidence(screenshot: screenshot, lines: lines)
     }
 
