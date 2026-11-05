@@ -117,8 +117,11 @@ closed or that folder navigation succeeded. A separate canonical source UUID
 prevents reuse of the later seed source directory. If Files instead opens the
 new empty `untitled folder`, the helper permits one strictly verified return to
 its local parent, then requires
-the same parent editor or Rename checks. That return shares the original
-30-second initial deadline and never authorizes Save. See the
+the same parent editor or Rename checks. Batch uses one 60-second resolution
+window for the initial state, a fresh Rename-candidate confirmation, and this
+single return, including a child transition discovered during confirmation.
+The clock is never reset; the 180-second case and 240-second native-folder
+work budget, plus its eight-second stop reserve, remain. No path authorizes Save. See the
 [Recovery preparation contract](recovery-hosted.md) for this separate state and
 its retained failure evidence. Only after the case passes
 may the host adopt the exact empty, nonsymlink leaf with stable parent and

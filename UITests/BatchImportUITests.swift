@@ -249,6 +249,7 @@ final class BatchImportUITests: XCTestCase {
         var acquisitionError: String?
         var errorTruncated = false
         var rejections: [String] = []
+        var classification = "not-classified"
 
         mutating func begin() {
             attempt += 1
@@ -258,6 +259,7 @@ final class BatchImportUITests: XCTestCase {
             acquisitionError = nil
             errorTruncated = false
             rejections = []
+            classification = "not-classified"
         }
 
         mutating func failed(_ error: Error) {
@@ -271,6 +273,7 @@ final class BatchImportUITests: XCTestCase {
                 "version": 1, "attempt": attempt, "acquisitionStage": String(stage.prefix(128)),
                 "currentPickerPresent": picker != nil, "currentApplicationPresent": application != nil,
                 "currentPairBound": lastBound?.attempt == attempt,
+                "classification": classification,
                 "lastBoundAttempt": lastBound.map { $0.attempt as Any } ?? NSNull(),
                 "acquisitionError": acquisitionError.map { $0 as Any } ?? NSNull(),
                 "errorTruncated": errorTruncated,
@@ -808,7 +811,7 @@ final class BatchImportUITests: XCTestCase {
     // no-export checks, fixture stop and host adoption remain separate.
     private func createNativeEmptyFilesFolder(
         _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String,
-        initialObservationTimeout: Duration = .seconds(30),
+        initialObservationTimeout: Duration = .seconds(60),
         textCompletionTimeout: Duration = .seconds(15)
     ) async throws {
         try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
@@ -837,16 +840,22 @@ final class BatchImportUITests: XCTestCase {
         let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
         var keyboardIntroductionAcknowledged = false
         var renameFrame: CGRect?
+        var pendingRenameFrame: CGRect?
+        var renameSnapshots: (picker: XCUIElementSnapshot, application: XCUIElementSnapshot)?
+        var renameCandidateCaptured = false
+        var renameCandidateRejected = false
         var initialObservation = NativeFolderInitialObservation()
         var parentReturnAttempted = false
         var parentReturnRejected = false
-        // Polling and action admission share one selected observation window.
-        // Late queries must not start Back or accept a result after its deadline.
+        // Resolve initial and fresh state, including at most one parent return,
+        // inside one selected window. Late queries cannot start Back or a long press.
         let initialDeadline = ContinuousClock.now.advanced(by: initialObservationTimeout)
         do {
             try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: initialObservationTimeout) {
                 renameFrame = nil
-                guard !parentReturnRejected, ContinuousClock.now < initialDeadline else { return false }
+                renameSnapshots = nil
+                guard !parentReturnRejected, !renameCandidateRejected,
+                      ContinuousClock.now < initialDeadline else { return false }
                 initialObservation.begin()
                 do {
                     let snapshots = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
@@ -859,11 +868,40 @@ final class BatchImportUITests: XCTestCase {
                         in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle,
                         diagnostic: { initialObservation.rejections.append($0) }
                     )
-                    renameFrame = state.renameFrame
-                    if state.ready { return ContinuousClock.now < initialDeadline }
+                    initialObservation.classification = state.ready
+                        ? (state.renameFrame == nil ? "editor" : "rename-candidate") : "unresolved"
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    if state.ready {
+                        guard let frame = state.renameFrame else {
+                            pendingRenameFrame = nil
+                            return true
+                        }
+                        if let pending = pendingRenameFrame {
+                            guard frame == pending else {
+                                renameCandidateRejected = true
+                                initialObservation.classification = "rename-candidate-changed"
+                                return false
+                            }
+                            renameFrame = state.renameFrame
+                            renameSnapshots = snapshots
+                            initialObservation.classification = "rename-confirmed"
+                            return true
+                        }
+                        pendingRenameFrame = frame
+                        if !renameCandidateCaptured {
+                            renameCandidateCaptured = true
+                            capture(app, "Native folder initial Rename candidate before fresh state validation")
+                        }
+                        return false
+                    }
+                    // A candidate may become the opened empty child as the
+                    // next query is in flight. Resolve it with the same one-Back
+                    // allowance; never act on the earlier candidate frame.
+                    pendingRenameFrame = nil
                     guard let before = Self.nativeFolderParentReturnFrame(
                         in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
                     ) else { return false }
+                    initialObservation.classification = "empty-child"
                     guard !parentReturnAttempted else {
                         // A completed Back can still expose the old child
                         // as navigation settles. Wait, without another tap.
@@ -881,6 +919,7 @@ final class BatchImportUITests: XCTestCase {
                         initialObservation.application = application
                     })
                     initialObservation.lastBound = (initialObservation.attempt, current.picker, current.application)
+                    initialObservation.classification = "parent-return-fresh-proof"
                     guard ContinuousClock.now < initialDeadline else { return false }
                     guard Self.nativeFolderParentReturnFrame(
                         in: current.picker, applicationSnapshot: current.application, localTitle: localTitle
@@ -916,15 +955,16 @@ final class BatchImportUITests: XCTestCase {
             throw error
         }
         if let before = renameFrame {
-            // The editor can appear after the initial observation selected the
-            // unedited-folder route. Reclassify the existing fresh pair before
-            // choosing any action; an unknown state still fails closed.
+            // Recheck the confirmed immutable pair and the live target. The
+            // resolution loop already handled any candidate-to-child transition.
             let created = files.element.cells.matching(NSPredicate(
                 format: "identifier == %@ AND label == %@",
                 "untitled folder, Folder", "untitled folder, 0 items"
             ))
-            capture(app, "Native folder initial Rename candidate before fresh state validation")
-            let snapshots = try nativeFolderSnapshots(app)
+            guard let snapshots = renameSnapshots else {
+                recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                throw BatchTestFailure(message: "Native folder Rename has no confirmed state")
+            }
             let currentState = Self.nativeFolderInitialState(
                 in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
@@ -932,11 +972,19 @@ final class BatchImportUITests: XCTestCase {
                       && (currentState.renameFrame == nil || currentState.renameFrame == before),
                       app: app, "New native folder changed before Rename request")
             if currentState.renameFrame != nil {
-                try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
-                          && created.count == 1 && created.element.frame == before
-                          && created.element.isEnabled && created.element.isHittable,
-                          app: app, "New native folder changed before Rename request")
+                let liveReady = isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                    && created.count == 1 && created.element.frame == before
+                    && created.element.isEnabled && created.element.isHittable
+                if !liveReady {
+                    initialObservation.classification = "rename-live-target-changed"
+                    recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                }
+                try check(liveReady, app: app, "New native folder changed before Rename request")
                 try Task.checkCancellation()
+                guard ContinuousClock.now < initialDeadline else {
+                    recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                    throw BatchTestFailure(message: "Native folder resolution expired before Rename request")
+                }
                 created.element.press(forDuration: 1)
                 let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
                 try await wait("Native folder context menu has no unique Rename action", app: app) {
