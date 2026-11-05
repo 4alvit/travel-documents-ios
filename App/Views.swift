@@ -1,6 +1,5 @@
 import SwiftUI
 import StoreKit
-import UIKit
 import TravelCore
 import UniformTypeIdentifiers
 
@@ -1019,97 +1018,9 @@ private struct PurchaseStateDiagnosticValue: ViewModifier {
 }
 #endif
 
-/// The purchase surface belongs to this Pro view, including when it is a sheet.
-@MainActor
-private final class PurchasePresentationContext {
-    weak var controller: UIViewController?
-    var isActive = false
-
-    func purchase(_ product: Product) async throws -> Product.PurchaseResult {
-        #if DEBUG && targetEnvironment(simulator)
-        tracePresentation(.entry)
-        defer { tracePresentation(.returned) }
-        #endif
-        guard isActive, let controller, controller.parent != nil,
-              let window = controller.viewIfLoaded?.window,
-              let scene = window.windowScene,
-              scene.activationState == .foregroundActive else {
-            throw PresentationError.unavailable
-        }
-        var ancestor: UIViewController? = controller
-        while let current = ancestor {
-            guard !current.isBeingDismissed, !current.isMovingFromParent else {
-                throw PresentationError.unavailable
-            }
-            ancestor = current.parent
-        }
-        if #available(iOS 18.2, *) {
-            return try await product.purchase(confirmIn: controller)
-        }
-        return try await product.purchase(confirmIn: scene)
-    }
-
-    #if DEBUG && targetEnvironment(simulator)
-    private enum ObservationPoint: String { case entry, returned }
-
-    /// Passive, bounded observations of this screen only. Never record class
-    /// names, object identities, document content, URLs or StoreKit payloads.
-    private func tracePresentation(_ point: ObservationPoint) {
-        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-purchase-diagnostics") else { return }
-        let window = controller?.viewIfLoaded?.window
-        print("purchase-presentation point=\(point.rawValue) active=\(isActive) controller=\(controller != nil) window=\(window != nil) keyWindow=\(window?.isKeyWindow == true) windowVisible=\(window.map { !$0.isHidden && $0.alpha > 0 } ?? false) sceneState=\(window?.windowScene?.activationState.rawValue ?? -99)")
-        var ancestors: [UIViewController] = []
-        var next = controller
-        while let current = next, ancestors.count < 12 {
-            ancestors.append(current)
-            next = current.parent
-        }
-        print("purchase-presentation point=\(point.rawValue) ancestors=\(ancestors.count) ancestorsTruncated=\(next != nil)")
-        for (index, current) in ancestors.enumerated() {
-            traceController(current, point: point, chain: "ancestor", index: index, window: window, containsAnchor: true)
-        }
-        next = window?.rootViewController
-        var index = 0
-        while let current = next, index < 12 {
-            traceController(current, point: point, chain: "presented", index: index, window: window,
-                            containsAnchor: ancestors.contains { $0 === current })
-            next = current.presentedViewController
-            index += 1
-        }
-        print("purchase-presentation point=\(point.rawValue) presented=\(index) presentedTruncated=\(next != nil)")
-    }
-
-    private func traceController(_ current: UIViewController, point: ObservationPoint, chain: String,
-                                 index: Int, window: UIWindow?, containsAnchor: Bool) {
-        let view = current.viewIfLoaded
-        let transition = current.transitionCoordinator
-        print("purchase-controller point=\(point.rawValue) chain=\(chain) index=\(index) containsAnchor=\(containsAnchor) viewLoaded=\(view != nil) sameWindow=\(window != nil && view?.window === window) boundsEmpty=\(view?.bounds.isEmpty ?? true) visible=\(view.map { !$0.isHidden && $0.alpha > 0 } ?? false) beingPresented=\(current.isBeingPresented) beingDismissed=\(current.isBeingDismissed) movingToParent=\(current.isMovingToParent) movingFromParent=\(current.isMovingFromParent) presents=\(current.presentedViewController != nil) hasPresenter=\(current.presentingViewController != nil) transition=\(transition != nil) animated=\(transition?.isAnimated == true) interactive=\(transition?.isInteractive == true)")
-    }
-    #endif
-
-    private enum PresentationError: Error { case unavailable }
-}
-
-@MainActor
-private struct PurchasePresentationBridge: UIViewControllerRepresentable {
-    let presentation: PurchasePresentationContext
-
-    func makeUIViewController(context: Context) -> UIViewController {
-        let controller = UIViewController()
-        controller.view.backgroundColor = .clear
-        controller.view.isUserInteractionEnabled = false
-        presentation.controller = controller
-        return controller
-    }
-
-    func updateUIViewController(_ controller: UIViewController, context: Context) {
-        presentation.controller = controller
-    }
-}
-
 @MainActor
 private struct ProView: View {
-    @State private var purchasePresentation = PurchasePresentationContext()
+    @Environment(\.purchase) private var purchase
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var purchaseFeedback = PurchaseFeedback()
@@ -1144,7 +1055,14 @@ private struct ProView: View {
                             let generation = purchaseFeedback.begin()
                             Task {
                                 let failure = await model.purchases.purchase(using: { product in
-                                    try await purchasePresentation.purchase(product)
+                                    #if DEBUG && targetEnvironment(simulator)
+                                    let observePresentation = ProcessInfo.processInfo.arguments.contains("--ui-testing-purchase-diagnostics")
+                                    if observePresentation { print("purchase-presentation route=swiftui-environment point=entry") }
+                                    defer {
+                                        if observePresentation { print("purchase-presentation route=swiftui-environment point=returned") }
+                                    }
+                                    #endif
+                                    return try await purchase(product)
                                 })
                                 guard !model.purchases.isPro else {
                                     purchaseFeedback.reset()
@@ -1203,17 +1121,7 @@ private struct ProView: View {
             } }
             .task { await model.purchases.load() }
         }
-        .background {
-            PurchasePresentationBridge(presentation: purchasePresentation)
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
-        .onAppear { purchasePresentation.isActive = true }
-        .onDisappear {
-            purchasePresentation.isActive = false
-            purchaseFeedback.reset()
-        }
+        .onDisappear { purchaseFeedback.reset() }
         .onChange(of: model.purchases.isPro) { _, isPro in
             if isPro { purchaseFeedback.reset() }
         }
