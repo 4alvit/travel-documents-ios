@@ -117,16 +117,21 @@ class ShellTests(unittest.TestCase):
         for name, value in zip(("runtimes.json", "device-types.json", "devices.json"), fixture()):
             (self.input / name).write_text(json.dumps(value))
         self.output = self.root / "xcode-arguments.json"
+        self.tool_log = self.root / "tool-invocations.jsonl"
         self.env = {**os.environ, "PATH": str(self.root / "bin") + ":" + os.defpath,
-                    "FAKE_SIM_INVENTORY": str(self.input), "FAKE_XCODE_ARGS": str(self.output)}
+                    "FAKE_SIM_INVENTORY": str(self.input), "FAKE_XCODE_ARGS": str(self.output),
+                    "FAKE_TOOL_LOG": str(self.tool_log)}
         for name in ("TRIPFOLIO_SIMULATOR_ID", "TEST_RUNNER_TRIPDOCKET_PHONE_TIMING",
                      "TRIPDOCKET_PHONE_TIMING", "RUNNER_ARCH", "GITHUB_ACTIONS"):
             self.env.pop(name, None)
+        for name in list(self.env):
+            if any(name.endswith("TRIPDOCKET_" + family + "_TIMING") for family in ("CORE", "PHONE", "IPAD")):
+                self.env.pop(name)
         (self.root / "bin/python3").symlink_to(sys.executable)
         tools = {
             "xcodegen": "pass",
-            "uname": "print(os.environ.get('FAKE_ARCH', 'arm64'))",
-            "xcodebuild": "Path(os.environ['FAKE_XCODE_ARGS']).write_text(json.dumps(sys.argv[1:])); Path(os.environ['FAKE_XCODE_ARGS'] + '.env').write_text(json.dumps({k:v for k,v in os.environ.items() if 'PHONE_TIMING' in k}))",
+            "uname": "print(os.environ.get('FAKE_LATER_ARCH', os.environ.get('FAKE_ARCH', 'arm64')) if sum(json.loads(x)['tool'] == 'uname' for x in Path(os.environ['FAKE_TOOL_LOG']).read_text().splitlines()) > 1 else os.environ.get('FAKE_ARCH', 'arm64'))",
+            "xcodebuild": "Path(os.environ['FAKE_XCODE_ARGS']).write_text(json.dumps(sys.argv[1:])); Path(os.environ['FAKE_XCODE_ARGS'] + '.env').write_text(json.dumps({k:v for k,v in os.environ.items() if '_TIMING' in k}))",
             "xcrun": """args = sys.argv[1:]
 if args == ['--sdk', 'iphonesimulator', '--show-sdk-version']: print('26.2')
 elif args[:2] == ['simctl', 'list']:
@@ -136,7 +141,10 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
         }
         for name, body in tools.items():
             path = self.root / "bin" / name
-            path.write_text("#!" + sys.executable + "\nimport os,sys,json\nfrom pathlib import Path\n" + body + "\n")
+            path.write_text("#!" + sys.executable + "\nimport os,sys,json\nfrom pathlib import Path\n"
+                            "with Path(os.environ['FAKE_TOOL_LOG']).open('a') as log:\n"
+                            "    log.write(json.dumps({'tool': Path(__file__).name, 'timing': {k:v for k,v in os.environ.items() if '_TIMING' in k}}) + '\\n')\n"
+                            + body + "\n")
             path.chmod(0o755)
 
     def run_script(self, *args, requested=None):
@@ -159,7 +167,7 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
         source = (HERE.parent / "UITests/PurchaseUITests.swift").read_text()
         helper = source.split("private func verifyPurchaseFailureAlert(", 1)[1].split(
             "private func requirePurchasePostcondition(", 1)[0]
-        self.assertIn("executionTimeAllowance = 240", helper)
+        self.assertIn("executionTimeAllowance = try failureAlertExecutionTimeAllowance()", helper)
         self.assertEqual(source.count("executionTimeAllowance ="), 1)
         records = list((self.root / "build/ci-toolchain").glob("simulator-selection.*/selection.json"))
         self.assertEqual(len(records), 1)
@@ -224,6 +232,68 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
     def test_strict_wrong_requested_uuid_prevents_native_test_command(self):
         result = self.run_script("--require-sdk-match", requested=SECOND)
         self.assertNotEqual(result.returncode, 0); self.assertFalse(self.output.exists())
+
+    def core_environment(self):
+        self.env.update(GITHUB_ACTIONS="true", RUNNER_OS="macOS", RUNNER_ARCH="X64",
+                        RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKFLOW="CI",
+                        GITHUB_JOB="validate", GITHUB_REPOSITORY="4alvit/travel-documents-ios",
+                        FAKE_ARCH="x86_64")
+
+    def test_hosted_core_profile_is_final_invocation_only(self):
+        self.core_environment()
+        result = self.run_script("--require-sdk-match", "--cohort", "core-purchase")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = [json.loads(x) for x in self.tool_log.read_text().splitlines()]
+        self.assertTrue(all(r['timing'] == {} for r in records[:-1]))
+        self.assertEqual(records[-1], {'tool': 'xcodebuild', 'timing': {
+            'TEST_RUNNER_TRIPDOCKET_CORE_TIMING': 'hosted-intel-core-v1'}})
+        argv = json.loads(self.output.read_text())
+        self.assertEqual(argv[argv.index('-default-test-execution-time-allowance') + 1], '180')
+        self.assertEqual(argv[argv.index('-maximum-test-execution-time-allowance') + 1], '480')
+
+    def test_core_marker_absent_for_ordinary_other_cohort_and_arm_calls(self):
+        self.core_environment()
+        for args in [(), ('--cohort', 'core-purchase'), ('--require-sdk-match', '--cohort', 'ui-guidance')]:
+            with self.subTest(args=args):
+                result = self.run_script(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(Path(str(self.output) + '.env').read_text()), {})
+        self.env.update(RUNNER_ARCH='ARM64', FAKE_ARCH='arm64')
+        result = self.run_script('--require-sdk-match', '--cohort', 'core-purchase')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(str(self.output) + '.env').read_text()), {})
+
+    def test_core_rejects_all_inherited_and_conflicting_aliases_before_tools(self):
+        self.core_environment()
+        for family in ('CORE', 'PHONE', 'IPAD'):
+            for prefix in ('', 'TEST_RUNNER_', 'SIMCTL_CHILD_'):
+                key = prefix + 'TRIPDOCKET_' + family + '_TIMING'
+                for value in ('', 'wrong', 'hosted-intel-core-v1'):
+                    with self.subTest(key=key, value=value):
+                        self.env[key] = value
+                        result = self.run_script('--require-sdk-match', '--cohort', 'core-purchase')
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertFalse(self.output.exists())
+                        if self.tool_log.exists():
+                            self.assertTrue(all(json.loads(x)['tool'] == 'uname' for x in self.tool_log.read_text().splitlines()))
+                        self.env.pop(key)
+
+    def test_core_rejects_wrong_context_and_changed_captured_architecture(self):
+        self.core_environment()
+        for name, wrong in [('RUNNER_OS', 'Linux'), ('RUNNER_ENVIRONMENT', 'self-hosted'),
+                            ('GITHUB_WORKFLOW', 'Other'), ('GITHUB_JOB', 'ui_guidance'),
+                            ('GITHUB_REPOSITORY', 'other/repo'), ('FAKE_ARCH', 'arm64')]:
+            with self.subTest(name=name):
+                old = self.env[name]; self.env[name] = wrong
+                result = self.run_script('--require-sdk-match', '--cohort', 'core-purchase')
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(self.output.exists())
+                self.env[name] = old
+        self.tool_log.unlink(missing_ok=True)
+        self.env['FAKE_LATER_ARCH'] = 'arm64'
+        result = self.run_script('--require-sdk-match', '--cohort', 'core-purchase')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
 
     def test_local_default_and_explicit_override_keep_previous_behavior(self):
         result = self.run_script()

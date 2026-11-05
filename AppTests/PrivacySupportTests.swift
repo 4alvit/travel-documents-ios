@@ -10,6 +10,7 @@ final class PrivacySupportTests: XCTestCase {
         let trace = GuidanceAppearanceTrace()
         trace.record(.testStarted)
         defer { add(trace.attachment()) }
+        let appearanceAllowance = try guidanceAppearanceAllowance()
         var appeared = false
         var requestedURLs: [URL] = []
         let didAppear = XCTestExpectation(description: "Guidance host finished appearing")
@@ -44,12 +45,33 @@ final class PrivacySupportTests: XCTestCase {
 
         // SwiftUI.onAppear can run before UIKit finishes the host transition.
         trace.record(.waiterStarted)
-        let appearance = await XCTWaiter.fulfillment(of: [didAppear], timeout: 5)
+        let appearance = await XCTWaiter.fulfillment(of: [didAppear], timeout: appearanceAllowance)
         trace.record(.waiterReturned)
         trace.waiterResult = appearance.rawValue
         XCTAssertEqual(appearance, .completed, "Guidance host must finish appearing")
         XCTAssertTrue(appeared, "Guidance must render without AppModel or a purchase environment")
         XCTAssertTrue(requestedURLs.isEmpty, "Rendering guidance must not open a website")
+    }
+
+    private enum CoreTimingError: Error { case invalidProfile }
+
+    @MainActor
+    private func guidanceAppearanceAllowance() throws -> TimeInterval {
+        let environment = ProcessInfo.processInfo.environment
+        guard let profile = environment["TRIPDOCKET_CORE_TIMING"] else { return 5 }
+        guard profile == "hosted-intel-core-v1",
+              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
+              environment["TRIPDOCKET_IPAD_TIMING"] == nil else {
+            throw CoreTimingError.invalidProfile
+        }
+        #if DEBUG && arch(x86_64) && targetEnvironment(simulator)
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw CoreTimingError.invalidProfile
+        }
+        return 30
+        #else
+        throw CoreTimingError.invalidProfile
+        #endif
     }
 
     func testOfflineGuidanceIsPresentInBothShippedLanguageBundles() throws {

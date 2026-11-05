@@ -1645,6 +1645,139 @@ class HostedIPadTimingTests(unittest.TestCase):
                                      maximum=True, binary=mutated), '1200.0')
 
 
+class HostedCoreAppearanceTests(unittest.TestCase):
+    """Execute the actual selector and fulfillment call with a deterministic callback."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        cls.source = (ROOT / 'AppTests/PrivacySupportTests.swift').read_text()
+        start = cls.source.index('    private enum CoreTimingError:')
+        end = cls.source.index('    func testOfflineGuidanceIsPresent', start)
+        selector = cls.source[start:end]
+        build_guard = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+        assert selector.count(build_guard) == 1
+        selector = selector.replace(build_guard, '#if CORE_FIXTURE')
+        allowance = next(line for line in cls.source.splitlines()
+                         if 'let appearanceAllowance =' in line)
+        expectation = next(line for line in cls.source.splitlines()
+                           if 'let didAppear = XCTestExpectation(' in line)
+        fulfillment = next(line for line in cls.source.splitlines()
+                           if 'let appearance = await XCTWaiter.fulfillment(' in line)
+        fixture = r"""import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["CORE_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        @MainActor final class XCTestExpectation {
+            let description: String
+            init(description: String) { self.description = description }
+        }
+        @MainActor enum XCTWaiter {
+            enum Result { case completed, timedOut }
+            static var calls = 0
+            static var requested = 0.0
+            static func fulfillment(of expectations: [XCTestExpectation], timeout: TimeInterval) async -> Result {
+                precondition(expectations.count == 1)
+                precondition(expectations[0].description == "Guidance host finished appearing")
+                calls += 1; requested = timeout
+                let environment = ProcessInfo.processInfo.environment
+                let callback = Double(environment["CORE_TEST_CALLBACK_AT"] ?? "8")!
+                // The fake clock emits only the UIKit expectation callback.
+                // A SwiftUI-only rendering event deliberately never fulfills it.
+                return environment["CORE_TEST_SWIFTUI_ONLY"] != "1" && callback <= timeout
+                    ? .completed : .timedOut
+            }
+        }
+        @MainActor final class Harness {
+        // SELECTOR
+            func run() async throws -> Bool {
+        // ALLOWANCE
+        // EXPECTATION
+        // FULFILLMENT
+                return appearance == .completed
+            }
+        }
+        @main struct Main {
+            @MainActor static func main() async {
+                do {
+                    let passed = try await Harness().run()
+                    print("\(passed ? "passed" : "timedOut") \(Int(XCTWaiter.requested)) \(XCTWaiter.calls)")
+                } catch {
+                    print("rejected \(Int(XCTWaiter.requested)) \(XCTWaiter.calls)")
+                }
+            }
+        }
+        """
+        fixture = (fixture.replace('// SELECTOR', selector)
+                   .replace('// ALLOWANCE', allowance)
+                   .replace('// EXPECTATION', expectation)
+                   .replace('// FULFILLMENT', fulfillment))
+        cls.binaries = {}
+        for name, flags, source in (
+            ('hosted', ['-D', 'CORE_FIXTURE'], fixture),
+            ('unsupported', [], fixture),
+            ('old-cap', ['-D', 'CORE_FIXTURE'], fixture.replace('return 30', 'return 5')),
+        ):
+            path = Path(cls.directory.name) / (name + '.swift'); path.write_text(source)
+            binary = path.with_suffix(''); cls.binaries[name] = binary
+            subprocess.run(['/usr/bin/swiftc', '-parse-as-library', '-swift-version', '6',
+                            *flags, str(path), '-o', str(binary)], capture_output=True,
+                           check=True, timeout=60)
+
+    def probe(self, binary='hosted', token='hosted-intel-core-v1', **overrides):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(('TRIPDOCKET_', 'CORE_TEST_'))}
+        if token is not None: environment['TRIPDOCKET_CORE_TIMING'] = token
+        environment.update(overrides)
+        result = subprocess.run([str(self.binaries[binary])], env=environment,
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_delayed_real_expectation_and_old_cap_causal_rejection(self):
+        self.assertEqual(self.probe(), 'passed 30 1')
+        self.assertEqual(self.probe(binary='old-cap'), 'timedOut 5 1')
+
+    def test_missing_token_keeps_default_on_both_builds(self):
+        for binary in ('hosted', 'unsupported'):
+            with self.subTest(binary=binary):
+                self.assertEqual(self.probe(binary=binary, token=None), 'timedOut 5 1')
+                self.assertEqual(self.probe(binary=binary, token=None,
+                                           CORE_TEST_CALLBACK_AT='4'), 'passed 5 1')
+
+    def test_swiftui_only_or_late_uikit_never_satisfies_wait(self):
+        self.assertEqual(self.probe(CORE_TEST_SWIFTUI_ONLY='1'), 'timedOut 30 1')
+        self.assertEqual(self.probe(CORE_TEST_CALLBACK_AT='31'), 'timedOut 30 1')
+
+    def test_invalid_token_build_or_device_rejects_before_wait(self):
+        for options in ({'token': ''}, {'token': 'wrong'}, {'token': 'hosted-intel-core-v1 '},
+                        {'binary': 'unsupported'}, {'CORE_TEST_IDIOM': 'pad'}):
+            with self.subTest(options=options):
+                self.assertEqual(self.probe(**options), 'rejected 0 0')
+
+    def test_conflicting_profiles_reject_before_wait(self):
+        for key in ('TRIPDOCKET_PHONE_TIMING', 'TRIPDOCKET_IPAD_TIMING'):
+            for value in ('', 'hosted-intel-phone-v1'):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(**{key: value}), 'rejected 0 0')
+
+    def test_callback_order_assertions_and_cleanup_are_retained(self):
+        source = self.source.split('    private enum CoreTimingError:', 1)[0]
+        self.assertLess(source.index('try guidanceAppearanceAllowance()'),
+                        source.index('UIWindow(windowScene: scene)'))
+        self.assertLess(source.index('host.onDidAppear ='), source.index('window.isHidden = false'))
+        self.assertLess(source.index('trace.record(.uiKitViewDidAppear)'), source.index('didAppear.fulfill()'))
+        self.assertEqual(source.count('didAppear.fulfill()'), 1)
+        self.assertIn('XCTAssertEqual(appearance, .completed,', source)
+        self.assertIn('XCTAssertTrue(appeared,', source)
+        self.assertIn('XCTAssertTrue(requestedURLs.isEmpty,', source)
+        self.assertIn('window.isHidden = true\n            window.rootViewController = nil\n            host.onDidAppear = nil', source)
+        self.assertEqual(source.count('await XCTWaiter.fulfillment('), 1)
+
+
 class SDKSourceTests(unittest.TestCase):
     def test_complete_file_typechecks_without_fixture_scope(self):
         sdk = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path'],

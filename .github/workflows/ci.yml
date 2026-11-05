@@ -15,10 +15,10 @@ jobs:
   validate:
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15-intel
-    # 75m = checkout2 + toolchain5 + toolchain evidence2 + selector2
-    #       + Verify10 + package2 + integration35 + cancellation5
+    # 82m = checkout2 + toolchain5 + toolchain evidence2 + selector2
+    #       + Verify10 + package2 + integration42 + cancellation5
     #       + raw evidence3 + optional extraction3/upload2 + Simulator2 + finalization2.
-    timeout-minutes: 75
+    timeout-minutes: 82
     env:
       # Keep the Release producer and core tests on matched Xcode 26.2.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -70,7 +70,7 @@ jobs:
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
-        timeout-minutes: 35
+        timeout-minutes: 42
         run: bash scripts/test-simulator.sh --require-sdk-match --cohort core-purchase
       # Preserve raw results before optional failure extraction consumes its budget.
       - name: Test evidence

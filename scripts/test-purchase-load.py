@@ -7,6 +7,7 @@ Readiness tests substitute only the UI values and clock in the actual UI-test
 call and wait helpers. Native integration remains a separate CI requirement.
 """
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -388,6 +389,149 @@ class PurchaseReadinessTests(unittest.TestCase):
         for case in ("missing", "disabled", "not-hittable", "alert"):
             with self.subTest(case=case):
                 self.run_case(case)
+
+
+
+CORE_TIMING_FIXTURE = r'''
+import Foundation
+
+struct PurchaseTestError: Error { let message: String }
+enum FixtureFailure: Error { case deadline }
+@MainActor enum UIDevice {
+    enum Idiom { case phone, pad }
+    struct Device {
+        var userInterfaceIdiom: Idiom {
+            ProcessInfo.processInfo.environment["FIXTURE_IDIOM"] == "pad" ? .pad : .phone
+        }
+    }
+    static var current: Device { Device() }
+}
+@MainActor final class Harness {
+    var executionTimeAllowance: TimeInterval = 777
+    var sideEffects = 0
+    let finishAfter: TimeInterval
+    init(_ finishAfter: TimeInterval) { self.finishAfter = finishAfter }
+    // ACTUAL_CASES
+    // ACTUAL_SELECTOR
+    private func verifyPurchaseFailureAlert(russian: Bool, diagnostics: Bool) async throws {
+        // ACTUAL_PREFIX
+        sideEffects += 1
+        _ = (russian, diagnostics)
+        // Only the native deadline is substituted: exercise the selected value
+        // at a deterministic completion boundary, without starting XCTest/UI.
+        if finishAfter >= executionTimeAllowance { throw FixtureFailure.deadline }
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let h = Harness(Double(CommandLine.arguments[2])!)
+        var result = "passed"
+        do {
+            switch CommandLine.arguments[1] {
+            case "en": try await h.testPurchaseFailureAlertInEnglishWithDiagnostics()
+            case "ru": try await h.testPurchaseFailureAlertInRussianWithDiagnostics()
+            case "no-diagnostics": try await h.testPurchaseFailureAlertWithoutDiagnosticFlag()
+            default: fatalError("Unknown fixture case")
+            }
+        } catch is PurchaseTestError { result = "rejected" }
+        catch FixtureFailure.deadline { result = "timedOut" }
+        catch { fatalError("Unexpected fixture error") }
+        print("\(result) \(h.executionTimeAllowance) \(h.sideEffects)")
+    }
+}
+'''
+
+
+def core_timing_fixture(source):
+    """Use the real three callers, selector and pre-side-effect assignment."""
+    cases_start = source.index('    func testPurchaseFailureAlertInEnglishWithDiagnostics()')
+    selector_start = source.index('    private func failureAlertExecutionTimeAllowance()')
+    helper_start = source.index('    private func verifyPurchaseFailureAlert(')
+    prefix_start = source.index('\n', helper_start) + 1
+    prefix_end = source.index('        continueAfterFailure = false', prefix_start)
+    selector = source[selector_start:helper_start]
+    boundary = '#if DEBUG && targetEnvironment(simulator) && arch(x86_64)'
+    if selector.count(boundary) != 1:
+        raise ValueError("Expected one native build boundary")
+    # Compile both sides of the actual native selector on the offline host.
+    selector = selector.replace(boundary, '#if CORE_SUPPORTED_FIXTURE')
+    return (CORE_TIMING_FIXTURE.replace('// ACTUAL_CASES', source[cases_start:selector_start])
+            .replace('// ACTUAL_SELECTOR', selector)
+            .replace('// ACTUAL_PREFIX', source[prefix_start:prefix_end]))
+
+
+class PurchaseCoreTimingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix="tripdocket-core-timing-")
+        cls.addClassCleanup(cls.directory.cleanup)
+        root = Path(cls.directory.name)
+        source = (ROOT / 'UITests/PurchaseUITests.swift').read_text()
+        fixture = core_timing_fixture(source)
+        if fixture.count('return 360') != 1:
+            raise AssertionError("Expected one selected hosted allowance")
+        cls.binaries = {}
+        for name, text, flags in (
+            ('supported', fixture, ['-D', 'CORE_SUPPORTED_FIXTURE']),
+            ('unsupported', fixture, []),
+            ('old-allowance', fixture.replace('return 360', 'return 240'), ['-D', 'CORE_SUPPORTED_FIXTURE']),
+        ):
+            swift = root / (name + '.swift')
+            swift.write_text(text)
+            executable = root / name
+            result = subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
+                                     *flags, str(swift), '-o', str(executable)],
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            cls.binaries[name] = executable
+
+    def invoke(self, token=None, *, case='en', finish=0, variant='supported', extra=None):
+        environment = os.environ.copy()
+        for key in ('TRIPDOCKET_CORE_TIMING', 'TRIPDOCKET_PHONE_TIMING',
+                    'TRIPDOCKET_IPAD_TIMING', 'FIXTURE_IDIOM'):
+            environment.pop(key, None)
+        if token is not None:
+            environment['TRIPDOCKET_CORE_TIMING'] = token
+        environment.update(extra or {})
+        result = subprocess.run([str(self.binaries[variant]), case, str(finish)],
+                                env=environment, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    def test_three_actual_callers_select_only_hosted_allowance(self):
+        for case in ('en', 'ru', 'no-diagnostics'):
+            with self.subTest(case=case):
+                self.assertEqual(self.invoke('hosted-intel-core-v1', case=case, finish=314.213),
+                                 'passed 360.0 1')
+                self.assertEqual(self.invoke(case=case, finish=239), 'passed 240.0 1')
+
+    def test_selected_allowance_remains_a_hard_boundary(self):
+        for finish in (360, 361):
+            with self.subTest(finish=finish):
+                self.assertEqual(self.invoke('hosted-intel-core-v1', finish=finish), 'timedOut 360.0 1')
+        self.assertEqual(self.invoke(finish=240), 'timedOut 240.0 1')
+
+    def test_old_hosted_allowance_causally_rejects_same_completion(self):
+        self.assertEqual(self.invoke('hosted-intel-core-v1', finish=314.213,
+                                     variant='old-allowance'), 'timedOut 240.0 1')
+
+    def test_invalid_or_conflicting_tokens_fail_before_side_effects(self):
+        for case in ('en', 'ru', 'no-diagnostics'):
+            for token, extra in (
+                ('', {}), ('hosted-intel-core-v2', {}),
+                ('hosted-intel-core-v1', {'TRIPDOCKET_PHONE_TIMING': ''}),
+                ('hosted-intel-core-v1', {'TRIPDOCKET_IPAD_TIMING': 'hosted-intel-ipad-en-v1'}),
+                ('hosted-intel-core-v1', {'FIXTURE_IDIOM': 'pad'}),
+            ):
+                with self.subTest(case=case, token=token, extra=extra):
+                    self.assertEqual(self.invoke(token, case=case, extra=extra), 'rejected 777.0 0')
+
+    def test_unsupported_build_rejects_token_but_keeps_default(self):
+        self.assertEqual(self.invoke('hosted-intel-core-v1', variant='unsupported'), 'rejected 777.0 0')
+        self.assertEqual(self.invoke(variant='unsupported'), 'passed 240.0 1')
+        self.assertEqual(self.invoke(extra={'TRIPDOCKET_PHONE_TIMING': 'hosted-intel-phone-v1'}),
+                         'passed 240.0 1')
 
 
 if __name__ == "__main__":

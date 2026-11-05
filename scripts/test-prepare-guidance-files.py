@@ -436,9 +436,9 @@ class ShellBoundary(s.ShellTests):
         core_integration = core.split("      - name: Simulator integration and StoreKit tests\n", 1)[1].split(
             "      - name:", 1)[0]
         self.assertEqual([line for line in core.splitlines()
-                          if line.startswith("    timeout-minutes:")], ["    timeout-minutes: 75"])
+                          if line.startswith("    timeout-minutes:")], ["    timeout-minutes: 82"])
         self.assertEqual([line for line in core_integration.splitlines()
-                          if line.startswith("        timeout-minutes:")], ["        timeout-minutes: 35"])
+                          if line.startswith("        timeout-minutes:")], ["        timeout-minutes: 42"])
         # Intel bootstrap includes1080s preparation, with bounded
         # postprocessing headroom under the unchanged75-minute step.
         self.assertEqual(m.WORK + m.STOP + m.WRITE + 2700 + 680, 75 * 60)
