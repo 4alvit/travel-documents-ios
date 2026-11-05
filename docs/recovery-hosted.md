@@ -745,7 +745,9 @@ Inherited Phone/iPad timing tokens are rejected. Only the final native command
 receives `TEST_RUNNER_TRIPDOCKET_IPAD_TIMING`; the app receives no timing token.
 The consumer requires Debug x86_64 Simulator and iPad idiom, with the exact
 `hosted-intel-ipad-en-v1` token for the English case or
-`hosted-intel-ipad-ru-v1` for Russian at maximum type. Both locales use a 1,200-second native allowance and 1,500-second command. Phone and missing-token timing stay unchanged.
+`hosted-intel-ipad-ru-v1` for Russian at maximum type. English uses a
+1,200-second native allowance and 1,500-second command; Russian uses 1,500 and
+1,800 seconds respectively. Phone and missing-token timing stay unchanged.
 
 The Russian case in run `41928330972` failed at the 480-second native limit during
 the first confirmation's warning, with zero cancellations yet recorded. Its
@@ -759,16 +761,25 @@ new allowance will complete the case. Captures and geometry checks stay intact.
 The same run reported the English case passing in895.949 seconds, only4.051 below
 its former900-second limit. Its upload then failed to create the439-file artifact
 with `ENOTFOUND`. The successful log is not independent native/visual/cleanup
-acceptance. English now receives the same1,200/1,500 timing margin using its
+acceptance. English now receives a1,200/1,500 timing margin using its
 existing strict token; no upload behavior changes.
 
-Each hosted locale requires 2,117 seconds of admission: preparation372,
-command1,500, a separate7-second stop reserve and post-validation238. The native
-command still has its full1,500-second wait cap, clipped by the original global
-deadline; immediate pre-spawn admission protects the stop/post-validation
-reserve. Work remains4,500 seconds and cleanup360, with the83-minute step and
-95-minute job unchanged. Hosted locale summed phase maxima4,743 exceed the work
-window, so a late build must fail admission rather than reset the clock. All24
+The later Russian case in run `41940543243` completed its authored checks and
+final accessibility capture at 1,196.13 seconds, then exceeded its 1,200-second
+native limit during teardown. Its raw finish at 1,207.926 seconds does not override
+the failed native result; the command returned 65 after 1,490.126 seconds. The
+same functional source previously passed in 981.964 seconds. Russian's additional
+300 seconds preserves finite headroom for the observed variation without
+removing any actions or captures, and does not guarantee a future pass.
+
+English requires 2,117 seconds of admission; Russian requires 2,417:
+preparation372, command1,500 or1,800, a separate7-second stop reserve and
+post-validation238. Each command retains its full selected wait cap, clipped by
+the original global deadline; immediate pre-spawn admission protects the
+stop/post-validation reserve. Work remains4,500 seconds and cleanup360, with the
+83-minute step and95-minute job unchanged. Summed phase maxima are4,743 for
+English and5,043 for Russian, exceeding the work window, so a late build must
+fail admission rather than reset the clock. All24
 text checks, four Cancels, zero Open actions and final Free/Trips evidence remain
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 

@@ -68,8 +68,8 @@ def timing_policy(architecture, locale, hosted, environment):
                 "Hosted timing requires the exact GitHub-hosted iPad CI context")
     token = ("hosted-intel-ipad-ru-v1" if locale == "ru-RU" else "hosted-intel-ipad-en-v1") if hosted else None
     return MappingProxyType({"name": token if hosted else "default",
-                             "xcode_case_max_seconds": 1200 if hosted else 480,
-                             "command_seconds": 1500 if hosted else 900,
+                             "xcode_case_max_seconds": (1500 if locale == "ru-RU" else 1200) if hosted else 480,
+                             "command_seconds": (1800 if locale == "ru-RU" else 1500) if hosted else 900,
                              "runner_token": token})
 
 

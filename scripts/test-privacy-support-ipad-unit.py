@@ -188,27 +188,27 @@ class DriverTests(unittest.TestCase):
         self.hosted_environment()
         before = dict(os.environ)
         driver, world, error, parsed = self.attempted_case(
-            1, architecture='x86_64', hosted_timing=True, delay=1300)
+            1, architecture='x86_64', hosted_timing=True, delay=1600)
         self.assertEqual(str(error), 'Synthetic result validation withheld')
         self.assertTrue(parsed)
         self.assertEqual(dict(driver.timing), {'name': 'hosted-intel-ipad-ru-v1',
-            'xcode_case_max_seconds': 1200, 'command_seconds': 1500,
+            'xcode_case_max_seconds': 1500, 'command_seconds': 1800,
             'runner_token': 'hosted-intel-ipad-ru-v1'})
         with self.assertRaises(TypeError): driver.timing['command_seconds'] = 900
         self.assertEqual(driver.report['timing_policy'], dict(driver.timing))
         self.assertEqual(self.row(driver)['timing_policy'], dict(driver.timing))
-        self.assertEqual(self.row(driver)['timeout_seconds'], 1500)
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1800)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2417)
         process = world.processes[0]
         self.assertEqual(process.environment['TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'], 'hosted-intel-ipad-ru-v1')
         self.assertFalse(any(key in process.environment for key in ipad.TIMING_ENV_KEYS
                              if key != 'TEST_RUNNER_TRIPDOCKET_IPAD_TIMING'))
         self.assertEqual(os.environ, before)
-        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '1200')
+        self.assertEqual(process.argv[process.argv.index('-maximum-test-execution-time-allowance') + 1], '1500')
         self.assertEqual(process.argv[process.argv.index('-default-test-execution-time-allowance') + 1], '180')
         # build_once and the native case both use this exact common argv.
         common = driver.common_xcode()
-        self.assertEqual(common[common.index('-maximum-test-execution-time-allowance') + 1], '1200')
+        self.assertEqual(common[common.index('-maximum-test-execution-time-allowance') + 1], '1500')
         world.plan = {'delay': 0}
         driver.command(['xcodebuild', 'build-for-testing', *common], 'build-for-testing', timeout=1200)
         self.assertFalse(any(key in world.processes[-1].environment for key in ipad.TIMING_ENV_KEYS))
@@ -217,16 +217,16 @@ class DriverTests(unittest.TestCase):
     def test_hosted_russian_original_admission_boundary_rejects_without_spawning(self):
         self.hosted_environment()
         driver, world = self.driver(locale='ru-RU', architecture='x86_64', hosted_timing=True)
-        world.t = 4500 - 2117
+        world.t = 4500 - 2417
         with self.assertRaisesRegex(RuntimeError, 'no case started'): driver.run_case(*driver.case)
-        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2117)
+        self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 2417)
         self.assertEqual(world.processes, [])
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
     def test_hosted_russian_just_admitted_case_keeps_full_wait_and_post_reserve(self):
         self.hosted_environment()
         driver, world, error, parsed = self.attempted_case(
-            1, start_at=4500-2117-1, architecture='x86_64', hosted_timing=True, delay=1499)
+            1, start_at=4500-2417-1, architecture='x86_64', hosted_timing=True, delay=1799)
         self.assertTrue(parsed)
         self.assertEqual(str(error), 'Synthetic result validation withheld')
         self.assertLess(world.t + 238, driver.work_deadline)
@@ -235,7 +235,7 @@ class DriverTests(unittest.TestCase):
     def test_hosted_russian_late_result_remains_failure(self):
         self.hosted_environment()
         driver, world, error, parsed = self.attempted_case(
-            1, architecture='x86_64', hosted_timing=True, delay=1501)
+            1, architecture='x86_64', hosted_timing=True, delay=1801)
         self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
         self.assertFalse(driver.active)
         self.assertEqual(len(world.processes), 1)
@@ -243,10 +243,10 @@ class DriverTests(unittest.TestCase):
     def test_hosted_russian_command_rechecks_original_post_validation_budget(self):
         self.hosted_environment()
         driver, world = self.driver(locale='ru-RU', architecture='x86_64', hosted_timing=True)
-        world.t = 4500 - 1500 - 7 - 238
+        world.t = 4500 - 1800 - 7 - 238
         with self.assertRaisesRegex(RuntimeError, 'no test spawned'):
             driver.command(['xcodebuild', 'test-without-building'], 'ru-RU-test',
-                           timeout=1500, required_after=238, native_timing=True)
+                           timeout=1800, required_after=238, native_timing=True)
         self.assertEqual(world.processes, [])
         self.assertEqual((driver.work_deadline, driver.final_deadline), (4500, 4860))
 
@@ -261,15 +261,15 @@ class DriverTests(unittest.TestCase):
     def test_hosted_russian_reverting_command_policy_loses_observed_headroom(self):
         self.hosted_environment()
         original = ipad.timing_policy
-        def old_command(*args):
-            policy = dict(original(*args))
-            policy['command_seconds'] = 900
+        def old_command(architecture, locale, hosted, environment):
+            policy = dict(original(architecture, locale, hosted, environment))
+            if hosted and locale == 'ru-RU': policy['command_seconds'] = 1500
             return ipad.MappingProxyType(policy)
         with patch.object(ipad, 'timing_policy', side_effect=old_command):
             driver, world, error, parsed = self.attempted_case(
-                1, architecture='x86_64', hosted_timing=True, delay=1300)
+                1, architecture='x86_64', hosted_timing=True, delay=1600)
         self.assertIn('finite timeout', str(error)); self.assertFalse(parsed)
-        self.assertEqual(self.row(driver)['timeout_seconds'], 900)
+        self.assertEqual(self.row(driver)['timeout_seconds'], 1500)
         self.assertFalse(driver.active)
 
     def test_all_inherited_phone_and_ipad_timing_tokens_fail_before_output(self):
