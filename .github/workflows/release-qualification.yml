@@ -1,91 +1,51 @@
-name: Release qualification
-run-name: "Release qualification: ${{ inputs.mode }} / ${{ inputs.runner || 'macos-15' }}"
+name: Purchase action diagnostic
+run-name: "Purchase cancellation (${{ inputs.runner }}): SwiftUI environment"
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: Capture one opt-in suite for independent release review
-        type: choice
-        required: true
-        options: [batch, biometrics]
       runner:
-        description: Hosted runner architecture (Intel is an explicit contingency)
+        description: Explicit diagnostic host profile
         type: choice
         required: true
         default: macos-15
-        options: [macos-15, macos-15-intel]
+        options:
+          - macos-15
+          - macos-15-intel
 permissions:
   contents: read
 concurrency:
-  group: release-qualification-${{ github.ref }}-${{ inputs.mode }}
+  group: purchase-action-diagnostic-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  qualify:
-    runs-on: ${{ fromJSON('{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"}')[inputs.runner || 'macos-15'] }}
-    timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 68 || 58 }}
-    # A successful capture still requires independent xcresult and visual review.
+  anchor:
+    if: github.ref == 'refs/heads/diagnostic/purchase-action-context'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
     env:
+      PURCHASE_ACTION_RUNNER: ${{ inputs.runner }}
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
-      - name: Verify selected runner architecture
-        timeout-minutes: 1
-        env:
-          QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}
-          QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          case "$QUALIFICATION_RUNNER:$QUALIFICATION_RUNNER_ARCH:$(uname -m)" in
-            macos-15:ARM64:arm64|macos-15-intel:X64:x86_64) ;;
-            *) echo 'Unexpected qualification runner label or architecture' >&2; exit 1 ;;
-          esac
       - name: Prepare XcodeGen
         timeout-minutes: 3
         run: brew install xcodegen
-      - name: Verify qualification guards
-        timeout-minutes: 5
-        run: |
-          python3 -B scripts/test-qualify-release.py
-          python3 -B scripts/test-batch-driver.py
-          python3 -B scripts/test-batch-checkpoint.py
-          python3 -B scripts/test-batch-checkpoint-host.py
-          python3 -B scripts/test-batch-scroll-container.py
-          python3 -B scripts/test-batch-import-diagnostics.py
-          python3 -B scripts/test-native-batch-seed.py
-          python3 -B scripts/test-native-root-fixture.py
-          python3 -B scripts/test-native-root-ui.py
-          python3 -B scripts/test-native-folder-geometry.py
-          python3 -B scripts/test-native-folder-direct.py
-          python3 -B scripts/test-native-folder-control.py
-          python3 -B scripts/test-simulator-driver-inventory.py
-          python3 -B scripts/test-biometric-handshake.py
-      - name: Capture selected suite for review
-        timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 54 || 44 }}
-        env:
-          QUALIFICATION_MODE: ${{ inputs.mode }}
-          QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}
-          QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}
-        run: python3 -B scripts/qualify-release.py --mode "$QUALIFICATION_MODE"
-      - name: Qualification evidence
+      - name: Verify diagnostic guards
+        timeout-minutes: 2
+        run: python3 -B scripts/test-purchase-action.py
+      - name: Capture the single unchanged cancellation case
+        timeout-minutes: 34
+        run: python3 -B scripts/diagnose-purchase-action.py --run
+      - name: Preserve the outcome and original evidence
         if: always()
         timeout-minutes: 4
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: TripDocket-qualification-${{ inputs.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: TripDocket-diagnostic-purchase-action-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/ReleaseQualification-*/
-            build/BatchSimulator-*/summary.json
-            build/BatchSimulator-*/actions.jsonl
-            build/BatchSimulator-*/fixtures/
-            build/BatchSimulator-*/fixture-manifest.json
-            build/BatchSimulator-*/xcresult-*.json
-            build/BatchSimulator-*/xcodebuild.log
-            build/BatchSimulator-*/Tests.xcresult/
-            build/PrivacySimulator-*/summary.json
-            build/PrivacySimulator-*/actions.jsonl
-            build/PrivacySimulator-*/xcresult-*.json
-            build/PrivacySimulator-*/xcodebuild.log
-            build/PrivacySimulator-*/Tests.xcresult/
+            build/PurchaseAction-*/
+            !build/PurchaseAction-*/DerivedData/
           if-no-files-found: error
           retention-days: 14
