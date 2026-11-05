@@ -691,7 +691,12 @@ class FolderDirectTests(unittest.TestCase):
         self.assertIn("initialObservation.failed(error)\n                    return false", initial)
         self.assertIn("recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)\n            throw error", initial)
         self.assertIn("renameFrame = state.renameFrame", initial)
-        self.assertIn("if state.ready { return ContinuousClock.now < initialDeadline }", initial)
+        self.assertIn("if state.ready {", initial)
+        self.assertIn("guard frame == pending else {", initial)
+        self.assertIn("renameCandidateRejected = true", initial)
+        self.assertIn("renameSnapshots = snapshots", initial)
+        self.assertLess(initial.index("pendingRenameFrame = nil", initial.index("// A candidate")),
+                        initial.index("Self.nativeFolderParentReturnFrame("))
         self.assertEqual(initial.count("timeout: initialObservationTimeout"), 1)
         self.assertIn('app: app, timeout: initialObservationTimeout) {', initial.splitlines()[0])
         for forbidden in ["nativeFolderRenameFrame(", ".press(", "sleep", "while "]:
@@ -703,7 +708,7 @@ class FolderDirectTests(unittest.TestCase):
         self.assertLess(initial.index("parentReturnAttempted = true"), initial.index("let current = try"))
         self.assertLess(initial.index("parentReturnRejected = true", initial.index("parentReturnAttempted = true")),
                         initial.index("let current = try"))
-        self.assertIn("guard !parentReturnRejected, ContinuousClock.now < initialDeadline", initial)
+        self.assertIn("guard !parentReturnRejected, !renameCandidateRejected,", initial)
         before_back = initial[:initial.index("back.element.tap()")]
         self.assertIn("try Task.checkCancellation()\n                    guard ContinuousClock.now < initialDeadline", before_back)
 
@@ -1021,11 +1026,14 @@ PREACTION_METHOD = r"""
         app.counters.waits += 1
         try check(condition(), app: app, message)
     }
+    private func recordNativeFolderInitialFailure(_ value: NativeFolderInitialObservation, localTitle: String) {}
     func exerciseAction(_ app: ActionApp, _ picker: XCUIElementSnapshot,
                         _ application: XCUIElementSnapshot) async -> String {
         let before = CGRect(x: 10, y: 212, width: 122, height: 190)
         let snapshots = (picker: picker, application: application)
         let localTitle = "On My iPhone"
+        let initialDeadline = ContinuousClock.now.advanced(by: .seconds(60))
+        var initialObservation = NativeFolderInitialObservation()
         let files = app.files, created = app.created
         let inlineNames = app.inlineNames, keyboardIntroduction = app.introduction
         do {
@@ -1313,7 +1321,20 @@ CHILD_ROUTE_METHODS = r'''
             if app.mode == "fresh-expiry" { ContinuousClock.now.seconds = 30 }
             if app.mode == "cancel-before" { Task.cancelled = true }
         }
-        if app.mode == "parent-cell" { pair = (parent.picker, parent.app) }
+        if app.mode == "parent-cell" || app.mode == "changed-candidate" { pair = (parent.picker, parent.app) }
+        if app.mode == "changed-candidate" && app.samples > 1 { parent.cell.frame.origin.x += 1 }
+        if app.mode.hasPrefix("late-child") && app.backs == 0 {
+            if app.samples == 1 {
+                pair = (parent.picker, parent.app)
+                ContinuousClock.now.seconds = 26.2
+            } else {
+                if app.samples == 2 {
+                    ContinuousClock.now.seconds = app.mode == "late-child-expired" ? 60 : 33.34
+                }
+                if app.mode == "late-child-ambiguous" { child.mutate("duplicate-grid") }
+                if app.mode == "late-child-changed" && app.samples == 3 { child.back.frame.origin.x += 1 }
+            }
+        }
         if app.mode == "parent-editor" { pair = (editor.picker, editor.app) }
         if app.mode.hasPrefix("slow-introduction") {
             editor.mutate("introduction-overlay")
@@ -1323,10 +1344,10 @@ CHILD_ROUTE_METHODS = r'''
         if app.samples == 1 && (app.mode.hasPrefix("slow-introduction") || app.mode == "slow-child") {
             ContinuousClock.now.seconds = app.mode == "slow-introduction-expired" ? 61 : 42
         }
-        if app.backs > 0 && app.mode != "repeated-child"
+        if app.backs > 0 && app.mode != "repeated-child" && app.mode != "late-child-consumed"
             && !(app.mode == "transient-child" && app.samples == 3) {
             pair = (parent.picker, parent.app)
-            if app.mode == "child-editor" || app.mode == "child-introduction" || (app.mode == "late-editor" && app.samples >= 4) {
+            if app.mode == "child-editor" || app.mode == "child-introduction" || app.mode == "late-child-editor" || (app.mode == "late-editor" && app.samples >= 4) {
                 if app.mode == "child-introduction" { editor.mutate("introduction-overlay") }
                 pair = (editor.picker, editor.app)
             }
@@ -1414,7 +1435,7 @@ class ParentReturnTests(unittest.TestCase):
         if result.returncode: raise AssertionError(result.stdout + result.stderr)
         return binary
 
-    def probe(self, mode, command="route", binary=None, timeout=None):
+    def probe(self, mode, command="route", binary=None, timeout=30):
         args = [str(binary or self.binary), command, mode] + ([] if timeout is None else [str(timeout)])
         return json.loads(subprocess.run(args, check=True,
                                          capture_output=True, text=True, timeout=5).stdout)
@@ -1506,12 +1527,12 @@ class ParentReturnTests(unittest.TestCase):
         row = self.probe("first-throws")
         self.assertEqual((row["outcome"], row["backs"], row["presses"]), ("rejected", 0, 0))
 
-    def test_hosted_window_accepts_bound_late_editor_but_default_and_expired_windows_reject(self):
+    def test_selected_window_accepts_bound_late_editor_but_short_and_expired_windows_reject(self):
         hosted = self.probe("slow-introduction", timeout=60)
         self.assertEqual((hosted["outcome"], hosted["backs"], hosted["presses"], hosted["samples"]),
                          ("accepted", 0, 0, 1))
         self.assertEqual(hosted["elapsed"], 42)
-        for mode, timeout in [("slow-introduction", None), ("slow-introduction-expired", 60),
+        for mode, timeout in [("slow-introduction", 30), ("slow-introduction-expired", 60),
                               ("slow-introduction-invalid", 60)]:
             with self.subTest(mode=mode, timeout=timeout):
                 row = self.probe(mode, timeout=timeout)
@@ -1527,6 +1548,43 @@ class ParentReturnTests(unittest.TestCase):
                 self.assertEqual((row["outcome"], row["backs"], row["renames"]), ("rejected", backs, 0))
                 self.assertGreaterEqual(row["elapsed"], 60)
                 self.assertLess(row["elapsed"], 60.2)
+
+    def test_late_candidate_to_child_reenters_resolution_with_one_back(self):
+        row = self.probe("late-child", timeout=None)
+        self.assertEqual((row["outcome"], row["backs"], row["presses"], row["renames"]),
+                         ("accepted", 1, 1, 1))
+        self.assertGreater(row["elapsed"], 33.34)
+        self.assertLess(row["elapsed"], 60)
+        short = self.probe("late-child", timeout=30)
+        self.assertEqual((short["outcome"], short["backs"], short["presses"]), ("rejected", 0, 0))
+
+    def test_late_child_expiry_changed_or_ambiguous_state_never_acts(self):
+        for mode in ["late-child-expired", "late-child-changed", "late-child-ambiguous", "changed-candidate"]:
+            with self.subTest(mode=mode):
+                row = self.probe(mode, timeout=None)
+                self.assertEqual((row["outcome"], row["backs"], row["presses"], row["renames"]),
+                                 ("rejected", 0, 0, 0))
+
+    def test_late_child_consumed_back_cannot_repeat_or_rename(self):
+        row = self.probe("late-child-consumed", timeout=None)
+        self.assertEqual((row["outcome"], row["backs"], row["presses"], row["renames"]),
+                         ("rejected", 1, 0, 0))
+        self.assertEqual(row["failureEvidence"]["classification"], "empty-child")
+
+    def test_late_child_editor_and_original_editor_do_not_request_rename(self):
+        for mode, backs in [("late-child-editor", 1), ("parent-editor", 0)]:
+            row = self.probe(mode, timeout=None)
+            self.assertEqual((row["outcome"], row["backs"], row["presses"], row["renames"]),
+                             ("accepted", backs, 0, 0))
+
+    def test_causal_early_candidate_acceptance_loses_the_late_child_transition(self):
+        old = "                        if let pending = pendingRenameFrame {"
+        mutant = "                        pendingRenameFrame = frame\n" + old
+        self.assertEqual(self.source.count(old), 1)
+        binary = self.compile(self.source.replace(old, mutant, 1), "early-candidate")
+        row = self.probe("late-child", binary=binary, timeout=None)
+        self.assertNotEqual((row["outcome"], row["backs"], row["presses"], row["renames"]),
+                            ("accepted", 1, 1, 1))
 
     def test_causal_old_deadline_or_polling_window_rejects_delayed_hosted_state(self):
         for name, old, new, mode in [
@@ -1651,8 +1709,8 @@ struct Instant: Comparable {
         row = self.rows["invalid"]
         self.assertEqual(row["outcome"], "failed")
         self.assertEqual(row["captures"], 1)
-        self.assertGreaterEqual(row["elapsed"], 30)
-        self.assertLess(row["elapsed"], 31.2)
+        self.assertGreaterEqual(row["elapsed"], 60)
+        self.assertLess(row["elapsed"], 61.2)
 
     def test_cancellation_stops_before_another_acquisition(self):
         row = self.rows["cancel"]
