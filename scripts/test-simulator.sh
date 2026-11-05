@@ -108,7 +108,7 @@ print(phones[0]["udid"])
 fi
 mkdir -p build
 # Only the final invocation receives its validated hosted cohort profile.
-# Preparation and ordinary/local/iPad defaults remain unchanged.
+# Preparation uses its own bounded profile; ordinary/local/iPad defaults stay unchanged.
 if [[ "$TRIPFOLIO_HOSTED_PHONE_TIMING" == 1 ]]; then
   test "$(cat "$TRIPFOLIO_SELECTION_DIR/architecture.txt")" = x86_64
   export TEST_RUNNER_TRIPDOCKET_PHONE_TIMING=hosted-intel-phone-v1

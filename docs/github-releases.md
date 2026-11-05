@@ -353,7 +353,12 @@ fresh snapshot for identity, label and value while retaining the global uniquene
 and live hit checks; snapshots are never reused after a drag or a new observation.
 Phone preparation has a 1,080-second work budget and a 960-second build/test command
 cap on Arm; Intel uses 1,440 seconds of work and a 1,080-second command cap.
-The shared preparation case has a 180-second allowance. A captured cold phone
+The preparation case retains a 180-second allowance on Arm. Intel uses the
+existing validated hosted Recovery profile with a 300-second prepare allowance,
+paired with both xcodebuild execution limits. Only that preparation command gets
+the profile token; the provider-only route and its no-Save checks are unchanged.
+The command and overall work budgets above still bound startup, execution and
+finalization. A captured cold phone
 run reached local Files checks at 132 seconds, after its former 120-second limit.
 That failed run remains failed; no completed preparation is inferred from its
 late observations. A later phone run spent about 518 seconds in build and runner
@@ -414,8 +419,8 @@ observed non-transition; it does not establish whether the first native action
 was ignored or delayed.
 Batch release qualification preparation has the profile-specific cap described above.
 Phone bootstrap selects an immutable 1,080-second Intel or 960-second Arm preparation
-command cap, with the same 180-second native preparation allowance, 30-second
-cleanup and ten-second receipt limits. Intel
+command cap, with a 300-second Intel or 180-second Arm native preparation
+allowance, 30-second cleanup and ten-second receipt limits. Intel
 gets 1,440 seconds of work; Arm retains 1,080. The Phone integration step has
 108 minutes within a 128-minute job: 1,480 seconds for the complete Intel bootstrap,
 4,380 seconds for the nine case ceilings, 600 seconds for selection, generation,

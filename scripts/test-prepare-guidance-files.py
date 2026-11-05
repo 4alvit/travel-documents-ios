@@ -507,6 +507,7 @@ class OwnedPreparationOps(OwnedBootOps):
 
     def spawn(self, argv):
         child = super().spawn(argv)
+        self.spawn_env = dict(self.env)
         poll = child.poll
         def completed():
             result = poll()
@@ -552,12 +553,36 @@ class PreparationCommandTests(unittest.TestCase):
                 self.assertEqual(row["outcome"], "completed" if passes else "failed")
                 argv = ops.processes[0].argv
                 for flag in ["-default-test-execution-time-allowance", "-maximum-test-execution-time-allowance"]:
-                    self.assertEqual(argv[argv.index(flag) + 1], "180")
+                    self.assertEqual(argv[argv.index(flag) + 1], "300" if arch == "x86_64" else "180")
                 self.assertEqual([a for a in argv if a.startswith("-only-testing:")],
                                  ["-only-testing:TripfolioUITests/" + m.PREPARE_CASE.removesuffix("()")])
                 self.assertEqual(len(ops.processes), 1); self.assertEqual(runner.preparation_calls, 1)
                 self.assertEqual(inspections, [True]); self.assertIs(ops.env, before)
                 self.assertFalse(runner.active); self.assertEqual(runner.report["status"], "running")
+
+    def test_native_prepare_profile_and_cli_are_paired_and_environment_restored(self):
+        for arch, native in [("arm64", 180), ("x86_64", 300)]:
+            for returncode in (0, 65):
+                with self.subTest(architecture=arch, returncode=returncode):
+                    runner, ops, _ = self.preparation_runner(arch, duration=100, returncode=returncode)
+                    previous = ops.env
+                    previous["TEST_RUNNER_UNRELATED"] = "retained"
+                    if returncode:
+                        with self.assertRaisesRegex(RuntimeError, "prepare-ui failed"):
+                            m.Bootstrap.prepare_ui(runner)
+                    else:
+                        m.Bootstrap.prepare_ui(runner)
+                    self.assertIs(ops.env, previous)
+                    self.assertNotIn("TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE", previous)
+                    self.assertEqual(ops.spawn_env["TEST_RUNNER_UNRELATED"], "retained")
+                    self.assertEqual(ops.spawn_env.get("TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"),
+                                     "hosted-intel-v1" if arch == "x86_64" else None)
+                    self.assertNotIn("TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER", ops.spawn_env)
+                    argv = ops.processes[0].argv
+                    for flag in ["-default-test-execution-time-allowance", "-maximum-test-execution-time-allowance"]:
+                        self.assertEqual(argv[argv.index(flag) + 1], str(native))
+                    self.assertEqual(len(ops.processes), 1)
+                    self.assertFalse(runner.active)
 
     def test_old_intel_preparation_cap_causally_rejects_delayed_completion(self):
         old = {**m.EXECUTION_PROFILES["x86_64"], "prepare_command_seconds": 960}
@@ -625,11 +650,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
                                  (1., 1. + work, 31. + work, 41. + work))
                 self.assertEqual(runner.execution_profile["warm_boot_seconds"], boot)
                 self.assertEqual(runner.execution_profile["prepare_command_seconds"], prepare)
+                self.assertEqual(runner.execution_profile["prepare_case_seconds"], 300 if arch == "x86_64" else 180)
                 self.assertEqual(runner.report["execution_profile"], dict(runner.execution_profile))
                 self.assertEqual(runner.report["limits"]["work_seconds"], work)
                 selected = runner.execution_profile
                 with self.assertRaises(TypeError): selected["work_seconds"] = 1
                 with self.assertRaises(TypeError): selected["prepare_command_seconds"] = 1
+                with self.assertRaises(TypeError): selected["prepare_case_seconds"] = 1
                 with self.assertRaises(AttributeError): runner.execution_profile = {}
                 with self.assertRaises(AttributeError): del runner.execution_profile
                 self.assertIs(runner.execution_profile, selected)

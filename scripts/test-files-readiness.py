@@ -360,6 +360,32 @@ class RecoveryNativeFolderModeTests(unittest.TestCase):
                                 capture_output=True, text=True, check=True, timeout=5)
         return result.stdout.strip()
 
+    def test_real_bootstrap_profile_reaches_existing_native_policy_without_folder_creation(self):
+        import runpy
+        module = runpy.run_path(str(ROOT / 'scripts/test-prepare-guidance-files.py'))
+        for architecture, expected in [('arm64', 180), ('x86_64', 300)]:
+            case = module['BootstrapTests']()
+            try:
+                runner = case.make(architecture=architecture)
+                self.assertEqual(case.run_bootstrap(runner), 0, runner.report)
+                environment = {key.removeprefix('TEST_RUNNER_'): value
+                               for key, value in runner.prep_env.items() if key.startswith('TEST_RUNNER_')}
+                self.assertEqual(self.probe(environment), 'provider-only')
+                self.assertEqual(self.allowance(environment, 'prepare', architecture == 'x86_64'),
+                                 str(float(expected)))
+                _, argv, _ = next(call for call in runner.calls if call[0] == 'prepare-ui')
+                for flag in ['-default-test-execution-time-allowance', '-maximum-test-execution-time-allowance']:
+                    self.assertEqual(argv[argv.index(flag) + 1], str(expected))
+                if architecture == 'x86_64':
+                    old = dict(environment)
+                    del old['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE']
+                    self.assertEqual(self.allowance(old, 'prepare'), '180.0')
+                    self.assertEqual(self.allowance(environment, 'prepare', False), 'rejected')
+                    environment['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = 'invalid'
+                    self.assertEqual(self.allowance(environment, 'prepare'), 'rejected')
+            finally:
+                case.doCleanups()
+
     def test_default_native_allowances_do_not_depend_on_host_architecture(self):
         for debug in (False, True):
             for phase, expected in (('prepare', '180.0'), ('export', '300.0'), ('restore', '300.0')):
@@ -1823,7 +1849,8 @@ class SDKSourceTests(unittest.TestCase):
                                   capture_output=True, text=True, check=True, timeout=15).stdout.strip()
         frameworks = str(Path(platform) / 'Developer/Library/Frameworks')
         for source, target, flags in ((SOURCE, 'arm64', []), (SOURCE, 'x86_64', ['-D', 'DEBUG']),
-                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'arm64', [])):
+                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'arm64', []),
+                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'x86_64', ['-D', 'DEBUG'])):
             with self.subTest(source=source.name, target=target, flags=flags):
                 result = subprocess.run(
                     ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
@@ -2849,7 +2876,11 @@ import CoreGraphics
     var now: Instant { Instant(time: Self.elapsed) }
 }
 @MainActor enum Task {
-    static func sleep(for duration: Duration) async throws { ContinuousClock.elapsed += duration }
+    static var cancelled = false
+    static func sleep(for duration: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        ContinuousClock.elapsed += duration
+    }
 }
 enum ElementType { case other, button, navigationBar }
 @MainActor final class XCUIElementSnapshot {
@@ -2883,8 +2914,13 @@ enum ElementType { case other, button, navigationBar }
     var failures = 0
     var tappedAt: Duration = .zero
     init(_ name: String) { self.name = name }
-    func snapshot() -> XCUIElementSnapshot {
+    func snapshot() throws -> XCUIElementSnapshot {
         snapshots += 1
+        if name == "hosted-snapshot-error" { throw FixtureFailure() }
+        if taps == 0 && name.contains("slow-readiness") { ContinuousClock.elapsed += .seconds(14) }
+        if taps == 0 && name == "hosted-late-readiness" { ContinuousClock.elapsed += .seconds(30) }
+        if taps > 0 && name.contains("slow-transition") { ContinuousClock.elapsed += .seconds(14) }
+        if taps > 0 && name == "hosted-late-transition" { ContinuousClock.elapsed += .seconds(30) }
         ContinuousClock.elapsed += taps == 0 ? .milliseconds(500) :
             (name == "late-snapshot" ? .seconds(5) : .milliseconds(500))
         let bounds = CGRect(x: 0, y: 0, width: 1032, height: 1376)
@@ -2893,7 +2929,7 @@ enum ElementType { case other, button, navigationBar }
         let initialIdentifier = name.contains("empty-id") && name != "nonempty-id-changed" && taps == 0 ? "" : "gearshape"
         let leaf = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
         leaf.isEnabled = name != "disabled-snapshot"
-        leaf.isSelected = taps > 0 && name != "unselected"
+        leaf.isSelected = taps > 0 && !name.contains("unselected") && name != "hosted-cancelled"
         if name == "single-button" || (name.contains("empty-id") && !name.contains("pair")) || name == "nonempty-id-changed" { root.storedChildren = [leaf] }
         else {
             let parent = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
@@ -2953,6 +2989,7 @@ enum ElementType { case other, button, navigationBar }
     }
     var isHittable: Bool {
         world.hittableReads += 1
+        if world.name == "hosted-late-hittable" { ContinuousClock.elapsed += .seconds(30) }
         if world.name == "late-live-hittable" { ContinuousClock.elapsed += .seconds(5) }
         guard query.nodes().count == 1, world.name != "unhittable-tab" else { return false }
         if world.name.contains("before-tap") { world.identifierChanged = true }
@@ -2996,27 +3033,38 @@ enum ElementType { case other, button, navigationBar }
 @MainActor final class XCUIApplication {
     let world: World
     init(_ world: World) { self.world = world }
-    func snapshot() throws -> XCUIElementSnapshot { world.snapshot() }
+    func snapshot() throws -> XCUIElementSnapshot { try world.snapshot() }
     var buttons: XCUIElementQuery { XCUIElementQuery(world) }
     var navigationBars: XCUIElementQuery { XCUIElementQuery(world) }
 }
 struct FixtureFailure: Error {}
+@MainActor final class XCTAttachment {
+    enum Lifetime { case keepAlways }
+    var name = ""
+    var lifetime = Lifetime.keepAlways
+    let string: String
+    init(string: String) { self.string = string }
+}
 @MainActor final class Harness {
+    var attachments: [XCTAttachment] = []
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
     func require(_ value: Bool, app: XCUIApplication, _ message: String) throws {
         if !value { app.world.failures += 1; throw FixtureFailure() }
     }
     // ACTUAL_HELPER
     func run(_ app: XCUIApplication) async throws {
-        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app)
+        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app, hostedTiming: app.world.name.hasPrefix("hosted-"))
     }
 }
 @main struct Main {
     @MainActor static func main() async {
         let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
-        let success = ["redundant-enabled-cost", "ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
-        let beforeTapFailure = ["disabled-snapshot", "late-live-hittable", "late-identity-resolution", "ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
+        let success = ["hosted-slow-readiness", "hosted-slow-transition", "redundant-enabled-cost", "ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
+        let beforeTapFailure = ["default-slow-readiness", "hosted-late-readiness", "hosted-late-hittable", "hosted-snapshot-error", "disabled-snapshot", "late-live-hittable", "late-identity-resolution", "ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
         var failed = false
-        do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
+        Task.cancelled = name == "hosted-cancelled"
+        let harness = Harness()
+        do { try await harness.run(XCUIApplication(world)) } catch { failed = true }
         precondition(failed != success)
         precondition(world.taps == (beforeTapFailure ? 0 : 1))
         precondition(world.enabledReads == 0)
@@ -3024,8 +3072,36 @@ struct FixtureFailure: Error {}
         if name == "disabled-snapshot" || name == "late-identity-resolution" { precondition(world.hittableReads == 0) }
         precondition(world.navigationQueries == 0)
         precondition(world.rejectedTapResolutions == 0)
-        precondition(world.failures == (success ? 0 : 1))
-        if success { precondition(world.snapshots == 2 && ContinuousClock.elapsed < .seconds(5)) }
+        precondition(world.failures == (success || ["hosted-cancelled", "hosted-snapshot-error"].contains(name) ? 0 : 1))
+        if success {
+            precondition(world.snapshots == 2)
+            precondition(ContinuousClock.elapsed < .seconds(name.hasPrefix("hosted-") ? 30 : 5))
+        }
+        precondition(harness.attachments.count == 1)
+        let attachment = harness.attachments[0]
+        let data = Data(attachment.string.utf8)
+        precondition(data.count <= 8192 && attachment.name == "Guidance tab observation")
+        let trace = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        precondition(trace["schemaVersion"] as? Int == 1)
+        precondition(trace["budgetSeconds"] as? Int == (name.hasPrefix("hosted-") ? 30 : 5))
+        precondition(trace["tapAttempted"] as? Bool == (world.taps == 1))
+        precondition(trace["observations"] as? Int == world.snapshots)
+        let rows = trace["samples"] as! [[String: Any]]
+        precondition(rows.count == min(16, world.snapshots))
+        precondition(trace["truncated"] as? Bool == (world.snapshots > 16))
+        precondition(trace["outcome"] as? String == (success ? "completed" :
+            (["hosted-cancelled", "hosted-snapshot-error"].contains(name) ? "incomplete" :
+             (beforeTapFailure ? "readiness-deadline" : "transition-deadline"))))
+        for row in rows {
+            let start = row["startedSeconds"] as! Double, end = row["finishedSeconds"] as! Double
+            precondition(start.isFinite && end.isFinite && start >= 0 && end >= start)
+            precondition(["readiness", "transition"].contains(row["phase"] as! String))
+        }
+        if name == "hosted-unselected" { precondition(world.snapshots > 16 && rows.first?["phase"] as? String == "readiness") }
+        if name == "hosted-snapshot-error" { precondition(rows[0]["reason"] as? String == "snapshot-error") }
+        if name.contains("late-transition") || name == "default-slow-transition" {
+            precondition(rows.last?["reason"] as? String == "deadline-after-snapshot")
+        }
         if name == "late-snapshot" || name == "late-traversal" { precondition(world.snapshots == 2) }
         print("PASS " + name)
     }
@@ -3039,8 +3115,8 @@ class TabNavigationTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.directory.cleanup)
         source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
-        start = source.index('    private func selectTab(')
-        end = source.index('    private func scrollTo(', start)
+        start = source.index('    private struct TabObservationTrace:')
+        end = source.index('    private struct ScrollObservation', start)
         path = Path(cls.directory.name) / 'TabNavigation.swift'
         path.write_text(TAB_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'tab-navigation-tests'
@@ -3076,6 +3152,44 @@ class TabNavigationTests(unittest.TestCase):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_hosted_tab_window_and_bounded_existing_snapshot_trace(self):
+        for name in ['hosted-slow-readiness', 'hosted-slow-transition',
+                     'default-slow-readiness', 'default-slow-transition',
+                     'hosted-late-readiness', 'hosted-late-transition',
+                     'hosted-late-hittable', 'hosted-unselected',
+                     'hosted-cancelled', 'hosted-snapshot-error']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_old_five_second_hosted_window_rejects_measured_slow_observation(self):
+        path = Path(self.directory.name) / 'TabNavigation.swift'
+        source = path.read_text()
+        self.assertEqual(source.count('let budgetSeconds = hostedTiming ? 30 : 5'), 1)
+        mutant = Path(self.directory.name) / 'OldTabNavigation.swift'
+        mutant.write_text(source.replace('let budgetSeconds = hostedTiming ? 30 : 5',
+                                         'let budgetSeconds = hostedTiming ? 5 : 5'))
+        binary = Path(self.directory.name) / 'old-tab-navigation-tests'
+        subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(mutant), '-o', str(binary)],
+                       capture_output=True, text=True, check=True, timeout=60)
+        # The actual hosted path must fail its expected-success assertion at the old cap.
+        result = subprocess.run([str(binary), 'hosted-slow-transition'], capture_output=True,
+                                text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_only_validated_guidance_profiles_select_hosted_tab_window(self):
+        source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
+        body = source[source.index('    private func verifyGuidance('):source.index('    /// Cover every')]
+        self.assertEqual(body.count('hostedTiming: hostedIPad || hostedPhone'), 2)
+        self.assertLess(body.index('try useHostedIPadTiming'), body.index('app.launch()'))
+        self.assertLess(body.index('try useHostedPhoneTiming'), body.index('app.launch()'))
+        helper = source[source.index('    private func selectTab('):source.index('    private struct ScrollObservation')]
+        self.assertEqual(helper.count('target.tap()'), 1)
+        self.assertEqual(helper.count('app.snapshot()'), 1)
+        self.assertEqual(helper.count('clock.now.advanced(by: .seconds(budgetSeconds))'), 2)
+        self.assertNotIn('ProcessInfo', helper)
 
 
 UI = SOURCE.read_text()

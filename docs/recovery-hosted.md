@@ -427,15 +427,23 @@ and two for startup/finalization. Their 95-minute jobs allocate two minutes to
 checkout, three to toolchain setup, 83 to the driver, two to artifact upload and
 five to cancellation/overhead. Insufficient remaining case admission still fails.
 
-Guidance tab transitions retain a five-second observation deadline and one tap.
-A failed English run showed a fully rendered Settings screen: the selected-tab
-snapshot was followed by a second remote navigation-bar query that exhausted
-the deadline. The transition now requires the selected tab and exactly one
-matching, nonempty, in-bounds navigation bar in the same immutable snapshot.
-The existing bounded traversal and strict deadline checks remain; a late
-snapshot, ambiguous title or missing navigation bar still fails. Fixture tests
-execute the actual Swift helper and reject those states without another remote
-query or another tap.
+Guidance tab readiness and transition observation each use 30 seconds only after
+the existing hosted Phone/iPad timing profile has been validated; ordinary runs
+retain five seconds. One fixed deadline is created per phase, and exactly one
+real tab action is attempted. The selected tab and one matching, nonempty,
+in-bounds navigation bar must still be present in the same snapshot before the
+deadline. A hosted English failure spent about 13.59 seconds in its first
+post-tap snapshot interval; later Settings was rendered. A Russian failure
+retained Trips after a transient Settings highlight, so the larger window is
+not proof of its cause or cure. No tap retry, extra AX query, native case
+allowance or outer budget is added.
+
+Each tab call retains a bounded JSON attachment with the first 16 existing
+observations, call outcome, phase, monotonic elapsed times, selected/navigation
+flags and fixed rejection reasons. Total observation count and truncation are
+explicit; later per-observation detail can be unavailable. Encoding/size failure
+is explicitly marked. These diagnostics never substitute for native assertions
+or pixel evidence.
 The step limits include each locale's selected work and cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
@@ -1007,3 +1015,24 @@ queries or OCR calls. The existing bounded last-observation attachment remains
 separate on failure. Serialization never truncates JSON bytes; an unexpected
 encoding failure is explicitly reported. These diagnostics do not authorize
 success or replace the subsequent host comparison of restored catalog and bytes.
+
+
+The native folder-name entry keeps one `typeText` action and then observes the
+result for at most 15 seconds. Each observation checks the foreground app and
+uses a separate frozen Files picker snapshot and application snapshot; the app
+snapshot alone can omit the remote Files subtree. Exact ownership, ancestry and
+visible editor geometry remain required. An empty value, the selected default
+name, or a strict prefix is pending; only the complete owned UUID name succeeds.
+Unexpected text, lost ownership, cancellation and results returned at or after
+the original deadline fail closed. No second typing action, clearing, paste or
+retry is performed. Existing live end-editing checks, the single blank-grid tap,
+no-Save rule, fixture shutdown and host exact empty-folder proof are unchanged.
+
+A retained text attachment records the first eight observations, total count,
+explicit truncation and final outcome as valid JSON of at most 8 KiB. Each value
+is compared in full; diagnostic value bytes are limited to a 128-byte UTF-8 hex
+prefix with an explicit length/truncation indicator. The 15-second window is
+local to this shared helper and does not change either caller's native allowance,
+the generic UI wait, Recovery command/work/cleanup limits or workflow timeouts.
+It does not establish whether the observed unchanged default name was caused by
+delayed processing or an input event that had no effect.
