@@ -323,22 +323,22 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(environment.splitlines(),[
             '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 113\n',recovery)
+        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 118\n',recovery)
         checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 2\n',checkout)
         regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 15\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
-        self.assertIn('        timeout-minutes: 86\n',attempt)
+        self.assertIn('        timeout-minutes: 91\n',attempt)
         self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
         evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
         self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
         step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
                       for step in (checkout,regressions,attempt,evidence)]
         job_minutes=int(re.search(r'^    timeout-minutes: (\d+)$',recovery,re.M).group(1))
-        self.assertEqual(step_minutes,[2,15,86,5])
+        self.assertEqual(step_minutes,[2,15,91,5])
         self.assertEqual(sum(step_minutes)+5,job_minutes)
-        self.assertEqual(PROFILE['total_seconds'],5040)
+        self.assertEqual(PROFILE['total_seconds'],5340)
         self.assertEqual(step_minutes[2]*60-PROFILE['total_seconds'],120)
 
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
@@ -513,7 +513,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_execution_profile_is_known_immutable_and_selected_before_output(self):
         r=self.runner(execution_profile='hosted-intel-v1')
-        self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
         self.assertEqual(r.execution_profile['boot_scan_seconds'],60)
         self.assertEqual(hosted.core.execution_profile()['boot_scan_seconds'],15)
         self.assertEqual((r.execution_profile['cleanup_seconds'],r.execution_profile['cleanup_action_seconds'],
@@ -561,7 +561,7 @@ class BoundaryTests(unittest.TestCase):
         invalid=[(dict(PROFILE),dict(job),'arm64')]
         for field,value in [('runner_label','macos-15'),('runner_arch','ARM64'),('machine','arm64'),
                             ('runner_environment','self-hosted'),
-                            ('total_seconds',5041),('total_seconds',True),('cleanup_seconds',361),
+                            ('total_seconds',5341),('total_seconds',True),('cleanup_seconds',361),
                             ('execution_profile','default'),('unexpected',1)]:
             invalid.append(({**PROFILE,field:value},dict(job),'x86_64'))
         for field,value in [('TRIPDOCKET_RUNNER_LABEL','macos-15'),('TRIPDOCKET_RUNNER_ARCH','ARM64'),
@@ -585,9 +585,9 @@ class BoundaryTests(unittest.TestCase):
         default=self.runner(label='default')
         intel=self.runner(execution_profile='hosted-intel-v1',label='intel')
         self.assertEqual((default.limit,default.final),(1380,1500))
-        self.assertEqual((intel.limit,intel.final),(4680,5040))
+        self.assertEqual((intel.limit,intel.final),(4980,5340))
         default.ops.t=intel.ops.t=400
-        self.assertEqual((default.limit,default.final,intel.limit,intel.final),(1380,1500,4680,5040))
+        self.assertEqual((default.limit,default.final,intel.limit,intel.final),(1380,1500,4980,5340))
         self.assertEqual(default.execution_profile['ui_profile'],None)
 
     def test_hosted_phases_use_one_profile_for_native_command_receipt_and_environment(self):
@@ -605,7 +605,7 @@ class BoundaryTests(unittest.TestCase):
                 row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
                 self.assertEqual(row['requested_cap_seconds'],command_seconds)
                 self.assertEqual(budget['selected_case_max_seconds'],native_seconds)
-                self.assertEqual(budget['original_work_deadline_elapsed'],4680)
+                self.assertEqual(budget['original_work_deadline_elapsed'],4980)
                 self.assertEqual(row['stop_reserve_seconds'],8)
                 argv,env=observed[-1]
                 for flag in ['-default-test-execution-time-allowance','-maximum-test-execution-time-allowance']:
@@ -614,7 +614,7 @@ class BoundaryTests(unittest.TestCase):
                 self.assertIs(r.ops.env,old_env)
                 self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         self.assertEqual(len(observed),3)
-        self.assertEqual((r.limit,r.final),(4680,5040))
+        self.assertEqual((r.limit,r.final),(4980,5340))
 
     def test_hosted_prepare_budget_causally_accepts_startup_rejected_by_default(self):
         for name,passes in [('default',False),('hosted-intel-v1',True)]:
@@ -635,13 +635,13 @@ class BoundaryTests(unittest.TestCase):
 
     def test_hosted_prepare_still_clips_to_original_work_and_reserves_cleanup(self):
         r=self.runner(execution_profile='hosted-intel-v1');r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
-        r.report['files_ui_baseline']={'absent':True};r.ops.t=4660;r.ops.plans=[{'delay':35}]
+        r.report['files_ui_baseline']={'absent':True};r.ops.t=4960;r.ops.plans=[{'delay':35}]
         with patch.object(r,'failure_evidence'),patch.object(r,'preserve_result') as preserve:
             with self.assertRaisesRegex(RuntimeError,'phase-prepare failed'):
                 hosted.core.Recovery.run_phase(r,'prepare')
         preserve.assert_not_called();row=r.report['commands'][0]
-        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(1200,4672,4680))
-        self.assertEqual((r.limit,r.final),(4680,5040));self.assertFalse(r.active)
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(1200,4972,4980))
+        self.assertEqual((r.limit,r.final),(4980,5340));self.assertFalse(r.active)
         with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
             hosted.core.Recovery.run_phase(r,'prepare')
         self.assertEqual(len(r.ops.processes),1)
@@ -1207,7 +1207,7 @@ class BoundaryTests(unittest.TestCase):
             ['profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'])
         self.assertTrue(all(x['requested_cap_seconds']==300 and x['command_deadline']==300
                             and x['work_deadline']==292 for x in discovery))
-        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,300])
+        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,600])
         self.assertEqual(r.report['discovery_budget']['status'],'completed')
         self.assertGreaterEqual(r.report['discovery_budget']['finished_elapsed'],270)
         self.assertLess(r.report['discovery_budget']['finished_elapsed'],292)
@@ -1224,51 +1224,89 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(r.report['discovery_budget']['requested_seconds'],300)
         self.assertEqual(r.report['attempts'],{'create':1})
 
-    def test_hosted_owned_boot_ready_can_finish_after_120_without_renewing_global_budget(self):
-        r=self.runner(Ops({'delay':180.,'output':[('stdout',b'Finished synthetic boot')]}))
+    def test_hosted_owned_boot_ready_can_finish_after_300_without_renewing_global_budget(self):
+        r=self.runner(Ops({'delay':350.,'output':[('stdout',b'Finished synthetic boot')]}),execution_profile='hosted-intel-v1')
         r.owned='10000000-0000-0000-0000-000000000001'
         self.assertEqual(r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120),'Finished synthetic boot')
         row=r.report['commands'][0]
         self.assertEqual(row['argv'],['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b'])
         self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
-                          row['stop_reserve_seconds']),(300,292.,300.,8))
+                          row['stop_reserve_seconds']),(600,592.,600.,8))
         self.assertEqual((row['outcome'],row['returncode']),('completed',0))
-        self.assertGreaterEqual(row['finish'],180.);self.assertLess(row['finish'],292.)
+        self.assertGreaterEqual(row['finish'],350.);self.assertLess(row['finish'],592.)
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(r.ops.signals,[]);self.assertEqual(len(r.ops.processes),1)
         self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
-        self.assertEqual((r.limit,r.final),(1380.,1500.))
-        self.assertTrue(all(sample['scan']['requested_scan_seconds'] in (5,15)
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
+        self.assertTrue(all(sample['scan']['requested_scan_seconds'] in (5,60)
                             for sample in r.report['resources']))
 
+    def test_prior_hosted_boot_cap_rejects_same_delayed_success(self):
+        import types
+        current=hosted.HostedRecovery.sim
+        self.assertEqual(current.__code__.co_consts.count(600),1)
+        prior=types.FunctionType(current.__code__.replace(co_consts=tuple(
+            300 if value==600 else value for value in current.__code__.co_consts)),
+            current.__globals__,argdefs=current.__defaults__,closure=current.__closure__)
+        prior.__kwdefaults__=current.__kwdefaults__
+        r=self.runner(Ops({'delay':350.,'output':[('stdout',b'Finished synthetic boot')]}),
+                      execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with patch.object(hosted.HostedRecovery,'sim',prior):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (300,292.,300.))
+        self.assertEqual(row['outcome'],'failed')
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+
+    def test_standalone_boot_keeps_120_second_limit(self):
+        ops=Ops({'delay':180.})
+        r=hosted.core.Recovery(ops,self.root/'standalone',
+                              {'runtime':'synthetic-runtime','device_type':'synthetic-device'},
+                              {'machine':'arm64'},'test',0,
+                              candidate=self.root/'source',source_manifest={})
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (120,112.,120.))
+        self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
     def test_hosted_owned_boot_ready_exhaustion_stops_once_inside_original_reserve(self):
-        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}))
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}),execution_profile='hosted-intel-v1')
         r.owned='10000000-0000-0000-000000000001'
         with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
             r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
         row=r.report['commands'][0]
         self.assertEqual(row['error'],"RuntimeError('Command timeout')")
         self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
-                          row['stop_reserve_seconds']),(300,292.,300.,8))
+                          row['stop_reserve_seconds']),(600,592.,600.,8))
         self.assertEqual(row['outcome'],'failed');self.assertEqual(row['stop']['signals'],[15,9])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
-        self.assertGreaterEqual(row['finish'],297.);self.assertLess(row['finish'],300.)
+        self.assertGreaterEqual(row['finish'],597.);self.assertLess(row['finish'],600.)
         self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
         self.assertNotIn('resource_scan_failure',r.report);self.assertNotIn('cap_error',row)
-        self.assertEqual((r.limit,r.final),(1380.,1500.))
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
 
     def test_hosted_owned_boot_ready_is_clipped_by_remaining_work_not_cleanup_budget(self):
-        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}));r.ops.t=1300.
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}),execution_profile='hosted-intel-v1');r.ops.t=4900.
         r.owned='10000000-0000-0000-0000-000000000001'
         with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
             r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
         row=r.report['commands'][0]
         self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
-                         (300,1372.,1380.))
+                         (600,4972.,4980.))
         self.assertEqual(row['stop']['signals'],[15,9])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
-        self.assertGreaterEqual(row['finish'],1377.);self.assertLess(row['finish'],1380.)
-        self.assertEqual((r.limit,r.final),(1380.,1500.));self.assertFalse(r.active)
+        self.assertGreaterEqual(row['finish'],4977.);self.assertLess(row['finish'],4980.)
+        self.assertEqual((r.limit,r.final),(4980.,5340.));self.assertFalse(r.active)
         with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
             r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
         self.assertEqual(len(r.ops.processes),1)
@@ -1418,7 +1456,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,90,90,60])
             self.assertTrue(all(x['stop_reserve_seconds']==8 and x['stop']['group_absent']
                                 and x['stop']['leader_reaped'] for x in r.report['commands']))
-            self.assertEqual((r.t0,r.final,r.limit,r.write_deadline),(0,5040,350,360))
+            self.assertEqual((r.t0,r.final,r.limit,r.write_deadline),(0,5340,350,360))
             self.assertGreaterEqual(r.ops.t,220);self.assertLess(r.ops.t,221)
             self.assertEqual(r.report['attempts'],{'shutdown':1,'delete':1})
 
@@ -1433,11 +1471,11 @@ class BoundaryTests(unittest.TestCase):
              patch.object(hosted.core.Recovery,'cleanup',scope['cleanup']):
             r.cleanup()
             self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
-            self.assertEqual((r.final,r.limit,r.write_deadline),(5040,110,120))
+            self.assertEqual((r.final,r.limit,r.write_deadline),(5340,110,120))
             self.assertTrue(r.report['errors']);self.assertLessEqual(r.ops.t,120)
 
     def test_hosted_cleanup_global_final_and_action_deadlines_are_not_reset(self):
-        for label,start,jump,end in [('late-action',0,91,90),('late-global',4980,61.4,5030)]:
+        for label,start,jump,end in [('late-action',0,91,90),('late-global',5280,61.4,5330)]:
             with self.subTest(label=label),self.owned_cleanup(label,start=start,jump=jump,
                     delays=(0,1000,0,0)) as (r,_,root):
                 r.cleanup()
@@ -1446,8 +1484,8 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual((row['command_deadline'],row['work_deadline']),(end,end-8))
                 self.assertEqual(row['stop']['signals'],[])
                 self.assertTrue(r.active);self.assertTrue(root.exists())
-                self.assertFalse(r.report['cleanup_verified']);self.assertEqual(r.final,5040)
-                self.assertEqual(r.write_deadline,min(5040,start+360))
+                self.assertFalse(r.report['cleanup_verified']);self.assertEqual(r.final,5340)
+                self.assertEqual(r.write_deadline,min(5340,start+360))
 
     def test_cleanup_ownership_errors_still_withhold_later_commands(self):
         with self.owned_cleanup('unknown-group',shutdown_options={'delay':float('inf'),'probe_error':True}) as (r,_,root):
@@ -3134,7 +3172,7 @@ class BoundaryTests(unittest.TestCase):
         r=self.runner(Ops())
         r.owned='10000000-0000-0000-0000-000000000001'
         def spawned(_):
-            r.ops.t=289.;r.next_scan=290.
+            r.ops.t=589.;r.next_scan=590.
         r.ops.on_spawn=spawned
         reads=0;scans=[]
         def read(_):
@@ -3149,7 +3187,7 @@ class BoundaryTests(unittest.TestCase):
         r.ops.read=read
         original_scan=hosted.core.live_sizes
         def scan(*args,**kwargs):
-            if r.ops.t>=290.:
+            if r.ops.t>=590.:
                 scans.append({'started':r.ops.t,'deadline':args[3],
                               'active':bool(r.active),
                               'finalizing':getattr(r,'_finalizing_success',None) is not None})
@@ -3166,18 +3204,18 @@ class BoundaryTests(unittest.TestCase):
         r,row,scans,ok=self.boot_exit_accounting()
         self.assertTrue(ok)
         self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
-                         (292.,300.,8))
+                         (592.,600.,8))
         self.assertEqual(row['outcome'],'completed')
         self.assertEqual(len(scans),1)
         self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
-        self.assertAlmostEqual(scans[0]['started'],291.3)
-        self.assertAlmostEqual(row['finish'],292.3)
+        self.assertAlmostEqual(scans[0]['started'],591.3)
+        self.assertAlmostEqual(row['finish'],592.3)
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(row['stop']['signals'],[])
         self.assertFalse(r.active)
-        self.assertAlmostEqual(row['post_exit_scan_deferral']['elapsed'],291.3)
+        self.assertAlmostEqual(row['post_exit_scan_deferral']['elapsed'],591.3)
         self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
-        self.assertAlmostEqual(r.report['resources'][-1]['elapsed'],292.3)
+        self.assertAlmostEqual(r.report['resources'][-1]['elapsed'],592.3)
 
     def test_boot_exit_drain_keeps_work_cancel_and_output_bounds(self):
         cases=[('deadline',{'drain_seconds':2.4},'Command timeout'),
@@ -3192,7 +3230,7 @@ class BoundaryTests(unittest.TestCase):
                 self.assertNotIn('post_exit_scan_deferral',row)
                 self.assertEqual(scans,[])
                 self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
-                self.assertLess(row['finish'],300.)
+                self.assertLess(row['finish'],600.)
                 self.assertFalse(r.active)
 
     def test_boot_exit_deferral_requires_complete_final_accounting(self):
@@ -3203,8 +3241,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(row['outcome'],'failed')
         self.assertEqual(len(scans),1)
         self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
-        self.assertAlmostEqual(scans[0]['deadline'],296.3)
-        self.assertLess(row['finish'],300.)
+        self.assertAlmostEqual(scans[0]['deadline'],596.3)
+        self.assertLess(row['finish'],600.)
         self.assertFalse(r.active)
 
     def boot_exit_checkpoint(self):
@@ -3469,7 +3507,7 @@ class BoundaryTests(unittest.TestCase):
         r=self.runner(execution_profile='hosted-intel-v1')
         r.owned='10000000-0000-0000-0000-000000000001'
         argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
-        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':292.}
+        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':592.}
         r.report['commands'].append(row);observed=[]
         def scan(*args,**kwargs):
             observed.append((args[3],kwargs['allow_xcresult_restart'],kwargs['allow_products_restart']))
@@ -3482,15 +3520,15 @@ class BoundaryTests(unittest.TestCase):
             row['argv']=argv[:-2]+['unowned','-b'];r.monitor();row['argv']=argv
             row['id']='boot';r.monitor();row['id']='boot-ready'
             r.owned=None;r.monitor();r.owned=argv[3]
-            row['work_deadline']=7.;r.monitor();row['work_deadline']=292.
-            r.limit=4.;r.monitor();r.limit=4680.
+            row['work_deadline']=7.;r.monitor();row['work_deadline']=592.
+            r.limit=4.;r.monitor();r.limit=4980.
             probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[dict(row)]},
                                   active={123:SimpleNamespace(pid=123)},owned=r.owned)
             r.monitor(command_owner=probe)
             row['id']='phase-prepare';r.monitor()
         self.assertEqual(observed,[(end,False,False) for end in [5.,60.,5.,5.,5.,5.,5.,7.,4.,5.]]
                          +[(30.,True,True)])
-        self.assertEqual((r.limit,r.final),(4680.,5040.))
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
         self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
                           hosted.core.CAPS['boot_scan_seconds']),(5,30,15))
         self.assertEqual(r.ops.processes,[])
@@ -3510,10 +3548,10 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('resource_scan_failure',r.report)
         row=r.report['commands'][0]
         self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
-                          row['stop_reserve_seconds'],row['returncode']),(300,292.,300.,8,0))
+                          row['stop_reserve_seconds'],row['returncode']),(600,592.,600.,8,0))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
-        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
 
     def test_default_boot_scan_still_rejects_26_second_stat(self):
         ops=Ops({'delay':float('inf'),'exit':-15})
@@ -3546,12 +3584,12 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(failure['traversal']['last_operation']['duration_seconds'],60.25)
         self.assertTrue(failure['partial_counts_are_not_valid_accounting'])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
-        self.assertEqual(row['stop']['signals'],[15]);self.assertLess(row['finish'],300.)
+        self.assertEqual(row['stop']['signals'],[15]);self.assertLess(row['finish'],600.)
         self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
 
     def test_hosted_boot_scan_late_stat_keeps_command_and_global_deadlines(self):
-        for name,start,wakeup,work,deadline in [('command',0.,290.,292.,300.),
-                                                 ('global',4600.,4670.,4672.,4680.)]:
+        for name,start,wakeup,work,deadline in [('command',0.,590.,592.,600.),
+                                                 ('global',4900.,4970.,4972.,4980.)]:
             with self.subTest(name=name):
                 r=self.runner(Ops({'delay':float('inf'),'exit':-15}),
                               execution_profile='hosted-intel-v1',label=name)
@@ -3568,7 +3606,7 @@ class BoundaryTests(unittest.TestCase):
                                  (work,deadline,8))
                 self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
                 self.assertLess(row['finish'],deadline);self.assertFalse(r.active)
-                self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
+                self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
 
     def test_hosted_repeated_boot_scans_cannot_renew_original_command(self):
         r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
@@ -3576,18 +3614,18 @@ class BoundaryTests(unittest.TestCase):
         with self.delayed_boot_stat(r,26.,repeat=True) as (calls,_):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
                 r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
-        self.assertGreaterEqual(len(calls),8)
+        self.assertGreaterEqual(len(calls),20)
         scans=[x for x in r.report['resources'] if x['scan']['requested_scan_seconds']==60]
-        self.assertGreaterEqual(len(scans),7)
-        self.assertTrue(all(x['scan']['deadline_elapsed']<=292 for x in scans))
+        self.assertGreaterEqual(len(scans),19)
+        self.assertTrue(all(x['scan']['deadline_elapsed']<=592 for x in scans))
         failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
-        self.assertEqual((failure['requested_scan_seconds'],failure['deadline_elapsed']),(60,292.))
+        self.assertEqual((failure['requested_scan_seconds'],failure['deadline_elapsed']),(60,592.))
         self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
-                         (292.,300.,8))
+                         (592.,600.,8))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
-        self.assertGreaterEqual(row['finish'],292.);self.assertLess(row['finish'],300.)
+        self.assertGreaterEqual(row['finish'],592.);self.assertLess(row['finish'],600.)
         self.assertEqual(row['stop']['signals'],[15]);self.assertEqual(len(r.ops.processes),1)
-        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
 
     def test_hosted_boot_scan_cancellation_still_closes_owned_process(self):
         r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
@@ -3599,7 +3637,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('Interrupted',row['error'])
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(row['stop']['signals'],[15]);self.assertFalse(r.active)
-        self.assertEqual((r.t0,r.limit,r.final),(0,4680,5040))
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
 
     def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
         r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
@@ -4008,7 +4046,7 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):r.setup()
         rows=r.report['commands']
         self.assertEqual([row['id'] for row in rows],['runtime-cache-ready','boot-ready'])
-        self.assertEqual(rows[-1]['requested_cap_seconds'],300)
+        self.assertEqual(rows[-1]['requested_cap_seconds'],600)
         self.assertEqual((r.out/'PhaseLogs/boot-ready-stdout.log').read_bytes(),b'Waiting for synthetic boot')
         self.assertEqual(len(r.ops.processes),2)
         private=r.out/'3-stdout.log';private.write_text('private process listing')

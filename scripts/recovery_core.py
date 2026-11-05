@@ -40,7 +40,7 @@ EXECUTION_PROFILES = MappingProxyType({
         cleanup_seconds=120, prepare_command_seconds=780, phase_command_seconds=600,
         prepare_case_seconds=180, phase_case_seconds=300, ui_profile=None, boot_scan_seconds=15,
         cleanup_action_seconds=30, cleanup_inventory_seconds=20)),
-    'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=5040,
+    'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=5340,
         cleanup_seconds=360, prepare_command_seconds=1200, phase_command_seconds=900,
         prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1', boot_scan_seconds=60,
         cleanup_action_seconds=90, cleanup_inventory_seconds=60)),
