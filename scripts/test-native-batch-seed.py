@@ -929,7 +929,7 @@ class NativeFolderTextCompletionTests(unittest.TestCase):
             var env = ["TRIPDOCKET_RECOVERY_UI": "1", "TRIPDOCKET_RECOVERY_PHASE": "prepare",
                        "TRIPDOCKET_RECOVERY_FOLDER": expected]
             if policy != "ordinary" && policy != "batch" {
-                env["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] = "hosted-intel-v1"
+                env["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] = policy == "arm-hosted" ? "hosted-arm-v1" : "hosted-intel-v1"
             }
             if policy == "unknown" { env["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] = "unknown" }
             if policy == "missing-ui" { env.removeValue(forKey: "TRIPDOCKET_RECOVERY_UI") }
@@ -937,10 +937,11 @@ class NativeFolderTextCompletionTests(unittest.TestCase):
             if policy == "invalid-folder" { env["TRIPDOCKET_RECOVERY_FOLDER"] = "TripDocket-Recovery-other" }
             if policy != "batch" {
                 _ = try recoveryExecutionTimeAllowance(env, phase: "prepare",
-                    debugIntelSimulator: policy != "arm" && policy != "release")
+                    debugIntelSimulator: policy != "arm" && policy != "release" && policy != "arm-hosted",
+                    debugARMSimulator: policy == "arm-hosted")
             }
             let timeout = recoveryFolderTextObservationTimeout(
-                hosted: policy != "batch" && env["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1")
+                hosted: policy != "batch" && isHostedRecoveryProfile(env["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"]))
             selectedSeconds = Double(timeout.components.seconds)
             try await observeNativeFolderTextCompletion(expectedName: expected, timeout: timeout,
                 foreground: {
@@ -1099,6 +1100,14 @@ class NativeFolderTextCompletionTests(unittest.TestCase):
                 value = self.probe("exact", policy=policy)
                 self.assertEqual(value["result"], "rejected")
                 self.assertEqual(value["foregroundCalls"], 0)
+
+    def test_arm_hosted_text_uses_same_validated_sixty_second_policy(self):
+        value = self.probe("observed-slow-picker", policy="arm-hosted")
+        self.assertEqual((value["result"], value["selectedSeconds"]), ("passed", 60))
+        self.assertEqual(value["decoded_trace"]["observations"][0]["valueKind"], "exact")
+        for scenario in ("boundary-picker:60", "cancel-picker"):
+            value = self.probe(scenario, policy="arm-hosted")
+            self.assertEqual(value["result"], "rejected")
 
     def test_actual_hosted_recovery_observation_retains_strict_boundaries_and_cancellation(self):
         for stage in ["foreground", "picker", "application"]:

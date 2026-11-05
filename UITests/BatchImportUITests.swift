@@ -553,11 +553,11 @@ final class BatchImportUITests: XCTestCase {
         app.terminate()
         defer { app.terminate() }
         if createFolder {
-            // recoveryConfiguration already validated the hosted Intel opt-in.
-            let initialObservationTimeout: Duration = ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+            // recoveryConfiguration already validated the matching hosted opt-in.
+            let initialObservationTimeout: Duration = Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
                 ? .seconds(60) : .seconds(30)
             let textCompletionTimeout = Self.recoveryFolderTextObservationTimeout(
-                hosted: ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+                hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
             )
             let sourceToken = UUID().uuidString.lowercased()
             let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
@@ -1655,9 +1655,9 @@ final class BatchImportUITests: XCTestCase {
 
     func testRecoveryExportFullBackupThroughFiles() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "export")
-        // recoveryConfiguration has already validated the hosted Intel opt-in.
+        // recoveryConfiguration has already validated the matching hosted opt-in.
         let saveCompletionTimeout: Duration =
-            ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+            Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
                 ? .seconds(60) : .seconds(15)
         let app = XCUIApplication()
         app.terminate()
@@ -1726,7 +1726,7 @@ final class BatchImportUITests: XCTestCase {
         let recoveryFolder = try recoveryConfiguration(phase: "restore")
         // The existing configuration validation admits this hosted-only policy.
         let previewObservationTimeout = Self.recoveryPreviewObservationTimeout(
-            hosted: ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+            hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
         )
         let app = XCUIApplication()
         app.terminate()
@@ -2237,15 +2237,20 @@ final class BatchImportUITests: XCTestCase {
         #else
         let debugIntelSimulator = false
         #endif
+        #if DEBUG && targetEnvironment(simulator) && arch(arm64)
+        let debugARMSimulator = true
+        #else
+        let debugARMSimulator = false
+        #endif
         executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(
-            env, phase: phase, debugIntelSimulator: debugIntelSimulator
+            env, phase: phase, debugIntelSimulator: debugIntelSimulator, debugARMSimulator: debugARMSimulator
         )
         continueAfterFailure = false
         return value
     }
 
     private static func recoveryExecutionTimeAllowance(
-        _ environment: [String: String], phase: String, debugIntelSimulator: Bool
+        _ environment: [String: String], phase: String, debugIntelSimulator: Bool, debugARMSimulator: Bool = false
     ) throws -> TimeInterval {
         guard ["prepare", "export", "restore"].contains(phase) else {
             throw BatchTestFailure(message: "Unknown Recovery execution phase")
@@ -2253,7 +2258,9 @@ final class BatchImportUITests: XCTestCase {
         guard let profile = environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] else {
             return phase == "prepare" ? 180 : 300
         }
-        guard profile == "hosted-intel-v1", debugIntelSimulator,
+        let matchingHost = (profile == "hosted-intel-v1" && debugIntelSimulator && !debugARMSimulator)
+            || (profile == "hosted-arm-v1" && debugARMSimulator && !debugIntelSimulator)
+        guard matchingHost,
               environment["TRIPDOCKET_RECOVERY_UI"] == "1",
               environment["TRIPDOCKET_RECOVERY_PHASE"] == phase,
               let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"],
@@ -2263,6 +2270,12 @@ final class BatchImportUITests: XCTestCase {
             throw BatchTestFailure(message: "Hosted Recovery execution profile is not admitted")
         }
         return phase == "prepare" ? 300 : 600
+    }
+
+    // Observation callers use this only after recoveryConfiguration validates
+    // the exact Debug Simulator architecture, phase and owned folder.
+    private static func isHostedRecoveryProfile(_ profile: String?) -> Bool {
+        profile == "hosted-intel-v1" || profile == "hosted-arm-v1"
     }
 
     private func recoveryTab(_ title: String, app: XCUIApplication) async throws {

@@ -34,7 +34,7 @@ CAPS = dict(total_seconds=1500, cleanup_seconds=120, receipt_seconds=10,
 PREPARE_CASE_SECONDS = 180
 PREPARE_PHASE_SECONDS = 780
 # Immutable scheduling policies. Standalone callers keep the original defaults;
-# only the hosted adapter can select its separately validated Intel policy.
+# only the hosted adapter can select its separately validated host policy.
 EXECUTION_PROFILES = MappingProxyType({
     'default': MappingProxyType(dict(name='default', total_seconds=1500,
         cleanup_seconds=120, prepare_command_seconds=780, phase_command_seconds=600,
@@ -43,6 +43,10 @@ EXECUTION_PROFILES = MappingProxyType({
     'hosted-intel-v1': MappingProxyType(dict(name='hosted-intel-v1', total_seconds=5340,
         cleanup_seconds=360, prepare_command_seconds=1200, phase_command_seconds=900,
         prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-intel-v1', boot_scan_seconds=60,
+        cleanup_action_seconds=90, cleanup_inventory_seconds=60)),
+    'hosted-arm-v1': MappingProxyType(dict(name='hosted-arm-v1', total_seconds=5340,
+        cleanup_seconds=360, prepare_command_seconds=1200, phase_command_seconds=900,
+        prepare_case_seconds=300, phase_case_seconds=600, ui_profile='hosted-arm-v1', boot_scan_seconds=60,
         cleanup_action_seconds=90, cleanup_inventory_seconds=60)),
 })
 
@@ -411,8 +415,10 @@ class Recovery:
                  execution_profile=None):
         self._execution_profile = validated_execution_profile(
             EXECUTION_PROFILES['default'] if execution_profile is None else execution_profile)
-        require(self.execution_profile['name'] == 'default' or host.get('machine') == 'x86_64',
-                'Hosted Recovery execution profile requires an Intel host')
+        if self.execution_profile['name'] == 'hosted-intel-v1':
+            require(host.get('machine') == 'x86_64', 'Hosted Recovery execution profile requires an Intel host')
+        elif self.execution_profile['name'] == 'hosted-arm-v1':
+            require(host.get('machine') == 'arm64', 'Hosted Recovery execution profile requires an ARM host')
         self.ops, self.out, self.plan, self.host = ops, Path(out), plan, host
         self.candidate = Path(candidate)
         self.source_manifest = source_manifest
@@ -458,26 +464,34 @@ class Recovery:
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
+        context = getattr(owner, '_finalizing_success', None)
+        finalized = (unfinished and context is not None and context[0] is pending
+                     and context[1].pid == pending.get('pgid')
+                     and context[1].returncode == 0
+                     and not owner.active and not owner.unknown_spawn
+                     and context[1].pid in owner.absent_groups)
         # Native phase scans allow30s after a retained export scan exceeded15s.
         # Exact active owned boot waits use the immutable profile's scan allowance:
-        # default15s, hosted Intel60s. Admission, other discovery, capability and
-        # evidence retain5s. No command/global/stop deadline is extended.
+        # default15s, explicit hosted policies60s. Only those policies keep60s for the same
+        # verified successful boot's final accounting; ordinary finalization,
+        # admission, other discovery, capability and evidence retain5s.
+        # No command/global/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         boot_process = (self.active.get(pending.get('pgid'))
                         if owner is self and unfinished and pending.get('id') == 'boot-ready' else None)
-        boot_scan = (boot_process is not None and boot_process.pid == pending.get('pgid')
+        hosted_boot_finalized = (owner is self and finalized
+                                 and any(self.execution_profile is EXECUTION_PROFILES[name]
+                                         for name in ('hosted-intel-v1', 'hosted-arm-v1'))
+                                 and type(context[1].returncode) is int)
+        boot_scan = (owner is self and unfinished and pending.get('id') == 'boot-ready'
+                     and ((boot_process is not None and boot_process.pid == pending.get('pgid'))
+                          or hosted_boot_finalized)
                      and self.owned is not None
                      and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
         allowance = (CAPS['phase_scan_seconds'] if phase_scan else
                      self.execution_profile['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
-            context = getattr(owner, '_finalizing_success', None)
-            finalized = (context is not None and context[0] is pending
-                         and context[1].pid == pending.get('pgid')
-                         and context[1].returncode == 0
-                         and not owner.active and not owner.unknown_spawn
-                         and context[1].pid in owner.absent_groups)
             deadline = min(deadline, owner.t0+pending[
                 'command_deadline' if finalized else 'work_deadline'])
         primary = self.report['commands'][-1] if self.report['commands'] else None
