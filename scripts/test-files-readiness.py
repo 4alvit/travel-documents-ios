@@ -1435,6 +1435,7 @@ class HostedPhoneTimingTests(unittest.TestCase):
             ('LocalizationUITests.swift', 'testRussianMaximumTypeCompleteBackupWarningAndCancellation', 'let app =', ''),
             ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = false; let maximumType = false'),
             ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = true; let maximumType = true'),
+            ('AccessibilityUITests.swift', 'testMaximumTypeReadinessAndImportCancellation', 'let app =', ''),
         ]
         code = '''import Foundation
         @MainActor enum UIDevice {
@@ -1472,7 +1473,7 @@ class HostedPhoneTimingTests(unittest.TestCase):
                 }
                 let values = [capture { try Case0().run() }, capture { try Case1().run() },
                               capture { try Case2().run() }, capture { try Case3().run() },
-                              capture { try Case4().run() }]
+                              capture { try Case4().run() }, capture { try Case5().run() }]
                 print("[" + values.joined(separator: ", ") + "]")
             }
         }
@@ -1505,34 +1506,46 @@ class HostedPhoneTimingTests(unittest.TestCase):
     def test_absent_token_preserves_explicit_and_inherited_defaults(self):
         for supported in (False, True):
             for idiom in ('phone', 'pad'):
-                self.assertEqual(self.invoke(supported, idiom=idiom), '[777.0, 180.0, 120.0, 480.0, 600.0]')
+                self.assertEqual(self.invoke(supported, idiom=idiom), '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
 
-    def test_exact_supported_phone_profile_changes_only_four_case_branches(self):
-        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[360.0, 360.0, 240.0, 1080.0, 1500.0]')
+    def test_exact_supported_phone_profile_selects_only_expected_case_allowances(self):
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[360.0, 360.0, 240.0, 1080.0, 1500.0, 360.0]')
 
     def test_reverting_each_changed_phone_policy_loses_only_its_allowances(self):
         cases = [
             ('executionTimeAllowance = 360', 'executionTimeAllowance = 240',
-             '[240.0, 360.0, 240.0, 1080.0, 1500.0]'),
+             '[240.0, 360.0, 240.0, 1080.0, 1500.0, 360.0]'),
             ('useHostedPhoneTiming() ? 360 : 180', 'useHostedPhoneTiming() ? 240 : 180',
-             '[360.0, 240.0, 240.0, 1080.0, 1500.0]'),
+             '[360.0, 240.0, 240.0, 1080.0, 1500.0, 360.0]'),
             ('hostedPhone ? (russian && maximumType ? 1500 : 1080)',
              'hostedPhone ? (russian && maximumType ? 600 : 720)',
-             '[360.0, 360.0, 240.0, 720.0, 600.0]'),
+             '[360.0, 360.0, 240.0, 720.0, 600.0, 360.0]'),
         ]
         for index, (new, old, expected) in enumerate(cases):
             with self.subTest(policy=new):
-                self.assertEqual(self.code.count(new), 2 if index == 2 else 1)
-                mutant = self.compile(self.code.replace(new, old), 'old-phone-' + str(index))
+                self.assertEqual(self.code.count(new), 2 if index in (0, 2) else 1)
+                mutant = self.compile(self.code.replace(new, old, 2 if index == 2 else 1),
+                                      'old-phone-' + str(index))
                 self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', binary=mutant), expected)
                 self.assertEqual(self.invoke(True, binary=mutant),
-                                 '[777.0, 180.0, 120.0, 480.0, 600.0]')
+                                 '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
+
+    def test_removing_readiness_allowance_loses_only_hosted_readiness_margin(self):
+        start = self.code.index('@MainActor final class Case5 {')
+        guard = 'if try useHostedPhoneTiming() { executionTimeAllowance = 360 }'
+        self.assertEqual(self.code[start:].count(guard), 1)
+        mutant = self.compile(self.code[:start] + self.code[start:].replace(guard, ''),
+                              'old-readiness')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', binary=mutant),
+                         '[360.0, 360.0, 240.0, 1080.0, 1500.0, 777.0]')
+        self.assertEqual(self.invoke(True, binary=mutant),
+                         '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
 
     def test_invalid_token_wrong_build_or_ipad_rejects_before_any_case_body(self):
         for token in ('', 'wrong', 'hosted-intel-phone-v1 '):
-            self.assertEqual(self.invoke(True, token), '[rejected, rejected, rejected, rejected, rejected]')
-        self.assertEqual(self.invoke(False, 'hosted-intel-phone-v1'), '[rejected, rejected, rejected, rejected, rejected]')
-        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', 'pad'), '[rejected, rejected, rejected, rejected, rejected]')
+            self.assertEqual(self.invoke(True, token), '[rejected, rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(False, 'hosted-intel-phone-v1'), '[rejected, rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', 'pad'), '[rejected, rejected, rejected, rejected, rejected, rejected]')
 
 
 class HostedIPadTimingTests(unittest.TestCase):

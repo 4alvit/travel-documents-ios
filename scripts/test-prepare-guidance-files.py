@@ -430,8 +430,8 @@ class ShellBoundary(s.ShellTests):
         text = (HERE.parent / ".github/workflows/ci.yml").read_text()
         guidance = text.split("  ui_guidance:\n", 1)[1].split("  privacy_ipad:\n", 1)[0]
         integration = guidance.split("      - name: Simulator integration and StoreKit tests\n", 1)[1]
-        self.assertIn("    timeout-minutes: 125\n", guidance)
-        self.assertIn("        timeout-minutes: 105\n", integration)
+        self.assertIn("    timeout-minutes: 128\n", guidance)
+        self.assertIn("        timeout-minutes: 108\n", integration)
         core = text.split("  validate:\n", 1)[1].split("  ui_guidance:\n", 1)[0]
         core_integration = core.split("      - name: Simulator integration and StoreKit tests\n", 1)[1].split(
             "      - name:", 1)[0]
@@ -442,11 +442,11 @@ class ShellBoundary(s.ShellTests):
         # The full Intel bootstrap and all nine nominal case ceilings fit with
         # an explicit600s other-work allocation and20s rounding. Arm is unchanged.
         self.assertEqual(m.WORK + m.STOP + m.WRITE, 1120)
-        native_cases = [360, 360, 180, 180, 180, 120, 240, 1080, 1500]
-        self.assertEqual(sum(native_cases), 4200)
+        native_cases = [360, 360, 360, 180, 180, 120, 240, 1080, 1500]
+        self.assertEqual(sum(native_cases), 4380)
         self.assertEqual(m.EXECUTION_PROFILES["x86_64"]["work_seconds"]
-                         + m.STOP + m.WRITE + sum(native_cases) + 600 + 20, 105 * 60)
-        self.assertEqual(2 + 3 + 105 + 5 + 3 + 3 + 2 + 2, 125)
+                         + m.STOP + m.WRITE + sum(native_cases) + 600 + 20, 108 * 60)
+        self.assertEqual(2 + 3 + 108 + 5 + 3 + 3 + 2 + 2, 128)
         self.assertEqual(guidance.count("        timeout-minutes: 3\n"), 3)
         self.assertEqual(guidance.count("        timeout-minutes: 2\n"), 2)
 

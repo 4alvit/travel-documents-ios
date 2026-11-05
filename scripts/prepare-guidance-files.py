@@ -48,8 +48,8 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # + the observed 78s boot + 58s leaves about 204s within 1440s. A full 300s boot
 # would exceed that projection by 17.4s and must clip to the original deadline.
 # This is not a guarantee that every command can consume its full cap.
-# The hosted105m integration /125m job budget includes the Intel1480s envelope,
-# nine case ceilings totaling4200s,600s other-work allocation and20s rounding.
+# The hosted108m integration /128m job budget includes the Intel1480s envelope,
+# nine case ceilings totaling4380s,600s other-work allocation and20s rounding.
 # Recovery and batch have separate profiles; their caps are not changed here.
 INPUTS = ("sdk.txt", "architecture.txt", "runtimes.json", "device-types.json", "devices.json")
 IDENTITY = ("selection", "sdk", "architecture", "runtime", "runtime_build", "udid", "device_type", "device_name")

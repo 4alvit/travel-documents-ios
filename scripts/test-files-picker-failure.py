@@ -513,7 +513,7 @@ class Controls(unittest.TestCase):
             version, build = '26.2', '17C52'
             self.assertIn('DEVELOPER_DIR: /Applications/Xcode_'+version+'.app/Contents/Developer',body)
             self.assertIn("$'Xcode "+version+"\\nBuild version "+build+"'",body)
-            job_minutes = 125 if prepare_files else 82
+            job_minutes = 128 if prepare_files else 82
             self.assertEqual([line for line in body.splitlines()
                               if line.startswith('    timeout-minutes:')],
                              [f'    timeout-minutes: {job_minutes}'])
@@ -534,7 +534,7 @@ class Controls(unittest.TestCase):
                     'name: Toolchain', 'name: Simulator integration and StoreKit tests',
                     'name: Test evidence', 'name: Extract existing Files/payment failure pairs',
                     'name: Files/payment failure evidence']
-                step_minutes = [2, 3, 105, 3, 3, 2]
+                step_minutes = [2, 3, 108, 3, 3, 2]
             else:
                 expected_steps = [
                     'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
