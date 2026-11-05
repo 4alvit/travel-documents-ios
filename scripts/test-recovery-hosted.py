@@ -3359,6 +3359,151 @@ class BoundaryTests(unittest.TestCase):
             r.cleaning=True;r.interrupted=True
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
 
+    def final_checkout_accounting(self, *, profile='hosted-arm-v1', label='',
+                                  target='active', command='git-final-head', delay=6.,
+                                  fault=None, limit=None, prior_delays=None):
+        ops=Ops({'output':[('stdout',(SHA+'\n').encode())]}, {})
+        r=self.runner(ops,execution_profile=profile,label=label)
+        if limit is not None:r.limit=limit
+        original_limit=r.limit
+        payload=r.out/'accounted.bin';payload.write_bytes(b'full final checkout accounting'*100)
+        checkpoint=r.checkpoint;scandir=hosted.core.os.scandir;close=r.ops.close
+        current=[None];injected=[];seen=[];prior_delays=dict(prior_delays or {})
+        def checked(**kwargs):
+            scope=getattr(r,'_final_checkout_scope',None)
+            row=r.report['commands'][-1] if r.report['commands'] else None
+            if scope is not None:
+                stage=('admission' if len(r.report['commands'])==scope.index else
+                       'final' if row and 'pgid' in row and not r.active else
+                       'active' if r.active else 'forced')
+                current[:]=[(scope.command[0],stage)]
+                if current[0]==(command,target) and not injected:
+                    if fault=='scope-receipt':
+                        r.report['_final_checkout_scope']=scope;r._final_checkout_scope=None
+                    elif fault=='profile-copy':object.__setattr__(r,'_execution_profile',dict(r.execution_profile))
+                    elif fault=='wrong-argv':row['argv']=['/usr/bin/git','status','--short']
+                    elif fault=='wrong-id':row['id']='other'
+                    elif fault=='copied-record':r.report['commands'][-1]=dict(row)
+                    elif fault=='extra-record':r.report['commands'].append(dict(row))
+                    elif fault=='cancel':r.signal()
+                    elif fault=='wrong-owner':scope.owner=SimpleNamespace()
+                    elif fault=='wrong-order':scope.command=hosted.core._FINAL_CHECKOUT_COMMANDS[1]
+                    elif fault=='delegated':
+                        kwargs['command_owner']=SimpleNamespace(report=r.report,active=r.active,
+                            unknown_spawn=r.unknown_spawn,limit=r.limit,t0=r.t0,absent_groups=r.absent_groups)
+                if current[0][0]==command and stage in prior_delays:
+                    r.ops.t+=prior_delays.pop(stage)
+            else:
+                # Portable/default still exercises the same final commands.
+                stage='final' if getattr(r,'_finalizing_success',None) else 'active' if r.active else 'forced' if row and 'finish' not in row else 'admission'
+                current[:]=[(row['id'] if row and 'finish' not in row else 'git-final-head',stage)]
+            r.next_scan=0.
+            return checkpoint(**kwargs)
+        def closed(process):
+            close(process)
+            if fault and current[0] and current[0][0]==command:
+                row=r.report['commands'][-1]
+                if fault=='unreaped':row['stop']['leader_reaped']=False
+                elif fault=='unconfirmed':row['stop']['group_absent']=False
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='nonzero':process.returncode=7
+                elif fault=='boolean-exit':process.returncode=False
+                elif fault=='absence-cache':r.absent_groups.clear()
+        @contextlib.contextmanager
+        def scanned(fd):
+            if current[0]==(command,target) and not injected:
+                injected.append(r.ops.now());r.ops.t+=delay
+            with scandir(fd) as entries:yield entries
+        def record_scan(*args,**kwargs):
+            seen.append((current[0],args[3]))
+            return real_scan(*args,**kwargs)
+        real_scan=hosted.core.live_sizes
+        with patch.object(r,'checkpoint',side_effect=checked), \
+             patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(hosted.core.os,'scandir',side_effect=scanned), \
+             patch.object(hosted.core,'live_sizes',side_effect=record_scan):
+            try:r._verify_final_checkout(SHA);ok=True
+            except RuntimeError:ok=False
+        self.assertEqual(r.limit,original_limit)
+        self.assertIsNone(getattr(r,'_final_checkout_scope',None))
+        return r,ok,injected,seen,payload
+
+    def test_final_checkout_full_scans_cover_both_commands_and_all_stages(self):
+        for profile in ('hosted-arm-v1','hosted-intel-v1'):
+            for command in ('git-final-head','git-final-clean'):
+                for stage in ('admission','forced','active','final'):
+                    with self.subTest(profile=profile,command=command,stage=stage):
+                        label=profile+command+stage
+                        r,ok,delays,seen,payload=self.final_checkout_accounting(profile=profile,label=label,target=stage,command=command)
+                        self.assertTrue(ok);self.assertEqual(len(delays),1)
+                        self.assertEqual([x['id'] for x in r.report['commands']],['git-final-head','git-final-clean'])
+                        self.assertTrue(all(x['outcome']=='completed' for x in r.report['commands']))
+                        self.assertTrue(all(x['scan']['requested_scan_seconds']==30 for x in r.report['resources']))
+                        self.assertTrue(all(x['logical']>=payload.stat().st_size for x in r.report['resources']))
+                        self.assertEqual(r.ops.signals,[]);self.assertFalse(r.active)
+                        for row in r.report['commands']:
+                            self.assertEqual(row['command_deadline']-row['work_deadline'],8)
+                            self.assertLessEqual(row['finish'],row['command_deadline'])
+                        if command=='git-final-head':self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+
+    def test_final_checkout_admission_and_work_share_original_twelve_seconds(self):
+        for stage,prior,delay,expected in [('admission',{},12.,0),('forced',{'admission':6.},6.,0),('active',{'admission':6.},6.,1)]:
+            with self.subTest(stage=stage):
+                r,ok,_,seen,_=self.final_checkout_accounting(label=stage,target=stage,delay=delay,prior_delays=prior)
+                self.assertFalse(ok);self.assertEqual(len(r.ops.processes),expected)
+                self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],12)
+                if r.report['commands']:self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+                self.assertLessEqual(r.ops.t,20)
+
+    def test_final_checkout_finalization_keeps_total_global_and_cancel_boundaries(self):
+        cases=[('total',dict(target='final',delay=20.)),('global',dict(target='admission',delay=6.,limit=14.)),('cancel',dict(fault='cancel'))]
+        for label,options in cases:
+            with self.subTest(label=label):
+                r,ok,_,_,_=self.final_checkout_accounting(label=label,**options)
+                self.assertFalse(ok)
+                if label=='total':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],20)
+                elif label=='global':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],6)
+                else:self.assertTrue(r.interrupted)
+                self.assertLessEqual(len(r.ops.processes),1)
+
+    def test_final_checkout_live_scope_rejects_spoofed_or_changed_context(self):
+        for fault in ('scope-receipt','profile-copy','wrong-argv','wrong-id','copied-record','extra-record','wrong-owner','wrong-order','delegated'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,fault=fault)
+                self.assertFalse(ok)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        r,ok,_,_,_=self.final_checkout_accounting(profile='default',label='default')
+        self.assertFalse(ok);self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+
+    def test_final_checkout_finalization_requires_verified_owned_success(self):
+        for fault in ('unreaped','unconfirmed','unknown','nonzero','boolean-exit','absence-cache'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,target='final',fault=fault)
+                self.assertFalse(ok)
+                self.assertLessEqual(len(r.ops.processes),1)
+                self.assertNotEqual(r.report['commands'][0]['outcome'],'completed')
+
+    def test_final_checkout_complete_accounting_still_enforces_resource_caps(self):
+        for key,value in [('output_bytes',1),('scan_entries',1)]:
+            with self.subTest(key=key),patch.dict(hosted.core.CAPS,{key:value}):
+                r,ok,_,_,_=self.final_checkout_accounting(label=key,delay=0)
+                self.assertFalse(ok);self.assertEqual(r.ops.processes,[])
+                self.assertEqual(r.report['resources'],[])
+
+    def test_final_checkout_order_nested_scope_and_original_checks_remain(self):
+        r=self.runner(label='order')
+        with patch.object(r,'command',return_value='wrong') as command:
+            with self.assertRaisesRegex(RuntimeError,'commit changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_count,1)
+        r=self.runner(label='dirty')
+        with patch.object(r,'command',side_effect=[SHA,' M tracked']) as command:
+            with self.assertRaisesRegex(RuntimeError,'Checkout changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_args_list[1].args,('git-final-clean',['/usr/bin/git','status','--porcelain'],20))
+        r=self.runner(execution_profile='hosted-arm-v1',label='nested');r._final_checkout_scope=object()
+        with self.assertRaisesRegex(RuntimeError,'already active'):r._verify_final_checkout(SHA)
+        r._final_checkout_scope=None;r.report['commands'].append({'id':'git-final-clean','finish':0})
+        with self.assertRaisesRegex(RuntimeError,'already attempted'):r._verify_final_checkout(SHA)
+
     def test_phase_scan_ceiling_only_applies_to_unfinished_native_phase_context(self):
         r=self.runner();deadlines=[]
         def scan(*args,**kwargs):
