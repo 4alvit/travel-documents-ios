@@ -310,7 +310,9 @@ class OrdinarySmoke:
     def capture(self):
         require(self.launch_count == 0, 'Ordinary launch may run only once')
         self.launch_count += 1
-        output = self.command('ordinary-launch', ['xcrun', 'simctl', 'launch', self.owned, APP_ID], 30).strip()
+        # One cold ordinary launch gets a finite 120-second command window.
+        # This consumes the existing work envelope; there is no retry or reset.
+        output = self.command('ordinary-launch', ['xcrun', 'simctl', 'launch', self.owned, APP_ID], 120).strip()
         match = re.fullmatch(re.escape(APP_ID) + r': ([1-9][0-9]*)', output)
         require(match is not None, 'Unexpected launch result')
         launched = time.monotonic()

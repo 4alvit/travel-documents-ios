@@ -361,5 +361,132 @@ class CacheTests(unittest.TestCase):
             if 'now' in options: self.assertEqual(calls[-1][3:], (900, 900))
 
 
+class OrdinaryLaunchTests(unittest.TestCase):
+    def run_capture(self, delay, start=200., cancelled=False):
+        # Real capture and process-controller code with a synthetic OS boundary.
+        # This never spawns native tools or waits on wall-clock launch time.
+        processes = load('recovery_process.py', 'launch_budget_processes')
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
+        owner.out = root
+        owner.repo = root
+        owner.app = root / 'Tripfolio.app'
+        owner.started = 0.
+        owner.work_deadline = 900.
+        owner.cleanup_deadline = 1080.
+        owner.cleaning = owner.interrupted = False
+        owner.owned = '11111111-1111-4111-8111-111111111111'
+        owner.launch_count = 0
+        owner.report = {'screenshots': []}
+        owner.save = lambda: None
+        owner.expected_manifest = {}
+        owner.manifest = lambda _: {}
+        verified = []
+        owner.verify_installed = verified.append
+        owner.zip = root / 'TripDocket-Simulator.zip'
+        owner.zip.write_bytes(b'synthetic already-verified ZIP')
+        owner.zip_sha = s.sha(owner.zip.read_bytes())
+        provenance = root / 'provenance.json'
+        provenance.write_bytes(b'synthetic already-verified provenance')
+        owner.report['producer_provenance_sha256'] = s.sha(provenance.read_bytes())
+        owner.before_code = {'synthetic': 'unchanged'}
+        owner.preparer = p
+        clock, calls = [start], []
+        class Process:
+            def __init__(self, pid, ready, output):
+                self.pid, self.ready, self.output = pid, ready, output
+                self.returncode, self.read_done = None, False
+            def poll(self):
+                if self.returncode is None and clock[0] >= self.ready:
+                    self.returncode = 0
+                return self.returncode
+        class Ops:
+            def now(self): return clock[0]
+            def sleep(self, seconds): clock[0] += seconds
+            def spawn(self, argv):
+                calls.append(argv)
+                launch = argv[2] == 'launch'
+                if not launch:
+                    Path(argv[-1]).write_bytes(b'\x89PNG\r\n\x1a\nsynthetic')
+                return Process(1000 + len(calls), clock[0] + (delay if launch else 0),
+                               (s.APP_ID + ': 12345\n').encode() if launch else b'')
+            def prepare(self, _): pass
+            def read(self, process):
+                if cancelled: owner.interrupted = True
+                if clock[0] >= process.ready and not process.read_done:
+                    process.read_done = True
+                    return [('stdout', process.output)] if process.output else []
+                return []
+            def absent(self, process): return process.poll() is not None
+            def send(self, process, sig):
+                process.returncode = -sig
+                return 'syscall_returned'
+            def close(self, _): pass
+        ops = Ops()
+        owner.commands = s.make_commands_class(SimpleNamespace(
+            Smoke=processes.Smoke, RealOps=lambda *_: ops))(owner)
+        failure = None
+        with patch.object(s.time, 'monotonic', side_effect=ops.now), \
+                patch.object(s.time, 'sleep', side_effect=ops.sleep), \
+                patch.object(s, 'code_identity', return_value=owner.before_code):
+            try: owner.capture()
+            except RuntimeError as error: failure = error
+        return owner, calls, verified, failure
+
+    def test_cold_launch_45_seconds_completes_once_then_three_screens_and_integrity(self):
+        owner, calls, verified, failure = self.run_capture(45.)
+        self.assertIsNone(failure)
+        self.assertEqual(calls[0], ['xcrun', 'simctl', 'launch', owner.owned, s.APP_ID])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(owner.commands.report['commands'][0]['requested_cap_seconds'], 128)
+        self.assertEqual(owner.report['launch']['arguments'], [])
+        self.assertEqual(owner.report['launch']['application_pid'], 12345)
+        self.assertEqual(owner.report['launch']['count'], 1)
+        self.assertFalse(owner.report['launch']['test_or_demo_flags'])
+        self.assertEqual([row['requested_seconds'] for row in owner.report['screenshots']], [2, 10, 30])
+        self.assertEqual(verified, ['installed-after'])
+        self.assertTrue(owner.report['capture_completed'])
+        with self.assertRaisesRegex(RuntimeError, 'only once'): owner.capture()
+        self.assertEqual(len(calls), 4)
+
+    def test_exact_120_second_boundary_fails_and_cannot_retry(self):
+        owner, calls, verified, failure = self.run_capture(120.)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(verified, [])
+        self.assertEqual(owner.report['screenshots'], [])
+        self.assertNotIn('launch', owner.report)
+        row = owner.commands.report['commands'][0]
+        self.assertEqual(row['work_deadline'] - row['start'], 120)
+        self.assertEqual(row['error'], "RuntimeError('Command timeout')")
+        self.assertEqual(row['stop']['signals'], [])  # Already exited exactly at the rejected boundary.
+        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        with self.assertRaisesRegex(RuntimeError, 'only once'): owner.capture()
+        self.assertEqual(len(calls), 1)
+
+    def test_near_boundary_launch_remains_finite_and_global_deadline_clips(self):
+        owner, _, _, failure = self.run_capture(119.8)
+        self.assertIsNone(failure)
+        self.assertTrue(owner.report['capture_completed'])
+        owner, calls, _, failure = self.run_capture(13., start=880.)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(len(calls), 1)
+        row = owner.commands.report['commands'][0]
+        self.assertEqual(row['command_deadline'], 900)
+        self.assertEqual(row['work_deadline'], 892)
+        self.assertEqual((owner.work_deadline, owner.cleanup_deadline), (900, 1080))
+
+    def test_cancelled_launch_stops_once_without_screens_or_integrity_acceptance(self):
+        owner, calls, verified, failure = self.run_capture(45., cancelled=True)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(verified, [])
+        self.assertEqual(owner.report['screenshots'], [])
+        self.assertNotIn('capture_completed', owner.report)
+        self.assertTrue(owner.commands.report['commands'][0]['stop']['group_absent'])
+
+
 if __name__ == '__main__':
     unittest.main()
