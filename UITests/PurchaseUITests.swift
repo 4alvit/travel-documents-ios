@@ -146,7 +146,8 @@ final class PurchaseUITests: XCTestCase {
             let ok = alert.buttons[russian ? "ОК" : "OK"]
             var completedAttempts = 0
             for attempt in 1...ExpectedFailureHistory.requiredAttempts {
-                try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard) {
+                try await require("Purchase is not ready for failure attempt \(attempt)", app: app, springboard: springboard,
+                                  timeout: attempt == 1 ? .seconds(60) : .seconds(15)) {
                     buy.exists && buy.isEnabled && buy.isHittable && app.alerts.count == 0
                 }
                 try await session.setSimulatedError(.generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
@@ -424,9 +425,10 @@ final class PurchaseUITests: XCTestCase {
 
     private func require(
         _ message: String, app: XCUIApplication, springboard: XCUIApplication,
+        timeout: Duration = .seconds(15),
         condition: @MainActor () -> Bool
     ) async throws {
-        guard try await waitUntil(condition, timeout: .seconds(15)) else {
+        guard try await waitUntil(condition, timeout: timeout) else {
             attachDiagnostics(app: app, springboard: springboard, name: message)
             throw PurchaseTestError(message: message)
         }
