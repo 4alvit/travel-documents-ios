@@ -791,6 +791,131 @@ class Guards(unittest.TestCase):
                 base.assert_called_once_with(label,args,188)
                 self.assertIsNone(getattr(arm,'_boot_boundary',None))
 
+    def test_initial_boot_actual_command_avoids_only_interim_scan_causally(self):
+        for admitted in (False, True):
+            with self.subTest(admitted=admitted), tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+                arm.ops.sleep=lambda seconds:now.__setitem__(0,now[0]+2)
+                arm.ops.send=lambda proc,sig:setattr(proc,'returncode',-int(sig))
+                original=arm.boot_boundary_eligible
+                arm.boot_boundary_eligible=lambda label,args:admitted and original(label,args)
+                def measured(*args,**kwargs):
+                    result=scan(*args,**kwargs)
+                    row=arm.report['commands'][-1] if arm.report['commands'] else {}
+                    if 'pgid' in row and 'finish' not in row:now[0]+=6
+                    else:now[0]+=.25
+                    return result
+                with mock.patch.object(core,'live_sizes',side_effect=measured), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    if admitted:self.assertEqual(arm.sim('boot','boot','ABC'),'')
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'boot failed'):arm.sim('boot','boot','ABC')
+                row=arm.report['commands'][0]
+                self.assertEqual(row['requested_cap_seconds'],38)
+                self.assertAlmostEqual(row['command_deadline']-row['work_deadline'],8)
+                self.assertFalse(arm.active)
+                if admitted:
+                    self.assertEqual([x[0] for x in scans],['before','pre','post'])
+                    self.assertTrue(row['boot_accounting']['full_pre_verified'])
+                    self.assertTrue(row['boot_accounting']['full_post_verified'])
+                    self.assertGreaterEqual(row['boot_accounting']['interim_checks'],3)
+                    self.assertEqual(row['returncode'],0)
+                    self.assertLess(now[0]-p.started,30)
+                else:
+                    self.assertIn('Shared output scan deadline exceeded',row['error'])
+                    self.assertNotIn('boot_accounting',row)
+
+    def test_initial_boot_unadmitted_monitor_retains_five_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+            arm.report['commands'].append({'id':'boot','argv':['/usr/bin/xcrun','simctl','boot','ABC'],
+                                           'work_deadline':30})
+            with mock.patch.object(core,'live_sizes',side_effect=scan):arm.monitor()
+            self.assertEqual(arm.report['resources'][-1]['requested_scan_seconds'],5)
+            self.assertNotIn('boot_accounting',arm.report['commands'][-1])
+
+    def test_initial_boot_requires_exact_owned_admission(self):
+        for fault in ('id','argv','executable','device','none','cleaning','proof','current','active','unknown','coordinator'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+                label='boot';args=['/usr/bin/xcrun','simctl','boot','ABC']
+                if fault=='id':label='other'
+                elif fault=='argv':args.append('-b')
+                elif fault=='executable':args[0]='xcrun'
+                elif fault=='device':arm.owned='OTHER'
+                elif fault=='none':arm.owned=None
+                elif fault=='cleaning':arm.cleaning=True
+                elif fault=='proof':p.report['shared_build_verified']=False
+                elif fault=='current':p.current=None
+                elif fault=='active':arm.active[123]=SimpleNamespace(pid=123)
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='coordinator':p.commands.unknown_spawn=True
+                with mock.patch.object(core.Recovery,'command',return_value='base') as base:
+                    self.assertEqual(arm.command(label,args,38),'base')
+                base.assert_called_once_with(label,args,38)
+                self.assertIsNone(getattr(arm,'_boot_boundary',None))
+
+    def test_initial_boot_postscan_and_original_deadline_fail_closed(self):
+        for fault in ('scan','command-deadline','global-deadline'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+                if fault=='global-deadline':arm.limit=p.started+10
+                def measured(*args,**kwargs):
+                    result=scan(*args,**kwargs)
+                    if scans[-1][0]=='post':
+                        if fault=='scan':raise RuntimeError('changed output tree')
+                        now[0]=args[3]
+                    return result
+                with mock.patch.object(core,'live_sizes',side_effect=measured), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.sim('boot','boot','ABC')
+                row=arm.report['commands'][0]
+                self.assertEqual(row['returncode'],0)
+                self.assertFalse(row['boot_accounting']['full_post_verified'])
+                self.assertEqual(row['boot_accounting']['post_status'],'failed')
+                self.assertFalse(arm.active)
+
+    def test_initial_boot_interim_ownership_resources_and_clocks_fail_closed(self):
+        faults=('root','space','stdout','stderr','aggregate-log','command-deadline','global-deadline',
+                'proof','foreign','unknown','coordinator','record')
+        for fault in faults:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as tmp:
+                p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+                row={'id':'boot','argv':['/usr/bin/xcrun','simctl','boot','ABC'],
+                     'work_deadline':30,'bytes':{'stdout':0,'stderr':0}}
+                arm.report['commands'].append(row);arm._boot_boundary={'record':None,'post':False,'kind':'boot'}
+                with mock.patch.object(core,'live_sizes',side_effect=scan), \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=core.CAPS['work_free_bytes'])):
+                    arm.monitor()
+                arm.active[child.pid]=child;row['pgid']=child.pid
+                if fault=='root':p.output_id=('wrong',)
+                elif fault=='stdout':row['bytes']['stdout']=core.base.PER_LOG+1
+                elif fault=='stderr':row['bytes']['stderr']=core.base.PER_LOG+1
+                elif fault=='aggregate-log':arm.log_total=core.base.ALL_LOG+1
+                elif fault=='command-deadline':now[0]=p.started+30
+                elif fault=='global-deadline':arm.limit=now[0]
+                elif fault=='proof':p.report['shared_build_verified']=False
+                elif fault=='foreign':arm.active[99]=SimpleNamespace(pid=99)
+                elif fault=='unknown':arm.unknown_spawn=True
+                elif fault=='coordinator':p.commands.active[98]=SimpleNamespace(pid=98)
+                elif fault=='record':arm.report['commands'][-1]=dict(row)
+                with mock.patch.object(core,'live_sizes') as full, \
+                        mock.patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=0 if fault=='space' else core.CAPS['work_free_bytes'])):
+                    with self.assertRaises(RuntimeError):arm.monitor()
+                full.assert_not_called()
+                self.assertFalse(row['boot_accounting']['full_post_verified'])
+
+    def test_initial_boot_proof_does_not_replace_bootstatus_install_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p,arm,now,child,polls,scans,scan=self.boot_command_fixture(Path(tmp).resolve())
+            p.product_paths={'Tripfolio':p.root/'App.app'}
+            arm.report['commands'].append({'id':'boot','argv':['/usr/bin/xcrun','simctl','boot','ABC'],
+                'returncode':0,'outcome':'completed','finish':1,'work_deadline':30,
+                'stop':{'group_absent':True,'leader_reaped':True},
+                'boot_accounting':{'full_pre_verified':True,'full_post_verified':True,'post_status':'verified','post_elapsed':2}})
+            self.assertFalse(arm.install_boundary_eligible('install-aut',
+                ['/usr/bin/xcrun','simctl','install','ABC',str(p.product_paths['Tripfolio'])]))
+
     def late_stop_fixture(self,root):
         with mock.patch.object(time,'monotonic',return_value=1000.0), \
                 mock.patch.object(core.base.RealOps,'now',return_value=1000.0):

@@ -169,8 +169,12 @@ def make_runner(q, core):
             writer=(child is not None and child.pid==pending.get('pgid') and args[:1]==['xcodebuild']
                     and pending['id'] in ('build-for-testing','selected-tests')
                     and args[-1:] in (['build-for-testing'],['test-without-building']))
-            boot=(unfinished and self.owned is not None and pending['id']=='boot-ready'
-                  and args==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+            boot=(unfinished and self.owned is not None
+                  and ((pending['id']=='boot-ready'
+                        and args==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b'])
+                       or (pending['id']=='boot'
+                           and args==['/usr/bin/xcrun','simctl','boot',self.owned]
+                           and (getattr(self,'_boot_boundary',None) or {}).get('kind')=='boot'))
                   and ((child is not None and child.pid==pending.get('pgid'))
                        or ('pgid' not in pending and not self.active and not self.unknown_spawn)))
             coordinator=getattr(self.pair,'commands',None)
@@ -266,8 +270,9 @@ def make_runner(q, core):
 
         def boot_boundary_eligible(self,label,argv):
             coordinator=getattr(self.pair,'commands',None)
-            return (not self.cleaning and label=='boot-ready' and self.owned is not None
-                and argv==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+            return (not self.cleaning and self.owned is not None
+                and ((label=='boot-ready' and argv==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b'])
+                     or (label=='boot' and argv==['/usr/bin/xcrun','simctl','boot',self.owned]))
                 and self.pair.current is self and self.pair.report.get('shared_build_verified') is True
                 and not self.active and not self.unknown_spawn and coordinator is not None
                 and not coordinator.active and not coordinator.unknown_spawn)
