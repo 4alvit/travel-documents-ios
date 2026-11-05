@@ -468,13 +468,13 @@ class PurchaseCoreTimingTests(unittest.TestCase):
         root = Path(cls.directory.name)
         source = (ROOT / 'UITests/PurchaseUITests.swift').read_text()
         fixture = core_timing_fixture(source)
-        if fixture.count('return 360') != 1:
+        if fixture.count('try useHostedCoreTiming() ? 360 : 240') != 1:
             raise AssertionError("Expected one selected hosted allowance")
         cls.binaries = {}
         for name, text, flags in (
             ('supported', fixture, ['-D', 'CORE_SUPPORTED_FIXTURE']),
             ('unsupported', fixture, []),
-            ('old-allowance', fixture.replace('return 360', 'return 240'), ['-D', 'CORE_SUPPORTED_FIXTURE']),
+            ('old-allowance', fixture.replace('try useHostedCoreTiming() ? 360 : 240', 'try useHostedCoreTiming() ? 240 : 240'), ['-D', 'CORE_SUPPORTED_FIXTURE']),
         ):
             swift = root / (name + '.swift')
             swift.write_text(text)
@@ -533,6 +533,245 @@ class PurchaseCoreTimingTests(unittest.TestCase):
         self.assertEqual(self.invoke(extra={'TRIPDOCKET_PHONE_TIMING': 'hosted-intel-phone-v1'}),
                          'passed 240.0 1')
 
+
+
+SYSTEM_SHEET_FIXTURE = r'''
+import Foundation
+struct PurchaseTestError: Error { let message: String }
+@MainActor enum UIDevice {
+    enum Idiom { case phone, pad }
+    struct Device {
+        var userInterfaceIdiom: Idiom {
+            ProcessInfo.processInfo.environment["FIXTURE_IDIOM"] == "pad" ? .pad : .phone
+        }
+    }
+    static var current: Device { Device() }
+}
+@MainActor enum SheetState {
+    static var elapsed = Duration.zero
+    static var appAt: Duration? = nil
+    static var springboardAt: Duration? = nil
+    static var appCost = Duration.zero
+    static var springboardCost = Duration.zero
+    static var reads: [String] = []
+    static var checks = 0
+    static var cancelAtCheck = -1
+    static var cancelOnSleep = false
+    static var cancelled = false
+}
+struct SheetInstant: Comparable {
+    let elapsed: Duration
+    func advanced(by value: Duration) -> SheetInstant { SheetInstant(elapsed: elapsed + value) }
+    static func < (lhs: SheetInstant, rhs: SheetInstant) -> Bool { lhs.elapsed < rhs.elapsed }
+}
+@MainActor struct SheetClock { var now: SheetInstant { SheetInstant(elapsed: SheetState.elapsed) } }
+@MainActor enum SheetTask {
+    static func checkCancellation() throws {
+        SheetState.checks += 1
+        if SheetState.cancelled || SheetState.checks == SheetState.cancelAtCheck { throw CancellationError() }
+    }
+    static func sleep(for duration: Duration) async throws {
+        if SheetState.cancelOnSleep { throw CancellationError() }
+        SheetState.elapsed += duration
+    }
+}
+@MainActor final class XCUIApplication {
+    let owner: String
+    init(_ owner: String) { self.owner = owner }
+}
+@MainActor struct SheetMarker {
+    let owner: String
+    var exists: Bool {
+        precondition(SheetState.reads.count < 3000)
+        SheetState.reads.append(owner)
+        SheetState.elapsed += owner == "app" ? SheetState.appCost : SheetState.springboardCost
+        guard let at = owner == "app" ? SheetState.appAt : SheetState.springboardAt else { return false }
+        return SheetState.elapsed >= at
+    }
+}
+@MainActor final class Harness {
+    var executionTimeAllowance: TimeInterval = 777
+    var sideEffects = 0
+    var diagnosticNames: [String] = []
+    var observations = 0
+    let app = XCUIApplication("app")
+    let springboard = XCUIApplication("springboard")
+    enum Point { case missingSheet }
+    func recordCancellationSessionSettings(_ session: Int, point: Point) { observations += 1 }
+    func recordFullPurchaseState(_ app: XCUIApplication) { observations += 1 }
+    func attachDiagnostics(app: XCUIApplication, springboard: XCUIApplication, name: String) {
+        diagnosticNames.append(name)
+    }
+    func xcodeMarker(in app: XCUIApplication) -> SheetMarker { SheetMarker(owner: app.owner) }
+    // ACTUAL_SELECTOR
+    // ACTUAL_OBSERVER
+    func run() async throws {
+        // ACTUAL_PREFIX
+        sideEffects += 1
+        let session = 0
+        // ACTUAL_OBSERVATION_CALL
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let name = CommandLine.arguments[1]
+        switch name {
+        case "delayed": SheetState.springboardAt = .milliseconds(79300)
+        case "app-ready": SheetState.appAt = .zero
+        case "last-valid": SheetState.appAt = .zero; SheetState.appCost = .milliseconds(119900)
+        case "app-boundary": SheetState.appAt = .zero; SheetState.appCost = .seconds(120)
+        case "app-late": SheetState.appAt = .zero; SheetState.appCost = .seconds(121)
+        case "springboard-late": SheetState.springboardAt = .zero; SheetState.springboardCost = .seconds(121)
+        case "slow-false": SheetState.appCost = .seconds(121)
+        case "never": break
+        case "cancel-before-app": SheetState.cancelAtCheck = 1
+        case "cancel-after-app": SheetState.cancelAtCheck = 2; SheetState.appAt = .zero
+        case "cancel-before-springboard": SheetState.cancelAtCheck = 3
+        case "cancel-after-springboard": SheetState.cancelAtCheck = 4; SheetState.springboardAt = .zero
+        case "cancel-sleep": SheetState.cancelOnSleep = true
+        default: fatalError("Unknown scenario")
+        }
+        let h = Harness()
+        var result = "passed"
+        do { try await h.run() }
+        catch is CancellationError { result = "cancelled" }
+        catch let error as PurchaseTestError { result = error.message }
+        catch { fatalError("Unexpected error: \(error)") }
+        let c = SheetState.elapsed.components
+        let row: [String: Any] = ["result": result, "allowance": h.executionTimeAllowance,
+            "sideEffects": h.sideEffects, "diagnostics": h.diagnosticNames,
+            "observations": h.observations, "appReads": SheetState.reads.filter { $0 == "app" }.count,
+            "springboardReads": SheetState.reads.filter { $0 == "springboard" }.count,
+            "elapsed": Double(c.seconds) + Double(c.attoseconds) / 1e18]
+        print(String(data: try! JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), encoding: .utf8)!)
+    }
+}
+'''
+
+
+def system_sheet_fixture(source):
+    case_start = source.index('    func testCancellingSystemPurchaseSheetKeepsFreeAccess()')
+    prefix_start = source.index('\n', case_start) + 1
+    prefix_end = source.index('        continueAfterFailure = false', prefix_start)
+    call_start = source.index('        do {', prefix_end)
+    call_end = source.index('        let paymentSurface =', call_start)
+    selector_start = source.index('    private func failureAlertExecutionTimeAllowance()')
+    selector_end = source.index('    private func verifyPurchaseFailureAlert(', selector_start)
+    observer_start = source.index('    private func waitForSystemPurchaseSheet(')
+    observer_end = source.index('    private func require(\n', observer_start)
+    observer = source[observer_start:observer_end]
+    if observer.count('ContinuousClock()') != 1 or observer.count('Task.checkCancellation()') != 4:
+        raise ValueError("Expected fixed clock and pre/post checks for both queries")
+    observer = observer.replace('ContinuousClock()', 'SheetClock()').replace('Task.', 'SheetTask.')
+    selector = source[selector_start:selector_end].replace(
+        '#if DEBUG && targetEnvironment(simulator) && arch(x86_64)', '#if CORE_SUPPORTED_FIXTURE')
+    return (SYSTEM_SHEET_FIXTURE.replace('// ACTUAL_PREFIX', source[prefix_start:prefix_end])
+            .replace('// ACTUAL_OBSERVATION_CALL', source[call_start:call_end])
+            .replace('// ACTUAL_SELECTOR', selector).replace('// ACTUAL_OBSERVER', observer))
+
+
+class SystemSheetObservationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix='tripdocket-system-sheet-')
+        cls.addClassCleanup(cls.directory.cleanup)
+        root = Path(cls.directory.name)
+        cls.source = (ROOT / 'UITests/PurchaseUITests.swift').read_text()
+        actual = system_sheet_fixture(cls.source)
+        cls.binaries = {}
+        mutant = actual
+        for query in ('let inApp = xcodeMarker(in: app).exists',
+                      'let inSpringboard = xcodeMarker(in: springboard).exists'):
+            before = query + '\n            try SheetTask.checkCancellation()\n            guard clock.now < deadline else { return false }'
+            if mutant.count(before) != 1:
+                raise AssertionError('Missing actual post-query boundary')
+            mutant = mutant.replace(before, query + '\n            try SheetTask.checkCancellation()')
+        for name, text, flags in [('supported', actual, ['-D', 'CORE_SUPPORTED_FIXTURE']),
+                                  ('unsupported', actual, []),
+                                  ('unchecked-late', mutant, ['-D', 'CORE_SUPPORTED_FIXTURE'])]:
+            swift = root / (name + '.swift'); swift.write_text(text)
+            binary = root / name
+            result = subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
+                                     *flags, str(swift), '-o', str(binary)],
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            cls.binaries[name] = binary
+
+    def invoke(self, scenario, token='hosted-intel-core-v1', *, variant='supported', extra=None):
+        import json
+        env = os.environ.copy()
+        for key in ('TRIPDOCKET_CORE_TIMING', 'TRIPDOCKET_PHONE_TIMING', 'TRIPDOCKET_IPAD_TIMING', 'FIXTURE_IDIOM'):
+            env.pop(key, None)
+        if token is not None: env['TRIPDOCKET_CORE_TIMING'] = token
+        env.update(extra or {})
+        run = subprocess.run([str(self.binaries[variant]), scenario], env=env,
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        return json.loads(run.stdout)
+
+    def test_actual_call_accepts_delayed_sheet_only_with_hosted_window(self):
+        hosted = self.invoke('delayed')
+        self.assertEqual(hosted['result'], 'passed')
+        self.assertEqual(hosted['allowance'], 360)
+        self.assertEqual(hosted['elapsed'], 79.3)
+        self.assertEqual(hosted['diagnostics'], [])
+        ordinary = self.invoke('delayed', None)
+        self.assertEqual(ordinary['result'], 'No Xcode payment sheet appeared')
+        self.assertEqual(ordinary['elapsed'], 15)
+        self.assertEqual(ordinary['allowance'], 777)  # The runner owns its default.
+        self.assertEqual(ordinary['diagnostics'], ['No Xcode payment sheet appeared'])
+        self.assertEqual(ordinary['observations'], 2)
+
+    def test_exact_and_late_matches_are_not_accepted(self):
+        for name in ('app-boundary', 'app-late', 'springboard-late', 'slow-false', 'never'):
+            with self.subTest(name=name):
+                row = self.invoke(name)
+                self.assertEqual(row['result'], 'No Xcode payment sheet appeared')
+        self.assertEqual(self.invoke('slow-false')['springboardReads'], 0)
+        self.assertEqual(self.invoke('last-valid')['result'], 'passed')
+        self.assertEqual(self.invoke('app-ready')['springboardReads'], 0)
+
+    def test_removing_actual_post_query_guards_causally_accepts_late_sheet(self):
+        for name in ('app-boundary', 'app-late', 'springboard-late'):
+            with self.subTest(name=name):
+                self.assertEqual(self.invoke(name, variant='unchecked-late')['result'], 'passed')
+                self.assertEqual(self.invoke(name)['result'], 'No Xcode payment sheet appeared')
+
+    def test_cancellation_propagates_at_every_query_boundary_and_sleep(self):
+        for name, app, spring in [('cancel-before-app', 0, 0), ('cancel-after-app', 1, 0),
+                                  ('cancel-before-springboard', 1, 0), ('cancel-after-springboard', 1, 1),
+                                  ('cancel-sleep', 1, 1)]:
+            with self.subTest(name=name):
+                row = self.invoke(name)
+                self.assertEqual(row['result'], 'cancelled')
+                self.assertEqual((row['appReads'], row['springboardReads']), (app, spring))
+                self.assertEqual(row['diagnostics'], [])
+                self.assertEqual(row['observations'], 2)  # The actual catch rethrows CancellationError.
+
+    def test_invalid_profiles_reject_before_side_effects_or_native_queries(self):
+        for token, extra in [('', {}), ('hosted-intel-core-v2', {}),
+                             ('hosted-intel-core-v1', {'TRIPDOCKET_PHONE_TIMING': ''}),
+                             ('hosted-intel-core-v1', {'TRIPDOCKET_IPAD_TIMING': ''}),
+                             ('hosted-intel-core-v1', {'FIXTURE_IDIOM': 'pad'})]:
+            with self.subTest(token=token, extra=extra):
+                row = self.invoke('app-ready', token, extra=extra)
+                self.assertNotEqual(row['result'], 'passed')
+                self.assertEqual((row['allowance'], row['sideEffects'], row['appReads']), (777, 0, 0))
+        self.assertEqual(self.invoke('app-ready', variant='unsupported')['sideEffects'], 0)
+        for variant in ('supported', 'unsupported'):
+            row = self.invoke('app-ready', None, variant=variant)
+            self.assertEqual((row['result'], row['allowance']), ('passed', 777))
+
+    def test_original_purchase_and_cancel_actions_stay_single(self):
+        case = self.source.split('    func testCancellingSystemPurchaseSheetKeepsFreeAccess()', 1)[1].split(
+            '    func testPurchaseFailureAlertInEnglishWithDiagnostics()', 1)[0]
+        self.assertEqual(case.count('buy.tap()'), 1)
+        self.assertEqual(case.count('try XCTUnwrap(cancel).tap()'), 1)
+        self.assertIn('self.xcodeMarker(in: app).exists && !self.xcodeMarker(in: springboard).exists',
+                      case.replace('\n                ', ' '))
+        self.assertIn('XCTAssertTrue(session.allTransactions().isEmpty', case)
+        self.assertIn('Cancellation unexpectedly removed the free trip limit', case)
 
 if __name__ == "__main__":
     unittest.main()
