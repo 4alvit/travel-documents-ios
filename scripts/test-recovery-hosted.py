@@ -26,6 +26,7 @@ with patch('subprocess.Popen') as startup,patch('os.killpg') as signals:
     spec.loader.exec_module(hosted)
     startup.assert_not_called();signals.assert_not_called()
 PROFILE=json.loads((HERE/'recovery-hosted-profile.json').read_text())
+ARM_PROFILE=json.loads((HERE/'recovery-hosted-arm-profile.json').read_text())
 SHA='a'*40;BASE='b'*40;HEAD='c'*40
 FILES_ALREADY_ABSENT = b'An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=3):\nSimulator device failed to terminate com.apple.DocumentsApp.\nfound nothing to terminate\nUnderlying error (domain=NSPOSIXErrorDomain, code=3):\n\tThe request to terminate "com.apple.DocumentsApp" failed. found nothing to terminate\n\tfound nothing to terminate\n'
 
@@ -213,12 +214,92 @@ class BoundaryTests(unittest.TestCase):
     def tearDown(self):
         for guard in self.guards:guard.assert_not_called()
 
-    def env(self):
+    def env(self, profile=None):
+        profile = PROFILE if profile is None else profile
         return {'CI':'true','GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':PROFILE['repository'],'GITHUB_JOB':'recovery',
-                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':'macos-15-intel','TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
-                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':'X64','ImageOS':'macos15','ImageVersion':'test-image',
+                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':profile['runner_label'],'TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
+                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':profile['runner_arch'],'ImageOS':'macos15','ImageVersion':'test-image',
                 'GITHUB_RUN_ATTEMPT':'1','GITHUB_RUN_ID':'123','GITHUB_EVENT_NAME':'pull_request',
                 'GITHUB_SHA':SHA,'GITHUB_REF':'refs/pull/1/merge'}
+
+    def test_arm_profile_cli_is_closed_and_legacy_default_is_unchanged(self):
+        for args, expected in [(['--run'], 'hosted-intel-v1'),
+                               (['--run', '--profile', 'hosted-arm-v1'], 'hosted-arm-v1')]:
+            profile = PROFILE if expected == 'hosted-intel-v1' else ARM_PROFILE
+            with patch.object(hosted.core, 'json_file', return_value=profile) as read, \
+                 patch.object(hosted, 'job_context', side_effect=RuntimeError('stop before work')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(hosted.main(args), 1)
+                read.assert_called_once_with(hosted.PROFILE_FILES[expected])
+        with patch.object(hosted.core, 'json_file') as read, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hosted.main(['--profile', 'hosted-arm-v1']), 0)
+            read.assert_not_called()
+        for value in ('../recovery-hosted-profile.json', '/tmp/profile.json', 'default', 'hosted-arm-v1 '):
+            with self.subTest(value=value), patch.object(hosted.core, 'json_file') as read, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                hosted.main(['--run', '--profile', value])
+            read.assert_not_called()
+        with patch.object(hosted.core, 'json_file', return_value=PROFILE), \
+             patch.object(hosted, 'job_context') as context, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hosted.main(['--run', '--profile', 'hosted-arm-v1']), 1)
+            context.assert_not_called()
+        with self.assertRaises(TypeError): hosted.PROFILE_FILES['other'] = Path('/tmp/profile.json')
+
+    def test_arm_profile_has_identical_bounds_and_exact_host_admission(self):
+        changed = {'runner_label', 'runner_arch', 'machine', 'execution_profile'}
+        self.assertEqual({k:v for k,v in ARM_PROFILE.items() if k not in changed},
+                         {k:v for k,v in PROFILE.items() if k not in changed})
+        intel = hosted.core.execution_profile('hosted-intel-v1')
+        arm = hosted.core.execution_profile('hosted-arm-v1')
+        self.assertEqual({k:v for k,v in arm.items() if k not in ('name', 'ui_profile')},
+                         {k:v for k,v in intel.items() if k not in ('name', 'ui_profile')})
+        for label in ('macos-15', 'macos-15-intel'):
+            for arch in ('ARM64', 'X64'):
+                for machine in ('arm64', 'x86_64'):
+                    env = {**self.env(ARM_PROFILE), 'TRIPDOCKET_RUNNER_LABEL': label,
+                           'TRIPDOCKET_RUNNER_ARCH': arch}
+                    with self.subTest(label=label, arch=arch, machine=machine):
+                        if (label, arch, machine) == ('macos-15', 'ARM64', 'arm64'):
+                            job = hosted.job_context(env, ARM_PROFILE, machine)
+                            self.assertIs(hosted.select_execution_profile(ARM_PROFILE, job, machine), arm)
+                        else:
+                            with self.assertRaises(RuntimeError): hosted.job_context(env, ARM_PROFILE, machine)
+                            with self.assertRaises(RuntimeError): hosted.select_execution_profile(ARM_PROFILE, env, machine)
+        with self.assertRaises(TypeError): arm['total_seconds'] = 9999
+        r = self.runner(execution_profile='hosted-arm-v1')
+        self.assertEqual((r.t0, r.limit, r.final), (0, 4980, 5340))
+        with self.assertRaisesRegex(AttributeError, 'reselected'): r._execution_profile = intel
+        for machine in ('x86_64', '', None):
+            with self.assertRaises(RuntimeError):
+                hosted.core.Recovery(Ops(), self.root/'not-created', {}, {'machine':machine}, 'test', 0,
+                    candidate=self.root/'source', source_manifest={}, execution_profile=arm)
+        self.assertFalse((self.root/'not-created').exists())
+        for field,value in [('total_seconds',5341), ('cleanup_seconds',361), ('runner_environment','self-hosted'),
+                            ('execution_profile','hosted-intel-v1')]:
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                hosted.select_execution_profile({**ARM_PROFILE,field:value}, self.env(ARM_PROFILE), 'arm64')
+
+    def test_arm_boot_finalization_requires_verified_success_and_original_bounds(self):
+        r,row,_,_,payload,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-success')
+        self.assertTrue(ok)
+        self.assertEqual(r.report['resources'][-1]['scan']['requested_scan_seconds'],60)
+        self.assertGreaterEqual(r.report['resources'][-1]['logical'],payload.stat().st_size)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],r.limit,r.final),(592.,600.,4980.,5340.))
+        for fault in ('unknown','active','unreaped','unconfirmed','unattempted','absence-cache',
+                      'identity','nonzero','boolean-exit','profile-copy','unowned','copied-record',
+                      'receipt-only','other-argv','other-command'):
+            with self.subTest(fault=fault):
+                r,row,_,_,_,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-'+fault,fault=fault)
+                self.assertFalse(ok)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        for label,options in [('scan',{'delay':60.}),('total',{'closed_at':599.,'delay':1.}),
+                              ('global',{'limit':505.}),('cancel',{'fault':'cancel'})]:
+            with self.subTest(boundary=label):
+                r,row,_,_,_,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-'+label,**options)
+                self.assertFalse(ok)
+                self.assertEqual(row['outcome'],'failed')
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
+                          hosted.core.CAPS['scan_entries'],hosted.core.CAPS['scan_depth']), (5,30,100000,40))
 
     def test_default_cli_and_invalid_environment_are_inert(self):
         with contextlib.redirect_stdout(io.StringIO()) as text:
@@ -321,16 +402,16 @@ class BoundaryTests(unittest.TestCase):
         recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
         environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
         self.assertEqual(environment.splitlines(),[
-            '      TRIPDOCKET_RUNNER_LABEL: macos-15-intel',
+            '      TRIPDOCKET_RUNNER_LABEL: macos-15',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15-intel\n    timeout-minutes: 118\n',recovery)
+        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 118\n',recovery)
         checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 2\n',checkout)
         regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 15\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
         self.assertIn('        timeout-minutes: 91\n',attempt)
-        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
+        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run --profile hosted-arm-v1\n',attempt)
         evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
         self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
         step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
@@ -491,7 +572,7 @@ class BoundaryTests(unittest.TestCase):
         workspace=self.root/('repo'+suffix);workspace.mkdir();out=self.root/('out'+suffix)
         ops=ops or Ops();ops.env={};ops.cwd=workspace
         selected=hosted.core.execution_profile(execution_profile)
-        profile=copy.deepcopy(PROFILE)
+        profile=copy.deepcopy(ARM_PROFILE if execution_profile == 'hosted-arm-v1' else PROFILE)
         profile.update(execution_profile=selected['name'],total_seconds=selected['total_seconds'],
                        cleanup_seconds=selected['cleanup_seconds'])
         if execution_profile == 'default':
@@ -506,7 +587,7 @@ class BoundaryTests(unittest.TestCase):
                 0,candidate=out/'Source',source_manifest={},execution_profile=selected)
             r.report['job']=r.job;r.save()
         else:
-            r=hosted.HostedRecovery(ops,out,profile,self.env(),self.event(),workspace,0,
+            r=hosted.HostedRecovery(ops,out,profile,self.env(profile),self.event(),workspace,0,
                                     execution_profile=selected)
         r.report['source_manifest']={'path':'synthetic-only','sha256':'0'*64}
         return r
@@ -611,6 +692,32 @@ class BoundaryTests(unittest.TestCase):
                 for flag in ['-default-test-execution-time-allowance','-maximum-test-execution-time-allowance']:
                     self.assertEqual(argv[argv.index(flag)+1],str(native_seconds))
                 self.assertEqual(env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'],'hosted-intel-v1')
+                self.assertIs(r.ops.env,old_env)
+                self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertEqual(len(observed),3)
+        self.assertEqual((r.limit,r.final),(4980,5340))
+
+    def test_hosted_arm_phases_use_one_profile_for_native_command_receipt_and_environment(self):
+        r=self.runner(execution_profile='hosted-arm-v1');r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+        r.report['files_ui_baseline']={'absent':True};r.report['files_folder']={'fixture_verified':True}
+        r.ops.plans=[{'delay':.1} for _ in range(3)];observed=[]
+        r.ops.on_spawn=lambda argv:observed.append((list(argv),dict(r.ops.env)))
+        old_env=r.ops.env
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read),patch.object(r,'app_state'), \
+             patch.object(r,'verify_folder'),patch.object(r,'authorize_restore'):
+            for phase,command_seconds,native_seconds in [('prepare',1200,300),('export',900,600),('restore',900,600)]:
+                hosted.core.Recovery.run_phase(r,phase)
+                row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
+                self.assertEqual(row['requested_cap_seconds'],command_seconds)
+                self.assertEqual(budget['selected_case_max_seconds'],native_seconds)
+                self.assertEqual(budget['original_work_deadline_elapsed'],4980)
+                self.assertEqual(row['stop_reserve_seconds'],8)
+                argv,env=observed[-1]
+                for flag in ['-default-test-execution-time-allowance','-maximum-test-execution-time-allowance']:
+                    self.assertEqual(argv[argv.index(flag)+1],str(native_seconds))
+                self.assertEqual(env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'],'hosted-arm-v1')
                 self.assertIs(r.ops.env,old_env)
                 self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         self.assertEqual(len(observed),3)

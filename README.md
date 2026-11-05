@@ -72,7 +72,8 @@ UUID is checked against the same requirements. Ordinary local use keeps its
 existing selection behavior. Core/purchase and phone guidance CI use standard
 `macos-15` ARM runners with Xcode 26.2 (17C52) and require its matching Simulator
 runtime. They retain the existing ordinary ARM test and preparation limits;
-iPad guidance and recovery remain on Intel. Their test artifacts retain
+iPad guidance remains on Intel. Recovery explicitly selects its hosted ARM
+profile with the same bounded policy as its retained Intel profile. Their test artifacts retain
 the selected device and captured inventories. The Release preview is built with
 the same Xcode version; its provenance records the actual producer. The separate
 recovery compatibility job keeps its own toolchain/profile.

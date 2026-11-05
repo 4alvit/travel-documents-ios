@@ -300,14 +300,14 @@ Xcode 27.1 review below must still establish actual results and warnings.
 
 Core/purchase tests, phone guidance and the Release preview use Xcode 26.2
 (17C52). Core/purchase and phone guidance request standard `macos-15` ARM
-runners; iPad guidance, recovery and Swift CodeQL retain `macos-15-intel`
-(x86_64). Earlier ARM runner acquisition failures motivated the Intel
+runners. Recovery now explicitly selects `hosted-arm-v1` on `macos-15`;
+iPad guidance and Swift CodeQL retain `macos-15-intel` (x86_64). Earlier ARM runner acquisition failures motivated the Intel
 configuration. Later ARM allocation and toolchain probes support trying ARM
-again for these two cohorts; they do not prove native test reliability.
-The ARM jobs use their existing ordinary test and preparation limits, without
-Intel timing tokens. Their enclosing workflow limits, test cases and assertions
-remain unchanged. Recovery still requires the exact `X64` runner context and
-`x86_64` host profile. Each cohort requires fresh evidence for the current source;
+again for these cohorts; they do not prove native test reliability.
+The Core/Phone ARM jobs use their existing ordinary test and preparation
+limits, without Intel timing tokens. Their enclosing workflow limits, test cases and assertions
+remain unchanged. Recovery requires the exact `ARM64`/`arm64` hosted context
+for its explicit ARM profile, retaining the Intel profile and CLI default. Each cohort requires fresh evidence for the current source;
 no previous architecture result is inherited. Neither runner class guarantees
 available hosted capacity.
 Both iPhone test jobs require a unique available runtime matching that Xcode's
@@ -385,8 +385,9 @@ guaranteed. The earlier 600-second failure's unconfirmed process-group cleanup
 remains historical evidence. The later 780-second run confirmed its owned group
 absent and its leader reaped; neither result proves the startup delay fixed.
 Standalone Recovery retains its 780-second prepare command, 600-second later
-commands and 180/300-second native allowances. The hosted Intel adapter selects
-one immutable, validated `hosted-intel-v1` profile before deriving deadlines from
+commands and 180/300-second native allowances. The hosted adapter selects
+immutable `hosted-intel-v1` or explicit `hosted-arm-v1`, with identical numeric
+bounds and architecture-specific admission, before deriving deadlines from
 its original clock: 4,980 seconds of work plus 360 for cleanup, prepare command/case
 caps of 1,200/300 seconds and export/restore caps of 900/600 seconds. Commands
 retain their eight-second stop reserve. Hosted cleanup alone allows 90 seconds
@@ -394,7 +395,9 @@ per owned shutdown/delete action and 60 per recovery/final inventory query;
 unresolved ownership still prevents later commands and cleanup acceptance.
 Standalone cleanup retains its original 120/30/20-second limits.
 The native change requires the exact
-Debug Intel Simulator opt-in; unrelated callers keep their defaults. A retained
+matching Debug Simulator architecture and exact profile token; unrelated
+callers keep their defaults. The legacy Intel JSON is unchanged; the closed
+`--profile` option cannot load arbitrary files. A retained
 Intel run spent 713 seconds before the prepare case began and was stopped during
 app launch. This profile budgets all three phases, result inspection and cleanup;
 it provides bounded startup and native performance margin without guaranteeing
