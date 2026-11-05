@@ -3,7 +3,8 @@
 
 Only entitlement/catalog I/O is substituted. No StoreKit, app, or Simulator is
 started. Checked continuations order overlapping calls without sleeps or races.
-Native purchase/restore integration tests remain a separate CI requirement.
+Readiness tests substitute only the UI values and clock in the actual UI-test
+call and wait helpers. Native integration remains a separate CI requirement.
 """
 from pathlib import Path
 import subprocess
@@ -230,6 +231,163 @@ class PurchaseLoadTests(unittest.TestCase):
 
     def test_catalog_error_releases_owner(self):
         self.run_case("catalog-error-releases-owner")
+
+
+READINESS_FIXTURE = r'''
+import Foundation
+
+@MainActor func expect(_ value: @autoclosure () -> Bool, _ message: String) {
+    guard value() else { print("FAIL \(message)"); exit(1) }
+}
+@MainActor enum FixtureTime { static var elapsed = Duration.zero }
+struct FixtureInstant: Comparable {
+    let elapsed: Duration
+    func advanced(by duration: Duration) -> Self { Self(elapsed: elapsed + duration) }
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.elapsed < rhs.elapsed }
+}
+@MainActor struct FixtureClock {
+    var now: FixtureInstant { FixtureInstant(elapsed: FixtureTime.elapsed) }
+}
+@MainActor enum FixtureSleep {
+    static func sleep(for duration: Duration) async throws { FixtureTime.elapsed += duration }
+}
+@MainActor final class XCUIApplication { var alerts: [Int] = [] }
+@MainActor final class FixtureBuy {
+    var exists = true
+    var enabled = true
+    var isHittable = true
+    var readyAt = Duration.seconds(35)
+    var isEnabled: Bool { enabled && FixtureTime.elapsed >= readyAt }
+}
+struct PurchaseTestError: Error { let message: String }
+
+@MainActor final class Harness {
+    let app = XCUIApplication()
+    let springboard = XCUIApplication()
+    let buy = FixtureBuy()
+    var diagnosticNames: [String] = []
+    func attachDiagnostics(app: XCUIApplication, springboard: XCUIApplication, name: String) {
+        diagnosticNames.append(name)
+    }
+    func check(attempt: Int) async throws {
+        // ACTUAL_CALL
+    }
+    func checkDefault() async throws {
+        try await require("default", app: app, springboard: springboard) { buy.isEnabled }
+    }
+    // ACTUAL_HELPERS
+}
+
+@main struct Main {
+    @MainActor static func main() async {
+        let name = CommandLine.arguments[1]
+        let h = Harness()
+        var attempt = 1
+        var accepted = true
+        var expectedTime = Duration.seconds(35)
+        switch name {
+        case "first-ready-35": break
+        case "first-ready-59": h.buy.readyAt = .seconds(59); expectedTime = .seconds(59)
+        case "first-too-late": h.buy.readyAt = .seconds(61); accepted = false; expectedTime = .seconds(60)
+        case "second-stays-15": attempt = 2; accepted = false; expectedTime = .seconds(15)
+        case "default-stays-15": accepted = false; expectedTime = .seconds(15)
+        case "missing", "disabled", "not-hittable", "alert":
+            h.buy.readyAt = .zero; accepted = false; expectedTime = .seconds(60)
+            if name == "missing" { h.buy.exists = false }
+            if name == "disabled" { h.buy.enabled = false }
+            if name == "not-hittable" { h.buy.isHittable = false }
+            if name == "alert" { h.app.alerts = [1] }
+        case "already-ready": h.buy.readyAt = .zero; expectedTime = .zero
+        default: fatalError("Unknown fixture")
+        }
+        var completed = false
+        var failure: String?
+        do {
+            if name == "default-stays-15" { try await h.checkDefault() }
+            else { try await h.check(attempt: attempt) }
+            completed = true
+        } catch let error as PurchaseTestError { failure = error.message }
+        catch { fatalError("Unexpected error: \(error)") }
+        expect(completed == accepted, "readiness result")
+        expect(FixtureTime.elapsed == expectedTime, "original wait deadline")
+        let message = name == "default-stays-15" ? "default" : "Purchase is not ready for failure attempt \(attempt)"
+        expect(h.diagnosticNames == (accepted ? [] : [message]), "diagnostic path")
+        expect(failure == (accepted ? nil : message), "failure preserved")
+        print("PASS \(name)")
+    }
+}
+'''
+
+
+def readiness_fixture(source):
+    def unique_section(start, end):
+        if source.count(start) != 1 or source.count(end) != 1:
+            raise ValueError("Cannot identify unique readiness boundary")
+        return source[source.index(start):source.index(end, source.index(start))]
+
+    call = unique_section('                try await require("Purchase is not ready for failure attempt',
+                          '                try await session.setSimulatedError(.generic')
+    helpers = unique_section('    private func require(\n', '    private func attachDiagnostics(')
+    # Substitute the two clock/I/O operations, retaining the real deadline,
+    # polling, final predicate, error and diagnostic control flow.
+    if helpers.count('ContinuousClock()') != 1 or helpers.count('Task.sleep(') != 1:
+        raise ValueError("Unexpected readiness clock operations")
+    helpers = helpers.replace('ContinuousClock()', 'FixtureClock()').replace('Task.sleep(', 'FixtureSleep.sleep(')
+    return READINESS_FIXTURE.replace('// ACTUAL_CALL', call).replace('// ACTUAL_HELPERS', helpers)
+
+
+class PurchaseReadinessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix="tripdocket-purchase-readiness-")
+        cls.addClassCleanup(cls.directory.cleanup)
+        root = Path(cls.directory.name)
+        source = (ROOT / "UITests/PurchaseUITests.swift").read_text()
+        selected = 'timeout: attempt == 1 ? .seconds(60) : .seconds(15)'
+        if source.count(selected) != 1:
+            raise AssertionError("Expected one scoped initial-readiness policy")
+        cls.executables = {}
+        for name, text in (("actual", source), ("old-cap", source.replace(selected, selected.replace('60', '15')))):
+            swift = root / (name + ".swift")
+            swift.write_text(readiness_fixture(text))
+            executable = root / name
+            result = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
+                                     str(swift), "-o", str(executable)],
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            cls.executables[name] = executable
+
+    def run_case(self, name, variant="actual"):
+        result = subprocess.run([str(self.executables[variant]), name], capture_output=True,
+                                text=True, timeout=5)
+        if variant == "old-cap":
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "FAIL readiness result")
+        else:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "PASS " + name)
+
+    def test_initial_readiness_uses_bounded_extra_time(self):
+        for case in ("first-ready-35", "first-ready-59", "already-ready"):
+            with self.subTest(case=case):
+                self.run_case(case)
+
+    def test_old_initial_cap_causally_rejects_delayed_readiness(self):
+        self.run_case("first-ready-35", "old-cap")
+
+    def test_initial_readiness_still_expires(self):
+        self.run_case("first-too-late")
+
+    def test_subsequent_and_default_waits_remain_short(self):
+        for case in ("second-stays-15", "default-stays-15"):
+            with self.subTest(case=case):
+                self.run_case(case)
+
+    def test_all_readiness_predicates_remain_required(self):
+        for case in ("missing", "disabled", "not-hittable", "alert"):
+            with self.subTest(case=case):
+                self.run_case(case)
 
 
 if __name__ == "__main__":

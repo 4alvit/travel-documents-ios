@@ -819,6 +819,16 @@ timeout caused the launch failure. The three failure-alert scenarios now request
 quota checks, PNG/AX captures and teardown remain required; the ordinary
 180-second default and Core's 480-second maximum are unchanged.
 
+In Core run 41935094544, the first failure-alert readiness check expired while
+the paywall's entitlement refresh remained busy for 35.075 seconds; later
+captures showed the purchase button enabled. Only the first readiness check
+in each of the three failure-alert scenarios now allows 60 seconds. The second
+attempt and every other `require` call retain 15 seconds. This shared test helper
+applies on all architectures. The exact visible, enabled, hittable purchase-button
+and no-alert condition, both checked failure cycles, all captures and the
+240-second case allowance remain unchanged. The extra initial margin does not
+guarantee completion or change the app's entitlement-loading behavior.
+
 Core's integration step now has a separate 35-minute limit within the
 75-minute job. The job envelope is checkout 2, toolchain 5, toolchain evidence 2,
 selector checks 2, Verify 10, packaging 2, integration 35, cancellation grace 5,
