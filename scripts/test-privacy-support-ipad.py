@@ -559,11 +559,15 @@ class Driver:
         target = targets[0]
 
         def resolve(value, host=None):
-            value = value.replace("__TESTROOT__", str(products))
+            replacements = {"__TESTROOT__": str(products)}
             if host:
-                value = value.replace("__TESTHOST__", str(host))
+                replacements["__TESTHOST__"] = str(host)
+            tokens = "|".join(re.escape(token) for token in replacements)
+            require("__" not in re.sub(tokens, "", value), "Unresolved/outside generated product path")
+            # Expand the template once; parent directory names are literal data.
+            value = re.sub(tokens, lambda match: replacements[match.group()], value)
             path = Path(value).resolve()
-            require("__" not in value and path.is_relative_to(products.resolve()) and path.exists(), "Unresolved/outside generated product path")
+            require(path.is_relative_to(products.resolve()) and path.exists(), "Unresolved/outside generated product path")
             return path
 
         runner = resolve(target["TestHostPath"])
