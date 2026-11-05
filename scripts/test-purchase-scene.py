@@ -1356,7 +1356,7 @@ class SceneControlTests(unittest.TestCase):
     def test_current_profile_and_no_extra_app_purchase(self):
         for runner,arch,machine in [('macos-15','ARM64','arm64'),('macos-15-intel','X64','x86_64')]:
             with tempfile.TemporaryDirectory() as t:
-                root=Path(t);(root/'build').mkdir();pair=Pair(root,m.context({**Guards().env(),'PURCHASE_SCENE_RUNNER':runner,'RUNNER_ARCH':arch},machine))
+                root=Path(t).resolve();(root/'build').mkdir();pair=Pair(root,m.context({**Guards().env(),'PURCHASE_SCENE_RUNNER':runner,'RUNNER_ARCH':arch},machine))
                 self.assertIs(pair.commands.execution_profile,core.execution_profile())
         views=(HERE.parent/'App/Views.swift').read_text()
         ui=(HERE.parent/'UITests/PurchaseUITests.swift').read_text()
@@ -1376,7 +1376,7 @@ class SceneControlTests(unittest.TestCase):
     def test_actual_current_setup_and_cleanup_both_profiles(self):
         for runner,arch,machine in [('macos-15','ARM64','arm64'),('macos-15-intel','X64','x86_64')]:
             with self.subTest(runner=runner),tempfile.TemporaryDirectory() as t:
-                root=Path(t);(root/'build').mkdir()
+                root=Path(t).resolve();(root/'build').mkdir()
                 pair=Pair(root,m.context({**Guards().env(),'PURCHASE_SCENE_RUNNER':runner,'RUNNER_ARCH':arch},machine))
                 arm=Context(pair,root/'arm',pair.work_end,'synthetic-owned-scene-device')
                 pair.current=arm;arm.source=mock.Mock();arm.owned_root=mock.Mock(return_value=root/'synthetic-device')
