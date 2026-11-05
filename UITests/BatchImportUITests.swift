@@ -68,7 +68,7 @@ final class BatchImportUITests: XCTestCase {
     private static func nativeFolderEditorFrame(
         in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
         expectedName: String, localTitle: String,
-        keyboardIntroduction: Bool = false,
+        keyboardIntroduction: Bool = false, observationAllowsEmptyName: Bool = false,
         diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
@@ -89,7 +89,8 @@ final class BatchImportUITests: XCTestCase {
         }
         guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
               applicationSnapshot.elementType == .application,
-              let all = nodes(snapshot), let environment = nodes(applicationSnapshot), !expectedName.isEmpty,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
+              (observationAllowsEmptyName || !expectedName.isEmpty),
               !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }),
               environment.filter({ $0.elementType == .other && $0.identifier == "UIContinuousPathIntroductionView" }).count
                 == (keyboardIntroduction ? 1 : 0),
@@ -986,8 +987,29 @@ final class BatchImportUITests: XCTestCase {
         try check(pretypeLiveReady && pretypeFramesMatch,
                   app: app, "Native folder editor left the single newly created local folder")
         inlineNames.element.typeText(ownedFolder)
-        try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
-                  app: app, "Native folder name differs from the exact owned UUID name")
+        var textTrace = NativeFolderTextTrace()
+        defer {
+            let attachment = XCTAttachment(string: textTrace.json())
+            attachment.name = "Native folder text completion observations"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        do {
+            try await Self.observeNativeFolderTextCompletion(
+                expectedName: ownedFolder,
+                foreground: { app.state == .runningForeground },
+                pickerSnapshot: {
+                    // .element requires one matching live picker; no firstMatch.
+                    try app.otherElements.matching(identifier: "Browse View (Picker)").element.snapshot()
+                },
+                applicationSnapshot: { try app.snapshot() },
+                trace: &textTrace
+            )
+        } catch {
+            if error is CancellationError { throw error }
+            capture(app, "Native folder name differs from the exact owned UUID name")
+            throw error
+        }
         try await acknowledgeNativeFolderKeyboardIntroduction(
             app, expectedName: ownedFolder, acknowledged: &keyboardIntroductionAcknowledged
         )
@@ -1821,6 +1843,146 @@ final class BatchImportUITests: XCTestCase {
         done.tap()
         // The host now compares the active catalog and original bytes against
         // its pre-reset snapshot. UI counts and a preview container are not it.
+    }
+
+    private struct NativeFolderTextRecord: Encodable {
+        var number = 0
+        var startedSeconds = 0.0
+        var finishedSeconds = 0.0
+        var stage = "started"
+        var valueKind = "unobserved"
+        var valueBytes: Int?
+        var valuePrefixUTF8Hex: String?
+        var valueTruncated = false
+    }
+
+    private struct NativeFolderTextTrace: Encodable {
+        let version = 1
+        var outcome = "running"
+        var totalObservations = 0
+        var truncated = false
+        var observations: [NativeFolderTextRecord] = []
+
+        mutating func append(_ record: NativeFolderTextRecord) {
+            totalObservations += 1
+            if observations.count < 8 {
+                var numbered = record
+                numbered.number = totalObservations
+                observations.append(numbered)
+            } else { truncated = true }
+        }
+
+        func json() -> String {
+            guard let data = try? JSONEncoder().encode(self), data.count <= 8192,
+                  let text = String(data: data, encoding: .utf8) else {
+                return "{\"version\":1,\"diagnosticEncodingFailed\":true}"
+            }
+            return text
+        }
+    }
+
+    private enum NativeFolderTextError: Error {
+        case deadline, ownership, unexpectedValue
+    }
+
+    private static func nativeFolderTextValue(
+        picker: XCUIElementSnapshot, application: XCUIElementSnapshot
+    ) throws -> String {
+        // Keep the remote picker and its application environment separate.
+        // A frozen app snapshot need not contain the remote Files subtree.
+        var pending: [(XCUIElementSnapshot, Int)] = [(picker, 0)]
+        var visited = 0
+        var editors: [XCUIElementSnapshot] = []
+        while let (node, depth) = pending.popLast() {
+            guard depth <= 96, visited < 4096 else { throw NativeFolderTextError.ownership }
+            visited += 1
+            if node.elementType == .textView && node.identifier == "DOC.inlineRenameField" {
+                editors.append(node)
+            }
+            let children = node.children
+            guard children.count <= 4096 - visited - pending.count else {
+                throw NativeFolderTextError.ownership
+            }
+            pending.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+        guard editors.count == 1, let value = editors[0].value as? String,
+              nativeFolderEditorFrame(in: picker, applicationSnapshot: application,
+                                      expectedName: value, localTitle: "On My iPhone",
+                                      observationAllowsEmptyName: true) != nil else {
+            throw NativeFolderTextError.ownership
+        }
+        return value
+    }
+
+    private static func observeNativeFolderTextCompletion(
+        expectedName: String,
+        foreground: () -> Bool,
+        pickerSnapshot: () throws -> XCUIElementSnapshot,
+        applicationSnapshot: () throws -> XCUIElementSnapshot,
+        now: () -> ContinuousClock.Instant = { ContinuousClock.now },
+        pause: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        trace: inout NativeFolderTextTrace
+    ) async throws {
+        let started = now()
+        let deadline = started.advanced(by: .seconds(15))
+        func seconds() -> Double {
+            let value = started.duration(to: now()).components
+            return Double(value.seconds) + Double(value.attoseconds) / 1e18
+        }
+        func boundary() throws {
+            try Task.checkCancellation()
+            guard now() < deadline else { throw NativeFolderTextError.deadline }
+        }
+        do {
+            while true {
+                var record = NativeFolderTextRecord()
+                record.startedSeconds = seconds()
+                defer {
+                    record.finishedSeconds = seconds()
+                    trace.append(record)
+                }
+                try boundary()
+                record.stage = "foreground"
+                let isForeground = foreground()
+                try boundary()
+                guard isForeground else { throw NativeFolderTextError.ownership }
+                record.stage = "picker-snapshot"
+                try boundary()
+                let picker = try pickerSnapshot()
+                try boundary()
+                record.stage = "application-snapshot"
+                let application = try applicationSnapshot()
+                try boundary()
+                record.stage = "classification"
+                let value = try nativeFolderTextValue(picker: picker, application: application)
+                record.valueBytes = value.utf8.count
+                record.valuePrefixUTF8Hex = value.utf8.prefix(128).map { String(format: "%02x", $0) }.joined()
+                record.valueTruncated = value.utf8.count > 128
+                record.valueKind = value == expectedName ? "exact" : value.isEmpty ? "empty"
+                    : value == "untitled folder" ? "default" : expectedName.hasPrefix(value) ? "prefix" : "unexpected"
+                try boundary()
+                if record.valueKind == "exact" {
+                    record.stage = "completed"
+                    trace.outcome = "completed"
+                    return
+                }
+                guard record.valueKind != "unexpected" else { throw NativeFolderTextError.unexpectedValue }
+                record.stage = "pending"
+                let remaining = now().duration(to: deadline)
+                try boundary()
+                try await pause(min(.milliseconds(100), remaining))
+            }
+        } catch {
+            if error is CancellationError { trace.outcome = "cancelled" }
+            else if let failure = error as? NativeFolderTextError {
+                switch failure {
+                case .deadline: trace.outcome = "deadline"
+                case .ownership: trace.outcome = "ownership-rejected"
+                case .unexpectedValue: trace.outcome = "unexpected-value"
+                }
+            } else { trace.outcome = "query-error" }
+            throw error
+        }
     }
 
     private struct RenderedOriginalEvidence {

@@ -893,5 +893,178 @@ struct Instant: Comparable {
                 self.assertIn("acceptance=failed",value["attachments"][0])
 
 
+
+class NativeFolderTextCompletionTests(unittest.TestCase):
+    """Execute actual Swift observation/ownership code with a synthetic clock."""
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="native-text-completion-")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.folder = Path(cls.scratch.name)
+        spec = importlib.util.spec_from_file_location("folder_direct_fixture", ROOT / "scripts/test-native-folder-direct.py")
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        types = fixture.SWIFT.split("@MainActor final class Harness", 1)[0]
+        tree = "@MainActor final class EditorTree" + fixture.SWIFT.split("@MainActor final class EditorTree", 1)[1].split("@main struct Main", 1)[0]
+        ownership = UI[UI.index("    @MainActor\n    private static func nativeFolderEditorFrame("):
+                       UI.index("    @MainActor\n    private static func nativeFolderInitialState(")]
+        observation = UI[UI.index("    private struct NativeFolderTextRecord:"):
+                         UI.index("    private struct RenderedOriginalEvidence {")]
+        cls.source = types + tree + "\n@MainActor final class Probe {\n" + ownership + observation + r"""
+    static func run(_ scenario: String) async -> [String: Any] {
+        let expected = "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc"
+        let tree = EditorTree("untitled folder")
+        let legacyEmpty = EditorTree("")
+        let legacyEmptyRejected = nativeFolderEditorFrame(in: legacyEmpty.picker,
+            applicationSnapshot: legacyEmpty.app, expectedName: "", localTitle: "On My iPhone") == nil
+        let epoch = ContinuousClock.now
+        var elapsed = 0.0
+        var foregroundCalls = 0, pickerCalls = 0, applicationCalls = 0
+        var trace = NativeFolderTextTrace()
+        var result = "passed"
+        do {
+            try await observeNativeFolderTextCompletion(expectedName: expected,
+                foreground: {
+                    foregroundCalls += 1
+                    if scenario == "slow-foreground" { elapsed += 15 }
+                    return scenario != "background"
+                },
+                pickerSnapshot: {
+                    pickerCalls += 1
+                    if scenario == "cancel-picker" { withUnsafeCurrentTask { $0?.cancel() } }
+                    if scenario == "query-error" { throw BatchTestFailure(message: "synthetic query") }
+                    if scenario == "slow-picker" { elapsed += 15 }
+                    switch scenario {
+                    case "default", "cancel-pause": tree.editor.value = "untitled folder"
+                    case "prefix": tree.editor.value = "TripDocket-Recovery-"
+                    case "empty": tree.editor.value = ""
+                    case "delayed": tree.editor.value = elapsed >= 0.3 ? expected : "untitled folder"
+                    case "empty-prefix-exact": tree.editor.value = elapsed >= 0.3 ? expected : elapsed >= 0.1 ? "TripDocket-" : ""
+                    case "overflow": tree.editor.value = elapsed >= 1.2 ? expected : "untitled folder"
+                    case "foreign": tree.editor.value = "other folder"
+                    case "duplicate": tree.editor.value = expected + expected
+                    case "long-value": tree.editor.value = String(repeating: "é", count: 2000)
+                    case "nil": tree.editor.value = nil
+                    case "non-string": tree.editor.value = 7
+                    default: tree.editor.value = expected
+                    }
+                    if scenario.hasPrefix("shape:") { tree.mutate(String(scenario.dropFirst(6))) }
+                    if scenario == "nonhittable-title" { tree.title.isHittable = false }
+                    return tree.picker
+                },
+                applicationSnapshot: {
+                    applicationCalls += 1
+                    if scenario == "late-exact" { elapsed += 15 }
+                    if scenario == "after-deadline" { elapsed += 16 }
+                    return tree.app
+                },
+                now: { epoch.advanced(by: .seconds(elapsed)) },
+                pause: { duration in
+                    if scenario == "cancel-pause" { throw CancellationError() }
+                    let v = duration.components
+                    elapsed += Double(v.seconds) + Double(v.attoseconds) / 1e18
+                }, trace: &trace)
+        } catch { result = "rejected" }
+        return ["result": result, "trace": trace.json(), "elapsed": elapsed,
+                "foregroundCalls": foregroundCalls, "pickerCalls": pickerCalls,
+                "applicationCalls": applicationCalls, "legacyEmptyRejected": legacyEmptyRejected,
+                "appIncludesPicker": tree.window.children.contains { $0 === tree.picker }]
+    }
+}
+@main struct Main {
+    static func main() async throws {
+        let result = await Probe.run(CommandLine.arguments[1])
+        print(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self))
+    }
+}
+"""
+        cls.binary = cls.compile(cls.source, "probe")
+
+    @classmethod
+    def compile(cls, source, name):
+        path = cls.folder / (name + ".swift"); binary = cls.folder / name
+        path.write_text(source)
+        result = subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-strict-concurrency=complete",
+                                 "-parse-as-library", str(path), "-o", str(binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode: raise AssertionError(result.stdout + result.stderr)
+        return binary
+
+    def probe(self, scenario, binary=None):
+        result = subprocess.run([str(binary or self.binary), scenario], capture_output=True,
+                                text=True, check=True, timeout=5)
+        value = json.loads(result.stdout); value["decoded_trace"] = json.loads(value["trace"])
+        self.assertLessEqual(len(value["trace"].encode()), 8192)
+        self.assertTrue(value["legacyEmptyRejected"])
+        return value
+
+    def test_actual_observer_accepts_exact_and_delayed_replacement_with_separate_snapshot_scopes(self):
+        for scenario in ["exact", "delayed", "empty-prefix-exact", "nonhittable-title"]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value["result"], "passed")
+                self.assertEqual(value["decoded_trace"]["outcome"], "completed")
+                self.assertFalse(value["appIncludesPicker"])
+                self.assertEqual(value["pickerCalls"], value["applicationCalls"])
+                self.assertEqual(value["foregroundCalls"], value["pickerCalls"])
+
+    def test_actual_observer_never_accepts_pending_or_foreign_values(self):
+        for scenario in ["default", "prefix", "empty", "foreign", "duplicate", "nil", "non-string", "long-value"]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario); self.assertEqual(value["result"], "rejected")
+                self.assertNotEqual(value["decoded_trace"]["outcome"], "completed")
+        long = self.probe("long-value")["decoded_trace"]["observations"][0]
+        self.assertEqual(long["valueBytes"], 4000)
+        self.assertTrue(long["valueTruncated"])
+        self.assertEqual(len(long["valuePrefixUTF8Hex"]), 256)
+
+    def test_actual_observer_rejects_deadline_crossing_each_remote_read_and_cancellation(self):
+        for scenario in ["slow-foreground", "slow-picker", "late-exact", "after-deadline", "cancel-picker", "cancel-pause", "query-error", "background"]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario); self.assertEqual(value["result"], "rejected")
+        self.assertEqual(self.probe("slow-foreground")["pickerCalls"], 0)
+        self.assertEqual(self.probe("slow-picker")["applicationCalls"], 0)
+        self.assertEqual(self.probe("cancel-picker")["decoded_trace"]["outcome"], "cancelled")
+
+    def test_actual_frozen_ownership_rejects_foreign_or_changed_editor_environment(self):
+        for shape in ["wrong-provider", "duplicate-picker", "duplicate-root", "duplicate-grid", "duplicate-nav", "duplicate-title", "wrong-title", "duplicate-editor", "disabled-editor", "editor-outside-cell-ancestry", "editor-outside-grid", "editor-outside-window", "editor-under-keyboard", "nonfinite-editor", "second-cell", "missing-keyboard", "missing-window", "root-outside-picker", "nav-outside-root", "grid-outside-root", "oversized-tree", "environment-too-deep"]:
+            with self.subTest(shape=shape): self.assertEqual(self.probe("shape:" + shape)["result"], "rejected")
+
+    def test_actual_diagnostics_keep_first_eight_and_explicit_overflow(self):
+        value = self.probe("overflow"); trace = value["decoded_trace"]
+        self.assertEqual(value["result"], "passed")
+        self.assertGreater(trace["totalObservations"], 8); self.assertEqual(len(trace["observations"]), 8)
+        self.assertTrue(trace["truncated"])
+        self.assertEqual([x["number"] for x in trace["observations"]], list(range(1, 9)))
+        for row in trace["observations"]:
+            self.assertGreaterEqual(row["startedSeconds"], 0)
+            self.assertGreaterEqual(row["finishedSeconds"], row["startedSeconds"])
+
+    def test_actual_observer_causal_mutations_expose_immediate_assertion_and_late_acceptance(self):
+        immediate = self.source.replace('guard record.valueKind != "unexpected" else',
+                                        'guard record.valueKind == "exact" else', 1)
+        self.assertNotEqual(immediate, self.source)
+        self.assertEqual(self.probe("delayed", self.compile(immediate, "immediate"))["result"], "rejected")
+        late = self.source.replace('guard now() < deadline else', 'guard true else', 1)
+        self.assertNotEqual(late, self.source)
+        self.assertEqual(self.probe("late-exact", self.compile(late, "late"))["result"], "passed")
+        self.assertEqual(self.probe("late-exact")["result"], "rejected")
+
+    def test_runtime_keeps_one_type_and_all_existing_post_completion_guards(self):
+        helper = UI[UI.index("    private func createNativeEmptyFilesFolder("):
+                    UI.index("    func testNativeSaveSeedsBothSyntheticOriginals()")]
+        self.assertEqual(helper.count("inlineNames.element.typeText(ownedFolder)"), 1)
+        self.assertEqual(helper.count("Self.observeNativeFolderTextCompletion("), 1)
+        self.assertLess(helper.index("inlineNames.element.typeText(ownedFolder)"), helper.index("Self.observeNativeFolderTextCompletion("))
+        after = helper.split("Self.observeNativeFolderTextCompletion(", 1)[1]
+        self.assertIn("let endEditingSnapshots = try nativeFolderSnapshots(app)", after)
+        self.assertIn("inlineNames.element.value as? String == ownedFolder", after)
+        self.assertEqual(helper.count("files.element.coordinate(withNormalizedOffset: current.normalized).tap()"), 1)
+        self.assertNotIn("save.tap()", helper)
+        integration = helper.split("var textTrace = NativeFolderTextTrace()", 1)[1].split("        try await acknowledgeNativeFolderKeyboardIntroduction(", 1)[0]
+        self.assertIn("if error is CancellationError { throw error }", integration)
+        self.assertIn('capture(app, "Native folder name differs from the exact owned UUID name")', integration)
+        self.assertNotIn("try check(false", integration)
+        self.assertTrue(integration.rstrip().endswith("throw error\n        }"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

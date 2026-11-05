@@ -27,10 +27,10 @@ WORK, STOP, WRITE = 1080, 30, 10
 EXECUTION_PROFILES = MappingProxyType({
     "arm64": MappingProxyType({"name": "default", "architecture": "arm64",
                               "work_seconds": WORK, "warm_boot_seconds": 180,
-                              "prepare_command_seconds": 960}),
+                              "prepare_command_seconds": 960, "prepare_case_seconds": 180}),
     "x86_64": MappingProxyType({"name": "intel-phone", "architecture": "x86_64",
                                "work_seconds": 1440, "warm_boot_seconds": 300,
-                               "prepare_command_seconds": 1080}),
+                               "prepare_command_seconds": 1080, "prepare_case_seconds": 300}),
 })
 PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # Existing initial inventory can take more than 30s, so each full inventory
@@ -39,8 +39,10 @@ PREPARE_CASE = "BatchImportUITests/testRecoveryPrepareFilesProvider()"
 # command includes the shared primitive's 8s stop reserve. This phone command
 # includes build and runner startup: run 41577208390 used about 711s before
 # the case and exhausted the old 780s cap after only 61s of the unchanged
-# 180s case allowance. Arm retains 960s; Intel allows 1080s after a later run
-# exhausted 960s before its native case could use the unchanged 180s allowance.
+# then-180s case allowance. Arm retains 960s; Intel allows 1080s after a later run
+# exhausted 960s before its native case could use that allowance. The current
+# Intel provider-only case uses the validated hosted Recovery 300s policy after
+# an observed native180s timeout; Arm remains180. Neither outer cap is extended.
 # Both command caps include the shared 8s stop reserve;
 # postprocessing shares one original work deadline: 1080s on Arm, 1440s on Intel.
 # The Intel warm-boot command gets 300s including its 8s stop reserve. Historical
@@ -237,8 +239,8 @@ class Bootstrap(process.Smoke):
         argv = ["xcodebuild", "-project", "Tripfolio.xcodeproj", "-scheme", "Tripfolio", "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=" + self.selected["udid"], "-destination-timeout", "30",
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS),
-            "-maximum-test-execution-time-allowance", str(recovery.PREPARE_CASE_SECONDS), "-derivedDataPath", str(derived),
+            "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", str(self.execution_profile["prepare_case_seconds"]),
+            "-maximum-test-execution-time-allowance", str(self.execution_profile["prepare_case_seconds"]), "-derivedDataPath", str(derived),
             "-resultBundlePath", str(self.out / "prepare.xcresult"),
             "-only-testing:TripfolioUITests/" + PREPARE_CASE.removesuffix("()"),
             "CODE_SIGNING_ALLOWED=NO", "test"]
@@ -246,6 +248,8 @@ class Bootstrap(process.Smoke):
         self.ops.env = {**previous, "TEST_RUNNER_TRIPDOCKET_RECOVERY_UI": "1",
             "TEST_RUNNER_TRIPDOCKET_RECOVERY_PHASE": "prepare", "TEST_RUNNER_TRIPDOCKET_RECOVERY_FOLDER": folder,
             "TEST_RUNNER_NSUnbufferedIO": "YES", "NSUnbufferedIO": "YES"}
+        if self.execution_profile["prepare_case_seconds"] == 300:
+            self.ops.env["TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] = "hosted-intel-v1"
         failure = None
         try:
             self.command("prepare-ui", argv, self.execution_profile["prepare_command_seconds"])
