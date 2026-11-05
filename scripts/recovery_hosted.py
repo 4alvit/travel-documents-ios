@@ -17,7 +17,7 @@ import uuid
 from types import MappingProxyType
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = '350adf246638cbcc48d846743c99d4b903f26f0f0cbff2a2184f124b1e4dbe16'
+CORE_SHA = '8266da61c8f46873bf9638c731bb44e193bcb6d5b0d0485f5d4f55a017a2e471'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
@@ -613,28 +613,68 @@ class HostedRecovery(core.Recovery):
     def work(self):
         super().work()
         identity=core.json_file(self.out/'source-identity.json')['checkout']
-        require(self.command('git-final-head',['/usr/bin/git','rev-parse','HEAD'],20).strip()==identity['commit'],
-                'Checkout commit changed during recovery')
-        require(not self.command('git-final-clean',['/usr/bin/git','status','--porcelain'],20).strip(),
-                'Checkout changed during recovery')
+        self._verify_final_checkout(identity['commit'])
+
+    def _verify_final_checkout(self, commit):
+        require(getattr(self, '_final_checkout_scope', None) is None,
+                'Final checkout scope already active')
+        require(not any(row.get('id') in ('git-final-head', 'git-final-clean')
+                        for row in self.report['commands']), 'Final checkout already attempted')
+        for label, argv in core._FINAL_CHECKOUT_COMMANDS:
+            previous_limit = self.limit
+            try:
+                if any(self.execution_profile is core.EXECUTION_PROFILES[name]
+                       for name in ('hosted-intel-v1', 'hosted-arm-v1')):
+                    self.timecheck()
+                    require(not self.active and not self.unknown_spawn,
+                            'Final checkout process ownership unresolved')
+                    # Include the first pre-record checkpoint in this same20s
+                    # command. Base.command retains its original8s stop reserve.
+                    self.limit = min(previous_limit, self.ops.now() + 20)
+                    self._final_checkout_scope = core._FinalCheckoutScope(self, (label, argv), self.limit)
+                output = self.command(label, list(argv), 20).strip()
+                require(output == commit if label == 'git-final-head' else not output,
+                        'Checkout commit changed during recovery' if label == 'git-final-head'
+                        else 'Checkout changed during recovery')
+            finally:
+                self.limit = previous_limit
+                self._final_checkout_scope = None
 
     def run_phase(self,phase):
+        first=len(self.report['commands'])
+        primary=None
         try:return super().run_phase(phase)
+        except BaseException as error:
+            primary=error
+            raise
         finally:
-            # Raw root logs are never public. This route selects only Xcode
-            # phase logs; the separate Files route also excludes every ps log.
-            for record in self.report['commands']:
-                if record['id']=='phase-'+phase:
-                    directory=self.out/'PhaseLogs'
-                    directory.mkdir(exist_ok=True);core.identity_of(directory)
-                    for key,value in list(record.get('logs',{}).items()):
-                        path=Path(value)
-                        if path.exists():
-                            require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
-                            public=directory/(phase+'-'+key+'.log')
-                            require(not os.path.lexists(public),'Public phase log already exists')
-                            path.rename(public);record['logs'][key]=str(public)
-            self.save()
+            try:
+                # Raw root logs are never public. This route selects only Xcode
+                # phase logs and exact closed attachment exports, never ps logs.
+                for record in self.report['commands']:
+                    if record['id']=='phase-'+phase:
+                        directory=self.out/'PhaseLogs'
+                        directory.mkdir(exist_ok=True);core.identity_of(directory)
+                        for key,value in list(record.get('logs',{}).items()):
+                            path=Path(value)
+                            if path.exists():
+                                require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
+                                public=directory/(phase+'-'+key+'.log')
+                                require(not os.path.lexists(public),'Public phase log already exists')
+                                path.rename(public);record['logs'][key]=str(public)
+                if phase in core.CASES:
+                    self.retain_closed_logs(first,{phase+'-attachments':[
+                        '/usr/bin/xcrun','xcresulttool','export','attachments',
+                        '--path',str(self.out/(phase+'-inspection.xcresult')),
+                        '--output-path',str(self.out/(phase+'-attachments')),
+                        '--test-id',core.CASES[phase],
+                    ]},'Attachment export')
+                self.save()
+            except BaseException as error:
+                self.report['phase_log_publication_error']=repr(error)
+                self.error('Phase log publication: '+repr(error))
+                if primary is None:
+                    raise
 
 
 def main(argv=None):

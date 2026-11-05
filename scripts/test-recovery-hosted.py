@@ -876,9 +876,12 @@ class BoundaryTests(unittest.TestCase):
         xcode=r.out/'1-stdout.log';xcode.write_text('xcode diagnostic')
         r.report['commands']=[{'id':'phase-export','logs':{'stdout':str(xcode)}},
                               {'id':'export-app-stopped','logs':{'stdout':str(ps)}}]
-        with patch.object(hosted.core.Recovery,'run_phase',side_effect=RuntimeError('app running')), \
+        primary=RuntimeError('app running')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=primary), \
              patch.object(Path,'rename',side_effect=OSError('failed move')):
-            with self.assertRaises(OSError):r.run_phase('export')
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('export')
+        self.assertIs(failure.exception,primary)
+        self.assertIn('failed move',r.report['phase_log_publication_error'])
         self.assertEqual(list((r.out/'PhaseLogs').glob('*')),[])
         self.assertEqual(ps.read_text(),'private process listing')
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
@@ -894,6 +897,125 @@ class BoundaryTests(unittest.TestCase):
             r.run_phase('export')
         self.assertEqual((r.out/'PhaseLogs/export-stdout.log').read_text(),'xcode diagnostic')
         self.assertEqual(ps.read_text(),'private process listing')
+
+    def attachment_argv(self,r,phase):
+        return ['/usr/bin/xcrun','xcresulttool','export','attachments',
+                '--path',str(r.out/(phase+'-inspection.xcresult')),
+                '--output-path',str(r.out/(phase+'-attachments')),
+                '--test-id',hosted.core.CASES[phase]]
+
+    def test_phase_retains_closed_attachment_failure_logs(self):
+        diagnostic=b'attachment export failed\n'
+        for profile in ('hosted-intel-v1','hosted-arm-v1'):
+            for phase in hosted.core.CASES:
+                with self.subTest(profile=profile,phase=phase):
+                    r=self.runner(Ops({'exit':1,'output':[('stderr',diagnostic)]}),
+                                  execution_profile=profile,label=profile+'-'+phase)
+                    def failed_export(actual_phase):
+                        self.assertEqual(actual_phase,phase)
+                        r.command(phase+'-attachments',self.attachment_argv(r,phase),60)
+                    with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_export):
+                        with self.assertRaisesRegex(RuntimeError,phase+'-attachments failed'):
+                            r.run_phase(phase)
+                    row=r.report['commands'][0]
+                    self.assertEqual(row['returncode'],1)
+                    self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    for channel,expected in [('stderr',diagnostic),('stdout',b'')]:
+                        public=r.out/'PhaseLogs'/(phase+'-attachments-'+channel+'.log')
+                        self.assertTrue(public.is_file(),str(public))
+                        self.assertEqual(public.read_bytes(),expected)
+                        self.assertEqual(row['logs'][channel],str(public))
+                        self.assertFalse((r.out/('1-'+channel+'.log')).exists())
+                    saved=json.loads((r.out/'receipt.json').read_text())
+                    self.assertEqual(saved['commands'][0]['logs'],row['logs'])
+                    self.assertEqual(r.log_total,len(diagnostic))
+                    self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_allowlist_keeps_prior_other_phase_and_raw_logs_private(self):
+        r=self.runner(Ops(*[{'output':[('stdout',b'private or selected output')]} for _ in range(4)]))
+        r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+        prior=dict(r.report['commands'][0]['logs'])
+        result=Path('/synthetic')
+        def phase_commands(_):
+            r.command('prepare-app-stopped',['/bin/ps','-axww'],60)
+            r.command('export-attachments',self.attachment_argv(r,'export'),60)
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return result
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=phase_commands):
+            self.assertIs(r.run_phase('prepare'),result)
+        self.assertEqual(r.report['commands'][0]['logs'],prior)
+        for row in r.report['commands'][:3]:
+            for path in row['logs'].values():
+                self.assertEqual(Path(path).parent,r.out);self.assertTrue(Path(path).is_file())
+        self.assertEqual({p.name for p in (r.out/'PhaseLogs').iterdir()},
+                         {'prepare-attachments-stdout.log','prepare-attachments-stderr.log'})
+        self.assertEqual(r.log_total,4*len(b'private or selected output'))
+        self.assertEqual(len(r.ops.processes),4);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_logs_require_exact_closed_bounded_owned_streams(self):
+        kinds=['argv','raw-path','symlink','unreaped','group-present','unclosed','unknown',
+               'collision','size','limit','deadline']
+        for kind in kinds:
+            with self.subTest(kind=kind),contextlib.ExitStack() as patches:
+                r=self.runner(Ops({'output':[('stdout',b'four')]}),label=kind)
+                private=r.out/'private-ps.log';private.write_text('private process listing')
+                def changed_export(_):
+                    r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+                    row=r.report['commands'][0]
+                    if kind=='argv':row['argv']=['/bin/ps','-axww']
+                    if kind=='raw-path':row['logs']['stdout']=str(private)
+                    if kind=='symlink':
+                        path=Path(row['logs']['stdout']);path.unlink();path.symlink_to(private)
+                    if kind=='unreaped':row['stop']['leader_reaped']=False
+                    if kind=='group-present':row['stop']['group_absent']=False
+                    if kind=='unclosed':row['log_close_errors']={'stdout':'unknown'}
+                    if kind=='unknown':r.unknown_spawn=True
+                    if kind=='collision':
+                        public=r.out/'PhaseLogs';public.mkdir()
+                        (public/'prepare-attachments-stdout.log').write_text('prior evidence')
+                    if kind=='size':row['bytes']['stdout']+=1
+                    if kind=='limit':patches.enter_context(patch.object(hosted.core.base,'PER_LOG',3))
+                    if kind=='deadline':r.ops.t=r.limit
+                with patch.object(hosted.core.Recovery,'run_phase',side_effect=changed_export):
+                    with self.assertRaises(RuntimeError):r.run_phase('prepare')
+                self.assertEqual(private.read_text(),'private process listing')
+                if (r.out/'PhaseLogs').exists():
+                    self.assertTrue(all(p.read_text()=='prior evidence' for p in (r.out/'PhaseLogs').iterdir()))
+                self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_failure_identity_survives_attachment_log_publication_failure(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        primary=RuntimeError('original Recovery AX failure')
+        publication=OSError('attachment log move failed')
+        def failed_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            raise primary
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,primary)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_successful_phase_still_fails_when_attachment_logs_cannot_be_published(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        publication=OSError('attachment log move failed')
+        def successful_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return Path('/synthetic')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=successful_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(OSError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,publication)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
 
     def capability_ops(self):
         normal=(json.dumps({'kind':'normal','pid':101,'pgid':101})+'\n').encode()
@@ -3236,6 +3358,151 @@ class BoundaryTests(unittest.TestCase):
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
             r.cleaning=True;r.interrupted=True
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
+
+    def final_checkout_accounting(self, *, profile='hosted-arm-v1', label='',
+                                  target='active', command='git-final-head', delay=6.,
+                                  fault=None, limit=None, prior_delays=None):
+        ops=Ops({'output':[('stdout',(SHA+'\n').encode())]}, {})
+        r=self.runner(ops,execution_profile=profile,label=label)
+        if limit is not None:r.limit=limit
+        original_limit=r.limit
+        payload=r.out/'accounted.bin';payload.write_bytes(b'full final checkout accounting'*100)
+        checkpoint=r.checkpoint;scandir=hosted.core.os.scandir;close=r.ops.close
+        current=[None];injected=[];seen=[];prior_delays=dict(prior_delays or {})
+        def checked(**kwargs):
+            scope=getattr(r,'_final_checkout_scope',None)
+            row=r.report['commands'][-1] if r.report['commands'] else None
+            if scope is not None:
+                stage=('admission' if len(r.report['commands'])==scope.index else
+                       'final' if row and 'pgid' in row and not r.active else
+                       'active' if r.active else 'forced')
+                current[:]=[(scope.command[0],stage)]
+                if current[0]==(command,target) and not injected:
+                    if fault=='scope-receipt':
+                        r.report['_final_checkout_scope']=scope;r._final_checkout_scope=None
+                    elif fault=='profile-copy':object.__setattr__(r,'_execution_profile',dict(r.execution_profile))
+                    elif fault=='wrong-argv':row['argv']=['/usr/bin/git','status','--short']
+                    elif fault=='wrong-id':row['id']='other'
+                    elif fault=='copied-record':r.report['commands'][-1]=dict(row)
+                    elif fault=='extra-record':r.report['commands'].append(dict(row))
+                    elif fault=='cancel':r.signal()
+                    elif fault=='wrong-owner':scope.owner=SimpleNamespace()
+                    elif fault=='wrong-order':scope.command=hosted.core._FINAL_CHECKOUT_COMMANDS[1]
+                    elif fault=='delegated':
+                        kwargs['command_owner']=SimpleNamespace(report=r.report,active=r.active,
+                            unknown_spawn=r.unknown_spawn,limit=r.limit,t0=r.t0,absent_groups=r.absent_groups)
+                if current[0][0]==command and stage in prior_delays:
+                    r.ops.t+=prior_delays.pop(stage)
+            else:
+                # Portable/default still exercises the same final commands.
+                stage='final' if getattr(r,'_finalizing_success',None) else 'active' if r.active else 'forced' if row and 'finish' not in row else 'admission'
+                current[:]=[(row['id'] if row and 'finish' not in row else 'git-final-head',stage)]
+            r.next_scan=0.
+            return checkpoint(**kwargs)
+        def closed(process):
+            close(process)
+            if fault and current[0] and current[0][0]==command:
+                row=r.report['commands'][-1]
+                if fault=='unreaped':row['stop']['leader_reaped']=False
+                elif fault=='unconfirmed':row['stop']['group_absent']=False
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='nonzero':process.returncode=7
+                elif fault=='boolean-exit':process.returncode=False
+                elif fault=='absence-cache':r.absent_groups.clear()
+        @contextlib.contextmanager
+        def scanned(fd):
+            if current[0]==(command,target) and not injected:
+                injected.append(r.ops.now());r.ops.t+=delay
+            with scandir(fd) as entries:yield entries
+        def record_scan(*args,**kwargs):
+            seen.append((current[0],args[3]))
+            return real_scan(*args,**kwargs)
+        real_scan=hosted.core.live_sizes
+        with patch.object(r,'checkpoint',side_effect=checked), \
+             patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(hosted.core.os,'scandir',side_effect=scanned), \
+             patch.object(hosted.core,'live_sizes',side_effect=record_scan):
+            try:r._verify_final_checkout(SHA);ok=True
+            except RuntimeError:ok=False
+        self.assertEqual(r.limit,original_limit)
+        self.assertIsNone(getattr(r,'_final_checkout_scope',None))
+        return r,ok,injected,seen,payload
+
+    def test_final_checkout_full_scans_cover_both_commands_and_all_stages(self):
+        for profile in ('hosted-arm-v1','hosted-intel-v1'):
+            for command in ('git-final-head','git-final-clean'):
+                for stage in ('admission','forced','active','final'):
+                    with self.subTest(profile=profile,command=command,stage=stage):
+                        label=profile+command+stage
+                        r,ok,delays,seen,payload=self.final_checkout_accounting(profile=profile,label=label,target=stage,command=command)
+                        self.assertTrue(ok);self.assertEqual(len(delays),1)
+                        self.assertEqual([x['id'] for x in r.report['commands']],['git-final-head','git-final-clean'])
+                        self.assertTrue(all(x['outcome']=='completed' for x in r.report['commands']))
+                        self.assertTrue(all(x['scan']['requested_scan_seconds']==30 for x in r.report['resources']))
+                        self.assertTrue(all(x['logical']>=payload.stat().st_size for x in r.report['resources']))
+                        self.assertEqual(r.ops.signals,[]);self.assertFalse(r.active)
+                        for row in r.report['commands']:
+                            self.assertEqual(row['command_deadline']-row['work_deadline'],8)
+                            self.assertLessEqual(row['finish'],row['command_deadline'])
+                        if command=='git-final-head':self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+
+    def test_final_checkout_admission_and_work_share_original_twelve_seconds(self):
+        for stage,prior,delay,expected in [('admission',{},12.,0),('forced',{'admission':6.},6.,0),('active',{'admission':6.},6.,1)]:
+            with self.subTest(stage=stage):
+                r,ok,_,seen,_=self.final_checkout_accounting(label=stage,target=stage,delay=delay,prior_delays=prior)
+                self.assertFalse(ok);self.assertEqual(len(r.ops.processes),expected)
+                self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],12)
+                if r.report['commands']:self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+                self.assertLessEqual(r.ops.t,20)
+
+    def test_final_checkout_finalization_keeps_total_global_and_cancel_boundaries(self):
+        cases=[('total',dict(target='final',delay=20.)),('global',dict(target='admission',delay=6.,limit=14.)),('cancel',dict(fault='cancel'))]
+        for label,options in cases:
+            with self.subTest(label=label):
+                r,ok,_,_,_=self.final_checkout_accounting(label=label,**options)
+                self.assertFalse(ok)
+                if label=='total':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],20)
+                elif label=='global':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],6)
+                else:self.assertTrue(r.interrupted)
+                self.assertLessEqual(len(r.ops.processes),1)
+
+    def test_final_checkout_live_scope_rejects_spoofed_or_changed_context(self):
+        for fault in ('scope-receipt','profile-copy','wrong-argv','wrong-id','copied-record','extra-record','wrong-owner','wrong-order','delegated'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,fault=fault)
+                self.assertFalse(ok)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        r,ok,_,_,_=self.final_checkout_accounting(profile='default',label='default')
+        self.assertFalse(ok);self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+
+    def test_final_checkout_finalization_requires_verified_owned_success(self):
+        for fault in ('unreaped','unconfirmed','unknown','nonzero','boolean-exit','absence-cache'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,target='final',fault=fault)
+                self.assertFalse(ok)
+                self.assertLessEqual(len(r.ops.processes),1)
+                self.assertNotEqual(r.report['commands'][0]['outcome'],'completed')
+
+    def test_final_checkout_complete_accounting_still_enforces_resource_caps(self):
+        for key,value in [('output_bytes',1),('scan_entries',1)]:
+            with self.subTest(key=key),patch.dict(hosted.core.CAPS,{key:value}):
+                r,ok,_,_,_=self.final_checkout_accounting(label=key,delay=0)
+                self.assertFalse(ok);self.assertEqual(r.ops.processes,[])
+                self.assertEqual(r.report['resources'],[])
+
+    def test_final_checkout_order_nested_scope_and_original_checks_remain(self):
+        r=self.runner(label='order')
+        with patch.object(r,'command',return_value='wrong') as command:
+            with self.assertRaisesRegex(RuntimeError,'commit changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_count,1)
+        r=self.runner(label='dirty')
+        with patch.object(r,'command',side_effect=[SHA,' M tracked']) as command:
+            with self.assertRaisesRegex(RuntimeError,'Checkout changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_args_list[1].args,('git-final-clean',['/usr/bin/git','status','--porcelain'],20))
+        r=self.runner(execution_profile='hosted-arm-v1',label='nested');r._final_checkout_scope=object()
+        with self.assertRaisesRegex(RuntimeError,'already active'):r._verify_final_checkout(SHA)
+        r._final_checkout_scope=None;r.report['commands'].append({'id':'git-final-clean','finish':0})
+        with self.assertRaisesRegex(RuntimeError,'already attempted'):r._verify_final_checkout(SHA)
 
     def test_phase_scan_ceiling_only_applies_to_unfinished_native_phase_context(self):
         r=self.runner();deadlines=[]
