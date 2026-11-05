@@ -617,17 +617,21 @@ struct SheetInstant: Comparable {
         let name = CommandLine.arguments[1]
         switch name {
         case "delayed": SheetState.springboardAt = .milliseconds(79300)
-        case "app-ready": SheetState.appAt = .zero
-        case "last-valid": SheetState.appAt = .zero; SheetState.appCost = .milliseconds(119900)
-        case "app-boundary": SheetState.appAt = .zero; SheetState.appCost = .seconds(120)
-        case "app-late": SheetState.appAt = .zero; SheetState.appCost = .seconds(121)
+        case "system-ready": SheetState.springboardAt = .zero
+        case "app-only": SheetState.appAt = .zero
+        case "delayed-system-slow-app":
+            SheetState.springboardAt = .milliseconds(6818)
+            SheetState.appCost = .microseconds(22129300)
+        case "last-valid": SheetState.springboardAt = .zero; SheetState.springboardCost = .milliseconds(119900)
+        case "system-boundary": SheetState.springboardAt = .zero; SheetState.springboardCost = .seconds(120)
         case "springboard-late": SheetState.springboardAt = .zero; SheetState.springboardCost = .seconds(121)
-        case "slow-false": SheetState.appCost = .seconds(121)
+        case "ordinary-last-valid": SheetState.springboardAt = .zero; SheetState.springboardCost = .milliseconds(14900)
+        case "ordinary-boundary": SheetState.springboardAt = .zero; SheetState.springboardCost = .seconds(15)
+        case "ordinary-late": SheetState.springboardAt = .zero; SheetState.springboardCost = .seconds(16)
+        case "slow-false": SheetState.springboardCost = .seconds(121)
         case "never": break
-        case "cancel-before-app": SheetState.cancelAtCheck = 1
-        case "cancel-after-app": SheetState.cancelAtCheck = 2; SheetState.appAt = .zero
-        case "cancel-before-springboard": SheetState.cancelAtCheck = 3
-        case "cancel-after-springboard": SheetState.cancelAtCheck = 4; SheetState.springboardAt = .zero
+        case "cancel-before-springboard": SheetState.cancelAtCheck = 1
+        case "cancel-after-springboard": SheetState.cancelAtCheck = 2; SheetState.springboardAt = .zero
         case "cancel-sleep": SheetState.cancelOnSleep = true
         default: fatalError("Unknown scenario")
         }
@@ -660,8 +664,8 @@ def system_sheet_fixture(source):
     observer_start = source.index('    private func waitForSystemPurchaseSheet(')
     observer_end = source.index('    private func require(\n', observer_start)
     observer = source[observer_start:observer_end]
-    if observer.count('ContinuousClock()') != 1 or observer.count('Task.checkCancellation()') != 4:
-        raise ValueError("Expected fixed clock and pre/post checks for both queries")
+    if observer.count('ContinuousClock()') != 1 or observer.count('Task.checkCancellation()') != 2:
+        raise ValueError("Expected fixed clock and pre/post checks for the system query")
     observer = observer.replace('ContinuousClock()', 'SheetClock()').replace('Task.', 'SheetTask.')
     selector = source[selector_start:selector_end].replace(
         '#if DEBUG && targetEnvironment(simulator) && arch(x86_64)', '#if CORE_SUPPORTED_FIXTURE')
@@ -680,15 +684,32 @@ class SystemSheetObservationTests(unittest.TestCase):
         actual = system_sheet_fixture(cls.source)
         cls.binaries = {}
         mutant = actual
-        for query in ('let inApp = xcodeMarker(in: app).exists',
-                      'let inSpringboard = xcodeMarker(in: springboard).exists'):
+        for query in ('let inSpringboard = xcodeMarker(in: springboard).exists',):
             before = query + '\n            try SheetTask.checkCancellation()\n            guard clock.now < deadline else { return false }'
             if mutant.count(before) != 1:
                 raise AssertionError('Missing actual post-query boundary')
             mutant = mutant.replace(before, query + '\n            try SheetTask.checkCancellation()')
+        # Recreate the previous app-first query and the insufficient simple
+        # reorder. Both must fail when the system sheet arrives while a
+        # negative covered-app query consumes the observation deadline.
+        app_probe = '''            let inApp = xcodeMarker(in: app).exists
+            try SheetTask.checkCancellation()
+            guard clock.now < deadline else { return false }
+            if inApp { return true }
+            try SheetTask.checkCancellation()
+            guard clock.now < deadline else { return false }
+'''
+        app_first = actual.replace('            let inSpringboard =', app_probe + '            let inSpringboard =')
+        immediate_fallback = actual.replace(
+            '            try await SheetTask.sleep(for: .milliseconds(100))',
+            '            try SheetTask.checkCancellation()\n'
+            '            guard clock.now < deadline else { return false }\n'
+            + app_probe + '            try await SheetTask.sleep(for: .milliseconds(100))')
         for name, text, flags in [('supported', actual, ['-D', 'CORE_SUPPORTED_FIXTURE']),
                                   ('unsupported', actual, []),
-                                  ('unchecked-late', mutant, ['-D', 'CORE_SUPPORTED_FIXTURE'])]:
+                                  ('unchecked-late', mutant, ['-D', 'CORE_SUPPORTED_FIXTURE']),
+                                  ('app-first', app_first, ['-D', 'CORE_SUPPORTED_FIXTURE']),
+                                  ('immediate-app-fallback', immediate_fallback, ['-D', 'CORE_SUPPORTED_FIXTURE'])]:
             swift = root / (name + '.swift'); swift.write_text(text)
             binary = root / name
             result = subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
@@ -724,24 +745,44 @@ class SystemSheetObservationTests(unittest.TestCase):
         self.assertEqual(ordinary['observations'], 2)
 
     def test_exact_and_late_matches_are_not_accepted(self):
-        for name in ('app-boundary', 'app-late', 'springboard-late', 'slow-false', 'never'):
+        for name in ('system-boundary', 'springboard-late', 'slow-false', 'never'):
             with self.subTest(name=name):
                 row = self.invoke(name)
                 self.assertEqual(row['result'], 'No Xcode payment sheet appeared')
-        self.assertEqual(self.invoke('slow-false')['springboardReads'], 0)
+        self.assertEqual(self.invoke('slow-false')['springboardReads'], 1)
         self.assertEqual(self.invoke('last-valid')['result'], 'passed')
-        self.assertEqual(self.invoke('app-ready')['springboardReads'], 0)
+        self.assertEqual(self.invoke('system-ready')['appReads'], 0)
+        self.assertEqual(self.invoke('ordinary-last-valid', None)['result'], 'passed')
+        for name in ('ordinary-boundary', 'ordinary-late'):
+            self.assertEqual(self.invoke(name, None)['result'], 'No Xcode payment sheet appeared')
+
+    def test_delayed_system_sheet_is_not_blocked_by_absent_app_query(self):
+        row = self.invoke('delayed-system-slow-app', None)
+        self.assertEqual(row['result'], 'passed')
+        self.assertEqual(row['appReads'], 0)
+        self.assertAlmostEqual(row['elapsed'], 6.9)
+        for variant in ('app-first', 'immediate-app-fallback'):
+            with self.subTest(variant=variant):
+                failed = self.invoke('delayed-system-slow-app', None, variant=variant)
+                self.assertEqual(failed['result'], 'No Xcode payment sheet appeared')
+                self.assertEqual(failed['appReads'], 1)
+                self.assertAlmostEqual(failed['elapsed'], 22.1293)
+
+    def test_app_only_marker_does_not_identify_a_system_payment_sheet(self):
+        row = self.invoke('app-only', None)
+        self.assertEqual(row['result'], 'No Xcode payment sheet appeared')
+        self.assertEqual(row['elapsed'], 15)
+        self.assertEqual(row['appReads'], 0)
 
     def test_removing_actual_post_query_guards_causally_accepts_late_sheet(self):
-        for name in ('app-boundary', 'app-late', 'springboard-late'):
+        for name in ('system-boundary', 'springboard-late'):
             with self.subTest(name=name):
                 self.assertEqual(self.invoke(name, variant='unchecked-late')['result'], 'passed')
                 self.assertEqual(self.invoke(name)['result'], 'No Xcode payment sheet appeared')
 
     def test_cancellation_propagates_at_every_query_boundary_and_sleep(self):
-        for name, app, spring in [('cancel-before-app', 0, 0), ('cancel-after-app', 1, 0),
-                                  ('cancel-before-springboard', 1, 0), ('cancel-after-springboard', 1, 1),
-                                  ('cancel-sleep', 1, 1)]:
+        for name, app, spring in [('cancel-before-springboard', 0, 0), ('cancel-after-springboard', 0, 1),
+                                  ('cancel-sleep', 0, 1)]:
             with self.subTest(name=name):
                 row = self.invoke(name)
                 self.assertEqual(row['result'], 'cancelled')
@@ -755,12 +796,12 @@ class SystemSheetObservationTests(unittest.TestCase):
                              ('hosted-intel-core-v1', {'TRIPDOCKET_IPAD_TIMING': ''}),
                              ('hosted-intel-core-v1', {'FIXTURE_IDIOM': 'pad'})]:
             with self.subTest(token=token, extra=extra):
-                row = self.invoke('app-ready', token, extra=extra)
+                row = self.invoke('system-ready', token, extra=extra)
                 self.assertNotEqual(row['result'], 'passed')
                 self.assertEqual((row['allowance'], row['sideEffects'], row['appReads']), (777, 0, 0))
-        self.assertEqual(self.invoke('app-ready', variant='unsupported')['sideEffects'], 0)
+        self.assertEqual(self.invoke('system-ready', variant='unsupported')['sideEffects'], 0)
         for variant in ('supported', 'unsupported'):
-            row = self.invoke('app-ready', None, variant=variant)
+            row = self.invoke('system-ready', None, variant=variant)
             self.assertEqual((row['result'], row['allowance']), ('passed', 777))
 
     def test_original_purchase_and_cancel_actions_stay_single(self):
@@ -768,6 +809,7 @@ class SystemSheetObservationTests(unittest.TestCase):
             '    func testPurchaseFailureAlertInEnglishWithDiagnostics()', 1)[0]
         self.assertEqual(case.count('buy.tap()'), 1)
         self.assertEqual(case.count('try XCTUnwrap(cancel).tap()'), 1)
+        self.assertIn('let paymentSurface = springboard', case)
         self.assertIn('self.xcodeMarker(in: app).exists && !self.xcodeMarker(in: springboard).exists',
                       case.replace('\n                ', ' '))
         self.assertIn('XCTAssertTrue(session.allTransactions().isEmpty', case)

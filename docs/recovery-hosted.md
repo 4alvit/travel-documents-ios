@@ -959,10 +959,23 @@ the privacy shield; its retained video later showed the Xcode-branded test sheet
 The delay's underlying cause is unresolved. Only the validated hosted Core
 cancellation case now selects 120 seconds for sheet presentation and a 360-second
 native allowance. Ordinary presentation still uses 15 seconds. One fixed
-deadline and cancellation checks surround each existing app/Springboard query;
+deadline and cancellation checks surround each system-sheet query;
 a late match cannot pass. The same single purchase, Xcode marker, Cancel/Close
 ownership, idle/Free checks and cleanup remain mandatory. No automatic retry or
 late-sheet dismissal is added. These margins are not proof of a service fix.
+
+In [main run 42033546776](https://github.com/4alvit/travel-documents-ios/actions/runs/42033546776),
+the first app-scoped Xcode-marker query returned no matches after 22.129 seconds,
+exhausting the ordinary 15-second window before SpringBoard was queried.
+The system payment controller appeared about 6.8 seconds after that query
+started; the later screenshot and accessibility tree locate the Xcode test
+sheet in SpringBoard. The exact first availability of its Xcode label is not
+recorded. The cancellation test now observes SpringBoard throughout its same
+fixed window and uses that positively matched surface for Cancel/Close.
+App-only markers cannot satisfy this system-sheet contract for the supported
+Xcode/iOS 26.2 environment. A deterministic delayed-system/slow-app regression
+checks the observation logic; native CI must still verify actual presentation,
+cancellation and Free access. No timing limit or purchase assertion is relaxed.
 
 Core's integration step has a separate 45-minute limit within the 85-minute
 job. The prior 42/82-minute envelope preserved the original 35-minute ceiling
@@ -1095,3 +1108,17 @@ command, work and cleanup limits are unchanged. A copied profile or receipt-only
 success claim cannot select hosted finalization. The three prepare/export/restore
 cases and their assertions are unchanged; native evidence must identify the
 actual architecture. Dedicated Batch keeps its ordinary 15-second text policy.
+
+
+Final checkout verification after Recovery uses the same complete resource scan
+as native phases for the exact, ordered `git-final-head` and `git-final-clean`
+commands under either validated hosted profile. Its requested scan allowance is
+30 seconds, but each command retains a total 20-second boundary anchored before
+its first admission checkpoint and an 8-second stop reserve. Admission and active
+work therefore have at most 12 seconds combined; only verified successful process
+closure permits final accounting to use the remaining original total boundary.
+A private live scope binds the exact command and record; receipt flags cannot
+select this policy. The prior work limit is restored on every exit, and generic
+or ordinary-profile scans retain their 5-second allowance. This corrects the
+accounting-policy mismatch observed after all three native phases passed; it does
+not identify or fix the underlying cause of filesystem or scheduling latency.

@@ -62,6 +62,63 @@ def validated_execution_profile(profile):
     return profile
 
 
+_FINAL_CHECKOUT_COMMANDS = (
+    ('git-final-head', ('/usr/bin/git', 'rev-parse', 'HEAD')),
+    ('git-final-clean', ('/usr/bin/git', 'status', '--porcelain')),
+)
+
+
+class _FinalCheckoutScope:
+    """Live authority for one final checkout command; never read from a receipt."""
+    def __init__(self, owner, command, end):
+        self.owner, self.command, self.end = owner, command, end
+        self.commands = owner.report['commands']
+        self.index = len(self.commands)
+        self.previous = self.commands[-1] if self.commands else None
+        self.record = None
+
+    def scan_deadline(self, pending, finalized):
+        owner = self.owner
+        if (owner.report['commands'] is not self.commands or owner.unknown_spawn
+                or owner.cleaning or owner.limit > self.end):
+            return None
+        if self.command == _FINAL_CHECKOUT_COMMANDS[1] and (
+                self.previous is None or self.previous.get('id') != 'git-final-head'
+                or self.previous.get('argv') != list(_FINAL_CHECKOUT_COMMANDS[0][1])
+                or self.previous.get('outcome') != 'completed'
+                or type(self.previous.get('returncode')) is not int
+                or self.previous['returncode'] != 0):
+            return None
+        if len(self.commands) == self.index:
+            if (self.record is None and pending is self.previous and not owner.active
+                    and (pending is None or 'finish' in pending)):
+                return self.end - 8  # First checkpoint, before a record exists.
+            return None
+        if len(self.commands) != self.index + 1 or pending is not self.commands[self.index]:
+            return None
+        label, argv = self.command
+        if (pending.get('id') != label or pending.get('argv') != list(argv)
+                or 'finish' in pending or pending.get('requested_cap_seconds') != 20
+                or pending.get('stop_reserve_seconds') != 8
+                or pending.get('command_deadline') != self.end - owner.t0
+                or pending.get('work_deadline') != self.end - 8 - owner.t0):
+            return None
+        if self.record is None:
+            if 'pgid' in pending or owner.active:
+                return None  # Bind only the exact record's pre-spawn admission.
+            self.record = pending
+        if pending is not self.record:
+            return None
+        if finalized and type(getattr(owner, '_finalizing_success')[1].returncode) is int:
+            return self.end
+        if 'pgid' not in pending and not owner.active:
+            return self.end - 8
+        process = owner.active.get(pending.get('pgid'))
+        if process is not None and len(owner.active) == 1 and process.pid == pending['pgid']:
+            return self.end - 8
+        return None
+
+
 CASES = {
     'prepare': 'BatchImportUITests/testRecoveryPrepareFilesProvider()',
     'export': 'BatchImportUITests/testRecoveryExportFullBackupThroughFiles()',
@@ -474,7 +531,8 @@ class Recovery:
         # Exact active owned boot waits use the immutable profile's scan allowance:
         # default15s, explicit hosted policies60s. Only those policies keep60s for the same
         # verified successful boot's final accounting; ordinary finalization,
-        # admission, other discovery, capability and evidence retain5s.
+        # other discovery, capability and evidence retain5s. The separately scoped
+        # final checkout checks below include admission in their fixed20s cap.
         # No command/global/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         boot_process = (self.active.get(pending.get('pgid'))
@@ -488,9 +546,18 @@ class Recovery:
                           or hosted_boot_finalized)
                      and self.owned is not None
                      and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
-        allowance = (CAPS['phase_scan_seconds'] if phase_scan else
+        checkout = getattr(self, '_final_checkout_scope', None)
+        checkout_end = (checkout.scan_deadline(pending, finalized)
+                        if owner is self and type(checkout) is _FinalCheckoutScope
+                        and checkout.owner is self
+                        and checkout.command in _FINAL_CHECKOUT_COMMANDS
+                        and any(self.execution_profile is EXECUTION_PROFILES[name]
+                                for name in ('hosted-intel-v1', 'hosted-arm-v1')) else None)
+        allowance = (CAPS['phase_scan_seconds'] if phase_scan or checkout_end is not None else
                      self.execution_profile['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
+        if checkout_end is not None:
+            deadline = min(deadline, checkout_end)
         if unfinished:
             deadline = min(deadline, owner.t0+pending[
                 'command_deadline' if finalized else 'work_deadline'])
