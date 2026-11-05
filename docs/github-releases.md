@@ -435,16 +435,24 @@ remain unchanged. Provider preparation alone is not UI
 acceptance; this lane covers a preinitialized provider, not cold first use.
 The recovery compatibility job retains its separately pinned profile.
 
-Core's three purchase-failure scenarios request 240 seconds for the complete
-two-alert, postcondition, Free-quota and diagnostic-capture flow. A retained
-Intel run exceeded the former 180-second default and continued to 191 seconds;
-the subsequent launch error and incomplete cohort remain failed evidence.
-The ordinary default stays 180 seconds and Core's per-case maximum stays 480.
-Its integration step is capped at 35 minutes within a 75-minute job with
-separate verification, packaging, cancellation and evidence allowances, as
-documented in [the hosted budget](recovery-hosted.md). Raw test evidence uploads
-before optional extraction. These limits do not guarantee a successful run or
-permit incomplete results to satisfy release qualification.
+Core's three purchase-failure scenarios retain a 240-second default for the
+complete two-alert, postcondition, Free-quota and diagnostic-capture flow. Only
+the strictly validated hosted Intel Core invocation selects 360 seconds, through
+the final-command `hosted-intel-core-v1` marker. The same marker selects a
+30-second guidance-host appearance wait instead of the five-second default;
+the UIKit/SwiftUI/no-URL assertions remain required. Missing markers preserve
+defaults, and invalid, conflicting or unsupported markers fail before test
+side effects. The cancellation case remains at 180 seconds and Core's per-case
+maximum stays 480; purchase readiness retains its first 60 and subsequent
+15-second checks.
+
+The integration step is capped at 42 minutes within an 82-minute job. The seven
+additional minutes preserve the prior envelope plus all three 120-second case
+increments and the 25-second appearance increment, rounded up. Separate
+verification, packaging, cancellation and evidence allowances are documented in
+[the hosted budget](recovery-hosted.md). Raw test evidence uploads before
+optional extraction. These limits do not guarantee a successful run or permit
+incomplete results to satisfy release qualification.
 
 Privacy/support text reading uses the same one-point inset viewport for scroll
 acceptance and coverage checks. Short text must fit completely in that reading

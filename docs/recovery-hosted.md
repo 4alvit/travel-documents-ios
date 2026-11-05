@@ -773,8 +773,8 @@ text checks, four Cancels, zero Open actions and final Free/Trips evidence remai
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has a 75-minute limit, Recovery has 118 minutes, phone guidance has 95 minutes,
-and each iPad locale has 95 minutes, at most 478 aggregate job-minutes. All five
+Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 95 minutes,
+and each iPad locale has 95 minutes, at most 485 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. All five use `macos-15-intel` with the same
@@ -792,7 +792,7 @@ are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
 account limits and other workflows share that capacity, including Swift CodeQL
 and separate Batch/Biometrics qualification. Jobs may queue, so the largest
 individual job limit of 118 minutes is not a completion-time guarantee.
-Per-job native tests remain serial, with unchanged timeouts, owned-process
+Per-job native tests remain serial, with explicit finite timeouts, owned-process
 cleanup, `!cancelled()` conditions and the final gate's four result checks.
 
 A retry used for complete qualification must run the full CI workflow and
@@ -823,8 +823,8 @@ finishing the Free quota check and diagnostic captures. The trace continued to
 191 seconds, but that is not a clean pass. The following Russian case had a
 launch timeout and XCTest restarted the runner; the 35-minute job limit later
 cancelled the incomplete cohort. The trace does not establish that the first
-timeout caused the launch failure. The three failure-alert scenarios now request
-240 seconds in their shared helper. Both alert cycles, postconditions, Free
+timeout caused the launch failure. The three failure-alert scenarios retain a 240-second default in their shared
+helper. Both alert cycles, postconditions, Free
 quota checks, PNG/AX captures and teardown remain required; the ordinary
 180-second default and Core's 480-second maximum are unchanged.
 
@@ -835,19 +835,49 @@ in each of the three failure-alert scenarios now allows 60 seconds. The second
 attempt and every other `require` call retain 15 seconds. This shared test helper
 applies on all architectures. The exact visible, enabled, hittable purchase-button
 and no-alert condition, both checked failure cycles, all captures and the
-240-second case allowance remain unchanged. The extra initial margin does not
+default 240-second case allowance remain unchanged by this readiness policy.
+The extra initial margin does not
 guarantee completion or change the app's entitlement-loading behavior.
 
-Core's integration step now has a separate 35-minute limit within the
-75-minute job. The job envelope is checkout 2, toolchain 5, toolchain evidence 2,
-selector checks 2, Verify 10, packaging 2, integration 35, cancellation grace 5,
-raw evidence 3, optional failure extraction/upload 3/2, Simulator upload 2 and
-finalization 2 minutes. Raw test evidence precedes optional failure extraction.
-This is a bounded policy, not a predicted duration: the failed Intel run spent
-6 minutes 45 seconds in Verify, about 8 minutes 28 seconds bootstrapping its
-first native worker, and 28 minutes 8 seconds in the incomplete integration
-step. No assertion or retry policy is changed, and new hosted results are
-required to establish completion.
+In Core run 41940543243, the English failure-alert case reached its first
+purchase at 180.04 seconds and exceeded its 240-second native allowance after
+starting the second purchase. The retained first alert contains the expected
+injected network error. Reopened-paywall checks occurred after the native
+timeout; their diagnostic label does not establish that an old alert replayed.
+The slowest successful sibling's complete first-purchase-to-finish tail was
+134.17 seconds. Combining that tail with the English startup gives an
+illustrative 314.21 seconds, not a prediction or inherited pass.
+
+Only the validated hosted Intel Core invocation now selects 360 seconds for
+these three failure-alert cases. The same invocation selects a 30-second
+appearance wait in the guidance-host unit test, whose default remains five
+seconds. Its retained trace showed SwiftUI's first appearance after 6.79 seconds
+of waiting, but no UIKit appearance callback before cleanup. The longer wait
+still requires the UIKit callback, SwiftUI appearance and no opened URL; it
+does not force a lifecycle event or establish eventual completion.
+
+The shell selects `TEST_RUNNER_TRIPDOCKET_CORE_TIMING=hosted-intel-core-v1`
+only for the final `--require-sdk-match --cohort core-purchase` test command
+with the exact hosted repository/workflow/job and Intel architecture context.
+Inherited Core markers and conflicting Phone/iPad markers are rejected before
+tools run. The native selectors require the exact marker in a Debug Intel
+Simulator build on iPhone and reject conflicting native markers before test
+side effects. Missing markers preserve the 240-second failure-helper and
+five-second appearance defaults. Cancellation remains 180 seconds, the CLI
+maximum remains 480 seconds, and the first/other purchase-readiness waits remain
+60/15 seconds. All assertions, both purchase cycles, captures and cleanup remain
+required; no retries are added.
+
+Core's integration step has a separate 42-minute limit within the 82-minute
+job. This preserves the prior 35-minute ceiling and adds seven minutes:
+three 120-second case increments plus 25 seconds of appearance waiting total
+385 seconds, rounded up to 420 seconds. The job envelope is checkout 2,
+toolchain 5, toolchain evidence 2, selector checks 2, Verify 10, packaging 2,
+integration 42, cancellation grace 5, raw evidence 3, optional failure
+extraction/upload 3/2, Simulator upload 2 and finalization 2 minutes. Raw test
+evidence precedes optional extraction. These are finite operating ceilings,
+not a guarantee that all 171 per-case maxima fit or that another hosted run
+will finish. Fresh complete results are still required.
 
 
 Files provider readiness uses only the unused part of the original `files-group`

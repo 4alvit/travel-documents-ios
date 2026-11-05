@@ -1,6 +1,7 @@
 import Foundation
 import StoreKit
 import StoreKitTest
+import UIKit
 import XCTest
 
 /// Keep this suite serial with the other StoreKit tests: SKTestSession changes
@@ -105,10 +106,28 @@ final class PurchaseUITests: XCTestCase {
         try await verifyPurchaseFailureAlert(russian: false, diagnostics: false)
     }
 
+    private func failureAlertExecutionTimeAllowance() throws -> TimeInterval {
+        let environment = ProcessInfo.processInfo.environment
+        guard let token = environment["TRIPDOCKET_CORE_TIMING"] else { return 240 }
+        guard token == "hosted-intel-core-v1",
+              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
+              environment["TRIPDOCKET_IPAD_TIMING"] == nil else {
+            throw PurchaseTestError(message: "Invalid or conflicting Core timing profile")
+        }
+        #if DEBUG && targetEnvironment(simulator) && arch(x86_64)
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw PurchaseTestError(message: "Core timing requires the hosted Intel iPhone Simulator")
+        }
+        return 360
+        #else
+        throw PurchaseTestError(message: "Core timing requires a Debug Intel Simulator build")
+        #endif
+    }
+
     private func verifyPurchaseFailureAlert(russian: Bool, diagnostics: Bool) async throws {
-        // A hosted Intel trace exceeded 180s and reached 191s through teardown.
-        // Keep this allowance local to the three failure-alert scenarios.
-        executionTimeAllowance = 240
+        // Only the validated Core invocation selects the hosted Intel margin.
+        // Keep ordinary runs and all other test allowances unchanged.
+        executionTimeAllowance = try failureAlertExecutionTimeAllowance()
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
