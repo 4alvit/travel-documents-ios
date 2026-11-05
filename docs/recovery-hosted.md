@@ -149,8 +149,9 @@ will complete every boot. The additional 300 seconds are included in the work
 and outer budgets above. Standalone boot remains 120 seconds, discovery remains
 300 seconds, and owned cleanup and all resource checks are unchanged.
 The immutable hosted Intel profile allows up to 60 seconds for one complete
-resource scan during an exact active owned boot wait; the portable profile
-retains 15 seconds. Two Intel attempts exceeded 15 seconds before native tests,
+resource scan during an exact active owned boot wait and its verified successful
+finalization; the portable profile retains 15 seconds while active and five
+seconds during finalization. Two Intel attempts exceeded 15 seconds before native tests,
 including one measured 25.86-second file-stat operation span. These spans include
 scheduling and do not establish the underlying cause. The scan still shares the
 original 600-second hosted boot command, its eight-second stop reserve and the global
@@ -452,9 +453,15 @@ can pass; partial testcase progress is not acceptance.
 One complete resource sample normally has a fixed five-second cooperative
 allowance. During an unfinished `phase-prepare`, `phase-export` or `phase-restore` command,
 including its admission and finalization, the explicit ceiling is thirty
-seconds. An active owned `boot-ready` process waiting for
+seconds. An ordinary active owned `boot-ready` process waiting for
 `simctl bootstatus <owned UUID> -b` retains its separate fifteen-second ceiling;
-its admission and post-process samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
+its admission and ordinary post-process samples keep five seconds. Only the
+validated hosted Intel profile retains its existing 60-second allowance for
+final accounting of that exact owned bootstatus command after verified success.
+A hosted attempt completed boot but failed a 6.90-second final sample because
+the closed process no longer qualified for the active allowance. This adjustment
+does not establish why that sample was slow or guarantee subsequent native work.
+Every sample is clipped to the overall work limit, the actual command
 owner's limit and its original work deadline, preserving the stop reserve
 during admission and execution. After a zero exit status, verified leader/group
 closure, successful pipe and log closure, and successful stdout read, the

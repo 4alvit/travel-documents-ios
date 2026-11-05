@@ -3245,6 +3245,111 @@ class BoundaryTests(unittest.TestCase):
         self.assertLess(row['finish'],600.)
         self.assertFalse(r.active)
 
+    def hosted_boot_finalization(self, *, label='', profile='hosted-intel-v1',
+                                 delay=6.9002, closed_at=500., fault=None, limit=None):
+        r=self.runner(Ops(),execution_profile=profile,label=label)
+        r.owned='10000000-0000-0000-0000-000000000001'
+        payload=r.out/'final-accounting.bin';payload.write_bytes(b'complete accounting\n'*512)
+        original_close=r.ops.close;original_scan=hosted.core.os.scandir
+        original_checkpoint=r.checkpoint;calls=[];contexts=[]
+        def closed(process):
+            original_close(process);r.ops.t=closed_at;r.next_scan=0.
+            if limit is not None:r.limit=limit
+            row=r.report['commands'][-1]
+            if fault=='unknown':r.unknown_spawn=True
+            if fault=='active':r.active[999]=SimpleNamespace(pid=999)
+            if fault=='unreaped':row['stop']['leader_reaped']=False
+            if fault=='unconfirmed':row['stop']['group_absent']=False
+            if fault=='unattempted':row['stop']['attempted']=False
+            if fault=='absence-cache':r.absent_groups.clear()
+            if fault=='identity':row['pgid']=999
+            if fault=='nonzero':process.returncode=7
+            if fault=='boolean-exit':process.returncode=False
+            if fault=='profile-copy':
+                # Deliberately bypass immutability to test the monitor's identity guard.
+                object.__setattr__(r,'_execution_profile',dict(r.execution_profile))
+            if fault=='unowned':r.owned=None
+            if fault=='cancel':r.signal()
+        def checkpoint(**kwargs):
+            context=getattr(r,'_finalizing_success',None)
+            if context is not None:
+                if fault=='copied-record':r._finalizing_success=(dict(context[0]),context[1])
+                if fault=='receipt-only':
+                    context[0]['_finalizing_success']=True;r._finalizing_success=None
+                contexts.append(r._finalizing_success)
+            return original_checkpoint(**kwargs)
+        @contextlib.contextmanager
+        def scanned(fd):
+            with original_scan(fd) as children:
+                def entries():
+                    for child in children:
+                        def read(*,follow_symlinks,child=child):
+                            if child.name==payload.name and r.ops.t>=closed_at and not calls:
+                                calls.append((r.ops.t,follow_symlinks));r.ops.t+=delay
+                            return child.stat(follow_symlinks=follow_symlinks)
+                        yield SimpleNamespace(name=child.name,stat=read)
+                yield entries()
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        if fault=='other-argv':argv[-1]='--other'
+        command='other' if fault=='other-command' else 'boot-ready'
+        with patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(r,'checkpoint',side_effect=checkpoint), \
+             patch.object(hosted.core.os,'scandir',side_effect=scanned):
+            try:r.command(command,argv,600);ok=True
+            except RuntimeError:ok=False
+        self.assertIsNone(getattr(r,'_finalizing_success',None))
+        self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual(r.ops.signals,[])
+        return r,r.report['commands'][-1],calls,contexts,payload,ok
+
+    def test_hosted_boot_finalization_accounts_full_tree_after_observed_slow_span(self):
+        r,row,calls,contexts,payload,ok=self.hosted_boot_finalization()
+        self.assertTrue(ok);self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(calls,[(500.,False)]);self.assertEqual(len(contexts),1)
+        self.assertFalse(r.active);self.assertTrue(row['stop']['group_absent'])
+        sample=r.report['resources'][-1]
+        self.assertEqual(sample['scan']['requested_scan_seconds'],60)
+        self.assertAlmostEqual(sample['scan']['duration_seconds'],6.9002)
+        self.assertGreaterEqual(sample['logical'],payload.stat().st_size)
+        self.assertGreaterEqual(sample['allocated'],payload.stat().st_blocks*512)
+        self.assertGreaterEqual(sample['entries'],4)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],r.limit,r.final),
+                         (592.,600.,4980.,5340.))
+
+    def test_hosted_boot_finalization_rejects_unverified_and_receipt_only_context(self):
+        faults=('unknown','active','unreaped','unconfirmed','unattempted','absence-cache',
+                'identity','nonzero','boolean-exit','profile-copy','unowned',
+                'copied-record','receipt-only','other-argv','other-command')
+        for fault in faults:
+            with self.subTest(fault=fault):
+                r,row,calls,_,_,ok=self.hosted_boot_finalization(label=fault,fault=fault)
+                self.assertFalse(ok);self.assertEqual(row['outcome'],'failed')
+                self.assertEqual(len(calls),1)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+
+    def test_hosted_boot_finalization_keeps_default_five_seconds(self):
+        r,row,calls,_,_,ok=self.hosted_boot_finalization(profile='default')
+        self.assertFalse(ok);self.assertEqual(len(calls),1)
+        self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        self.assertEqual(row['outcome'],'failed')
+
+    def test_hosted_boot_finalization_keeps_scan_total_and_global_boundaries(self):
+        cases=[('scan',dict(delay=60.),560.),
+               ('total',dict(closed_at=599.,delay=1.),600.),
+               ('global',dict(limit=505.),505.)]
+        for label,options,deadline in cases:
+            with self.subTest(label=label):
+                r,row,calls,_,_,ok=self.hosted_boot_finalization(label=label,**options)
+                self.assertFalse(ok);self.assertEqual(len(calls),1)
+                self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],deadline)
+                self.assertEqual(row['outcome'],'failed')
+                self.assertTrue(r.report['resource_scan_failure']['partial_counts_are_not_valid_accounting'])
+
+    def test_hosted_boot_finalization_cancellation_prevents_scan(self):
+        r,row,calls,_,_,ok=self.hosted_boot_finalization(fault='cancel')
+        self.assertFalse(ok);self.assertEqual(calls,[])
+        self.assertIn('Interrupted',row['finalization_error'])
+
     def boot_exit_checkpoint(self):
         r=self.runner(Ops())
         r.owned='10000000-0000-0000-0000-000000000001'
