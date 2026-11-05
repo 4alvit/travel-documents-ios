@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "repository": "4alvit/travel-documents-ios",
-  "runner_label": "macos-15",
+  "runner_label": "macos-15-intel",
   "runner_environment": "github-hosted",
-  "runner_arch": "ARM64",
-  "machine": "arm64",
+  "runner_arch": "X64",
+  "machine": "x86_64",
   "image_os_prefix": "macos15",
   "python_minimum": [
     3,
@@ -19,8 +19,9 @@
     "export": 1,
     "restore": 1
   },
-  "total_seconds": 1500,
-  "cleanup_seconds": 120,
+  "execution_profile": "hosted-intel-v1",
+  "total_seconds": 5340,
+  "cleanup_seconds": 360,
   "prep_seconds": 60,
   "minimum_admission_free_GiB": 16,
   "minimum_work_free_GiB": 8,

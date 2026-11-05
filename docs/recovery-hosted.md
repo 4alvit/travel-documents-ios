@@ -8,9 +8,10 @@ or payment acceptance.
 
 ## Profile and dependencies
 
-The job uses the existing standard `macos-15` runner class. The reviewed profile
-requires the actual runner context to report `github-hosted` and `ARM64`, and
-Python to observe `arm64`. Image OS/version are recorded. The profile is a
+The job uses the standard `macos-15-intel` runner class after repeated hosted
+ARM runner acquisition failures. The reviewed profile requires the actual
+runner context to report `github-hosted` and `X64`, and Python to observe
+`x86_64`. Image OS/version are recorded. The profile is a
 requirement checked in the job, not evidence that the future host satisfies it.
 
 Only the image's already selected Xcode is used. The job records and freezes its
@@ -25,12 +26,12 @@ This job does not run XcodeGen, Homebrew, pip, `verify.sh`, or another preparato
 build. Python 3.11+ and its standard library, Git and Xcode must already exist.
 The other CI jobs retain their existing generation and dependency steps.
 
-GitHub currently documents `macos-15` as standard ARM64 and standard macOS storage
+GitHub currently documents `macos-15-intel` as standard Intel and macOS storage
 as 14 GB. Consequently **16 GiB free is not guaranteed**. The job measures the
 actual filesystem and refuses admission below 16 GiB; it never lowers the guard
 or removes preinstalled/unrelated data. Official references:
 [runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
-[image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md).
+[image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md).
 Image inventories change and do not substitute for the measurements in this job.
 
 ## Source identity
@@ -87,20 +88,77 @@ published artifacts. It does not replace the UI flows with direct service calls.
 
 ## Bounds and evidence
 
-The whole executor has 1,500 seconds, with work ending by 1,380 and 120 seconds
-reserved for owned cleanup, including a final 10-second receipt reserve. The
-prepare Xcode command has at most 780 seconds; export and restore retain 600
-seconds each. All command caps include the eight-second stop reserve and are
-clipped to the original remaining work deadline. The preparation case retains
-180 seconds and export/restore each retain 300.
+The standalone executor retains its 1,500-second total, 1,380-second work
+window and 120-second owned cleanup reserve, including a final 10-second receipt
+reserve. Its prepare command/case caps remain 780/180 seconds, and export and
+restore each retain 600/300 seconds.
 
-A retained PR16 run spent about 514 seconds before its preparation case began,
-including a 272-second runner launch. Its former 600-second command allowance
-left only 78 seconds for the case and interrupted final evidence formatting
-after Files/root checks. The 780-second allowance covers that observed startup
-plus the full case allowance; it does not diagnose or repair the startup delay.
-Later phases and result inspection still share the original work budget and
-may fail if insufficient time remains. No phase is retried or given a new clock.
+The hosted Intel adapter selects the immutable `hosted-intel-v1` profile before
+creating output or deriving deadlines from the original entry clock. It requires
+the exact `macos-15-intel` / `X64` / `x86_64` hosted tuple. Unknown profiles,
+crossed host identities and changed timing policy are rejected before work.
+The selected profile cannot be replaced during the run. It allows 5,340 seconds
+total: 4,980 for work and 360 for cleanup. Prepare allows 1,200 command
+seconds and 300 native case seconds; export and restore each allow 900 command
+seconds and 600 native case seconds. Every command includes the unchanged
+eight-second stop reserve and is clipped to the original work deadline. The
+native allowances require an exact profile token, the existing Recovery opt-in,
+matching phase and canonical folder identity in a Debug Intel Simulator build.
+Without that token the standalone native allowances are unchanged.
+
+Only hosted cleanup gives each owned shutdown/delete action 90 seconds and
+each recovery/final inventory query 60 seconds, including the same eight-second
+stop reserve. Default cleanup retains 30-second actions, 20-second queries and
+its 120-second total. In run 41894677683 the shorter action and inventory work
+windows expired, while bounded process termination succeeded. Run 41896588489
+completed shutdown in 21.55 seconds and verified cleanup. In run 41899787568,
+an unobserved 44.23-second gap put shutdown's next observation beyond its entire
+30-second command deadline; no stop signal could then be sent. This does not
+identify the cause of the gap or prove that more time will complete cleanup.
+
+The hosted cleanup maximum includes optional ownership recovery 60, shutdown
+90, delete 90, final inventory 60 and final receipt 10: 310 seconds, leaving 50
+seconds for non-command work inside the 360-second window. It remains clipped
+to the original overall deadline. The work allocation remains 4,980 seconds
+for 4,815 seconds of command ceilings and 165 seconds of non-command margin.
+No extra attempt, signal retry, drain or ownership adoption is introduced.
+An unresolved process still prevents further commands and cleanup acceptance.
+
+In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126765257864),
+prepare spent 713.25 seconds before its test began, leaving only 58.75 seconds
+of command work. The command expired during app launch, before any Files action;
+this was not a demonstrated native case timeout. A historical Arm
+restore case took 274.88 seconds of its 300-second allowance. The hosted native
+increases provide performance margin for slower Intel execution; they do not
+prove an application defect or guarantee completion.
+
+The complete hosted work envelope includes 110 seconds for source Git commands,
+80 for toolchain checks, 300 for shared discovery, 630 for boot commands, 3,000
+for the three phase commands, 360 for result readers, 160 for app-state checks,
+135 for result comparators and 40 for final Git checks. Those command ceilings
+total 4,815 seconds, leaving 165 for source copying, manifests, parsing and other
+in-process verification before cleanup. They remain ceilings rather than new
+per-phase clocks. No phase retries or additional workers are introduced.
+Only the validated hosted adapter gives the initial owned `bootstatus` command
+600 seconds, including the unchanged eight-second stop reserve. Two successive
+hosted runs exhausted the earlier 300-second command before native tests. The
+second retained Data Migration progress without a terminal ready result; its
+last resource scan had only 6.96 seconds left in the command window. This does
+not show that the 60-second scan allowance was exhausted or that 600 seconds
+will complete every boot. The additional 300 seconds are included in the work
+and outer budgets above. Standalone boot remains 120 seconds, discovery remains
+300 seconds, and owned cleanup and all resource checks are unchanged.
+The immutable hosted Intel profile allows up to 60 seconds for one complete
+resource scan during an exact active owned boot wait; the portable profile
+retains 15 seconds. Two Intel attempts exceeded 15 seconds before native tests,
+including one measured 25.86-second file-stat operation span. These spans include
+scheduling and do not establish the underlying cause. The scan still shares the
+original 600-second hosted boot command, its eight-second stop reserve and the global
+work deadline. Repeated scans cannot renew those clocks. Admission and other
+ordinary scans retain five seconds, native phase scans retain 30 seconds, and
+all files, byte limits and ownership checks remain required. A synchronous
+operation can overrun a cooperative deadline; after it returns, the scan fails
+closed rather than accepting partial accounting.
 Recovery discovery uses one fixed 300-second window after source/toolchain
 preflight. It covers the first runtime query, profile parsing/selection, the
 existing capability check, runtime recheck, baseline device inventory, one
@@ -118,10 +176,10 @@ stopped and reaped. Earlier identical queries completed in 7.7–63.4 seconds.
 These observations justify a bounded startup policy, but do not prove the OS
 cause or that 300 seconds will always suffice. There is no retry, warmup query,
 runtime fallback or download. The capability stage keeps its own 60-second cap
-inside the shared discovery window. The original 1,380-second work deadline is
-unchanged: fully consuming discovery leaves at most 1,080 seconds minus
-preflight for boot, UI phases and evidence. The per-phase maxima are ceilings,
-not a guarantee that all can run for their maximum duration in one attempt;
+inside the shared discovery window. Fully consuming discovery leaves at most
+4,380 hosted work seconds minus preflight for boot, UI phases and evidence.
+Standalone execution retains its original 1,380-second work deadline. The
+per-phase maxima are ceilings, not a guarantee that all can run for their maximum duration in one attempt;
 later commands remain clipped to available work time and cleanup is reserved.
 
 Hosted readiness for the newly created, owned Simulator has a separate
@@ -130,7 +188,7 @@ Only the exact `simctl bootstatus <owned UUID> -b` call receives this allowance;
 the portable executor's 120-second default, the initial boot command, UI cases
 and all other command caps stay unchanged. Readiness still requires a successful
 command exit and verified process closure before building or testing. The
-allowance is clipped to the original 1,380-second work deadline and introduces
+allowance is clipped to the selected original work deadline and introduces
 no retry or renewed global clock.
 
 The [successful reference run](https://github.com/4alvit/travel-documents-ios/actions/runs/41781766427/job/126414697445)
@@ -152,13 +210,13 @@ canonical source UUID distinct from the Recovery destination UUID. It requires
 one enabled, hittable synthetic-ticket source and opens it once, then reaches
 the exact local root using the existing 30-second initial presentation allowance.
 It proves the canonical destination name absent and requests New Folder and
-rename through the unchanged bounded Files action sequence shared with Batch
+rename through the bounded Files action sequence shared with Batch
 qualification. No Save is requested: the direct fixture must report neither an
 exported file nor a failure before or after folder creation. Preparation stops
 the app before the host can adopt the empty folder.
 
-Only the shared post-New-Folder readiness observation gets a 30-second polling
-allowance. In run 41805678990, about 18 seconds elapsed between the first live
+The shared post-New-Folder readiness observation defaults to a 30-second polling
+allowance for standalone and Batch callers. In run 41805678990, about 18 seconds elapsed between the first live
 picker-count query starting and the failure capture. That query did not report
 exactly one picker, and the previous 15-second window ended before a second
 sample. The later failure image showed an inline editor
@@ -167,6 +225,34 @@ The new allowance permits another fresh, fully validated picker/application
 pair. More and New Folder are still tapped once, and no other wait or outer
 case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
 wait semantics. It does not guarantee remote Files readiness.
+
+The already validated `hosted-intel-v1` Recovery opt-in selects 60 seconds for
+this observation only. In run 41899787568, the first bound picker/application
+pair included the supported inline editor and keyboard introduction, but its
+live binding finished at least 42 seconds after the observation began. The
+original 30-second deadline correctly rejected that late result. The hosted
+window now gives that same classifier more time; polling and action admission
+share one deadline that is never reset. A result arriving after the selected
+deadline still cannot authorize readiness or Back. The observation adjustment
+leaves initial picker presentation, the native 300-second prepare case and the
+1,200-second prepare command unchanged. This change does not establish native success
+or resolve the independent unconfirmed Simulator shutdown in that run.
+
+In [main run 41845526416](https://github.com/4alvit/travel-documents-ios/actions/runs/41845526416),
+the single New Folder action instead opened an empty `untitled folder` child.
+The parent-only editor and Rename checks correctly rejected that state. The
+helper now recognizes this separate navigation state using the exact local
+provider, child title, parent Back action and visible empty-folder placeholder,
+with no cells, editor or keyboard. The remote snapshot may omit the empty
+collection view. A fresh bound observation and matching enabled, hittable Back
+control permit one return to `On My iPhone`; the child itself is never ready for
+rename. The return and subsequent unchanged parent checks share the original
+selected observation deadline. A late query, changed control or repeated child state cannot
+initiate another Back. New Folder is not repeated, and Save is never pressed.
+Exact UUID naming,
+editor geometry, fixture termination and host empty-folder adoption remain
+required. This handles the observed transition; it does not establish why Files
+chose it or prove native acceptance of a new candidate.
 
 The explicit keyboard-introduction state accepts zero or one Keyboard node:
 its first-use overlay can be present in a bound application snapshot without a
@@ -187,6 +273,17 @@ phone/iPad local-root navigation, absent-folder probe and explicit app shutdown,
 and never requests folder creation. Ordinary UI cases and actual Recovery
 export/restore still use the production Free gate, disclosure, Save-to-Files
 and import/replacement paths.
+
+After the single Save tap, the validated `hosted-intel-v1` export case allows
+60 seconds for the picker to disappear and Settings to be present; other callers
+retain 15 seconds. In run 41928330972, the retained failure image and accessibility
+snapshot still showed the owned destination with an in-progress indicator. That
+state remains pending, never completion. The extra polling allowance does not
+change the predicate, repeat Save or reset the wait deadline. The native
+600-second case and 900-second host command remain bounded, and synchronous
+XCTest queries retain their existing overrun behavior. This is finite headroom,
+not proof that the pending export will finish. A dismissed picker still requires
+the host's complete backup metadata and original-byte verification before reset.
 
 After the prepare case passes and its process group closes, the host adopts
 exactly one native-created leaf. The pre-boot absence proof, no-follow ancestor
@@ -263,8 +360,12 @@ remaining time. A late parse or selection cannot admit another query or device
 creation. If the deadline expires after creation, the existing cleanup still
 owns that exact device.
 
-Overall work deadlines remain fixed at driver start: 2,100 seconds for each
-locale, including discovery. Both reserve 180 seconds for cleanup.
+Overall work deadlines remain fixed at driver start, including discovery:
+2,100 seconds on ARM and 4,500 seconds on Intel for either locale. ARM reserves
+180 seconds for cleanup and Intel reserves 360 seconds, including final evidence. The immutable profile is selected from the host
+architecture before allocating the deadline, and recorded in the receipt.
+The later captured `uname` must match it before device creation; an unknown
+architecture or mismatch fails closed. Discovery never changes the profile.
 The phase is also clipped to that overall work deadline. Stop receipts summarize
 the existing poll, group probe and signal calls in four bounded slots; an EPERM
 is a failure, and only ESRCH establishes group absence. A primary timeout remains
@@ -273,7 +374,7 @@ checks between operations, not preemption of a blocked OS syscall. Releasing the
 discovery phase before boot/build never renews the overall clock; longer discovery
 still consumes time available for the complete case admission below.
 
-Both iPad XCTest commands have a 900-second host wait. A fresh Russian run took
+By default, both iPad XCTest commands have a 900-second host wait. A fresh Russian run took
 239 seconds from process spawn to XCTest start and was interrupted by its old
 570-second wait while making UI progress at 331 seconds. A later English run
 passed discovery in 10.2 seconds but took 299.814 seconds from test-process spawn
@@ -281,28 +382,69 @@ to XCTest start. Its old 600-second wait interrupted active UI work at 300.30
 seconds. Neither interrupted run completed its result bundle or retained usable
 screenshot payloads. These are startup-budget failures, not passing UI evidence.
 
-The shared 900-second wait accommodates the observed roughly 300-second startup,
+The default 900-second wait accommodates the observed roughly 300-second startup,
 the unchanged 480-second XCTest ceiling and up to 120 seconds of result-finishing
 headroom. This is a finite allowance, not a guarantee about future startup time
-or a passing result. Exact test methods, UI assertions, content-size settings,
-XCTest default 180/max 480 execution allowances and no-retry behavior are unchanged.
+or a passing result. Exact test methods, UI assertions and content-size settings
+are unchanged. Default XCTest allowances remain 180/max 480; no run retries a case.
 
 Each test must fit inside its locale's absolute work deadline, including its
 seven-second process-stop reserve and mandatory post-test validation. Admission
 is checked before preparation and again immediately before spawn. A terminal
 test-process poll at or after its wait deadline fails, even with exit code 0.
-Both locales use 40-minute workflow steps and 46-minute jobs.
+On Intel, initial boot readiness allows 600 seconds, clipped to the original
+work deadline; ARM retains 180 seconds. Two Intel runs exhausted 180 seconds
+while reporting data migration. A separate run completed boot readiness in
+118.663 seconds. These observations support bounded cold-start headroom, not a
+claim that a larger allowance cures a service failure. Initial boot retains
+600 seconds on Intel and 180 on ARM. The default test command remains 900 seconds;
+full-case admission is 1,487 seconds on ARM and 1,517 on Intel. The explicit
+hosted English policy below uses a 1,200-second command and 1,817-second admission.
 
-Guidance tab transitions retain a five-second observation deadline and one tap.
-A failed English run showed a fully rendered Settings screen: the selected-tab
-snapshot was followed by a second remote navigation-bar query that exhausted
-the deadline. The transition now requires the selected tab and exactly one
-matching, nonempty, in-bounds navigation bar in the same immutable snapshot.
-The existing bounded traversal and strict deadline checks remain; a late
-snapshot, ambiguous title or missing navigation bar still fails. Fixture tests
-execute the actual Swift helper and reject those states without another remote
-query or another tap.
-The step limits include each locale's work and 180-second cleanup budgets; the
+In [run 41884508287](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116),
+Intel boot completed in 312.7 seconds, but the fresh build reached its 480-second
+limit before any UI case started. The last logged operation was asset catalog
+compilation; no compiler error was reported. That log does not identify the
+underlying cause of the delay. All 26 process groups closed and the complete
+127-device baseline was restored after deleting the owned device.
+
+The selected Intel profile now permits a 1,200-second fresh build inside its
+4,500-second work window; ARM retains its 480-second build. Preflight, discovery,
+boot, project generation, the build and the complete case admission have combined
+command ceilings of 4,143 seconds on Intel under the default native policy,
+leaving 357 seconds for manifests, product discovery, parsing and receipt writes.
+The explicit hosted English policy increases that sum to 4,443 seconds, leaving
+57 seconds while retaining the same original work deadline and strict admission. This is engineering headroom,
+not a measured requirement or a guarantee that the next build will complete.
+The 360-second Intel cleanup window includes final source/product/original checks:
+normal cleanup and four final Git commands have 249 seconds of command ceilings.
+An optional ownership recovery and one outstanding group stop add 34 seconds.
+Multiple unresolved groups may still exhaust the window and must remain failures.
+No command is retried, no clock is reset, and no native assertion is removed.
+
+Both hosted locales use 83-minute steps: 75 minutes of Intel work, six of cleanup
+and two for startup/finalization. Their 95-minute jobs allocate two minutes to
+checkout, three to toolchain setup, 83 to the driver, two to artifact upload and
+five to cancellation/overhead. Insufficient remaining case admission still fails.
+
+Guidance tab readiness and transition observation each use 30 seconds only after
+the existing hosted Phone/iPad timing profile has been validated; ordinary runs
+retain five seconds. One fixed deadline is created per phase, and exactly one
+real tab action is attempted. The selected tab and one matching, nonempty,
+in-bounds navigation bar must still be present in the same snapshot before the
+deadline. A hosted English failure spent about 13.59 seconds in its first
+post-tap snapshot interval; later Settings was rendered. A Russian failure
+retained Trips after a transient Settings highlight, so the larger window is
+not proof of its cause or cure. No tap retry, extra AX query, native case
+allowance or outer budget is added.
+
+Each tab call retains a bounded JSON attachment with the first 16 existing
+observations, call outcome, phase, monotonic elapsed times, selected/navigation
+flags and fixed rejection reasons. Total observation count and truncation are
+explicit; later per-observation detail can be unavailable. Encoding/size failure
+is explicitly marked. These diagnostics never substitute for native assertions
+or pixel evidence.
+The step limits include each locale's selected work and cleanup budgets; the
 job limits also leave time for toolchain setup and artifact upload. A command
 return still requires the original result/provenance validation before a case
 can pass; partial testcase progress is not acceptance.
@@ -446,8 +588,26 @@ The 2 GiB xcresult content limit still checks both logical and allocated size;
 manifest, archive, input and log-content bounds are unchanged. Each log stream
 has a 16 MiB limit and all log streams 64 MiB. Output limits remain
 sampled abort thresholds, not a filesystem quota or whole-device allocation
-measurement. The workflow's 27-minute execution step and 35-minute job give an
-outer deadline plus time for checkout, offline checks and evidence upload.
+measurement. The native execution step allows 91 minutes, including two minutes
+beyond the 89-minute executor ceiling. The 118-minute job allocates two minutes
+to checkout, 15 to offline regressions, 91 to native recovery and five to evidence
+upload, plus five minutes for cancellation and step overhead. The executor still
+reserves its own cleanup time before the outer workflow deadline.
+
+In [run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897632),
+the first synthetic Swift fixture compilation exceeded its 30-second timeout.
+The first three regression suites then reported 125.137 seconds combined,
+already exceeding the former two-minute step before the other ten suites ran.
+The Files readiness fixture compilers now consistently allow 60 seconds;
+five-second fixture executions retain their limit. The three complete-file SDK
+typechecks now allow 180 seconds each. A later hosted run exhausted 45 seconds
+for both Batch UI checks (ARM default and Intel Debug); this is a compiler-command
+timeout, not a native test failure. The 15-minute regression step includes
+headroom beyond a conservative 688-second estimate from that run and the other
+retained suites. It remains finite and does not guarantee future compiler speed.
+These offline allowances do not change native case limits or accept incomplete
+regressions. All 13 suites and the subsequent native recovery still require a
+fresh passing hosted run; the larger envelope does not guarantee completion.
 
 There is one new owned Simulator, one fixed Files-provider setup, one export
 case, a durable verified before-reset snapshot pin, then one restore case.
@@ -500,15 +660,16 @@ it does not permit a nonzero group lookup. The existing Files log-publication
 allowlist is also unchanged. Group lookup output remains a private root log,
 not a new public artifact route.
 
-Removing the forced 120-second launch and 60-second termination does not extend
-the total work deadline or reserve new time for a later phase. At the observed
-preparation start of 148.57 seconds, 1,231.43 seconds remain before the original
+The earlier removal of the forced 120-second launch and 60-second termination
+did not extend that run's work deadline or reserve new time for a later phase.
+At the observed preparation start of 148.57 seconds, 1,231.43 seconds remained before the original
 1,380-second work limit. A full 60-second group lookup leaves at most 1,171.43
 seconds for export, restore and evidence processing; the two 600-second phase
 caps still cannot both be consumed in full. They remain maxima clipped to the
 original remaining work time. Every command still needs more than its 8-second
 stop reserve before admission and again before spawn. Cleanup retains its
-original 120 seconds within the same 1,500-second executor limit. No additional
+original 120 seconds within that historical 1,500-second executor limit. The
+current hosted profile is specified above. No additional
 worker, Simulator, test attempt or runtime fallback is introduced.
 
 Each iPad guidance locale now runs in a separate fresh driver and owned device.
@@ -521,9 +682,10 @@ scheme and plan include only the UI-test target and its app dependencies. The
 core/purchase job continues to build and run all hosted AppTests through the
 unchanged default plan. Generated iPad metadata must contain exactly the UI-test
 target; a full-scheme result is rejected rather than silently accepted.
-The fixed EN/RU CI matrix has `max-parallel: 1` and `fail-fast: false`: a failed
-English lane cannot prevent Russian from running, and the existing CI gate
-requires the aggregate matrix result to be `success`. Each artifact includes its
+The fixed EN/RU CI matrix has `max-parallel: 2` and `fail-fast: false`: both
+independent locale jobs can become eligible together, and a failed English lane
+cannot prevent Russian from running. The existing CI gate requires the aggregate
+matrix result to be `success`. Each artifact includes its
 locale, source SHA, run ID and attempt; the receipt records the exact locale,
 method, one-case count, source manifests, built/installed bytes and owned UUID.
 No case is inferred from the other locale's result.
@@ -531,12 +693,15 @@ No case is inferred from the other locale's result.
 This corrects an observed allocation defect: English took 590 seconds including
 bootstrap; Russian was then admitted with only 357 seconds of work even though
 its requested command allowance was 570 seconds. Its timeout was subsequently
-masked by an installed-AUT lookup that could not fit. Fresh drivers now use
-2,100-second work budgets and the same 180-second cleanup reserve.
-Both command waits are 900 seconds; XCTest's 480-second maximum is unchanged. Before
-case preparation, the driver requires the full command budgets and each 7-second
-stop reserve, plus 30 seconds for local manifests/copy/validation: 1,487 seconds
-for either locale. Immediately before test spawn it again requires the full
+masked by an installed-AUT lookup that could not fit. Fresh drivers use separate
+work budgets of 2,100 seconds on ARM or 4,500 on Intel and respective cleanup
+reserves of 180 and 360 seconds.
+Default command waits are 900 seconds with XCTest's 480-second maximum.
+The explicit hosted English policy uses a 1,200-second command and 900-second
+XCTest maximum. Before case preparation, the driver requires the full command
+budgets and each 7-second stop reserve, plus 30 seconds for local manifests/copy/validation:
+1,487 seconds on ARM, 1,517 on default Intel or 1,817 for hosted English.
+Immediately before test spawn it again requires the full
 test wait, its 7-second stop reserve and 238 seconds for post-test validation
 (two installed lookups of 60 seconds, result summary 30, result tests 30, four 7-second stops
 and 30 seconds of local evidence work). These are admissions within each locale's absolute work
@@ -557,19 +722,239 @@ expected identifier. Fresh 60-second container lookups before and after the test
 verify both identifiers, bundle paths and complete built-versus-installed bytes;
 they do not reuse a path that xcodebuild may replace. The added runner install
 and lookups are included in the case and post-test admissions above. Installation
-or readback failure cannot become test success. The original generated xctestrun,
-900-second host wait, native assertions, exact result checks and no-retry behavior
-are unchanged. This explicit setup requires new hosted evidence; it does not
+or readback failure cannot become test success.
+
+The Russian iPad job in run `41899787568` completed boot and build, then exceeded
+its 60-second AUT installation wait without reporting an installation error or
+success. It reached no native case. Intel AUT installation now allows 90 seconds;
+ARM AUT installation, runner installation and every container lookup keep 60.
+This is part of the architecture-selected profile, including standalone Intel,
+not a hosted-only opt-in. The extra 30 seconds are included in the full-case
+admission: Intel preparation is 372 seconds, with the original 7-second stop
+reserves and 238-second post-validation budget. Work, cleanup and native limits
+are unchanged. The failed run's process and owned-device cleanup completed;
+a larger install allowance neither proves installation nor guarantees a pass.
+
+The original generated xctestrun,
+selected finite host wait, native assertions, exact result checks and no-retry
+behavior remain required. This explicit setup requires new hosted evidence; it does not
 retroactively validate the failed launch or guarantee against service failures.
+The English iPad case in run `41899787568` reached its 480-second native limit
+while saving evidence after the second confirmation cancellation. Its raw log
+continued through a fourth Cancel at about 660 seconds, but the retained native
+result is failed and contains no final Trips evidence. The command returned 65
+after 753.5 seconds; boot and build had completed. This supports additional native
+time, not a claim that the unrecorded final navigation succeeded.
+
+Only CI's explicit `--hosted-intel-timing` option admits hosted iPad timing. The
+producer checks the exact GitHub-hosted macOS/X64 context, selected locale and
+captured architecture; standalone Intel and ARM runs keep their defaults.
+Inherited Phone/iPad timing tokens are rejected. Only the final native command
+receives `TEST_RUNNER_TRIPDOCKET_IPAD_TIMING`; the app receives no timing token.
+The consumer requires Debug x86_64 Simulator and iPad idiom, with the exact
+`hosted-intel-ipad-en-v1` token for the English case or
+`hosted-intel-ipad-ru-v1` for Russian at maximum type. English uses a
+1,200-second native allowance and 1,500-second command; Russian uses 1,500 and
+1,800 seconds respectively. Phone and missing-token timing stay unchanged.
+
+The Russian case in run `41928330972` failed at the 480-second native limit during
+the first confirmation's warning, with zero cancellations yet recorded. Its
+post-timeout stdout continued only into the second link; those later actions
+are not accepted native evidence. A historical ARM pass took 316.8 seconds with
+byte-identical functional UI actions and captures. Scaling its remaining three
+cycles and final return by the observed first-cycle ratio gives an illustrative
+947.8 seconds. This estimate motivates finite headroom, not a guarantee that the
+new allowance will complete the case. Captures and geometry checks stay intact.
+
+The same run reported the English case passing in895.949 seconds, only4.051 below
+its former900-second limit. Its upload then failed to create the439-file artifact
+with `ENOTFOUND`. The successful log is not independent native/visual/cleanup
+acceptance. English now receives a1,200/1,500 timing margin using its
+existing strict token; no upload behavior changes.
+
+The later Russian case in run `41940543243` completed its authored checks and
+final accessibility capture at 1,196.13 seconds, then exceeded its 1,200-second
+native limit during teardown. Its raw finish at 1,207.926 seconds does not override
+the failed native result; the command returned 65 after 1,490.126 seconds. The
+same functional source previously passed in 981.964 seconds. Russian's additional
+300 seconds preserves finite headroom for the observed variation without
+removing any actions or captures, and does not guarantee a future pass.
+
+English requires 2,117 seconds of admission; Russian requires 2,417:
+preparation372, command1,500 or1,800, a separate7-second stop reserve and
+post-validation238. Each command retains its full selected wait cap, clipped by
+the original global deadline; immediate pre-spawn admission protects the
+stop/post-validation reserve. Work remains4,500 seconds and cleanup360, with the
+83-minute step and95-minute job unchanged. Summed phase maxima are4,743 for
+English and5,043 for Russian, exceeding the work window, so a late build must
+fail admission rather than reset the clock. All24
+text checks, four Cancels, zero Open actions and final Free/Trips evidence remain
+mandatory. Neither a timeout nor a nonzero result becomes a pass.
+
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-three with 35-minute limits and two iPad jobs with 46-minute limits,
-at most 197 aggregate job-minutes. The workflow permits
-up to four concurrent macOS jobs: core/purchase, guidance, recovery and one iPad
-locale, subject to account runner capacity. There are six jobs including the
-Ubuntu gate. The bounded observer retains its original 120-minute admission
-window and records both locale jobs separately; it must not declare a complete
-cohort when one locale is missing, skipped or failed. This is a scheduling-policy
-change requiring new runtime evidence, not acceptance of either failed old run.
+Core has an 85-minute limit, Recovery has 118 minutes, phone guidance has 128 minutes,
+and each iPad locale has 95 minutes, at most 521 aggregate job-minutes. All five
+jobs can become eligible independently: phone guidance does not consume Core
+outputs, and each iPad locale creates its own checkout, build and owned device
+without consuming Recovery artifacts. Core/purchase and phone guidance now
+request standard `macos-15` ARM runners; both iPad locales and Recovery retain
+`macos-15-intel`. All use Xcode 26.2 and SDK-compatible runtime selection.
+The earlier all-Intel configuration followed ARM runner acquisition failures.
+New ARM allocation and toolchain observations justify another bounded run,
+not a claim that ARM resolves the observed native failures. ARM Core/Phone use
+their existing ordinary test and preparation limits without Intel timing tokens;
+the enclosing workflow limits above are retained. All cohorts still require
+fresh source-bound evidence. Recovery's exact Intel profile is unchanged.
+There are six jobs including the Ubuntu gate. Both locale jobs remain required;
+a missing, skipped or failed locale cannot count as a complete cohort. The
+runner change requires fresh runtime evidence and does not validate old failures
+or guarantee available hosted capacity.
+
+Independent eligibility removes the former Core-to-Phone and
+Recovery-to-serial-iPad scheduling waits; it does not reserve runners. GitHub's
+[documented macOS concurrency limits](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners)
+are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
+account limits and other workflows share that capacity, including Swift CodeQL
+and separate Batch/Biometrics qualification. Jobs may queue, so the largest
+individual job limit of 128 minutes is not a completion-time guarantee.
+Per-job native tests remain serial, with explicit finite timeouts, owned-process
+cleanup, `!cancelled()` conditions and the final gate's four result checks.
+
+A retry used for complete qualification must run the full CI workflow and
+verify all six fresh jobs in the same attempt. Retrying only failed jobs no
+longer reruns independent guidance jobs through the removed dependency edges;
+copied or earlier successful records are not fresh native evidence.
+
+Run `41940543243` reached all nine Phone cases after successful preparation, but
+four exceeded their native allowances. The first complete-warning case crossed
+240 seconds during its final dismissal check; a later AUT termination failed.
+Free-card dismissal and AUT shutdown completed by 239.600 seconds, but diagnostic
+recording finalization crossed 240. English guidance reached its fourth link
+confirmation before 720 seconds; Russian maximum-type guidance reached only its
+first confirmation before 600. Post-timeout actions are diagnostic evidence,
+not passing results. The explicit hosted Phone profile now gives the two affected
+accessibility cases 360 seconds each, English guidance 1,080 and Russian guidance
+1,500. The five other cases and every action, assertion, capture and teardown stay
+unchanged. The final hosted Phone invocation alone uses a 1,500-second CLI maximum.
+Missing native tokens retain the original defaults, including English 480,
+Russian 600 and the inherited Free-card allowance. Dedicated iPad policies remain
+separate. All three inherited Phone token aliases are rejected at shell entry;
+the strict hosted Phone branch also requires the exact repository and rejects
+all three iPad aliases before native tools.
+
+The 600-second non-case allocation exceeds the current approximately 351 seconds
+outside failure-associated windows and the earlier accepted Arm run's approximately
+464 seconds. The current extra 426 seconds includes post-timeout continuation and
+runner restarts; it is neither ordinary overhead nor guaranteed removable cost.
+The main command shares DerivedData with preparation but still runs `xcodebuild test`.
+It can therefore incur further build, install and runner-startup work. The policy
+does not guarantee that future host delays fit the step.
+
+Run `41950012017` subsequently passed eight Phone cases and exceeded the inherited
+180-second allowance in readiness/import cancellation during the Files Cancel action.
+The original verification and Files picker captures preceded the timeout; later
+return actions and the separate failed app termination do not establish a clean pass.
+That case now uses 360 seconds only in the same hosted Intel Phone profile, as a
+bounded host-variance margin. Its ordinary inherited allowance, 40-second Files
+readiness admission, all actions, captures and termination remain unchanged.
+The other eight case limits remain unchanged, including the Russian demo's
+120 seconds (89.210 seconds in this run). The larger allowance does not prove that
+the separate termination failure is resolved.
+
+The hosted Intel Phone guidance profile uses a 108-minute integration step within
+that 128-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
+30 cleanup and ten receipt), including a 300-second post-preparation warm-boot
+command and a 1,080-second combined preparation command. Arm retains 1,080 seconds
+of work, a 960-second preparation command and its 180-second warm-boot cap.
+Both preparation commands retain the 180-second native allowance. The Intel
+increase addresses an outer command timeout before the native allowance elapsed;
+it does not change native assertions or guarantee completion. All commands share
+the original work deadline and must clip to it, including the later warm boot.
+The nine required native case allowances total 4,380 seconds. The step allocates
+600 seconds for selection, generation, main build/session startup, transitions
+and result finalization, plus 20 seconds for rounding. This is an engineering
+allocation rather than a measured worst-case guarantee. The explicit Phone
+allowances apply to three accessibility cases, the Russian warning and both
+guidance cases; ordinary runs, Core, ARM and dedicated iPad limits stay intact.
+All assertions, diagnostic captures and app termination remain required; see
+[the release qualification policy](github-releases.md) for selection and evidence.
+
+In [Core run 41877246834](https://github.com/4alvit/travel-documents-ios/actions/runs/41877246834/job/126739897092),
+the English purchase-failure case exceeded its 180-second allowance while
+finishing the Free quota check and diagnostic captures. The trace continued to
+191 seconds, but that is not a clean pass. The following Russian case had a
+launch timeout and XCTest restarted the runner; the 35-minute job limit later
+cancelled the incomplete cohort. The trace does not establish that the first
+timeout caused the launch failure. The three failure-alert scenarios retain a 240-second default in their shared
+helper. Both alert cycles, postconditions, Free
+quota checks, PNG/AX captures and teardown remain required; the ordinary
+180-second default and Core's 480-second maximum are unchanged.
+
+In Core run 41935094544, the first failure-alert readiness check expired while
+the paywall's entitlement refresh remained busy for 35.075 seconds; later
+captures showed the purchase button enabled. Only the first readiness check
+in each of the three failure-alert scenarios now allows 60 seconds. The second
+attempt and every other `require` call retain 15 seconds. This shared test helper
+applies on all architectures. The exact visible, enabled, hittable purchase-button
+and no-alert condition, both checked failure cycles, all captures and the
+default 240-second case allowance remain unchanged by this readiness policy.
+The extra initial margin does not
+guarantee completion or change the app's entitlement-loading behavior.
+
+In Core run 41940543243, the English failure-alert case reached its first
+purchase at 180.04 seconds and exceeded its 240-second native allowance after
+starting the second purchase. The retained first alert contains the expected
+injected network error. Reopened-paywall checks occurred after the native
+timeout; their diagnostic label does not establish that an old alert replayed.
+The slowest successful sibling's complete first-purchase-to-finish tail was
+134.17 seconds. Combining that tail with the English startup gives an
+illustrative 314.21 seconds, not a prediction or inherited pass.
+
+Only the validated hosted Intel Core invocation now selects 360 seconds for
+these three failure-alert cases. The same invocation selects a 30-second
+appearance wait in the guidance-host unit test, whose default remains five
+seconds. Its retained trace showed SwiftUI's first appearance after 6.79 seconds
+of waiting, but no UIKit appearance callback before cleanup. The longer wait
+still requires the UIKit callback, SwiftUI appearance and no opened URL; it
+does not force a lifecycle event or establish eventual completion.
+
+The shell selects `TEST_RUNNER_TRIPDOCKET_CORE_TIMING=hosted-intel-core-v1`
+only for the final `--require-sdk-match --cohort core-purchase` test command
+with the exact hosted repository/workflow/job and Intel architecture context.
+Inherited Core markers and conflicting Phone/iPad markers are rejected before
+tools run. The native selectors require the exact marker in a Debug Intel
+Simulator build on iPhone and reject conflicting native markers before test
+side effects. Missing markers preserve the 240-second failure-helper and
+five-second appearance defaults. Ordinary cancellation runs inherit the runner's
+case allowance; Core's CLI default remains 180 seconds and its maximum remains
+480 seconds. The first/other purchase-readiness waits remain 60/15 seconds.
+All assertions, both purchase cycles, captures and cleanup remain required;
+no retries are added.
+
+In Core run 41972215370, the cancellation purchase remained pending when the
+15-second sheet observation failed. The Xcode payment controller appeared about
+79.2–79.4 seconds after purchase entry, during the next test and after the first
+app process had terminated. That next test's Settings element was replaced by
+the privacy shield; its retained video later showed the Xcode-branded test sheet.
+The delay's underlying cause is unresolved. Only the validated hosted Core
+cancellation case now selects 120 seconds for sheet presentation and a 360-second
+native allowance. Ordinary presentation still uses 15 seconds. One fixed
+deadline and cancellation checks surround each existing app/Springboard query;
+a late match cannot pass. The same single purchase, Xcode marker, Cancel/Close
+ownership, idle/Free checks and cleanup remain mandatory. No automatic retry or
+late-sheet dismissal is added. These margins are not proof of a service fix.
+
+Core's integration step has a separate 45-minute limit within the 85-minute
+job. The prior 42/82-minute envelope preserved the original 35-minute ceiling
+plus three 120-second case increments and 25 seconds of appearance waiting
+(385 seconds rounded up to 420). Three further minutes preserve that complete
+envelope plus the cancellation case's 180-second allowance increase. The job
+envelope is checkout 2, toolchain 5, toolchain evidence 2, selector checks 2, Verify 10, packaging 2,
+integration 45, cancellation grace 5, raw evidence 3, optional failure
+extraction/upload 3/2, Simulator upload 2 and finalization 2 minutes. Raw test
+evidence precedes optional extraction. These are finite operating ceilings,
+not a guarantee that all 171 per-case maxima fit or that another hosted run
+will finish. Fresh complete results are still required.
 
 
 Files provider readiness uses only the unused part of the original `files-group`
@@ -627,3 +1012,55 @@ as the xcresult writer. The scan remains limited to five seconds and to both
 the primary and child original work deadlines; neither stop reserve may be
 borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
+
+
+The hosted Intel Recovery restore phase allows 60 seconds for observing the
+rendered original PDF; the default observation remains 40 seconds. This selection
+follows the existing validated Recovery profile. One deadline covers the existing
+preview queries, fresh screenshot and synchronous Vision recognition. A screenshot
+or OCR result that finishes too late is still rejected, and both exact synthetic
+markers must occur once in the recognized preview pixels.
+
+A failed hosted run reached the rendered PDF but recorded that Vision completed
+after the 40-second deadline. The later failure screenshot contained both markers;
+it does not establish what the earlier OCR input or recognition result contained.
+The 60-second choice is bounded engineering headroom, not proof of completion.
+The restore case remains capped at 600 seconds, its command at 900 seconds, and
+all work, cleanup and workflow limits remain unchanged.
+
+The preview observer retains one diagnostic JSON attachment of at most 8 KiB on
+success or failure. It records the first eight attempts with relative start,
+query, screenshot, OCR and total durations and fixed outcomes, plus the total
+attempt count and an explicit truncation flag. It makes no additional accessibility
+queries or OCR calls. The existing bounded last-observation attachment remains
+separate on failure. Serialization never truncates JSON bytes; an unexpected
+encoding failure is explicitly reported. These diagnostics do not authorize
+success or replace the subsequent host comparison of restored catalog and bytes.
+
+
+The native folder-name entry keeps one `typeText` action and then observes the
+result for at most 60 seconds only in the native-folder preparation branch after
+validation of the hosted Intel Recovery profile. Ordinary Recovery and dedicated
+Batch preparation retain 15 seconds. Each observation checks the foreground app and
+uses a separate frozen Files picker snapshot and application snapshot; the app
+snapshot alone can omit the remote Files subtree. Exact ownership, ancestry and
+visible editor geometry remain required. An empty value, the selected default
+name, or a strict prefix is pending; only the complete owned UUID name succeeds.
+Unexpected text, lost ownership, cancellation and results returned at or after
+the original deadline fail closed. No second typing action, clearing, paste or
+retry is performed. Existing live end-editing checks, the single blank-grid tap,
+no-Save rule, fixture shutdown and host exact empty-folder proof are unchanged.
+
+A retained text attachment records the first eight observations, total count,
+explicit truncation and final outcome as valid JSON of at most 8 KiB. Each value
+is compared in full; diagnostic value bytes are limited to a 128-byte UTF-8 hex
+prefix with an explicit length/truncation indicator. Two hosted failures returned
+from the foreground/picker observation after about 39 seconds, before application
+snapshot or value validation; those intervals do not isolate one RPC or prove
+when the full name became available. Successful controls took about 1.4 and
+7.4 seconds. The 60-second choice is bounded tolerance for that observed variation,
+not a demonstrated fix to its underlying cause. The selected window is local to
+this shared helper and does not change either caller's native allowance,
+the generic UI wait, Recovery command/work/cleanup limits or workflow timeouts.
+It does not establish whether the observed unchanged default name was caused by
+delayed processing or an input event that had no effect.
