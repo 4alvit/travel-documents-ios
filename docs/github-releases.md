@@ -208,7 +208,7 @@ and 600 seconds for the initial boot-readiness check (`simctl bootstatus`). The
 separate `simctl boot` command retains its 60-second cap. The work deadline stays
 anchored to the original qualification start. Its capture step allows 54 minutes
 and its job
-65 minutes. A [boot-only observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
+68 minutes. A [boot-only observation](https://github.com/4alvit/travel-documents-ios/actions/runs/41456445847)
 measured 279.406 seconds for boot, followed by 88.267 seconds for ready inventory.
 The original work budget left insufficient room for the then-current
 2,100-second reservation for preparation, driver and postchecks. This profile
@@ -233,11 +233,15 @@ starts, including after a slow boot. The receipt records the selected phase cap;
 the actual command uses that same cap. This allocation is not a guarantee that
 preparation, subsequent import or result inspection will finish.
 
-All biometric captures retain their existing budgets and path. Batch changes
+All biometric captures retain their existing native budgets and path. Batch changes
 only its initial driver allocation as described above. Native case limits,
 the 180-second cleanup budget, runtime matching, source verification
 and complete device-inventory checks remain unchanged. The 54-minute capture
-and 65-minute job envelopes are unchanged.
+envelope is unchanged. The fourteen qualification guard commands share a
+five-minute step; the outer job allows 58 minutes, or 68 for Intel batch.
+This preserves the four-minute evidence upload allowance and the existing
+one-minute margin for checkout and action overhead. It does not guarantee
+completion of every command at its maximum allowance.
 
 Both ARM and Intel batch builds compile only the complete test source files needed by
 this selected suite, plus `LocalizationTests.swift`, whose name also occurs in
@@ -410,6 +414,16 @@ job, including checkout, 15 minutes for all offline guards, evidence upload and
 cancellation. Complete-file SDK typechecks allow 180 seconds each after two
 hosted compiler commands exceeded their former 45-second limits; fixture
 compilation and execution limits remain unchanged.
+The dedicated Recovery restore case allows 30 seconds for its initial Files
+navigation polling, matching the existing cold seed allowance. Its shared
+helper still defaults to 15 seconds; subsequent browser, Recents, folder and
+original-data checks, tap counts and outer case/phase limits are unchanged.
+In [main run 42070800281](https://github.com/4alvit/travel-documents-ios/actions/runs/42070800281/job/127397854478),
+the initial 15-second check failed and a later capture showed native Recents
+navigation. That capture does not establish first availability or full browser
+readiness. An in-flight synchronous XCTest query can outlast the polling
+allowance; the change neither guarantees a hard 30-second return nor establishes
+or remedies the cause of the late navigation observation.
 Only the full Recovery export case may retry the native **Save to Files**
 navigation action once. Its first action and any retry share a 30-second
 polling allowance; retry eligibility begins after 15 seconds and requires
