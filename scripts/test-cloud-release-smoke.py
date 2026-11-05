@@ -362,7 +362,9 @@ class CacheTests(unittest.TestCase):
 
 
 class OrdinaryLaunchTests(unittest.TestCase):
-    def run_capture(self, delay, start=200., cancelled=False):
+    def run_capture(self, delay, start=200., cancelled=False, sample_delay=0.,
+                    sample_unresolved=False, observe_failure=False, sigchld=signal.SIG_DFL,
+                    thread_count=1, failed_probe=False):
         # Real capture and process-controller code with a synthetic OS boundary.
         # This never spawns native tools or waits on wall-clock launch time.
         processes = load('recovery_process.py', 'launch_budget_processes')
@@ -379,7 +381,8 @@ class OrdinaryLaunchTests(unittest.TestCase):
         owner.cleaning = owner.interrupted = False
         owner.owned = '11111111-1111-4111-8111-111111111111'
         owner.launch_count = 0
-        owner.report = {'screenshots': []}
+        owner.report = {'screenshots': [], 'installed-before': {'fixture': True}}
+        owner.baseline = {}
         owner.save = lambda: None
         owner.expected_manifest = {}
         owner.manifest = lambda _: {}
@@ -393,25 +396,34 @@ class OrdinaryLaunchTests(unittest.TestCase):
         owner.report['producer_provenance_sha256'] = s.sha(provenance.read_bytes())
         owner.before_code = {'synthetic': 'unchanged'}
         owner.preparer = p
-        clock, calls = [start], []
+        clock, calls, sample_live = [start], [], [False]
         class Process:
-            def __init__(self, pid, ready, output):
+            def __init__(self, pid, ready, output, kind):
                 self.pid, self.ready, self.output = pid, ready, output
+                self.kind = kind
                 self.returncode, self.read_done = None, False
             def poll(self):
+                if self.kind == 'launch' and sample_live[0]:
+                    raise AssertionError('Parent polled before sampler closed')
                 if self.returncode is None and clock[0] >= self.ready:
-                    self.returncode = 0
+                    self.returncode = 1 if failed_probe and self.kind == 'probe' else 0
                 return self.returncode
         class Ops:
             def now(self): return clock[0]
             def sleep(self, seconds): clock[0] += seconds
             def spawn(self, argv):
                 calls.append(argv)
-                launch = argv[2] == 'launch'
-                if not launch:
+                launch, sample = argv[2] == 'launch', argv[0] == '/usr/bin/sample'
+                screenshot = not sample and argv[2] == 'io'
+                kind = 'launch' if launch else 'sample' if sample else 'screenshot' if screenshot else 'probe'
+                if screenshot or sample:
                     Path(argv[-1]).write_bytes(b'\x89PNG\r\n\x1a\nsynthetic')
-                return Process(1000 + len(calls), clock[0] + (delay if launch else 0),
-                               (s.APP_ID + ': 12345\n').encode() if launch else b'')
+                if sample: sample_live[0] = True
+                output = (s.APP_ID + ': 12345\n').encode() if launch else b''
+                if kind == 'probe' and argv[-1] == 'list':
+                    output = ('12345\t0\tUIKitApplication:' + s.APP_ID + '[fixture]\n').encode()
+                return Process(1000 + len(calls), clock[0] + (delay if launch else sample_delay if sample else 0),
+                               output, kind)
             def prepare(self, _): pass
             def read(self, process):
                 if cancelled: owner.interrupted = True
@@ -419,20 +431,29 @@ class OrdinaryLaunchTests(unittest.TestCase):
                     process.read_done = True
                     return [('stdout', process.output)] if process.output else []
                 return []
-            def absent(self, process): return process.poll() is not None
+            def absent(self, process):
+                if process.kind == 'sample' and sample_unresolved:
+                    raise PermissionError('Synthetic unresolved sampler')
+                return process.poll() is not None
             def send(self, process, sig):
                 process.returncode = -sig
                 return 'syscall_returned'
-            def close(self, _): pass
+            def close(self, process):
+                if process.kind == 'sample' and not sample_unresolved: sample_live[0] = False
         ops = Ops()
-        owner.commands = s.make_commands_class(SimpleNamespace(
-            Smoke=processes.Smoke, RealOps=lambda *_: ops))(owner)
+        process_api = SimpleNamespace(Smoke=processes.Smoke, RealOps=lambda *_: ops)
+        owner.qualification = SimpleNamespace(processes=process_api)
+        owner.commands = s.make_commands_class(process_api)(owner)
         failure = None
         with patch.object(s.time, 'monotonic', side_effect=ops.now), \
                 patch.object(s.time, 'sleep', side_effect=ops.sleep), \
-                patch.object(s, 'code_identity', return_value=owner.before_code):
+                patch.object(s, 'code_identity', return_value=owner.before_code), \
+                patch.object(s.signal, 'getsignal', return_value=sigchld), \
+                patch.object(s.threading, 'active_count', return_value=thread_count):
             try: owner.capture()
             except RuntimeError as error: failure = error
+            if observe_failure and failure:
+                owner.observe_launch_failure()
         return owner, calls, verified, failure
 
     def test_cold_launch_45_seconds_completes_once_then_three_screens_and_integrity(self):
@@ -454,7 +475,8 @@ class OrdinaryLaunchTests(unittest.TestCase):
     def test_exact_120_second_boundary_fails_and_cannot_retry(self):
         owner, calls, verified, failure = self.run_capture(120.)
         self.assertIsInstance(failure, RuntimeError)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)  # One ordinary launch plus its owned-PID sample.
+        self.assertEqual(calls[1][:4], ['/usr/bin/sample', '1001', '1', '10'])
         self.assertEqual(verified, [])
         self.assertEqual(owner.report['screenshots'], [])
         self.assertNotIn('launch', owner.report)
@@ -464,7 +486,7 @@ class OrdinaryLaunchTests(unittest.TestCase):
         self.assertEqual(row['stop']['signals'], [])  # Already exited exactly at the rejected boundary.
         self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         with self.assertRaisesRegex(RuntimeError, 'only once'): owner.capture()
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
 
     def test_near_boundary_launch_remains_finite_and_global_deadline_clips(self):
         owner, _, _, failure = self.run_capture(119.8)
@@ -486,6 +508,89 @@ class OrdinaryLaunchTests(unittest.TestCase):
         self.assertEqual(owner.report['screenshots'], [])
         self.assertNotIn('capture_completed', owner.report)
         self.assertTrue(owner.commands.report['commands'][0]['stop']['group_absent'])
+
+    def test_sample_keeps_parent_unreaped_when_it_exits_during_synchronous_sample(self):
+        owner, calls, _, failure = self.run_capture(91., sample_delay=3.)
+        self.assertIsNone(failure)
+        self.assertEqual(len([argv for argv in calls if argv[0] == '/usr/bin/sample']), 1)
+        sample = owner.commands.report['commands'][0]['sample']
+        self.assertIsNone(sample['last_poll_result'])
+        self.assertEqual(sample['status'], 'collected')
+        self.assertGreaterEqual(sample['finished_seconds'] - sample['started_seconds'], 3.)
+        self.assertTrue(owner.report['capture_completed'])
+
+    def test_sampler_timeout_closes_before_parent_and_does_not_reset_launch_deadline(self):
+        owner, calls, _, failure = self.run_capture(125., sample_delay=30.)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(len(calls), 2)
+        sample = owner.report['launch-sample_commands']['commands'][0]
+        self.assertEqual(sample['requested_cap_seconds'], 13)
+        self.assertEqual(sample['stop_reserve_seconds'], 8)
+        self.assertEqual(sample['stop']['signals'], [signal.SIGTERM])
+        self.assertTrue(sample['stop']['group_absent'] and sample['stop']['leader_reaped'])
+        launch = owner.commands.report['commands'][0]
+        self.assertEqual(launch['work_deadline'] - launch['start'], 120)
+        self.assertTrue(launch['stop']['group_absent'])
+
+    def test_sampler_skipped_for_auto_reaper_or_multiple_threads(self):
+        for kwargs in ({'sigchld': signal.SIG_IGN}, {'sigchld': lambda *_: None}, {'thread_count': 2}):
+            with self.subTest(kwargs=kwargs):
+                owner, calls, _, failure = self.run_capture(120., **kwargs)
+                self.assertIsInstance(failure, RuntimeError)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(owner.commands.report['commands'][0]['sample']['status'], 'skipped')
+
+    def test_unresolved_sampler_withholds_parent_reap_and_failure_probes(self):
+        owner, calls, _, failure = self.run_capture(125., sample_unresolved=True, observe_failure=True)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(owner.report['failure_observation']['status'], 'skipped')
+        launch = owner.commands.report['commands'][0]
+        self.assertIn('Sampler must close', launch['stop_error'])
+        self.assertNotIn('stop', launch)
+        self.assertTrue(owner.commands.active)
+
+    def test_failure_probes_require_no_launch_pid_and_never_fill_success_fields(self):
+        owner, calls, verified, failure = self.run_capture(125., observe_failure=True)
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(verified, [])
+        self.assertNotIn('launch', owner.report)
+        self.assertEqual(owner.report['screenshots'], [])
+        self.assertTrue(owner.report['ordinary_launch_failed'])
+        rows = owner.report['failure_observation']['observations']
+        self.assertEqual([row['status'] for row in rows], ['collected'] * 3)
+        self.assertIn('UIKitApplication:' + s.APP_ID, rows[1]['matching_services'][0])
+        self.assertEqual(len([argv for argv in calls if argv[2] == 'launch']), 1)
+        for argv in calls[-3:]: self.assertIn(owner.owned, argv)
+        self.assertIn('process == "Tripfolio" OR eventMessage CONTAINS[c] "com.4alvit.tripfolio"', calls[-1])
+
+    def test_cancelled_or_deadline_clipped_failure_does_not_start_post_probes(self):
+        for kwargs in ({'cancelled': True}, {'start': 880.}):
+            with self.subTest(kwargs=kwargs):
+                owner, calls, _, failure = self.run_capture(125., observe_failure=True, **kwargs)
+                self.assertIsInstance(failure, RuntimeError)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(owner.report['failure_observation']['status'], 'skipped')
+
+    def test_unavailable_probe_is_recorded_without_turning_failed_launch_into_success(self):
+        owner, _, _, failure = self.run_capture(125., failed_probe=True, observe_failure=True)
+        self.assertIsInstance(failure, RuntimeError)
+        rows = owner.report['failure_observation']['observations']
+        self.assertEqual([row['status'] for row in rows], ['collected', 'unavailable', 'unavailable'])
+        self.assertNotIn('capture_completed', owner.report)
+
+    def test_diagnostic_tree_rejects_symlinks_and_total_cap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
+            owner.out = Path(temporary)
+            owner.check = lambda: None
+            root = owner.diagnostic_root()
+            link = root / 'link'
+            link.symlink_to(owner.out)
+            with self.assertRaisesRegex(RuntimeError, 'Unsafe diagnostic entry'): owner.diagnostic_usage()
+            link.unlink()
+            with (root / 'large').open('wb') as stream: stream.truncate(8 * s.MIB + 1)
+            with self.assertRaisesRegex(RuntimeError, 'output cap'): owner.diagnostic_usage()
 
 
 if __name__ == '__main__':

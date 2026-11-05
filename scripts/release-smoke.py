@@ -17,6 +17,7 @@ import re
 import signal
 import stat
 import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -81,9 +82,11 @@ def select_runtime(qualification, data, sdk, architecture, identifier=None, buil
 
 def make_commands_class(processes):
     class Commands(processes.Smoke):
-        def __init__(self, owner):
+        def __init__(self, owner, purpose='commands'):
             self.owner = owner
-            self.out = owner.out / 'commands'
+            require(purpose in {'commands', 'launch-sample', 'failure'}, 'Unknown command purpose')
+            self.diagnostic = purpose != 'commands'
+            self.out = owner.out / purpose if not self.diagnostic else owner.diagnostic_root() / purpose
             self.out.mkdir()
             self.ops = processes.RealOps(environment(), str(owner.repo))
             self.t0 = owner.started
@@ -92,11 +95,66 @@ def make_commands_class(processes):
             self.active, self.absent_groups = {}, set()
             self.unknown_spawn, self.log_total = False, 0
             self.report = {'commands': [], 'errors': []}
-            owner.report['native_commands'] = self.report
+            owner.report['native_commands' if not self.diagnostic else purpose + '_commands'] = self.report
 
         def checkpoint(self, **_):
             self.owner.check()
             require(time.monotonic() < self.limit, 'Command phase expired')
+            if self.diagnostic:
+                self.owner.diagnostic_usage()
+
+        def pump(self, p, record, handles):
+            super().pump(p, record, handles)
+            if self.diagnostic or record['id'] != 'ordinary-launch' or 'sample' in record:
+                return
+            now = self.ops.now()
+            if now - self.t0 - record['start'] < 90:
+                return
+            sample = record['sample'] = {'status': 'skipped', 'target_pid': p.pid,
+                'reason': 'unsafe ownership or insufficient original work time',
+                'observer_effect': 'sample briefly suspends the simctl child, not the app'}
+            # No other thread, SIGCHLD handler or reaper may release this PID.
+            # The synchronous nested command finishes before the next parent poll.
+            if (self.active.get(p.pid) is not p or p.returncode is not None or
+                    signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL or
+                    threading.current_thread() is not threading.main_thread() or
+                    threading.active_count() != 1 or
+                    self.t0 + record['work_deadline'] - now <= 13):
+                return
+            sample['last_poll_started'] = self.ops.now() - self.t0
+            sample['last_poll_result'] = p.poll()
+            sample['last_poll_finished'] = self.ops.now() - self.t0
+            if sample['last_poll_result'] is not None:
+                sample['reason'] = 'target already exited; no sampling'
+                return
+            self.owner.check()
+            if self.t0 + record['work_deadline'] - self.ops.now() <= 13:
+                sample['reason'] = 'poll consumed original sampling budget'
+                return
+            nested = self.owner.new_diagnostic_commands('launch-sample')
+            nested.limit = min(self.t0 + record['work_deadline'], self.ops.now() + 13)
+            path = self.owner.diagnostic_root() / 'simctl.sample.txt'
+            sample.update(status='attempted', file=str(path), started_seconds=self.ops.now() - self.t0)
+            try:
+                nested.command('owned-simctl-sample',
+                               ['/usr/bin/sample', str(p.pid), '1', '10', '-file', str(path)], 13)
+                sample['output'] = self.owner.diagnostic_file(path, 2 * MIB)
+                sample['status'] = 'collected'
+                sample.pop('reason', None)
+            except BaseException as error:
+                sample.update(status='unavailable', reason=repr(error))
+            finally:
+                sample['finished_seconds'] = self.ops.now() - self.t0
+            require(not nested.active and not nested.unknown_spawn, 'Sampler ownership unresolved')
+            require(self.ops.now() < self.t0 + record['work_deadline'], 'Command timeout')
+            self.checkpoint()
+
+        def stop(self, p, deadline, record):
+            if not self.diagnostic:
+                require(all(not item.active and not item.unknown_spawn
+                            for item in getattr(self.owner, 'diagnostic_commands', [])),
+                        'Sampler must close before parent poll/reap')
+            return super().stop(p, deadline, record)
     return Commands
 
 
@@ -162,6 +220,93 @@ class OrdinarySmoke:
         require(len(encoded) <= 16 * MIB, 'Record exceeds size limit')
         (self.out / name).write_bytes(encoded)
         return {'file': name, 'bytes': len(encoded), 'sha256': sha(encoded)}
+
+    def diagnostic_root(self):
+        root = self.out / 'diagnostics'
+        if not root.exists():
+            root.mkdir(mode=0o700)
+        require(root.is_dir() and root.resolve(strict=True) == root, 'Unsafe diagnostic directory')
+        return root
+
+    def diagnostic_usage(self):
+        # Only this new private output tree: no global log or process inventory.
+        pending, count, total = [self.diagnostic_root()], 0, 0
+        while pending:
+            self.check()
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    self.check()
+                    count += 1
+                    require(count <= 64, 'Diagnostic entry cap exceeded')
+                    mode = entry.stat(follow_symlinks=False)
+                    require(stat.S_ISDIR(mode.st_mode) or stat.S_ISREG(mode.st_mode),
+                            'Unsafe diagnostic entry')
+                    if stat.S_ISDIR(mode.st_mode):
+                        pending.append(Path(entry.path))
+                    else:
+                        total += mode.st_size
+                        require(total <= 8 * MIB, 'Diagnostic output cap exceeded')
+        return total
+
+    def diagnostic_file(self, path, maximum):
+        require(path.parent == self.diagnostic_root(), 'Unexpected diagnostic file path')
+        data = self.preparer.read_regular(path, maximum)
+        self.diagnostic_usage()
+        return {'file': str(path.relative_to(self.out)), 'bytes': len(data), 'sha256': sha(data)}
+
+    def new_diagnostic_commands(self, purpose):
+        commands = make_commands_class(self.qualification.processes)(self, purpose)
+        if not hasattr(self, 'diagnostic_commands'):
+            self.diagnostic_commands = []
+        self.diagnostic_commands.append(commands)
+        return commands
+
+    def observe_launch_failure(self):
+        observation = self.report['failure_observation'] = {'status': 'skipped', 'observations': [],
+            'interpretation': 'Diagnostic evidence only; never changes failed launch to success'}
+        if (self.interrupted or self.cleaning or self.commands.active or self.commands.unknown_spawn or
+                any(item.active or item.unknown_spawn for item in getattr(self, 'diagnostic_commands', [])) or
+                self.owned is None or self.baseline is None or self.owned in self.baseline or
+                'installed-before' not in self.report or self.work_deadline - time.monotonic() <= 23):
+            observation['reason'] = 'ownership, cancellation or original work budget does not admit observations'
+            return
+        commands = self.new_diagnostic_commands('failure')
+        commands.limit = min(self.work_deadline, time.monotonic() + 90)
+        observation.update(status='attempted', deadline_seconds=commands.limit - self.started)
+        path = self.diagnostic_root() / 'failure-screen.png'
+        start = datetime.fromisoformat(self.report['ordinary_launch_started_at_utc']).strftime('%Y-%m-%d %H:%M:%S%z')
+        end = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')
+        probes = [
+            ('failure-screenshot', ['xcrun', 'simctl', 'io', self.owned, 'screenshot', '--type=png', str(path)], 15),
+            ('failure-launch-services', ['xcrun', 'simctl', 'spawn', self.owned, 'launchctl', 'list'], 10),
+            ('failure-app-log', ['xcrun', 'simctl', 'spawn', self.owned, 'log', 'show', '--style', 'json',
+                '--no-pager', '--start', start, '--end', end, '--predicate',
+                'process == "Tripfolio" OR eventMessage CONTAINS[c] "com.4alvit.tripfolio"', '--info', '--debug'], 20),
+        ]
+        for label, argv, work in probes:
+            row = {'id': label, 'status': 'skipped'}
+            observation['observations'].append(row)
+            if (self.interrupted or commands.active or commands.unknown_spawn or
+                    commands.limit - time.monotonic() <= work + 8):
+                row['reason'] = 'original observation budget, cancellation or unresolved child'
+                break
+            try:
+                output = commands.command(label, argv, work + 8)
+                if label == 'failure-screenshot':
+                    require(self.preparer.read_regular(path, 4 * MIB).startswith(b'\x89PNG\r\n\x1a\n'),
+                            'Failure screenshot is not PNG')
+                    row['output'] = self.diagnostic_file(path, 4 * MIB)
+                elif label == 'failure-launch-services':
+                    matches = [line for line in output.splitlines()
+                        if re.search(r'(?<![A-Za-z0-9_.-])' + re.escape(APP_ID) + r'(?![A-Za-z0-9_.-])', line)]
+                    row['matching_services'] = [line[:1024] for line in matches[:32]]
+                    row['matching_services_truncated'] = len(matches) > 32 or any(len(line) > 1024 for line in matches[:32])
+                    row['interpretation'] = 'Matching service text only; no match does not prove app-process absence'
+                row['status'] = 'collected'
+            except BaseException as error:
+                row.update(status='unavailable', reason=repr(error))
+        observation['status'] = 'finished' if not commands.active and not commands.unknown_spawn else 'unresolved-child'
+        self.diagnostic_usage()
 
     def command(self, label, argv, seconds=30):
         return self.commands.command(label, [str(arg) for arg in argv], seconds + 8)
@@ -312,7 +457,12 @@ class OrdinarySmoke:
         self.launch_count += 1
         # One cold ordinary launch gets a finite 120-second command window.
         # This consumes the existing work envelope; there is no retry or reset.
-        output = self.command('ordinary-launch', ['xcrun', 'simctl', 'launch', self.owned, APP_ID], 120).strip()
+        self.report['ordinary_launch_started_at_utc'] = datetime.now(timezone.utc).isoformat()
+        try:
+            output = self.command('ordinary-launch', ['xcrun', 'simctl', 'launch', self.owned, APP_ID], 120).strip()
+        except BaseException:
+            self.report['ordinary_launch_failed'] = True
+            raise
         match = re.fullmatch(re.escape(APP_ID) + r': ([1-9][0-9]*)', output)
         require(match is not None, 'Unexpected launch result')
         launched = time.monotonic()
@@ -355,6 +505,9 @@ class OrdinarySmoke:
         self.commands.limit = self.cleanup_deadline
         require(not self.commands.active and not self.commands.unknown_spawn,
                 'Unresolved owned process; further native cleanup withheld')
+        require(all(not item.active and not item.unknown_spawn
+                    for item in getattr(self, 'diagnostic_commands', [])),
+                'Unresolved diagnostic process; further native cleanup withheld')
         if self.baseline is None:
             self.report['cleanup_verified'] = True  # No create was attempted.
             return
@@ -383,6 +536,12 @@ class OrdinarySmoke:
             self.capture()
         except BaseException as error:
             self.report['errors'].append(repr(error))
+            if self.report.get('ordinary_launch_failed'):
+                self.report['status'] = 'failed'
+                try:
+                    self.observe_launch_failure()
+                except BaseException as diagnostic_error:
+                    self.report['failure_observation_error'] = repr(diagnostic_error)
         finally:
             try:
                 self.cleanup()
