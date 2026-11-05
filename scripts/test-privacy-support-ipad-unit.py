@@ -977,6 +977,66 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Expected only TripfolioUITests target'):driver.discover_products()
         self.assertEqual(world.processes,[])
 
+    def generated_products_fixture(self):
+        driver,world=self.driver()
+        products=driver.derived/'Build/Products';products.mkdir(parents=True)
+        aut=products/'Tripfolio.app';aut.mkdir()
+        runner=products/'TripfolioUITests-Runner.app';runner.mkdir()
+        bundle=runner/'PlugIns/TripfolioUITests.xctest';bundle.mkdir(parents=True)
+        for path,identifier in [(aut,ipad.BUNDLE_ID),(runner,ipad.RUNNER_BUNDLE_ID)]:
+            (path/'Info.plist').write_bytes(ipad.plistlib.dumps({'CFBundleIdentifier':identifier}))
+        target={'BlueprintName':'TripfolioUITests','IsUITestBundle':True,
+                'UITargetAppPath':'__TESTROOT__/Tripfolio.app',
+                'TestHostPath':'__TESTROOT__/TripfolioUITests-Runner.app',
+                'TestBundlePath':'__TESTHOST__/PlugIns/TripfolioUITests.xctest'}
+        def write_target(value):
+            data={'__xctestrun_metadata__':{'FormatVersion':2},
+                  'TestConfigurations':[{'TestTargets':[value]}]}
+            (products/'Synthetic.xctestrun').write_bytes(ipad.plistlib.dumps(data))
+        expected={'aut':aut,'runner':runner,'test_bundle':bundle,
+                  'xctestrun':products/'Synthetic.xctestrun'}
+        return driver,world,products,target,write_target,expected
+
+    def test_generated_products_expand_template_once_under_literal_parent_names(self):
+        original=self.root
+        try:
+            for name in ['ordinary', 'literal__parent', 'literal__TESTROOT__parent',
+                         'literal__TESTHOST__parent', 'both__TESTROOT____TESTHOST__']:
+                self.root=original/name;self.root.mkdir()
+                driver,world,_,target,write_target,expected=self.generated_products_fixture()
+                for bundle in ['__TESTHOST__/PlugIns/TripfolioUITests.xctest',
+                               '__TESTROOT__/TripfolioUITests-Runner.app/PlugIns/TripfolioUITests.xctest']:
+                    with self.subTest(parent=name,bundle=bundle):
+                        write_target(dict(target,TestBundlePath=bundle));driver.discover_products()
+                        self.assertEqual(driver.products,expected)
+                        self.assertEqual(driver.report['product_bundle_identifiers'],
+                                         {'aut':ipad.BUNDLE_ID,'runner':ipad.RUNNER_BUNDLE_ID})
+                self.assertEqual(world.processes,[])
+        finally:
+            self.root=original
+
+    def test_generated_products_reject_unresolved_missing_and_escaping_templates(self):
+        driver,world,products,target,write_target,expected=self.generated_products_fixture()
+        outside=products.parent/'outside';outside.mkdir()
+        (products/'escape').symlink_to(outside,target_is_directory=True)
+        write_target(target);driver.discover_products()
+        self.assertEqual(driver.products,expected)
+        for field in ['UITargetAppPath','TestHostPath','TestBundlePath']:
+            for value in ['__UNKNOWN__/item','__TESTROOT__/__UNKNOWN__/item',
+                          '__TESTROOT__/literal__item','__TESTROOT',
+                          '__TESTROOT__/missing','__TESTROOT__/../outside',
+                          '__TESTROOT__/escape',str(outside)]:
+                with self.subTest(field=field,value=value):
+                    write_target(dict(target,**{field:value}))
+                    with self.assertRaisesRegex(RuntimeError,'Unresolved/outside generated product path'):
+                        driver.discover_products()
+        for field in ['UITargetAppPath','TestHostPath']:
+            with self.subTest(field=field,value='unavailable-host'):
+                write_target(dict(target,**{field:'__TESTHOST__/PlugIns/TripfolioUITests.xctest'}))
+                with self.assertRaisesRegex(RuntimeError,'Unresolved/outside generated product path'):
+                    driver.discover_products()
+        self.assertEqual(world.processes,[])
+
     def test_ipad_plan_preserves_options_and_default_scheme_keeps_all_test_targets(self):
         import xml.etree.ElementTree as xml
         default=json.loads((HERE.parent/'Tripfolio.xctestplan').read_text())
