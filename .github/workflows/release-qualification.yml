@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   anchor:
-    if: github.ref == 'refs/heads/diagnostic/purchase-action-context'
+    if: github.ref == 'refs/heads/diagnostic/purchase-action-context' && (inputs.runner == 'macos-15' || inputs.runner == 'macos-15-intel')
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
     env:

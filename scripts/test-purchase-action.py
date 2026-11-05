@@ -32,7 +32,7 @@ class Guards(unittest.TestCase):
 
     def test_single_case_workflow_and_sdk_preflight(self):
         workflow=(HERE.parent/'.github/workflows/release-qualification.yml').read_text()
-        self.assertIn("if: github.ref == 'refs/heads/diagnostic/purchase-action-context'",workflow)
+        self.assertIn("if: github.ref == 'refs/heads/diagnostic/purchase-action-context' && (inputs.runner == 'macos-15' || inputs.runner == 'macos-15-intel')",workflow)
         self.assertNotIn('diagnostic/purchase-scene',workflow)
         self.assertIn('workflow_dispatch:',workflow)
         self.assertNotIn('push:',workflow)
