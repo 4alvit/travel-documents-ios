@@ -8,11 +8,20 @@ or payment acceptance.
 
 ## Profile and dependencies
 
-The job uses the standard `macos-15-intel` runner class after repeated hosted
-ARM runner acquisition failures. The reviewed profile requires the actual
-runner context to report `github-hosted` and `X64`, and Python to observe
-`x86_64`. Image OS/version are recorded. The profile is a
-requirement checked in the job, not evidence that the future host satisfies it.
+The CI job explicitly uses `--profile hosted-arm-v1` on standard `macos-15`.
+Its checked-in `recovery-hosted-arm-profile.json` requires `github-hosted`,
+`ARM64` and Python's `arm64`. The original `recovery-hosted-profile.json` and
+CLI default remain `hosted-intel-v1`, requiring `macos-15-intel`, `X64` and
+`x86_64`. The CLI accepts only these two named profiles, never a caller-supplied
+path. Crossed architecture/profile fields fail before work. Image OS/version
+are recorded; configuration is not evidence that a future host satisfies it.
+
+Earlier ARM acquisition failures motivated Intel. On commit `c1ed0046`,
+Core/Phone ARM jobs passed in [attempt 1](https://github.com/4alvit/travel-documents-ios/actions/runs/42012387988/attempts/1),
+while the prior Intel Recovery job in [attempt 2](https://github.com/4alvit/travel-documents-ios/actions/runs/42012387988/attempts/2)
+failed during XCTest accessibility initialization before an authored case.
+These observations motivate a bounded ARM qualification; they do not establish
+architecture as the failure's cause or predict a passing result.
 
 Only the image's already selected Xcode is used. The job records and freezes its
 canonical developer directory, version/build, Simulator SDK version/path and
@@ -93,9 +102,10 @@ window and 120-second owned cleanup reserve, including a final 10-second receipt
 reserve. Its prepare command/case caps remain 780/180 seconds, and export and
 restore each retain 600/300 seconds.
 
-The hosted Intel adapter selects the immutable `hosted-intel-v1` profile before
-creating output or deriving deadlines from the original entry clock. It requires
-the exact `macos-15-intel` / `X64` / `x86_64` hosted tuple. Unknown profiles,
+The hosted adapter selects immutable `hosted-arm-v1` or `hosted-intel-v1`
+before creating output or deriving deadlines from the original entry clock.
+Each requires its exact runner label, architecture and host-machine tuple.
+Both have identical numeric bounds; the portable default is unchanged. Unknown profiles,
 crossed host identities and changed timing policy are rejected before work.
 The selected profile cannot be replaced during the run. It allows 5,340 seconds
 total: 4,980 for work and 360 for cleanup. Prepare allows 1,200 command
@@ -103,7 +113,9 @@ seconds and 300 native case seconds; export and restore each allow 900 command
 seconds and 600 native case seconds. Every command includes the unchanged
 eight-second stop reserve and is clipped to the original work deadline. The
 native allowances require an exact profile token, the existing Recovery opt-in,
-matching phase and canonical folder identity in a Debug Intel Simulator build.
+matching phase and canonical folder identity in the corresponding Debug
+Simulator architecture. An ARM token fails in an Intel build and vice versa;
+both fail in Release and on devices.
 Without that token the standalone native allowances are unchanged.
 
 Only hosted cleanup gives each owned shutdown/delete action 90 seconds and
@@ -149,8 +161,9 @@ will complete every boot. The additional 300 seconds are included in the work
 and outer budgets above. Standalone boot remains 120 seconds, discovery remains
 300 seconds, and owned cleanup and all resource checks are unchanged.
 The immutable hosted Intel profile allows up to 60 seconds for one complete
-resource scan during an exact active owned boot wait; the portable profile
-retains 15 seconds. Two Intel attempts exceeded 15 seconds before native tests,
+resource scan during an exact active owned boot wait and its verified successful
+finalization; the portable profile retains 15 seconds while active and five
+seconds during finalization. Two Intel attempts exceeded 15 seconds before native tests,
 including one measured 25.86-second file-stat operation span. These spans include
 scheduling and do not establish the underlying cause. The scan still shares the
 original 600-second hosted boot command, its eight-second stop reserve and the global
@@ -226,7 +239,7 @@ pair. More and New Folder are still tapped once, and no other wait or outer
 case/host cap increases. This is a polling allowance: an in-flight synchronous XCTest query can overrun it under the existing
 wait semantics. It does not guarantee remote Files readiness.
 
-The already validated `hosted-intel-v1` Recovery opt-in selects 60 seconds for
+Either already validated hosted Recovery opt-in selects 60 seconds for
 this observation only. In run 41899787568, the first bound picker/application
 pair included the supported inline editor and keyboard introduction, but its
 live binding finished at least 42 seconds after the observation began. The
@@ -274,7 +287,7 @@ and never requests folder creation. Ordinary UI cases and actual Recovery
 export/restore still use the production Free gate, disclosure, Save-to-Files
 and import/replacement paths.
 
-After the single Save tap, the validated `hosted-intel-v1` export case allows
+After the single Save tap, either validated hosted export profile allows
 60 seconds for the picker to disappear and Settings to be present; other callers
 retain 15 seconds. In run 41928330972, the retained failure image and accessibility
 snapshot still showed the owned destination with an in-progress indicator. That
@@ -452,9 +465,15 @@ can pass; partial testcase progress is not acceptance.
 One complete resource sample normally has a fixed five-second cooperative
 allowance. During an unfinished `phase-prepare`, `phase-export` or `phase-restore` command,
 including its admission and finalization, the explicit ceiling is thirty
-seconds. An active owned `boot-ready` process waiting for
+seconds. An ordinary active owned `boot-ready` process waiting for
 `simctl bootstatus <owned UUID> -b` retains its separate fifteen-second ceiling;
-its admission and post-process samples keep five seconds. Every sample is clipped to the overall work limit, the actual command
+its admission and ordinary post-process samples keep five seconds. Only the
+validated hosted profiles retain their existing 60-second allowance for
+final accounting of that exact owned bootstatus command after verified success.
+A hosted attempt completed boot but failed a 6.90-second final sample because
+the closed process no longer qualified for the active allowance. This adjustment
+does not establish why that sample was slow or guarantee subsequent native work.
+Every sample is clipped to the overall work limit, the actual command
 owner's limit and its original work deadline, preserving the stop reserve
 during admission and execution. After a zero exit status, verified leader/group
 closure, successful pipe and log closure, and successful stdout read, the
@@ -797,14 +816,15 @@ and each iPad locale has 95 minutes, at most 521 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. Core/purchase and phone guidance now
-request standard `macos-15` ARM runners; both iPad locales and Recovery retain
-`macos-15-intel`. All use Xcode 26.2 and SDK-compatible runtime selection.
+request standard `macos-15` ARM runners, as does explicit hosted ARM Recovery;
+both iPad locales retain `macos-15-intel`. All use Xcode 26.2 and SDK-compatible runtime selection.
 The earlier all-Intel configuration followed ARM runner acquisition failures.
 New ARM allocation and toolchain observations justify another bounded run,
 not a claim that ARM resolves the observed native failures. ARM Core/Phone use
 their existing ordinary test and preparation limits without Intel timing tokens;
 the enclosing workflow limits above are retained. All cohorts still require
-fresh source-bound evidence. Recovery's exact Intel profile is unchanged.
+fresh source-bound evidence. Recovery's explicit ARM profile preserves every
+numeric bound of its retained Intel profile; its default CLI stays Intel.
 There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
 runner change requires fresh runtime evidence and does not validate old failures
@@ -1014,7 +1034,7 @@ borrowed. An ended or absent primary, unrelated report/parent or missing owned
 process cannot inherit restart permission.
 
 
-The hosted Intel Recovery restore phase allows 60 seconds for observing the
+Both validated hosted Recovery profiles allow 60 seconds for observing the
 rendered original PDF; the default observation remains 40 seconds. This selection
 follows the existing validated Recovery profile. One deadline covers the existing
 preview queries, fresh screenshot and synchronous Vision recognition. A screenshot
@@ -1040,7 +1060,7 @@ success or replace the subsequent host comparison of restored catalog and bytes.
 
 The native folder-name entry keeps one `typeText` action and then observes the
 result for at most 60 seconds only in the native-folder preparation branch after
-validation of the hosted Intel Recovery profile. Ordinary Recovery and dedicated
+validation of either hosted Recovery profile. Ordinary Recovery and dedicated
 Batch preparation retain 15 seconds. Each observation checks the foreground app and
 uses a separate frozen Files picker snapshot and application snapshot; the app
 snapshot alone can omit the remote Files subtree. Exact ownership, ancestry and
@@ -1064,3 +1084,14 @@ this shared helper and does not change either caller's native allowance,
 the generic UI wait, Recovery command/work/cleanup limits or workflow timeouts.
 It does not establish whether the observed unchanged default name was caused by
 delayed processing or an input event that had no effect.
+
+### Hosted architecture and accounting invariants
+
+Both explicitly admitted hosted profiles retain the 60-second boot accounting
+window, including final accounting only after the same verified successful
+owned boot process has been closed. Active native-phase accounting remains
+30 seconds, ordinary scans five seconds, and all traversal, byte, entry, depth,
+command, work and cleanup limits are unchanged. A copied profile or receipt-only
+success claim cannot select hosted finalization. The three prepare/export/restore
+cases and their assertions are unchanged; native evidence must identify the
+actual architecture. Dedicated Batch keeps its ordinary 15-second text policy.

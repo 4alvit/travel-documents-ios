@@ -14,15 +14,24 @@ import stat
 import sys
 import time
 import uuid
+from types import MappingProxyType
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'a33e0ce057f9cb3981a492a441f10f4d4de38f3b26c10cb6584f5e09ed457e41'
+CORE_SHA = '350adf246638cbcc48d846743c99d4b903f26f0f0cbff2a2184f124b1e4dbe16'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
 core = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core)
 require = core.require
+PROFILE_FILES = MappingProxyType({
+    'hosted-intel-v1': HERE/'recovery-hosted-profile.json',
+    'hosted-arm-v1': HERE/'recovery-hosted-arm-profile.json',
+})
+PROFILE_HOSTS = MappingProxyType({
+    'hosted-intel-v1': ('macos-15-intel', 'X64', 'x86_64', 'github-hosted'),
+    'hosted-arm-v1': ('macos-15', 'ARM64', 'arm64', 'github-hosted'),
+})
 
 
 def job_context(env, profile, machine):
@@ -54,12 +63,13 @@ def select_execution_profile(profile, job, machine):
             'device_type','case_attempts','execution_profile','total_seconds','cleanup_seconds','prep_seconds',
             'minimum_admission_free_GiB','minimum_work_free_GiB','maximum_output_GiB','maximum_xcresult_GiB','project'},
             'Unexpected hosted profile fields')
+    require(profile['execution_profile'] in PROFILE_HOSTS, 'Unexpected hosted execution profile')
+    label, architecture, host_machine, environment = PROFILE_HOSTS[profile['execution_profile']]
     require((profile['runner_label'], profile['runner_arch'], profile['machine'], profile['runner_environment'],
              job['TRIPDOCKET_RUNNER_LABEL'], job['TRIPDOCKET_RUNNER_ARCH'],
              job['TRIPDOCKET_RUNNER_ENVIRONMENT'], machine)
-            == ('macos-15-intel', 'X64', 'x86_64', 'github-hosted', 'macos-15-intel', 'X64', 'github-hosted', 'x86_64'),
-            'Hosted Recovery execution profile requires the exact Intel host')
-    require(profile['execution_profile'] == 'hosted-intel-v1', 'Unexpected hosted execution profile')
+            == (label, architecture, host_machine, environment, label, architecture, environment, host_machine),
+            'Hosted Recovery execution profile requires its exact host')
     selected = core.execution_profile(profile['execution_profile'])
     require(type(profile['total_seconds']) is int and type(profile['cleanup_seconds']) is int
             and (profile['total_seconds'], profile['cleanup_seconds'])
@@ -629,11 +639,13 @@ class HostedRecovery(core.Recovery):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--run',action='store_true')
+    parser.add_argument('--profile', choices=tuple(PROFILE_FILES), default='hosted-intel-v1')
     args=parser.parse_args(argv)
     if not args.run:
         print(json.dumps({'status':'NOT_RUN','native_calls':0}));return 0
     try:
-        started=time.monotonic();profile=core.json_file(HERE/'recovery-hosted-profile.json')
+        started=time.monotonic();profile=core.json_file(PROFILE_FILES[args.profile])
+        require(profile['execution_profile'] == args.profile, 'Selected profile identity changed')
         require(sys.version_info[:2]>=tuple(profile['python_minimum']),'Python version unsupported')
         machine=platform.machine()
         job=job_context(os.environ,profile,machine)
