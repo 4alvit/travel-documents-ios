@@ -1027,6 +1027,8 @@ private final class PurchasePresentationContext {
 
     func purchase(_ product: Product) async throws -> Product.PurchaseResult {
         #if DEBUG && targetEnvironment(simulator)
+        let sceneControl = try Self.sceneControlMode(arguments: ProcessInfo.processInfo.arguments)
+        if let sceneControl { print("purchase-scene mode=\(sceneControl.rawValue)") }
         tracePresentation(.entry)
         defer { tracePresentation(.returned) }
         #endif
@@ -1043,6 +1045,11 @@ private final class PurchasePresentationContext {
             }
             ancestor = current.parent
         }
+        #if DEBUG && targetEnvironment(simulator)
+        if sceneControl == .scene {
+            return try await product.purchase(confirmIn: scene)
+        }
+        #endif
         if #available(iOS 18.2, *) {
             return try await product.purchase(confirmIn: controller)
         }
@@ -1050,6 +1057,20 @@ private final class PurchasePresentationContext {
     }
 
     #if DEBUG && targetEnvironment(simulator)
+    enum SceneControlMode: String { case child, scene }
+
+    static func sceneControlMode(arguments: [String]) throws -> SceneControlMode? {
+        let family = arguments.filter { $0.hasPrefix("--ui-testing-purchase-scene") }
+        guard !family.isEmpty else { return nil }
+        let prefix = "--ui-testing-purchase-scene="
+        guard family.count == 1, family[0].hasPrefix(prefix),
+              arguments.filter({ $0 == "--ui-testing-purchase-diagnostics" }).count == 1,
+              let mode = SceneControlMode(rawValue: String(family[0].dropFirst(prefix.count))) else {
+            throw PresentationError.unavailable
+        }
+        return mode
+    }
+
     private enum ObservationPoint: String { case entry, returned }
 
     /// Passive, bounded observations of this screen only. Never record class

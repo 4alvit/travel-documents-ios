@@ -12,7 +12,8 @@ final class PurchaseUITests: XCTestCase {
 
     func testCancellingSystemPurchaseSheetKeepsFreeAccess() async throws {
         let hostedCoreTiming = try useHostedCoreTiming()
-        if hostedCoreTiming { executionTimeAllowance = 360 }
+        let sceneControl = try diagnosticSceneControl()
+        if hostedCoreTiming || sceneControl != nil { executionTimeAllowance = 360 }
         continueAfterFailure = false
         let app = XCUIApplication()
         app.terminate()
@@ -26,6 +27,13 @@ final class PurchaseUITests: XCTestCase {
         recordCancellationSessionSettings(session, point: .beforeLaunch)
 
         app.launchArguments = ["--ui-testing-unlocked", "--ui-testing-reset", "--demo", "--ui-testing-purchase-diagnostics"]
+        if let sceneControl {
+            app.launchArguments.append("--ui-testing-purchase-scene=\(sceneControl)")
+            let selection = XCTAttachment(string: "purchase-scene-test mode=\(sceneControl)")
+            selection.name = "Diagnostic purchase scene selection"
+            selection.lifetime = .keepAlways
+            add(selection)
+        }
         app.launch()
         try await require("The synthetic demo trip did not load", app: app, springboard: springboard) {
             app.staticTexts["Coast weekend"].exists
@@ -52,7 +60,7 @@ final class PurchaseUITests: XCTestCase {
         do {
             guard try await waitForSystemPurchaseSheet(
                 app: app, springboard: springboard,
-                timeout: hostedCoreTiming ? .seconds(120) : .seconds(15)
+                timeout: hostedCoreTiming || sceneControl != nil ? .seconds(120) : .seconds(15)
             ) else {
                 attachDiagnostics(app: app, springboard: springboard, name: "No Xcode payment sheet appeared")
                 throw PurchaseTestError(message: "No Xcode payment sheet appeared")
@@ -110,6 +118,26 @@ final class PurchaseUITests: XCTestCase {
 
     func testPurchaseFailureAlertWithoutDiagnosticFlag() async throws {
         try await verifyPurchaseFailureAlert(russian: false, diagnostics: false)
+    }
+
+    private func diagnosticSceneControl() throws -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let key = "TRIPDOCKET_PURCHASE_SCENE_CONTROL"
+        guard let mode = environment[key] else { return nil }
+        guard ["child", "scene"].contains(mode),
+              environment["TRIPDOCKET_CORE_TIMING"] == nil,
+              environment["TRIPDOCKET_PHONE_TIMING"] == nil,
+              environment["TRIPDOCKET_IPAD_TIMING"] == nil else {
+            throw PurchaseTestError(message: "Invalid or conflicting diagnostic scene control")
+        }
+        #if DEBUG && targetEnvironment(simulator) && (arch(arm64) || arch(x86_64))
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw PurchaseTestError(message: "Diagnostic scene control requires an iPhone Simulator")
+        }
+        return mode
+        #else
+        throw PurchaseTestError(message: "Diagnostic scene control requires a Debug Simulator build")
+        #endif
     }
 
     private func failureAlertExecutionTimeAllowance() throws -> TimeInterval {
