@@ -1749,7 +1749,7 @@ final class BatchImportUITests: XCTestCase {
         try await reveal(restore, app: app, navigation: "Settings")
         try check(restore.isEnabled, app: app, "Free backup restore is disabled")
         restore.tap()
-        let picker = try await openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)
+        let picker = try await openLocalFilesFolder(recoveryFolder, app: app, initialNavigationTimeout: .seconds(30), retryRecoveryFolderEntry: true)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         // Folder was created empty and host-verified to contain exactly this
         // one UI-exported file. Match a complete display name, never a prefix.
