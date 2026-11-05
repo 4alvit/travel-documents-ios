@@ -51,7 +51,7 @@ final class PurchaseUITests: XCTestCase {
         // an Apple Account login or a Sandbox/production payment sheet.
         do {
             guard try await waitForSystemPurchaseSheet(
-                app: app, springboard: springboard,
+                springboard: springboard,
                 timeout: hostedCoreTiming ? .seconds(120) : .seconds(15)
             ) else {
                 attachDiagnostics(app: app, springboard: springboard, name: "No Xcode payment sheet appeared")
@@ -64,7 +64,7 @@ final class PurchaseUITests: XCTestCase {
             recordFullPurchaseState(app)
             throw error
         }
-        let paymentSurface = xcodeMarker(in: app).exists ? app : springboard
+        let paymentSurface = springboard
         var cancel: XCUIElement?
         try await require("The Xcode payment sheet has no accessible Cancel or Close button", app: app, springboard: springboard) {
             cancel = paymentSurface.buttons.matching(NSPredicate(
@@ -453,18 +453,14 @@ final class PurchaseUITests: XCTestCase {
     }
 
     private func waitForSystemPurchaseSheet(
-        app: XCUIApplication, springboard: XCUIApplication, timeout: Duration
+        springboard: XCUIApplication, timeout: Duration
     ) async throws -> Bool {
+        // The supported Xcode/iOS 26.2 payment sheet belongs to SpringBoard.
+        // Querying the covered app can consume this entire window before
+        // the system sheet is observed.
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while true {
-            try Task.checkCancellation()
-            guard clock.now < deadline else { return false }
-            let inApp = xcodeMarker(in: app).exists
-            try Task.checkCancellation()
-            guard clock.now < deadline else { return false }
-            if inApp { return true }
-
             try Task.checkCancellation()
             guard clock.now < deadline else { return false }
             let inSpringboard = xcodeMarker(in: springboard).exists
