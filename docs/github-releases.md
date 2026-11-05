@@ -501,7 +501,8 @@ profile before a device is created. Two Intel runs exhausted the former
 180-second boot wait during data migration, while another completed in
 118.663 seconds. The added headroom does not establish that delayed boots will
 finish. It preserves exact runtime selection, full-case admission
-(1,487 seconds on ARM, 1,517 on default Intel, 2,117 for either hosted locale) and separate cleanup; it never resets a clock or retries a boot.
+(1,487 seconds on ARM, 1,517 on default Intel, 2,117 for hosted English and 2,417
+for hosted Russian) and separate cleanup; it never resets a clock or retries a boot.
 A later [Intel run](https://github.com/4alvit/travel-documents-ios/actions/runs/41884508287/job/126784418116)
 completed boot in 312.7 seconds but exhausted the 480-second fresh-build limit
 before any test. Its final log showed asset catalog compilation, not a compiler
@@ -516,8 +517,9 @@ An English iPad case later reached its480-second native limit during retained
 second-cancellation evidence; its raw log continued through fourth Cancel near660
 seconds but the native result remained failed, without final Trips evidence.
 Only the explicit `--hosted-intel-timing` CI option selects the hosted iPad
-native allowances: English at standard type and Russian at maximum type use
-1,200 seconds with a 1,500-second command. The producer
+native allowances: English at standard type uses 1,200 seconds with a
+1,500-second command; Russian at maximum type uses 1,500 seconds with a
+1,800-second command. The producer
 requires the exact GitHub-hosted macOS/X64 context. Separate
 `hosted-intel-ipad-en-v1` and `hosted-intel-ipad-ru-v1` tokens require the matching
 locale/type arguments in a Debug x86_64 iPad consumer. The token goes only to the
@@ -528,18 +530,26 @@ The Russian case in run `41928330972` reached its 480-second limit during the
 first confirmation's public-support warning. A historical complete ARM run used
 the same functional UI implementation and took 316.8 seconds. Scaling its
 remaining work by the current first-cycle duration gives an illustrative 947.8
-seconds, not a measured completion or prediction of a pass. The 1,200-second
-Russian allowance provides finite headroom without removing captures or checks.
+seconds, not a measured completion or prediction of a pass. This originally
+motivated a 1,200-second Russian allowance without removing captures or checks.
 The same run later reported an English pass in 895.949 seconds, just 4.051 below
-its former 900-second limit. English receives the same finite margin. Its artifact
+its former 900-second limit. English receives a 1,200-second allowance. Its artifact
 upload failed with `ENOTFOUND`; the log does not replace independent native,
 visual or cleanup evidence, and the timing change does not repair upload failures.
 
-Full admission is 2,117 seconds for either hosted locale,
-including preparation, the command's separate 7-second stop reserve, and 238
-seconds of post-validation. The original 4,500/360 work/cleanup windows and
-83/95-minute step/job remain fixed. Summed phase maxima for either hosted locale reach 4,743
-seconds, so late preparation must fail admission; the larger command does not
+The later Russian case in run `41940543243` reached its final accessibility
+capture at 1,196.13 seconds, then exceeded the 1,200-second limit during teardown.
+Its raw finish at 1,207.926 seconds and command exit 65 after 1,490.126 seconds
+remain failed evidence. A prior pass with the same functional source took
+981.964 seconds. The additional Russian margin addresses this observed variation
+without predicting that a future run will pass.
+
+Full admission is 2,117 seconds for hosted English and 2,417 for hosted Russian,
+including 372 seconds of preparation, the selected 1,500/1,800-second command,
+its separate 7-second stop reserve, and 238 seconds of post-validation.
+The original 4,500/360 work/cleanup windows and 83/95-minute step/job remain fixed.
+Summed phase maxima reach 4,743 seconds for English and 5,043 for Russian, so late
+preparation must fail admission; the larger command does not
 extend the original deadline or borrow cleanup time. All 24 text checks, four
 Cancels, zero Open actions, final Free/Trips navigation and original-evidence
 checks remain mandatory.

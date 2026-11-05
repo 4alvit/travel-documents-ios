@@ -70,7 +70,7 @@ final class PrivacySupportUITests: XCTestCase {
         // Runs without an iPad opt-in retain their existing Phone/default allowances.
         let hostedIPad = try useHostedIPadTiming(russian: russian, maximumType: maximumType)
         let hostedPhone = try useHostedPhoneTiming()
-        executionTimeAllowance = hostedIPad ? 1200 : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))
+        executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) : (russian && maximumType ? 600 : (hostedPhone ? 720 : 480))
         continueAfterFailure = false
         let copy = Copy(russian: russian)
         let app = XCUIApplication()
