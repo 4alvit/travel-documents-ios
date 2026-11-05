@@ -159,7 +159,7 @@ class SeedGuards(unittest.TestCase):
             self.assertNotIn(forbidden,case)
         self.assertLess(case.index("saved.count == 0"),case.index("app.state == .notRunning"))
 
-    def test_only_seed_initial_folder_navigation_gets_the_larger_polling_allowance(self):
+    def test_seed_and_restore_initial_folder_navigation_get_the_larger_polling_allowance(self):
         seed = UI[UI.index("    func testNativeSaveSeedsBothSyntheticOriginals()"):
                   UI.index("    private func waitForNativeSeedExport(")]
         route = UI[UI.index("    private func openLocalFilesFolder("):
@@ -167,7 +167,7 @@ class SeedGuards(unittest.TestCase):
         call = "openLocalFilesFolder(folder, app: app, initialNavigationTimeout: .seconds(30))"
         self.assertEqual(UI.count(call), 1)
         self.assertIn(call, seed)
-        self.assertEqual(UI.count("initialNavigationTimeout: .seconds(30)"), 1)
+        self.assertEqual(UI.count("initialNavigationTimeout: .seconds(30)"), 2)
         self.assertIn("initialNavigationTimeout: Duration = .seconds(15)", route)
         self.assertEqual(route.count("timeout: initialNavigationTimeout"), 1)
         initial, rest = route.split('        let pickers =', 1)

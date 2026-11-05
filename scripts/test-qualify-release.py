@@ -312,7 +312,7 @@ class Guards(unittest.TestCase):
         capture=workflow.split("      - name: Capture selected suite for review\n",1)[1].split("      - name:",1)[0]
         for declaration in ("QUALIFICATION_RUNNER: ${{ inputs.runner || 'macos-15' }}", "QUALIFICATION_RUNNER_ARCH: ${{ runner.arch }}"):
             self.assertIn(declaration,capture)
-        self.assertIn("    timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 65 || 55 }}",workflow)
+        self.assertIn("    timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 68 || 58 }}",workflow)
         self.assertIn("        timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 54 || 44 }}",capture)
 
     def test_batch_order_must_match_the_original_bounded_log(self):

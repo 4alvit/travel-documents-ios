@@ -3495,7 +3495,7 @@ class RestoreFolderNavigation(unittest.TestCase):
     def test_only_restore_explicitly_opts_in_and_original_actions_remain(self):
         self.assertEqual(UI.count('retryRecoveryFolderEntry: true'), 1)
         restore = UI[UI.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal()'):UI.index('    private func isRecoveryFolder(')]
-        self.assertIn('openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)', restore)
+        self.assertIn('openLocalFilesFolder(recoveryFolder, app: app, initialNavigationTimeout: .seconds(30), retryRecoveryFolderEntry: true)', restore)
         self.assertIn('let recoveryFolder = try recoveryConfiguration(phase: "restore")', restore)
         self.assertIn('retryRecoveryFolderEntry: Bool = false', UI)
 
