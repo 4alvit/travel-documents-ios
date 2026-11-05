@@ -540,6 +540,7 @@ final class World {
     var events: [String] = []
     var waitSeconds: [Int64] = []
     var folderObservationSeconds: [Int64] = []
+    var textObservationSeconds: [Int64] = []
     let scenario: String
     init(_ scenario: String) {
         self.scenario = scenario
@@ -681,9 +682,10 @@ final class Harness {
         return Element(world, "picker")
     }
     func createNativeEmptyFilesFolder(_ app: XCUIApplication, picker: Element, ownedFolder: String,
-                                     initialObservationTimeout: Duration) async throws {
+                                     initialObservationTimeout: Duration, textCompletionTimeout: Duration) async throws {
         precondition(picker.kind == "picker" && ownedFolder == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc")
         world.folderObservationSeconds.append(initialObservationTimeout.components.seconds)
+        world.textObservationSeconds.append(textCompletionTimeout.components.seconds)
         world.events.append("create")
         if world.scenario == "saved-at-create" { world.saved = 1 }
         if world.scenario == "failed-at-create" { world.failed = true }
@@ -701,6 +703,7 @@ print(String(data: try JSONEncoder().encode(["status": [status], "events": world
                                             "arguments": app.launchArguments,
                                             "presentationElapsed": [String(world.presentationElapsed)],
                                             "folderObservationSeconds": world.folderObservationSeconds.map(String.init),
+                                            "textObservationSeconds": world.textObservationSeconds.map(String.init),
                                             "waitSeconds": world.waitSeconds.map(String.init)]), encoding: .utf8)!)
 '''
 
@@ -715,6 +718,8 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         branch = prepare.split('        if createFolder {', 1)[1].split('        } else {', 1)[0]
         start = source.index('    private static func recoveryNativeSourceArguments(')
         helper = source[start:source.index('    // Opt-in prepare/export/restore phases.', start)]
+        selector_start = source.index('    private static func recoveryFolderTextObservationTimeout(')
+        helper += source[selector_start:source.index('    private static func observeNativeFolderTextCompletion(', selector_start)]
         fixture = DIRECT_RECOVERY_FIXTURE.replace('    // ACTUAL_ARGUMENT_HELPER', helper).replace('        // ACTUAL_BRANCH', branch)
         root = Path(cls.directory.name)
         path = root / 'DirectRecovery.swift'
@@ -745,11 +750,13 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
         self.assertEqual(len(value['arguments']), 4)
         self.assertEqual(value['folderObservationSeconds'], ['30'])
+        self.assertEqual(value['textObservationSeconds'], ['15'])
 
     def test_validated_hosted_profile_selects_only_folder_observation_window(self):
         value = self.probe('ready', 'hosted-intel-v1')
         self.assertEqual(value['status'], ['passed'])
         self.assertEqual(value['folderObservationSeconds'], ['60'])
+        self.assertEqual(value['textObservationSeconds'], ['60'])
         self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'root', 'create', 'capture'])
         self.assertEqual(value['waitSeconds'], ['15'])
 

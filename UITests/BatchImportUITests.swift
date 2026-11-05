@@ -556,6 +556,9 @@ final class BatchImportUITests: XCTestCase {
             // recoveryConfiguration already validated the hosted Intel opt-in.
             let initialObservationTimeout: Duration = ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
                 ? .seconds(60) : .seconds(30)
+            let textCompletionTimeout = Self.recoveryFolderTextObservationTimeout(
+                hosted: ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] == "hosted-intel-v1"
+            )
             let sourceToken = UUID().uuidString.lowercased()
             let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
             app.launchArguments = recoveryArguments + sourceArguments
@@ -575,7 +578,8 @@ final class BatchImportUITests: XCTestCase {
             try check(saved.count == 0 && !failed.exists, app: app,
                       "Recovery preparation unexpectedly exported a destination")
             try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder,
-                                                  initialObservationTimeout: initialObservationTimeout)
+                                                  initialObservationTimeout: initialObservationTimeout,
+                                                  textCompletionTimeout: textCompletionTimeout)
             try check(saved.count == 0 && !failed.exists, app: app,
                       "Recovery preparation unexpectedly exported a destination")
             capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
@@ -804,7 +808,8 @@ final class BatchImportUITests: XCTestCase {
     // no-export checks, fixture stop and host adoption remain separate.
     private func createNativeEmptyFilesFolder(
         _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String,
-        initialObservationTimeout: Duration = .seconds(30)
+        initialObservationTimeout: Duration = .seconds(30),
+        textCompletionTimeout: Duration = .seconds(15)
     ) async throws {
         try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
                   "Native folder creation requires its selected iPhone")
@@ -997,6 +1002,7 @@ final class BatchImportUITests: XCTestCase {
         do {
             try await Self.observeNativeFolderTextCompletion(
                 expectedName: ownedFolder,
+                timeout: textCompletionTimeout,
                 foreground: { app.state == .runningForeground },
                 pickerSnapshot: {
                     // .element requires one matching live picker; no firstMatch.
@@ -1914,8 +1920,13 @@ final class BatchImportUITests: XCTestCase {
         return value
     }
 
+    private static func recoveryFolderTextObservationTimeout(hosted: Bool) -> Duration {
+        hosted ? .seconds(60) : .seconds(15)
+    }
+
     private static func observeNativeFolderTextCompletion(
         expectedName: String,
+        timeout: Duration = .seconds(15),
         foreground: () -> Bool,
         pickerSnapshot: () throws -> XCUIElementSnapshot,
         applicationSnapshot: () throws -> XCUIElementSnapshot,
@@ -1924,7 +1935,7 @@ final class BatchImportUITests: XCTestCase {
         trace: inout NativeFolderTextTrace
     ) async throws {
         let started = now()
-        let deadline = started.advanced(by: .seconds(15))
+        let deadline = started.advanced(by: timeout)
         func seconds() -> Double {
             let value = started.duration(to: now()).components
             return Double(value.seconds) + Double(value.attoseconds) / 1e18
