@@ -641,22 +641,40 @@ class HostedRecovery(core.Recovery):
                 self._final_checkout_scope = None
 
     def run_phase(self,phase):
+        first=len(self.report['commands'])
+        primary=None
         try:return super().run_phase(phase)
+        except BaseException as error:
+            primary=error
+            raise
         finally:
-            # Raw root logs are never public. This route selects only Xcode
-            # phase logs; the separate Files route also excludes every ps log.
-            for record in self.report['commands']:
-                if record['id']=='phase-'+phase:
-                    directory=self.out/'PhaseLogs'
-                    directory.mkdir(exist_ok=True);core.identity_of(directory)
-                    for key,value in list(record.get('logs',{}).items()):
-                        path=Path(value)
-                        if path.exists():
-                            require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
-                            public=directory/(phase+'-'+key+'.log')
-                            require(not os.path.lexists(public),'Public phase log already exists')
-                            path.rename(public);record['logs'][key]=str(public)
-            self.save()
+            try:
+                # Raw root logs are never public. This route selects only Xcode
+                # phase logs and exact closed attachment exports, never ps logs.
+                for record in self.report['commands']:
+                    if record['id']=='phase-'+phase:
+                        directory=self.out/'PhaseLogs'
+                        directory.mkdir(exist_ok=True);core.identity_of(directory)
+                        for key,value in list(record.get('logs',{}).items()):
+                            path=Path(value)
+                            if path.exists():
+                                require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
+                                public=directory/(phase+'-'+key+'.log')
+                                require(not os.path.lexists(public),'Public phase log already exists')
+                                path.rename(public);record['logs'][key]=str(public)
+                if phase in core.CASES:
+                    self.retain_closed_logs(first,{phase+'-attachments':[
+                        '/usr/bin/xcrun','xcresulttool','export','attachments',
+                        '--path',str(self.out/(phase+'-inspection.xcresult')),
+                        '--output-path',str(self.out/(phase+'-attachments')),
+                        '--test-id',core.CASES[phase],
+                    ]},'Attachment export')
+                self.save()
+            except BaseException as error:
+                self.report['phase_log_publication_error']=repr(error)
+                self.error('Phase log publication: '+repr(error))
+                if primary is None:
+                    raise
 
 
 def main(argv=None):

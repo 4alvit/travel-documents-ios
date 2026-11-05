@@ -876,9 +876,12 @@ class BoundaryTests(unittest.TestCase):
         xcode=r.out/'1-stdout.log';xcode.write_text('xcode diagnostic')
         r.report['commands']=[{'id':'phase-export','logs':{'stdout':str(xcode)}},
                               {'id':'export-app-stopped','logs':{'stdout':str(ps)}}]
-        with patch.object(hosted.core.Recovery,'run_phase',side_effect=RuntimeError('app running')), \
+        primary=RuntimeError('app running')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=primary), \
              patch.object(Path,'rename',side_effect=OSError('failed move')):
-            with self.assertRaises(OSError):r.run_phase('export')
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('export')
+        self.assertIs(failure.exception,primary)
+        self.assertIn('failed move',r.report['phase_log_publication_error'])
         self.assertEqual(list((r.out/'PhaseLogs').glob('*')),[])
         self.assertEqual(ps.read_text(),'private process listing')
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
@@ -894,6 +897,125 @@ class BoundaryTests(unittest.TestCase):
             r.run_phase('export')
         self.assertEqual((r.out/'PhaseLogs/export-stdout.log').read_text(),'xcode diagnostic')
         self.assertEqual(ps.read_text(),'private process listing')
+
+    def attachment_argv(self,r,phase):
+        return ['/usr/bin/xcrun','xcresulttool','export','attachments',
+                '--path',str(r.out/(phase+'-inspection.xcresult')),
+                '--output-path',str(r.out/(phase+'-attachments')),
+                '--test-id',hosted.core.CASES[phase]]
+
+    def test_phase_retains_closed_attachment_failure_logs(self):
+        diagnostic=b'attachment export failed\n'
+        for profile in ('hosted-intel-v1','hosted-arm-v1'):
+            for phase in hosted.core.CASES:
+                with self.subTest(profile=profile,phase=phase):
+                    r=self.runner(Ops({'exit':1,'output':[('stderr',diagnostic)]}),
+                                  execution_profile=profile,label=profile+'-'+phase)
+                    def failed_export(actual_phase):
+                        self.assertEqual(actual_phase,phase)
+                        r.command(phase+'-attachments',self.attachment_argv(r,phase),60)
+                    with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_export):
+                        with self.assertRaisesRegex(RuntimeError,phase+'-attachments failed'):
+                            r.run_phase(phase)
+                    row=r.report['commands'][0]
+                    self.assertEqual(row['returncode'],1)
+                    self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    for channel,expected in [('stderr',diagnostic),('stdout',b'')]:
+                        public=r.out/'PhaseLogs'/(phase+'-attachments-'+channel+'.log')
+                        self.assertTrue(public.is_file(),str(public))
+                        self.assertEqual(public.read_bytes(),expected)
+                        self.assertEqual(row['logs'][channel],str(public))
+                        self.assertFalse((r.out/('1-'+channel+'.log')).exists())
+                    saved=json.loads((r.out/'receipt.json').read_text())
+                    self.assertEqual(saved['commands'][0]['logs'],row['logs'])
+                    self.assertEqual(r.log_total,len(diagnostic))
+                    self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_allowlist_keeps_prior_other_phase_and_raw_logs_private(self):
+        r=self.runner(Ops(*[{'output':[('stdout',b'private or selected output')]} for _ in range(4)]))
+        r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+        prior=dict(r.report['commands'][0]['logs'])
+        result=Path('/synthetic')
+        def phase_commands(_):
+            r.command('prepare-app-stopped',['/bin/ps','-axww'],60)
+            r.command('export-attachments',self.attachment_argv(r,'export'),60)
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return result
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=phase_commands):
+            self.assertIs(r.run_phase('prepare'),result)
+        self.assertEqual(r.report['commands'][0]['logs'],prior)
+        for row in r.report['commands'][:3]:
+            for path in row['logs'].values():
+                self.assertEqual(Path(path).parent,r.out);self.assertTrue(Path(path).is_file())
+        self.assertEqual({p.name for p in (r.out/'PhaseLogs').iterdir()},
+                         {'prepare-attachments-stdout.log','prepare-attachments-stderr.log'})
+        self.assertEqual(r.log_total,4*len(b'private or selected output'))
+        self.assertEqual(len(r.ops.processes),4);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_logs_require_exact_closed_bounded_owned_streams(self):
+        kinds=['argv','raw-path','symlink','unreaped','group-present','unclosed','unknown',
+               'collision','size','limit','deadline']
+        for kind in kinds:
+            with self.subTest(kind=kind),contextlib.ExitStack() as patches:
+                r=self.runner(Ops({'output':[('stdout',b'four')]}),label=kind)
+                private=r.out/'private-ps.log';private.write_text('private process listing')
+                def changed_export(_):
+                    r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+                    row=r.report['commands'][0]
+                    if kind=='argv':row['argv']=['/bin/ps','-axww']
+                    if kind=='raw-path':row['logs']['stdout']=str(private)
+                    if kind=='symlink':
+                        path=Path(row['logs']['stdout']);path.unlink();path.symlink_to(private)
+                    if kind=='unreaped':row['stop']['leader_reaped']=False
+                    if kind=='group-present':row['stop']['group_absent']=False
+                    if kind=='unclosed':row['log_close_errors']={'stdout':'unknown'}
+                    if kind=='unknown':r.unknown_spawn=True
+                    if kind=='collision':
+                        public=r.out/'PhaseLogs';public.mkdir()
+                        (public/'prepare-attachments-stdout.log').write_text('prior evidence')
+                    if kind=='size':row['bytes']['stdout']+=1
+                    if kind=='limit':patches.enter_context(patch.object(hosted.core.base,'PER_LOG',3))
+                    if kind=='deadline':r.ops.t=r.limit
+                with patch.object(hosted.core.Recovery,'run_phase',side_effect=changed_export):
+                    with self.assertRaises(RuntimeError):r.run_phase('prepare')
+                self.assertEqual(private.read_text(),'private process listing')
+                if (r.out/'PhaseLogs').exists():
+                    self.assertTrue(all(p.read_text()=='prior evidence' for p in (r.out/'PhaseLogs').iterdir()))
+                self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_failure_identity_survives_attachment_log_publication_failure(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        primary=RuntimeError('original Recovery AX failure')
+        publication=OSError('attachment log move failed')
+        def failed_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            raise primary
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,primary)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_successful_phase_still_fails_when_attachment_logs_cannot_be_published(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        publication=OSError('attachment log move failed')
+        def successful_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return Path('/synthetic')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=successful_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(OSError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,publication)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
 
     def capability_ops(self):
         normal=(json.dumps({'kind':'normal','pid':101,'pgid':101})+'\n').encode()
