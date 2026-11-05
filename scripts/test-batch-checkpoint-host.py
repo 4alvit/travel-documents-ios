@@ -189,7 +189,7 @@ class HostGuards(unittest.TestCase):
   self.driver=SimpleNamespace(process=p,args=SimpleNamespace(device=OWNED),checkpoint_session=SESSION,token=TOKEN,deadline=time.monotonic()+60,summary={'combined_batch':True,'fixtures':[{'name':'synthetic-ticket.pdf','bytes':713,'sha256':'a'*64},{'name':'synthetic-insurance.pdf','bytes':716,'sha256':'b'*64}]},fixture_directory=self.root/'provider'/('TripDocket-Batch-QA-'+TOKEN),provider_identity=(1,2),fixture_identity=(1,3))
   self.bundle=self.root/'Tripfolio.app';self.bundle.mkdir();(self.bundle/'Tripfolio').write_bytes(b'executable')
   r.container_path=Mock(return_value=self.bundle);r.native_seed_files=Mock();r.before={'files':{}}
-  self.commands=[];self.listing='999 /bin/ps -axww -o pid=,command=\n123 /usr/bin/xcodebuild\n'
+  self.commands=[];self.listing='999 ps              \n123 xcodebuild       \n'
   def command(label,argv,seconds):
    if label=='checkpoint-ack':
     proof=json.loads((r.out/'receipt.json').read_text())['batch_checkpoint']
@@ -200,7 +200,7 @@ class HostGuards(unittest.TestCase):
      self.assertEqual(proof['fixture_identity'],[1,3])
     else:
      self.assertNotIn('provider_root',proof);self.assertNotIn('fixture_identity',proof)
-   self.commands.append((label,argv,seconds));r.commands.report['commands'].append({'id':label,'returncode':0,'pgid':999})
+   self.commands.append((label,argv,seconds));r.commands.report['commands'].append({'id':label,'returncode':0,'pgid':999,'bytes':{'stdout':len(self.listing.encode('utf-8')),'stderr':0}})
    return str(self.bundle) if label=='checkpoint-app' else self.listing if label=='checkpoint-app-stopped' else ''
   r.command=command;self.request=cp.execution_order(raw(),SESSION,TOKEN)['request']
  def invoke(self):return self.run.acknowledge_batch_seed(self.driver,self.request,time.monotonic()+60)
@@ -214,6 +214,7 @@ class HostGuards(unittest.TestCase):
   self.assertTrue(callable(call.kwargs['check']))
   self.run.native_seed_files.assert_called_once_with(self.driver)
   self.assertTrue(self.run.report['batch_checkpoint_verified']);self.assertEqual(limit,self.run.commands.limit)
+  self.assertEqual(self.commands[1][1],['/bin/ps','-ax','-o','pid=,ucomm='])
   self.assertTrue(all(0<x[2]<=10 for x in self.commands));self.assertEqual(self.commands[-1][1],['xcrun','simctl','notify_set_state',OWNED,self.request['name'],'1'])
  def test_root_route_ack_does_not_claim_a_created_leaf(self):
   self.run.native_folder_control=False
@@ -223,11 +224,61 @@ class HostGuards(unittest.TestCase):
   self.assertTrue(self.run.report['batch_checkpoint_verified'])
   self.assertEqual(self.commands[-1][0],'checkpoint-ack')
  def test_running_missing_reader_and_ambiguous_process_reject_before_ack(self):
-  old=Path.home()/'Library/Developer/CoreSimulator/Devices'/OWNED/'data/Containers/Bundle/Application'/NONCE/'Tripfolio.app/Tripfolio'
-  for text in ('','123 /usr/bin/xcodebuild\n',self.listing+f'42 {self.bundle}/Tripfolio\n',self.listing+f'42 {old} --old-container\n',self.listing+'42 Tripfolio --arg\n','malformed'):
+  good=self.listing
+  bad=('', '123 xcodebuild\n', good+'42 Tripfolio\n', 'malformed',
+       good+'123 duplicate\n', good+'0 kernel_task\n', good+'-1 unknown\n',
+       good+'42 \n', good+'42 bad\x00name\n', good+'42 bad\tname\n',
+       good+'42 '+'x'*17+'\n', good+'42 \ufffd\n', good.rstrip(),
+       '999 not-ps\n123 xcodebuild\n', good+'\n')
+  for text in bad:
    self.run.report.pop('batch_checkpoint',None);self.listing=text;self.commands.clear();self.run.commands.report['commands'].clear()
    with self.subTest(text=text),self.assertRaises(RuntimeError):self.invoke()
    self.assertNotIn('checkpoint-ack',[x[0] for x in self.commands])
+ def test_accounting_name_retains_runner_and_space_but_rejects_any_aut(self):
+  self.listing+='42 TripfolioUITests\n43 name with space\n'
+  self.invoke()
+  self.assertTrue(self.run.report['batch_checkpoint_verified'])
+  # ucomm carries no path or state: owned, other-device and zombie AUTs
+  # are all the same exact name and must conservatively prevent ACK.
+  for candidate in ('Tripfolio', 'Tripfolio    '):
+   self.run.report.pop('batch_checkpoint',None);self.run.report.pop('batch_checkpoint_verified',None)
+   self.run.commands.report['commands'].clear();self.commands.clear()
+   self.listing='999 ps\n42 '+candidate+'\n'
+   with self.subTest(candidate=candidate),self.assertRaisesRegex(RuntimeError,'AUT still running'):
+    self.invoke()
+   self.assertNotIn('checkpoint-ack',[x[0] for x in self.commands])
+ def test_listing_error_or_incomplete_binding_never_sends_ack(self):
+  original=self.run.command
+  for fault in ('timeout','returncode','stderr','stdout','reader-type','duplicate-record'):
+   self.run.report.pop('batch_checkpoint',None);self.run.commands.report['commands'].clear();self.commands.clear()
+   def command(label,argv,seconds):
+    value=original(label,argv,seconds)
+    if label=='checkpoint-app-stopped':
+     row=self.run.commands.report['commands'][-1]
+     if fault=='timeout':raise RuntimeError('Command timeout')
+     if fault=='returncode':row['returncode']=1
+     if fault=='stderr':row['bytes']['stderr']=1
+     if fault=='stdout':row['bytes']['stdout']-=1
+     if fault=='reader-type':row['pgid']=True
+     if fault=='duplicate-record':self.run.commands.report['commands'].append(dict(row))
+    return value
+   self.run.command=command
+   limit=self.run.commands.limit
+   with self.subTest(fault=fault),self.assertRaises(RuntimeError):self.invoke()
+   self.assertEqual(self.run.commands.limit,limit)
+   self.assertNotIn('checkpoint-ack',[x[0] for x in self.commands])
+ def test_late_inventory_completion_cannot_ack_or_reset_checkpoint(self):
+  original=self.run.command;now=time.monotonic();clock=[now]
+  def command(label,argv,seconds):
+   value=original(label,argv,seconds)
+   if label=='checkpoint-app-stopped':clock[0]=now+61
+   return value
+  self.run.command=command;limit=self.run.commands.limit
+  with patch.object(q.time,'monotonic',side_effect=lambda:clock[0]):
+   with self.assertRaisesRegex(RuntimeError,'Checkpoint primary/clock changed'):
+    self.run.acknowledge_batch_seed(self.driver,self.request,now+60)
+  self.assertEqual(self.run.commands.limit,limit)
+  self.assertNotIn('checkpoint-ack',[x[0] for x in self.commands])
  def test_failed_or_changed_preparation_never_sends_ack(self):
   for failure in ('reader','changed'):
    self.commands.clear();self.run.report.pop('batch_checkpoint',None)
