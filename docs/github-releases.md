@@ -299,11 +299,17 @@ test result. Both profiles require an SDK match. Ordinary CI and the default
 Xcode 27.1 review below must still establish actual results and warnings.
 
 Core/purchase tests, phone guidance and the Release preview use Xcode 26.2
-(17C52). All ordinary macOS CI jobs and Swift CodeQL use `macos-15-intel`
-(x86_64) after repeated hosted ARM runner acquisition failures. Recovery also
-requires the exact `X64` runner context and `x86_64` host profile. This changes
-the requested runner class, not the test cases or their execution limits, and
-does not establish that Intel will be available.
+(17C52). Core/purchase and phone guidance request standard `macos-15` ARM
+runners; iPad guidance, recovery and Swift CodeQL retain `macos-15-intel`
+(x86_64). Earlier ARM runner acquisition failures motivated the Intel
+configuration. Later ARM allocation and toolchain probes support trying ARM
+again for these two cohorts; they do not prove native test reliability.
+The ARM jobs use their existing ordinary test and preparation limits, without
+Intel timing tokens. Their enclosing workflow limits, test cases and assertions
+remain unchanged. Recovery still requires the exact `X64` runner context and
+`x86_64` host profile. Each cohort requires fresh evidence for the current source;
+no previous architecture result is inherited. Neither runner class guarantees
+available hosted capacity.
 Both iPhone test jobs require a unique available runtime matching that Xcode's
 Simulator SDK, with a compatible iPhone and host architecture. A supplied device
 UUID must satisfy the same checks; there is no fallback to another runtime.

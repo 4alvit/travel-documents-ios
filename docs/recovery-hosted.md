@@ -796,9 +796,15 @@ Core has an 85-minute limit, Recovery has 118 minutes, phone guidance has 128 mi
 and each iPad locale has 95 minutes, at most 521 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
-without consuming Recovery artifacts. All five use `macos-15-intel` with the same
-Xcode 26.2 and SDK-compatible runtime selection after repeated ARM runner
-acquisition failures.
+without consuming Recovery artifacts. Core/purchase and phone guidance now
+request standard `macos-15` ARM runners; both iPad locales and Recovery retain
+`macos-15-intel`. All use Xcode 26.2 and SDK-compatible runtime selection.
+The earlier all-Intel configuration followed ARM runner acquisition failures.
+New ARM allocation and toolchain observations justify another bounded run,
+not a claim that ARM resolves the observed native failures. ARM Core/Phone use
+their existing ordinary test and preparation limits without Intel timing tokens;
+the enclosing workflow limits above are retained. All cohorts still require
+fresh source-bound evidence. Recovery's exact Intel profile is unchanged.
 There are six jobs including the Ubuntu gate. Both locale jobs remain required;
 a missing, skipped or failed locale cannot count as a complete cohort. The
 runner change requires fresh runtime evidence and does not validate old failures
