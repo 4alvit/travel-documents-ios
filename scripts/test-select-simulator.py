@@ -168,7 +168,12 @@ else: raise RuntimeError('Unexpected native command: ' + repr(args))""",
         helper = source.split("private func verifyPurchaseFailureAlert(", 1)[1].split(
             "private func requirePurchasePostcondition(", 1)[0]
         self.assertIn("executionTimeAllowance = try failureAlertExecutionTimeAllowance()", helper)
-        self.assertEqual(source.count("executionTimeAllowance ="), 1)
+        self.assertEqual(source.count("executionTimeAllowance ="), 2)
+        cancellation = source.split("func testCancellingSystemPurchaseSheetKeepsFreeAccess()", 1)[1].split(
+            "func testPurchaseFailureAlertInEnglishWithDiagnostics()", 1)[0]
+        self.assertIn("let hostedCoreTiming = try useHostedCoreTiming()", cancellation)
+        self.assertIn("if hostedCoreTiming { executionTimeAllowance = 360 }", cancellation)
+        self.assertIn("timeout: hostedCoreTiming ? .seconds(120) : .seconds(15)", cancellation)
         records = list((self.root / "build/ci-toolchain").glob("simulator-selection.*/selection.json"))
         self.assertEqual(len(records), 1)
         selection = json.loads(records[0].read_text())

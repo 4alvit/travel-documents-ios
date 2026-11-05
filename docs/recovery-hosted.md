@@ -792,8 +792,8 @@ text checks, four Cancels, zero Open actions and final Free/Trips evidence remai
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 128 minutes,
-and each iPad locale has 95 minutes, at most 518 aggregate job-minutes. All five
+Core has an 85-minute limit, Recovery has 118 minutes, phone guidance has 128 minutes,
+and each iPad locale has 95 minutes, at most 521 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. All five use `macos-15-intel` with the same
@@ -919,17 +919,32 @@ Inherited Core markers and conflicting Phone/iPad markers are rejected before
 tools run. The native selectors require the exact marker in a Debug Intel
 Simulator build on iPhone and reject conflicting native markers before test
 side effects. Missing markers preserve the 240-second failure-helper and
-five-second appearance defaults. Cancellation remains 180 seconds, the CLI
-maximum remains 480 seconds, and the first/other purchase-readiness waits remain
-60/15 seconds. All assertions, both purchase cycles, captures and cleanup remain
-required; no retries are added.
+five-second appearance defaults. Ordinary cancellation runs inherit the runner's
+case allowance; Core's CLI default remains 180 seconds and its maximum remains
+480 seconds. The first/other purchase-readiness waits remain 60/15 seconds.
+All assertions, both purchase cycles, captures and cleanup remain required;
+no retries are added.
 
-Core's integration step has a separate 42-minute limit within the 82-minute
-job. This preserves the prior 35-minute ceiling and adds seven minutes:
-three 120-second case increments plus 25 seconds of appearance waiting total
-385 seconds, rounded up to 420 seconds. The job envelope is checkout 2,
-toolchain 5, toolchain evidence 2, selector checks 2, Verify 10, packaging 2,
-integration 42, cancellation grace 5, raw evidence 3, optional failure
+In Core run 41972215370, the cancellation purchase remained pending when the
+15-second sheet observation failed. The Xcode payment controller appeared about
+79.2–79.4 seconds after purchase entry, during the next test and after the first
+app process had terminated. That next test's Settings element was replaced by
+the privacy shield; its retained video later showed the Xcode-branded test sheet.
+The delay's underlying cause is unresolved. Only the validated hosted Core
+cancellation case now selects 120 seconds for sheet presentation and a 360-second
+native allowance. Ordinary presentation still uses 15 seconds. One fixed
+deadline and cancellation checks surround each existing app/Springboard query;
+a late match cannot pass. The same single purchase, Xcode marker, Cancel/Close
+ownership, idle/Free checks and cleanup remain mandatory. No automatic retry or
+late-sheet dismissal is added. These margins are not proof of a service fix.
+
+Core's integration step has a separate 45-minute limit within the 85-minute
+job. The prior 42/82-minute envelope preserved the original 35-minute ceiling
+plus three 120-second case increments and 25 seconds of appearance waiting
+(385 seconds rounded up to 420). Three further minutes preserve that complete
+envelope plus the cancellation case's 180-second allowance increase. The job
+envelope is checkout 2, toolchain 5, toolchain evidence 2, selector checks 2, Verify 10, packaging 2,
+integration 45, cancellation grace 5, raw evidence 3, optional failure
 extraction/upload 3/2, Simulator upload 2 and finalization 2 minutes. Raw test
 evidence precedes optional extraction. These are finite operating ceilings,
 not a guarantee that all 171 per-case maxima fit or that another hosted run
