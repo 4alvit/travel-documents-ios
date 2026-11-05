@@ -458,26 +458,33 @@ class Recovery:
         owner = self if command_owner is None else command_owner
         pending = owner.report['commands'][-1] if owner.report['commands'] else None
         unfinished = pending is not None and 'finish' not in pending
+        context = getattr(owner, '_finalizing_success', None)
+        finalized = (unfinished and context is not None and context[0] is pending
+                     and context[1].pid == pending.get('pgid')
+                     and context[1].returncode == 0
+                     and not owner.active and not owner.unknown_spawn
+                     and context[1].pid in owner.absent_groups)
         # Native phase scans allow30s after a retained export scan exceeded15s.
         # Exact active owned boot waits use the immutable profile's scan allowance:
-        # default15s, hosted Intel60s. Admission, other discovery, capability and
-        # evidence retain5s. No command/global/stop deadline is extended.
+        # default15s, hosted Intel60s. Only hosted Intel keeps60s for the same
+        # verified successful boot's final accounting; ordinary finalization,
+        # admission, other discovery, capability and evidence retain5s.
+        # No command/global/stop deadline is extended.
         phase_scan = unfinished and pending.get('id') in ('phase-prepare', 'phase-export', 'phase-restore')
         boot_process = (self.active.get(pending.get('pgid'))
                         if owner is self and unfinished and pending.get('id') == 'boot-ready' else None)
-        boot_scan = (boot_process is not None and boot_process.pid == pending.get('pgid')
+        hosted_boot_finalized = (owner is self and finalized
+                                 and self.execution_profile is EXECUTION_PROFILES['hosted-intel-v1']
+                                 and type(context[1].returncode) is int)
+        boot_scan = (owner is self and unfinished and pending.get('id') == 'boot-ready'
+                     and ((boot_process is not None and boot_process.pid == pending.get('pgid'))
+                          or hosted_boot_finalized)
                      and self.owned is not None
                      and pending.get('argv') == ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.owned, '-b'])
         allowance = (CAPS['phase_scan_seconds'] if phase_scan else
                      self.execution_profile['boot_scan_seconds'] if boot_scan else CAPS['scan_seconds'])
         deadline = min(self.limit, owner.limit, started+allowance)
         if unfinished:
-            context = getattr(owner, '_finalizing_success', None)
-            finalized = (context is not None and context[0] is pending
-                         and context[1].pid == pending.get('pgid')
-                         and context[1].returncode == 0
-                         and not owner.active and not owner.unknown_spawn
-                         and context[1].pid in owner.absent_groups)
             deadline = min(deadline, owner.t0+pending[
                 'command_deadline' if finalized else 'work_deadline'])
         primary = self.report['commands'][-1] if self.report['commands'] else None
