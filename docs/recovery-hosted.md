@@ -1108,3 +1108,17 @@ command, work and cleanup limits are unchanged. A copied profile or receipt-only
 success claim cannot select hosted finalization. The three prepare/export/restore
 cases and their assertions are unchanged; native evidence must identify the
 actual architecture. Dedicated Batch keeps its ordinary 15-second text policy.
+
+
+Final checkout verification after Recovery uses the same complete resource scan
+as native phases for the exact, ordered `git-final-head` and `git-final-clean`
+commands under either validated hosted profile. Its requested scan allowance is
+30 seconds, but each command retains a total 20-second boundary anchored before
+its first admission checkpoint and an 8-second stop reserve. Admission and active
+work therefore have at most 12 seconds combined; only verified successful process
+closure permits final accounting to use the remaining original total boundary.
+A private live scope binds the exact command and record; receipt flags cannot
+select this policy. The prior work limit is restored on every exit, and generic
+or ordinary-profile scans retain their 5-second allowance. This corrects the
+accounting-policy mismatch observed after all three native phases passed; it does
+not identify or fix the underlying cause of filesystem or scheduling latency.
