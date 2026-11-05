@@ -646,9 +646,10 @@ lists the toolchain and runtime version, but does not establish a particular
 job's runtime build or successful execution. Acceptance still requires its own
 live preflight, exact source/product evidence, native results, cleanup and
 independent 27.1 review. Existing Arm results do not certify Intel execution.
-The Core/Release producer, Recovery, Swift CodeQL and ordinary phone and iPad
-guidance jobs use the fixed Intel profiles above. Each new candidate still
-requires fresh results; earlier ARM successes do not qualify its Intel jobs.
+The Core/Release producer, Recovery and ordinary phone guidance jobs use
+`macos-15` ARM runners; iPad guidance and Swift CodeQL retain `macos-15-intel`.
+Each new candidate requires fresh results for its selected runner profiles;
+earlier results do not qualify the new candidate.
 
 Successful hosted capture has status `captured_pending_review`, never `passed`.
 It requires successful native execution, exact case counts and device identity,
