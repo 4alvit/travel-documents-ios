@@ -784,8 +784,8 @@ text checks, four Cancels, zero Open actions and final Free/Trips evidence remai
 mandatory. Neither a timeout nor a nonzero result becomes a pass.
 
 The separate guidance cohort and two iPad locale builds give five macOS jobs:
-Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 125 minutes,
-and each iPad locale has 95 minutes, at most 515 aggregate job-minutes. All five
+Core has an 82-minute limit, Recovery has 118 minutes, phone guidance has 128 minutes,
+and each iPad locale has 95 minutes, at most 518 aggregate job-minutes. All five
 jobs can become eligible independently: phone guidance does not consume Core
 outputs, and each iPad locale creates its own checkout, build and owned device
 without consuming Recovery artifacts. All five use `macos-15-intel` with the same
@@ -802,7 +802,7 @@ Recovery-to-serial-iPad scheduling waits; it does not reserve runners. GitHub's
 are five for standard Free, Pro and Team plans and fifty for Enterprise. Actual
 account limits and other workflows share that capacity, including Swift CodeQL
 and separate Batch/Biometrics qualification. Jobs may queue, so the largest
-individual job limit of 125 minutes is not a completion-time guarantee.
+individual job limit of 128 minutes is not a completion-time guarantee.
 Per-job native tests remain serial, with explicit finite timeouts, owned-process
 cleanup, `!cancelled()` conditions and the final gate's four result checks.
 
@@ -836,8 +836,19 @@ The main command shares DerivedData with preparation but still runs `xcodebuild 
 It can therefore incur further build, install and runner-startup work. The policy
 does not guarantee that future host delays fit the step.
 
-The hosted Intel Phone guidance profile uses a 105-minute integration step within
-that 125-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
+Run `41950012017` subsequently passed eight Phone cases and exceeded the inherited
+180-second allowance in readiness/import cancellation during the Files Cancel action.
+The original verification and Files picker captures preceded the timeout; later
+return actions and the separate failed app termination do not establish a clean pass.
+That case now uses 360 seconds only in the same hosted Intel Phone profile, as a
+bounded host-variance margin. Its ordinary inherited allowance, 40-second Files
+readiness admission, all actions, captures and termination remain unchanged.
+The other eight case limits remain unchanged, including the Russian demo's
+120 seconds (89.210 seconds in this run). The larger allowance does not prove that
+the separate termination failure is resolved.
+
+The hosted Intel Phone guidance profile uses a 108-minute integration step within
+that 128-minute job. Its bootstrap is bounded by 1,480 seconds (1,440 work,
 30 cleanup and ten receipt), including a 300-second post-preparation warm-boot
 command and a 1,080-second combined preparation command. Arm retains 1,080 seconds
 of work, a 960-second preparation command and its 180-second warm-boot cap.
@@ -845,11 +856,11 @@ Both preparation commands retain the 180-second native allowance. The Intel
 increase addresses an outer command timeout before the native allowance elapsed;
 it does not change native assertions or guarantee completion. All commands share
 the original work deadline and must clip to it, including the later warm boot.
-The nine required native case allowances total 4,200 seconds. The step allocates
+The nine required native case allowances total 4,380 seconds. The step allocates
 600 seconds for selection, generation, main build/session startup, transitions
 and result finalization, plus 20 seconds for rounding. This is an engineering
 allocation rather than a measured worst-case guarantee. The explicit Phone
-allowances apply to the two accessibility cases, the Russian warning and both
+allowances apply to three accessibility cases, the Russian warning and both
 guidance cases; ordinary runs, Core, ARM and dedicated iPad limits stay intact.
 All assertions, diagnostic captures and app termination remain required; see
 [the release qualification policy](github-releases.md) for selection and evidence.

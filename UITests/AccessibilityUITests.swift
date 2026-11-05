@@ -66,6 +66,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testMaximumTypeReadinessAndImportCancellation() async throws {
+        if try useHostedPhoneTiming() { executionTimeAllowance = 360 }
         let app = try launchFixture()
         defer { app.terminate() }
 
