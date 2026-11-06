@@ -2279,7 +2279,8 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private var recoveryArguments: [String] {
-        ["--ui-testing-unlocked", "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+        ["--ui-testing-unlocked", "--ui-testing-share-diagnostics",
+         "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
     }
 
