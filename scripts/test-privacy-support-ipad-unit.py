@@ -823,8 +823,8 @@ class DriverTests(unittest.TestCase):
         lane=workflow.split('  privacy_ipad:',1)[1].split('  recovery:',1)[0]
         phone=workflow.split('  ui_guidance:',1)[1].split('  privacy_ipad:',1)[0]
         for independent_lane in (phone,lane):
-            self.assertNotRegex(independent_lane,r'(?m)^\s+needs:')
-            self.assertIn('if: ${{ !cancelled() }}',independent_lane)
+            self.assertRegex(independent_lane,r'(?m)^    needs: \[scope\]$')
+            self.assertIn("if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}",independent_lane)
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 2',lane)
         for locale,step,job in [('en-US',83,95),('ru-RU',83,95)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
@@ -844,7 +844,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn('timeout-minutes: ${{ matrix.step_minutes }}',lane)
         gate=workflow.split('  gate:',1)[1]
         self.assertIn('if: always()',gate)
-        self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
+        self.assertIn('needs: [scope, validate, ui_guidance, privacy_ipad, recovery]',gate)
         self.assertIn('CORE_PURCHASE_RESULT: ${{ needs.validate.result }}',gate)
         self.assertIn('UI_GUIDANCE_RESULT: ${{ needs.ui_guidance.result }}',gate)
         self.assertIn('test "$CORE_PURCHASE_RESULT" = success',gate)

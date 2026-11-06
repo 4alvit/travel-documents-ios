@@ -461,7 +461,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(workflow.count('bash scripts/verify.sh'),1)
         self.assertEqual(workflow.count('bash scripts/package-ci-preview.sh'),1)
         gate=workflow.split('  gate:\n',1)[1]
-        self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
+        self.assertIn('needs: [scope, validate, ui_guidance, privacy_ipad, recovery]',gate)
         for variable,job in [('CORE_PURCHASE_RESULT','validate'),('UI_GUIDANCE_RESULT','ui_guidance'),
                              ('IPAD_RESULT','privacy_ipad'),('RECOVERY_RESULT','recovery')]:
             self.assertIn(variable+': ${{ needs.'+job+'.result }}',gate)
@@ -5287,5 +5287,53 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(observation['status'],'failed')
         self.assertEqual(observation['last_operation']['operation'],'root_identity')
 
+
+class DocumentationScopeGateTests(unittest.TestCase):
+    def test_complete_merge_group_docs_and_source_diffs(self):
+        import subprocess
+        spec = importlib.util.spec_from_file_location('ci_change_scope', HERE / 'change_scope.py')
+        scope = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scope)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            def git(*arguments):
+                return subprocess.check_output(['git', '-c', 'user.name=Scope Test', '-c', 'user.email=scope@example.invalid', '-c', 'commit.gpgsign=false', *arguments], cwd=repo, stderr=subprocess.DEVNULL).decode().strip()
+            git('init', '-q')
+            (repo / 'README.md').write_text('Initial documentation\n')
+            git('add', '.'); git('commit', '-qm', 'initial')
+            base = git('rev-parse', 'HEAD')
+            (repo / 'README.md').write_text('Updated documentation\n')
+            git('add', '.'); git('commit', '-qm', 'documentation')
+            docs = git('rev-parse', 'HEAD')
+            self.assertEqual(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': base, 'head_sha': docs}}), {'run': False, 'reason': 'documentation-only'})
+            (repo / 'source.swift').write_text('struct Source {}\n')
+            git('add', '.'); git('commit', '-qm', 'source')
+            head = git('rev-parse', 'HEAD')
+            self.assertTrue(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': base, 'head_sha': head}})['run'])
+            self.assertTrue(scope.classify(repo, 'workflow_dispatch', {})['run'])
+            self.assertTrue(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': 'a' * 40, 'head_sha': head}})['run'])
+
+    def test_real_gate_accepts_only_complete_native_or_documentation_vectors(self):
+        import subprocess
+        workflow = (HERE.parent / '.github/workflows/ci.yml').read_text()
+        gate = workflow.split('  gate:\n', 1)[1]
+        script = '\n'.join(line[10:] for line in gate.split('        run: |\n', 1)[1].splitlines())
+        keys = ['CORE_PURCHASE_RESULT', 'UI_GUIDANCE_RESULT', 'IPAD_RESULT', 'RECOVERY_RESULT']
+        for run, reason, expected_result in [('false', 'documentation-only', 'skipped'), ('true', 'source-change', 'success')]:
+            baseline = {key: expected_result for key in keys}
+            baseline.update(SCOPE_RESULT='success', SCOPE_RUN=run, SCOPE_REASON=reason)
+            variants = [(baseline, True)]
+            for key in keys + ['SCOPE_RESULT']:
+                for value in ['success', 'failure', 'cancelled', 'skipped', '']:
+                    variants.append(({**baseline, key: value}, value == baseline[key]))
+            for value in ['', 'unknown', 'FALSE']:
+                variants.append(({**baseline, 'SCOPE_RUN': value}, False))
+            if run == 'false':
+                for reason in ['', 'source-change', 'unavailable-history']:
+                    variants.append(({**baseline, 'SCOPE_REASON': reason}, False))
+            for env, expected in variants:
+                with self.subTest(env=env):
+                    result = subprocess.run(['bash', '-c', script], env={**os.environ, **env}, capture_output=True)
+                    self.assertEqual(result.returncode == 0, expected, result.stderr.decode())
 
 if __name__=='__main__':unittest.main(verbosity=2)
