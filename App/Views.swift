@@ -900,6 +900,14 @@ private struct SettingsView: View {
                     .accessibilityIdentifier("privacySupport.entry")
                 }
                 Section {
+                    Button { asksBackup = true } label: { Label(L10n.ui("backup.export", defaultValue: "Export full backup"), systemImage: "square.and.arrow.up") }
+                        .disabled(model.isBusy)
+                    Button { showsRestoreFiles = true } label: { Label(L10n.ui("backup.restore", defaultValue: "Restore from backup"), systemImage: "square.and.arrow.down") }
+                        .disabled(model.isBusy)
+                } header: { Text(L10n.ui("backup.section", defaultValue: "Backup & recovery")) } footer: {
+                    Text(L10n.ui("backup.help", defaultValue: "TripDocket has no account or cloud sync. Export a backup to a place you trust before deleting the app or changing devices. A successful restore replaces the entire current library. Viewing, export and recovery do not require Pro."))
+                }
+                Section {
                     Button { showsPro = true } label: {
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: "sparkles").font(.title2)
@@ -915,14 +923,6 @@ private struct SettingsView: View {
                     Button(L10n.ui("pro.restore", defaultValue: "Restore purchases")) { Task { await model.purchases.restore() } }
                         .disabled(model.purchases.isBusy)
                     if let status = model.purchases.statusMessage { Text(status).font(.footnote).foregroundStyle(.secondary) }
-                }
-                Section {
-                    Button { asksBackup = true } label: { Label(L10n.ui("backup.export", defaultValue: "Export full backup"), systemImage: "square.and.arrow.up") }
-                        .disabled(model.isBusy)
-                    Button { showsRestoreFiles = true } label: { Label(L10n.ui("backup.restore", defaultValue: "Restore from backup"), systemImage: "square.and.arrow.down") }
-                        .disabled(model.isBusy)
-                } header: { Text(L10n.ui("backup.section", defaultValue: "Backup & recovery")) } footer: {
-                    Text(L10n.ui("backup.help", defaultValue: "TripDocket has no account or cloud sync. Export a backup to a place you trust before deleting the app or changing devices. A successful restore replaces the entire current library. Viewing, export and recovery do not require Pro."))
                 }
                 Section(L10n.ui("settings.device", defaultValue: "On this device")) {
                     libraryCount(L10n.ui("nav.trips", defaultValue: "Trips"), count: model.library.trips.count, identifier: "settings.count.trips")

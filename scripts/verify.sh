@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 python3 scripts/check-localizations.py
 python3 -B scripts/test-purchase-load.py
 python3 -B scripts/test-batch-import-diagnostics.py
+python3 -B scripts/test-share-lifecycle.py
 python3 -B scripts/test-batch-scroll-container.py
 python3 -B scripts/test-localization-snapshots.py
 # Validate native fixture contracts before building the Release preview.

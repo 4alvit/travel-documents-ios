@@ -1493,6 +1493,72 @@ class ParentReturnTests(unittest.TestCase):
         self.assertTrue(changed["currentPairBound"])
         self.assertEqual(changed["alternativeFirstRejections"], ["parent-return: fresh child proof changed"])
 
+    def test_parent_return_diagnostics_preserve_short_circuit_query_order(self):
+        # Execute the actual guard with and without its value-only recorder.
+        # Read instrumentation lives in the fake native API, not in that guard.
+        source = self.source.replace(
+            "@MainActor final class RouteElement {",
+            "@MainActor enum QueryReads { static var values: [String] = [] }\n"
+            "@MainActor final class RouteElement {",
+        )
+        replacements = {
+            "var frame = CGRect(x: 16, y: 88, width: 44, height: 44)":
+                'var storedFrame = CGRect(x: 16, y: 88, width: 44, height: 44)\n'
+                '    var frame: CGRect { get { QueryReads.values.append("frame"); return storedFrame } set { storedFrame = newValue } }',
+            "var isEnabled = true\n    var hittable = true":
+                'var enabled = true\n'
+                '    var isEnabled: Bool { get { QueryReads.values.append("enabled"); return enabled } set { enabled = newValue } }\n'
+                '    var hittable = true',
+            "var exists = false":
+                'var present = false\n'
+                '    var exists: Bool { get { QueryReads.values.append("exists"); return present } set { present = newValue } }',
+            "var isHittable: Bool { onHittable?(); return hittable }":
+                'var isHittable: Bool { QueryReads.values.append("hittable"); onHittable?(); return hittable }',
+            "var count = 1\n    let element = RouteElement()":
+                'var countValue = 1\n'
+                '    var count: Int { get { QueryReads.values.append("count"); return countValue } set { countValue = newValue } }\n'
+                '    let element = RouteElement()',
+            '"failureEvidence": lastInitialEvidence]':
+                '"failureEvidence": lastInitialEvidence, "queryReads": QueryReads.values]',
+        }
+        for before, after in replacements.items():
+            self.assertEqual(source.count(before), 1, before)
+            source = source.replace(before, after)
+        names = ["navigationUnique", "backUnique", "backFrameMatches", "backEnabled",
+                 "backHittable", "noSavedFixture", "noFixtureFailure"]
+        expressions = ["navigation.count == 1", "back.count == 1", "back.element.frame == before",
+                       "back.element.isEnabled", "back.element.isHittable",
+                       'app.staticTexts.matching(NSPredicate(\n                              format: "identifier BEGINSWITH %@", "nativeSeed.saved."\n                          )).count == 0',
+                       '!app.staticTexts["nativeSeed.failure"].exists']
+        baseline = source
+        for name, expression in zip(names, expressions):
+            recorded = f'initialObservation.recordParentReturnCheck("{name}", {expression})'
+            self.assertEqual(baseline.count(recorded), 1)
+            baseline = baseline.replace(recorded, expression)
+        instrumented = self.compile(source, "observed-parent-guard")
+        original = self.compile(baseline, "original-parent-guard")
+        modes = ["live-nav-duplicate", "live-duplicate", "live-moved", "live-disabled",
+                 "live-hidden", "saved", "failure"]
+        for index, mode in enumerate(modes):
+            with self.subTest(mode=mode):
+                actual = self.probe(mode, binary=instrumented)
+                previous = self.probe(mode, binary=original)
+                self.assertEqual(actual["outcome"], "rejected")
+                recorded = actual["failureEvidence"].pop("parentReturnChecks")
+                self.assertEqual(recorded, [{"name": name, "result": i != index}
+                                            for i, name in enumerate(names[:index + 1])])
+                self.assertEqual(previous["failureEvidence"].pop("parentReturnChecks"), [])
+                self.assertEqual(actual, previous)
+        for mode in ["child-cell", "child-editor", "live-expiry", "cancel-before", "fresh-wrong"]:
+            with self.subTest(mode=mode):
+                actual = self.probe(mode, binary=instrumented)
+                previous = self.probe(mode, binary=original)
+                observed = actual["failureEvidence"].pop("parentReturnChecks", None)
+                if mode == "live-expiry":
+                    self.assertEqual(observed, [{"name": name, "result": True} for name in names])
+                previous["failureEvidence"].pop("parentReturnChecks", None)
+                self.assertEqual(actual, previous)
+
     def test_parent_must_be_proved_and_child_must_never_be_reentered(self):
         for mode in ["repeated-child", "wrong-parent", "multiple-parent", "missing-parent", "occupied-parent", "nonempty-parent"]:
             with self.subTest(mode=mode):

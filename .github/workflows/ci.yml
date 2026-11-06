@@ -12,7 +12,23 @@ concurrency:
   # Preserve the recovery job's bounded owned-process cleanup window.
   cancel-in-progress: false
 jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        run: python3 scripts/change_scope.py
   validate:
+    needs: [scope]
+    if: ${{ (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15
     # 85m = checkout2 + toolchain5 + toolchain evidence2 + selector2
@@ -116,9 +132,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   ui_guidance:
+    needs: [scope]
     name: Accessibility, localization and guidance UI
     # Independent checkout and Simulator; the final gate still requires every cohort.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     runs-on: macos-15
     # 108m integration covers1480s bootstrap +4380s case ceilings +600s other work,
     # plus20s rounding; other work is an engineering allocation, not a guarantee.
@@ -180,9 +197,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
+    needs: [scope]
     name: iPad privacy and support (${{ matrix.locale }})
     # Each locale owns a fresh checkout and Simulator; both remain required by the gate.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -228,6 +246,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   recovery:
+    needs: [scope]
+    if: ${{ (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     name: Free backup and recovery
     # 118m = checkout 2 + regressions 15 + native 91 + evidence 5 + cancellation 5.
     runs-on: macos-15
@@ -283,17 +303,30 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [validate, ui_guidance, privacy_ipad, recovery]
+    needs: [scope, validate, ui_guidance, privacy_ipad, recovery]
     runs-on: ubuntu-latest
     steps:
       - name: Require successful validation
         env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_RUN: ${{ needs.scope.outputs.run }}
+          SCOPE_REASON: ${{ needs.scope.outputs.reason }}
           CORE_PURCHASE_RESULT: ${{ needs.validate.result }}
           UI_GUIDANCE_RESULT: ${{ needs.ui_guidance.result }}
           # Aggregate matrix result requires both fixed locales to succeed.
           IPAD_RESULT: ${{ needs.privacy_ipad.result }}
           RECOVERY_RESULT: ${{ needs.recovery.result }}
         run: |
+          set -euo pipefail
+          test "$SCOPE_RESULT" = success
+          if [[ "$SCOPE_RUN" == false && "$SCOPE_REASON" == documentation-only ]]; then
+            for result in "$CORE_PURCHASE_RESULT" "$UI_GUIDANCE_RESULT" "$IPAD_RESULT" "$RECOVERY_RESULT"; do
+              test "$result" = skipped
+            done
+            echo 'Documentation-only change; native simulator qualification was not exercised.'
+            exit 0
+          fi
+          test "$SCOPE_RUN" = true
           test "$CORE_PURCHASE_RESULT" = success
           test "$UI_GUIDANCE_RESULT" = success
           test "$IPAD_RESULT" = success

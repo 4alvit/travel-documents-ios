@@ -9,6 +9,7 @@ import io
 import itertools
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -158,6 +159,49 @@ class ReleaseTests(unittest.TestCase):
         cases = [self.f.jobs[:-1], self.f.jobs[:-1] + [self.f.jobs[0]]]
         for field, value in [("status", "in_progress"), ("conclusion", "skipped"), ("head_sha", "a" * 40), ("run_id", 12), ("run_attempt", 1)]:
             jobs = copy.deepcopy(self.f.jobs); jobs[0][field] = value; cases.append(jobs)
+        for jobs in cases:
+            with self.subTest(jobs=jobs), self.assertRaises(m.InvalidRelease):
+                m.validate_run(self.f.run, jobs, self.f.commit, 10)
+
+    def test_release_job_inventory_matches_actual_ci_with_matrix_expansion(self):
+        # Read the actual workflow rather than deriving fixtures from JOBS, which
+        # previously let a newly added scope job escape this strict inventory.
+        workflow = (Path(__file__).resolve().parents[1] / m.WORKFLOW).read_text()
+        blocks = re.split(r"(?m)^  ([a-z][a-z0-9_-]*):\n", workflow.split("\njobs:\n", 1)[1])
+        names = []
+        for job_id, body in zip(blocks[1::2], blocks[2::2]):
+            with self.subTest(job=job_id):
+                matches = re.findall(r"(?m)^    name: (.+)$", body)
+                self.assertEqual(len(matches), 1, "Every CI job must have an explicit name")
+                name = matches[0]
+                if "${{ matrix.locale }}" in name:
+                    locales = re.findall(r"(?m)^          - locale: ([a-z]{2}-[A-Z]{2})$", body)
+                    self.assertTrue(locales, "The locale matrix must be explicitly expanded")
+                    matrix = re.split(r"\n    (?=\S)", body.split("      matrix:\n", 1)[1], maxsplit=1)[0]
+                    self.assertEqual(matrix.splitlines()[0], "        include:")
+                    self.assertTrue(all(re.fullmatch(
+                        r"          - locale: [a-z]{2}-[A-Z]{2}|            (?:step_minutes|job_minutes): [0-9]+",
+                        line) for line in matrix.splitlines()[1:]), "Unknown matrix expansion")
+                    names.extend(name.replace("${{ matrix.locale }}", locale) for locale in locales)
+                else:
+                    self.assertNotIn("    strategy:", body, "Expand any new matrix explicitly")
+                    names.append(name)
+        self.assertTrue(names)
+        self.assertTrue(all("${{" not in name for name in names))
+        self.assertEqual(len(names), len(set(names)), "Duplicate expanded CI job names")
+        self.assertEqual(set(names), m.JOBS)
+
+    def test_scope_job_must_pass_for_the_same_source_run_and_attempt(self):
+        m.validate_run(self.f.run, self.f.jobs, self.f.commit, 10)
+        scope = next(job for job in self.f.jobs if job["name"] == "Change scope")
+        cases = [
+            [job for job in self.f.jobs if job is not scope],
+            self.f.jobs + [scope],
+        ]
+        for field, value in [("status", "in_progress"), ("conclusion", "skipped"),
+                             ("conclusion", "failure"), ("head_sha", "a" * 40),
+                             ("run_id", 12), ("run_attempt", 1)]:
+            cases.append([{**job, field: value} if job is scope else job for job in self.f.jobs])
         for jobs in cases:
             with self.subTest(jobs=jobs), self.assertRaises(m.InvalidRelease):
                 m.validate_run(self.f.run, jobs, self.f.commit, 10)
