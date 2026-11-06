@@ -210,3 +210,14 @@ and executable permissions; its bytes and modes are checked before upload.
 Provenance identifies the actual tested checkout, which can be a PR merge commit.
 It is an unsigned Simulator candidate: a successful CI upload does not establish
 physical-device, App Store or separate release-smoke acceptance.
+
+### Documentation-only CI
+
+The required CI gate classifies the complete PR or push diff before scheduling
+native runners. Ordinary documentation skips the macOS simulator and recovery
+cohorts; the gate accepts only a successful classification and all four cohorts
+explicitly skipped. Source, workflow, fixture and file-mode changes, unknown
+history and manual runs keep the complete native qualification. Merge-group
+runs also classify the complete merge-queue diff.
+Independent CodeQL scanning retains its existing behavior. A documentation-only
+result does not attest to a new Simulator package or runtime acceptance evidence.

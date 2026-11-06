@@ -91,12 +91,18 @@ final class PrivacySupportUITests: XCTestCase {
         // Resetting library data does not reset StoreKit entitlements. Fail this
         // precondition explicitly rather than revoking or fabricating an entitlement.
         let free = app.staticTexts[copy.freeTitle]
+        // At maximum type, the Backup section can put this card below the
+        // initial lazy List viewport. Visibility is not an entitlement signal.
+        try await scrollTo(free, in: app, navigationTitle: copy.settings,
+                           description: "Free plan card", preferWholeFrame: true,
+                           snapshotMatch: SnapshotMatch(type: .staticText, key: copy.freeTitle))
         try require(free.waitForExistence(timeout: 5) && free.isHittable,
                     app: app, "Requires an unentitled Free fixture; do not reset StoreKit automatically")
         attach(app, name: "Free Settings before guidance")
         let entry = app.buttons["privacySupport.entry"].firstMatch
         try await scrollTo(entry, in: app, navigationTitle: copy.settings,
                            description: "Privacy and support entry", preferWholeFrame: true,
+                           searchDown: false,
                            snapshotMatch: SnapshotMatch(type: .button, key: "privacySupport.entry"))
         entry.tap()
         try require(app.navigationBars[copy.title].waitForExistence(timeout: 5),

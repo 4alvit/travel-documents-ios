@@ -104,10 +104,79 @@ struct ExplicitShareSheet: UIViewControllerRepresentable {
         // A share extension can keep consuming the source after our scene
         // backgrounds. Clean up only after the system reports completion or
         // cancellation, never merely because the sheet disappeared.
-        controller.completionWithItemsHandler = { _, _, _, _ in
-            Task { @MainActor in completion() }
+        #if DEBUG
+        let sharedURL = url
+        let diagnostics = ShareLifecycleDiagnostics()
+        diagnostics?.record(.handoff, url: sharedURL)
+        #endif
+        controller.completionWithItemsHandler = { activity, completed, _, error in
+            #if DEBUG
+            diagnostics?.record(.completion, url: sharedURL, activity: activity?.rawValue,
+                                completed: completed, error: error.map { $0 as NSError })
+            #endif
+            Task { @MainActor in
+                #if DEBUG
+                diagnostics?.record(.cleanupBefore, url: sharedURL)
+                #endif
+                completion()
+                #if DEBUG
+                diagnostics?.record(.cleanupAfter, url: sharedURL)
+                #endif
+            }
         }
         return controller
     }
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
+
+#if DEBUG
+/// Four value-only events per explicitly opted-in share; never reads the payload.
+private final class ShareLifecycleDiagnostics: @unchecked Sendable {
+    enum Stage: String { case handoff, completion, cleanupBefore, cleanupAfter }
+    private let id: String
+    private let started: TimeInterval
+    private let lock = NSLock()
+    // Only this counter is mutable, and every access holds lock.
+    private var remaining = 4
+
+    init?(arguments: [String] = ProcessInfo.processInfo.arguments) {
+        guard arguments.contains("--ui-testing-share-diagnostics") else { return nil }
+        id = UUID().uuidString
+        started = ProcessInfo.processInfo.systemUptime
+    }
+
+    func record(_ stage: Stage, url: URL, activity: String? = nil,
+                completed: Bool? = nil, error: NSError? = nil) {
+        lock.lock()
+        guard remaining > 0 else { lock.unlock(); return }
+        remaining -= 1
+        lock.unlock()
+        let files = FileManager.default
+        let attributes = try? files.attributesOfItem(atPath: url.path)
+        var values: [String: Any] = [
+            "v": 1, "id": id, "stage": stage.rawValue,
+            "ms": Int(min(max(ProcessInfo.processInfo.systemUptime - started, 0), 86_400) * 1_000),
+            "exists": files.fileExists(atPath: url.path),
+            "readable": files.isReadableFile(atPath: url.path),
+            "metadata_available": attributes != nil,
+        ]
+        if let size = attributes?[.size] as? NSNumber { values["bytes"] = size.int64Value }
+        if let completed { values["completed"] = completed }
+        if let activity {
+            // Keep the native activity needed for this diagnosis; never log an
+            // arbitrary extension identifier supplied by another application.
+            values["activity"] = activity == "com.apple.DocumentManagerUICore.SaveToFiles"
+                ? activity : "other"
+        }
+        if let error {
+            let domains = [NSCocoaErrorDomain, NSPOSIXErrorDomain, NSOSStatusErrorDomain,
+                           NSURLErrorDomain, "NSFileProviderErrorDomain", "UIActivityErrorDomain"]
+            values["error_domain"] = domains.contains(error.domain) ? error.domain : "other"
+            values["error_code"] = error.code
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]),
+              let line = String(data: data, encoding: .utf8) else { return }
+        print("share-lifecycle " + line)
+    }
+}
+#endif

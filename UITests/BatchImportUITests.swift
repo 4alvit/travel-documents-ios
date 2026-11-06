@@ -250,6 +250,7 @@ final class BatchImportUITests: XCTestCase {
         var errorTruncated = false
         var rejections: [String] = []
         var classification = "not-classified"
+        var parentReturnChecks: [(name: String, result: Bool)] = []
 
         mutating func begin() {
             attempt += 1
@@ -259,6 +260,7 @@ final class BatchImportUITests: XCTestCase {
             acquisitionError = nil
             errorTruncated = false
             rejections = []
+            parentReturnChecks = []
             classification = "not-classified"
         }
 
@@ -268,19 +270,28 @@ final class BatchImportUITests: XCTestCase {
             errorTruncated = acquisitionError != description
         }
 
+        // Record only a value already evaluated by the existing short-circuit guard.
+        mutating func recordParentReturnCheck(_ name: String, _ result: Bool) -> Bool {
+            parentReturnChecks.append((name: name, result: result))
+            return result
+        }
+
         func metadata() -> Data {
             let payload: [String: Any] = [
                 "version": 1, "attempt": attempt, "acquisitionStage": String(stage.prefix(128)),
                 "currentPickerPresent": picker != nil, "currentApplicationPresent": application != nil,
                 "currentPairBound": lastBound?.attempt == attempt,
                 "classification": classification,
+                "parentReturnChecks": parentReturnChecks.prefix(7).map {
+                    ["name": $0.name, "result": $0.result] as [String: Any]
+                },
                 "lastBoundAttempt": lastBound.map { $0.attempt as Any } ?? NSNull(),
                 "acquisitionError": acquisitionError.map { $0 as Any } ?? NSNull(),
                 "errorTruncated": errorTruncated,
                 "alternativeFirstRejections": Array(rejections.prefix(3)).map { String($0.prefix(160)) },
                 "snapshotScope": "Sequential existing picker/application observations; not atomic. Prior bound pair is not the current failed acquisition.",
                 "limits": ["errorCharacters": 512, "stageCharacters": 128, "rejections": 3,
-                           "rejectionCharacters": 160, "bytes": 16_384]
+                           "rejectionCharacters": 160, "parentReturnChecks": 7, "bytes": 16_384]
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
                   data.count <= 16_384 else {
@@ -930,11 +941,15 @@ final class BatchImportUITests: XCTestCase {
                     let back = navigation.element.buttons.matching(NSPredicate(
                         format: "identifier == %@ AND label == %@", "BackButton", localTitle
                     ))
-                    guard navigation.count == 1, back.count == 1,
-                          back.element.frame == before, back.element.isEnabled, back.element.isHittable,
-                          app.staticTexts.matching(NSPredicate(
+                    guard initialObservation.recordParentReturnCheck("navigationUnique", navigation.count == 1),
+                          initialObservation.recordParentReturnCheck("backUnique", back.count == 1),
+                          initialObservation.recordParentReturnCheck("backFrameMatches", back.element.frame == before),
+                          initialObservation.recordParentReturnCheck("backEnabled", back.element.isEnabled),
+                          initialObservation.recordParentReturnCheck("backHittable", back.element.isHittable),
+                          initialObservation.recordParentReturnCheck("noSavedFixture", app.staticTexts.matching(NSPredicate(
                               format: "identifier BEGINSWITH %@", "nativeSeed.saved."
-                          )).count == 0, !app.staticTexts["nativeSeed.failure"].exists else {
+                          )).count == 0),
+                          initialObservation.recordParentReturnCheck("noFixtureFailure", !app.staticTexts["nativeSeed.failure"].exists) else {
                         initialObservation.rejections.append("parent-return: live Back or unsaved fixture changed")
                         return false
                     }
@@ -2264,7 +2279,8 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private var recoveryArguments: [String] {
-        ["--ui-testing-unlocked", "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+        ["--ui-testing-unlocked", "--ui-testing-share-diagnostics",
+         "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
     }
 

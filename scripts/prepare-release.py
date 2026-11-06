@@ -26,7 +26,7 @@ PAYLOAD = ("TripDocket-Simulator.zip", "TripDocket-source.tar.gz", "provenance.j
 JOBS = {
     "Swift, hosted tests and purchase UI", "Accessibility, localization and guidance UI",
     "iPad privacy and support (en-US)", "iPad privacy and support (ru-RU)",
-    "Free backup and recovery", "CI gate",
+    "Free backup and recovery", "CI gate", "Change scope",
 }
 BIOMETRIC_TESTS = {
     "testFailedAndCancelledAuthenticationKeepDocumentsPrivate",
