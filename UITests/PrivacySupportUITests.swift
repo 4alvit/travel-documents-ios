@@ -222,8 +222,10 @@ final class PrivacySupportUITests: XCTestCase {
         back.tap()
         try require(app.navigationBars[copy.settings].waitForExistence(timeout: 5),
                     app: app, "Settings did not return from guidance")
+        // Returning keeps the guidance entry in view; the lazy Free card is
+        // below Backup, just as it was before opening guidance.
         try await scrollTo(free, in: app, navigationTitle: copy.settings,
-                           description: "Free state after guidance", preferWholeFrame: true, searchDown: false,
+                           description: "Free state after guidance", preferWholeFrame: true, searchDown: true,
                            snapshotMatch: SnapshotMatch(type: .staticText, key: copy.freeTitle))
         try require(free.exists && free.isHittable, app: app, "Free state changed during guidance")
         try await selectTab(copy.trips, navigationTitle: "TripDocket",

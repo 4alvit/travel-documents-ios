@@ -84,6 +84,9 @@ with tempfile.TemporaryDirectory(prefix='tripdocket-reading-geometry-') as tmp:
 start = source.index('        let free = app.staticTexts[copy.freeTitle]')
 end = source.index('        entry.tap()', start)
 admission = source[start:end]
+start = source.index('        try await scrollTo(free,', source.index('        back.tap()'))
+end = source.index('        try await selectTab(', start)
+return_admission = source[start:end]
 fixture = '''import Foundation
 enum Failure: Error { case rejected }
 enum Kind { case staticText, button }
@@ -122,9 +125,12 @@ struct Copy { let freeTitle = "Free card"; let settings = "Settings" }
                snapshotMatch: SnapshotMatch) async throws {
   precondition(navigationTitle == copy.settings && preferWholeFrame)
   if target === app.free {
-   events.append("free-down")
-   precondition(searchDown && snapshotMatch.type == .staticText && snapshotMatch.key == copy.freeTitle)
+   events.append("locate-free")
+   precondition(snapshotMatch.type == .staticText && snapshotMatch.key == copy.freeTitle)
    if mode == "scroll-fails" { throw Failure.rejected }
+   if target.exists && target.isHittable { return }
+   // The lazy Free row is below Backup in Settings; searching upward cannot load it.
+   guard searchDown else { throw Failure.rejected }
    target.exists = mode != "missing-free"
    target.isHittable = mode != "nonhittable-free"
   } else {
@@ -135,27 +141,37 @@ struct Copy { let freeTitle = "Free card"; let settings = "Settings" }
  }
  func require(_ condition: Bool, app: App, _ message: String) throws {
   events.append("require-free")
-  precondition(message == "Requires an unentitled Free fixture; do not reset StoreKit automatically")
+  precondition(message == "Requires an unentitled Free fixture; do not reset StoreKit automatically"
+               || message == "Free state changed during guidance")
   guard condition else { throw Failure.rejected }
  }
  func attach(_ app: App, name: String) { events.append("attach-free") }
  func exercise() async throws {
 '''+admission+'''
  }
+ func exerciseReturn() async throws {
+  let free = app.staticTexts[copy.freeTitle]
+'''+return_admission+'''
+ }
 }
 @main struct Runner {
  @MainActor static func main() async {
   var count = 0
-  for mode in ["lazy-free", "visible", "missing-free", "nonhittable-free", "scroll-fails"] {
-   let harness = Harness(mode)
-   var passed = false
-   do { try await harness.exercise(); passed = true } catch {}
-   let expected = mode == "visible" || mode == "lazy-free"
-   guard passed == expected else { print("FAIL result \\(mode): \\(harness.events)"); exit(1) }
-   let expectedEvents = expected ? ["free-down", "require-free", "attach-free", "entry-up"]
-       : mode == "scroll-fails" ? ["free-down"] : ["free-down", "require-free"]
-   guard harness.events == expectedEvents else { print("FAIL ordering \\(mode): \\(harness.events)"); exit(1) }
-   count += 1
+  for returning in [false, true] {
+   for mode in ["lazy-free", "visible", "missing-free", "nonhittable-free", "scroll-fails"] {
+    let harness = Harness(mode)
+    var passed = false
+    do {
+     if returning { try await harness.exerciseReturn() } else { try await harness.exercise() }
+     passed = true
+    } catch {}
+    let expected = mode == "visible" || mode == "lazy-free"
+    guard passed == expected else { print("FAIL result returning=\\(returning) \\(mode): \\(harness.events)"); exit(1) }
+    let expectedEvents = expected ? (returning ? ["locate-free", "require-free"] : ["locate-free", "require-free", "attach-free", "entry-up"])
+        : mode == "scroll-fails" ? ["locate-free"] : ["locate-free", "require-free"]
+    guard harness.events == expectedEvents else { print("FAIL ordering \\(mode): \\(harness.events)"); exit(1) }
+    count += 1
+   }
   }
   print("PASS \\(count) actual fixture-admission scenarios; native app calls=0")
  }
