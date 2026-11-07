@@ -122,22 +122,23 @@ class SeedGuards(unittest.TestCase):
         self.assertIn('"--ui-testing-native-batch-token", token',case)
         self.assertEqual(case.count(".tap()"),1)
         self.assertIn("source.element.tap()",case)
-        initial_call = "let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"
         folder=UI[UI.index("    func testNativeCreateOwnedFilesFolder"):
                   UI.index("    private func createNativeEmptyFilesFolder(")]
         recovery=UI[UI.index("    func testRecoveryPrepareFilesProvider()"):
                     UI.index("    // Batch-only provider initialization.")]
         create, provider_only = recovery.split("        } else {",1)
         create = create.split("        if createFolder {",1)[1]
-        # These three callers use the native-root helper's larger allowance.
+        # Only direct cold preparation gets 45s; folder creation keeps 30s.
         # Provider-only preparation keeps its iPad-aware route and initial wait.
         remaining = UI
-        for name, caller in (("batch prepare",case),("batch folder",folder),("recovery create",create)):
+        for name, caller, seconds in (("batch prepare",case,45),("batch folder",folder,30),("recovery create",create,30)):
             with self.subTest(caller=name):
+                initial_call = f"let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds({seconds}))"
                 self.assertEqual(caller.count(initial_call),1)
                 self.assertLess(caller.index("source.element.tap()"),caller.index(initial_call))
                 remaining = remaining.replace(caller,"",1)
         self.assertNotIn("initialTimeout: .seconds(30)",remaining)
+        self.assertNotIn("initialTimeout: .seconds(45)",remaining)
         self.assertNotIn("openNativeFilesRoot(",provider_only)
         self.assertIn('try await wait("Real Files preparation picker did not open", app: app, timeout: .seconds(30))',provider_only)
         self.assertEqual(provider_only.count('timeout: .seconds(30)'),1)
