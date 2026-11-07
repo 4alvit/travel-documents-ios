@@ -58,14 +58,21 @@ these separate paths. Batch qualification covers a preinitialized provider,
 not cold first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
-The direct preparation case uses a 30-second initial readiness polling
+The direct preparation case uses a 45-second initial readiness polling
 deadline for the supported Files browser or Recents screen. An in-flight
-synchronous XCTest query can return after that deadline; the existing outer
-case and command bounds still apply. In a retained
+synchronous XCTest query can return after that deadline, but a late positive
+result is rejected before routing continues; the existing outer case and
+command bounds still apply. In a retained
 [Intel capture](https://github.com/4alvit/travel-documents-ios/actions/runs/41634849458),
 native navigation lifecycle events arrived about 18 seconds after polling
 started, beyond the former 15-second window; the retained screen was still
-blank and did not prove a usable root. This scoped startup allowance preserves
+blank and did not prove a usable root. A later
+[Arm capture, attempt 2](https://github.com/4alvit/travel-documents-ios/actions/runs/42332477749/attempts/2)
+recorded 224 fast unsuccessful navigation probes during the 30-second window.
+The failure screenshot was blank; native service, browser and navigation
+lifecycle events appeared 33–35 seconds after the tap, during teardown.
+Those events do not prove a usable root or repair the first attempt's separate
+native export cancellation. This scoped startup allowance preserves
 the readiness predicates, one exporter tap, subsequent 15-second waits, and
 the 180-second case allowance. It neither retries presentation nor establishes
 that the native service or full import scenario has been repaired.
