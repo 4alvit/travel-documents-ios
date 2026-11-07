@@ -1549,6 +1549,33 @@ final class BatchImportUITests: XCTestCase {
         var retryAvailable = true
         var previous: (frames: [CGRect], identity: String, action: XCUIElement)?
         var stableObservations = 0
+        func pickerHasNavigation(_ picker: XCUIElement) -> Bool {
+            guard ContinuousClock.now < deadline, let snapshot = try? picker.snapshot(),
+                  ContinuousClock.now < deadline,
+                  snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)" else { return false }
+            var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
+            var visited = 0
+            var pickerCount = 0
+            var navigationFrames: [CGRect] = []
+            while let (node, depth) = pending.popLast() {
+                guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else { return false }
+                visited += 1
+                if node.elementType == .other, node.identifier == "Browse View (Picker)" { pickerCount += 1 }
+                if node.elementType == .navigationBar,
+                   node.identifier == "FullDocumentManagerViewControllerNavigationBar" {
+                    navigationFrames.append(node.frame)
+                }
+                let children = node.children
+                guard children.count <= 4_096 - visited - pending.count else { return false }
+                pending.append(contentsOf: children.map { ($0, depth + 1) })
+            }
+            guard pickerCount == 1, navigationFrames.count == 1 else { return false }
+            let bounds = snapshot.frame
+            return ContinuousClock.now < deadline && ([bounds] + navigationFrames).allSatisfy { frame in
+                frame.minX.isFinite && frame.minY.isFinite && frame.width.isFinite && frame.height.isFinite
+                    && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
+            }
+        }
         func matches(_ left: (frames: [CGRect], identity: String, action: XCUIElement),
                      _ right: (frames: [CGRect], identity: String, action: XCUIElement)) -> Bool {
             left.identity == right.identity && left.frames.count == right.frames.count
@@ -1572,17 +1599,24 @@ final class BatchImportUITests: XCTestCase {
         while ContinuousClock.now < deadline {
             let foreground = app.state == .runningForeground
             guard ContinuousClock.now < deadline else { break }
-            let count = navigations.count
+            // Bind the remote picker once. Separate global navigation and picker
+            // queries can each rebuild the remote hierarchy and exhaust this window.
+            let boundPickers = pickers.allElementsBoundByAccessibilityElement
             guard ContinuousClock.now < deadline else { break }
-            if foreground && count == 1 {
-                let exists = navigations.element.exists
+            if foreground && boundPickers.count == 1 && pickerHasNavigation(boundPickers[0]) {
+                let stillForeground = app.state == .runningForeground
                 guard ContinuousClock.now < deadline else { break }
-                if exists { return }
+                if stillForeground { return }
             }
-            if retryAvailable {
-                let pickerCount = pickers.count
+            guard ContinuousClock.now < deadline else { break }
+            if !boundPickers.isEmpty {
+                // Partial, ambiguous or unreadable Files presence is never proof
+                // that the original share action may safely be tapped again.
+                disableRetry("foreground/share-only precondition changed")
+            } else if retryAvailable {
+                let count = navigations.count
                 guard ContinuousClock.now < deadline else { break }
-                if !foreground || count != 0 || pickerCount != 0 {
+                if !foreground || count != 0 {
                     disableRetry("foreground/share-only precondition changed")
                 } else if let proof = shareActionObservation(actions, app: app, before: deadline) {
                     guard ContinuousClock.now < deadline else { break }
@@ -1596,11 +1630,11 @@ final class BatchImportUITests: XCTestCase {
                             // picker, changed foreground state or late query forbids a tap.
                             let stillForeground = app.state == .runningForeground
                             guard ContinuousClock.now < deadline else { break }
-                            let remainingNavigations = navigations.count
+                            let remainingPickers = pickers.allElementsBoundByAccessibilityElement
                             guard ContinuousClock.now < deadline else { break }
-                            let remainingPickers = pickers.count
+                            let remainingNavigations = remainingPickers.isEmpty ? navigations.count : -1
                             guard ContinuousClock.now < deadline else { break }
-                            let stillShareOnly = stillForeground && remainingNavigations == 0 && remainingPickers == 0
+                            let stillShareOnly = stillForeground && remainingNavigations == 0 && remainingPickers.isEmpty
                             retryAvailable = false
                             if stillShareOnly {
                                 record("dispatch intent 2; identity=\(proof.identity); frames=\(proof.frames)")
