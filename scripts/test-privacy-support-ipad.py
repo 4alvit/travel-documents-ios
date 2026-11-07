@@ -322,6 +322,10 @@ class Driver:
             leader_exited = observed("poll", process.poll) is not None  # Reap our child when possible.
             record["leader_returncode"] = process.returncode
             record["group_absent"] = group_absent()
+            # Reaping releases the leader's numeric PID. A still-present PGID
+            # may have been reused; its identity no longer permits signaling.
+            require(not leader_exited or record["group_absent"],
+                    "Reaped leader leaves uncertain process group identity")
             confirmed_stopped = leader_exited and record["group_absent"]
             return confirmed_stopped
 

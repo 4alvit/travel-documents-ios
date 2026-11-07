@@ -733,13 +733,48 @@ The script requires:
 - A completed successful `.github/workflows/ci.yml` main push or main manual
   dispatch run whose `head_sha` is exactly that commit. PR synthetic merge
   artifacts are deliberately not treated as the PR head.
-- All seven expected jobs successful in the same run attempt: change scope,
-  core/purchase, guidance, iPad EN, iPad RU, recovery, and the final CI gate.
+- The latest execution of all seven expected jobs successful for that same run
+  and source: change scope, core/purchase, guidance, iPad EN, iPad RU, recovery,
+  and the final CI gate. The final gate must belong to the current run attempt.
 - The exact nonexpired `TripDocket-simulator-COMMIT-RUN-ATTEMPT` artifact, its
   GitHub digest, original checksums/provenance, and valid Simulator bundle.
+  `ATTEMPT` is the successful core/purchase build job's actual producer attempt.
 - Operator-reviewed execution receipts described below.
 - A new absolute output directory outside the repository, with an existing
   parent. Existing paths and symbolic-link parent paths are rejected.
+
+### Partial CI reruns and artifact identity
+
+[GitHub reruns](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)
+retain the original source SHA/ref and preserve outputs of jobs that are not
+rerun. A failed iPad job and its dependent gate can therefore be repeated without
+rebuilding an already successful Release payload. This does not permit skipping
+any required job or accepting a previously failed execution.
+
+The preparer derives the latest execution of every required job from GitHub's
+complete `filter=all` history. The separate `filter=latest` view must match either
+all those executions or exactly the final attempt's executions; an omitted
+current job or stale row is rejected. Untouched earlier jobs are therefore
+verified from history even when absent from the final attempt's view. Missing,
+duplicate, ambiguous, wrong-source or newer nonpassing jobs are rejected. It binds the artifact
+name and the payload's `GITHUB_RUN_ATTEMPT` to the verified build job, rather than
+relabeling an older build as the final qualification attempt. `acceptance.json`
+records each job's actual attempt, the final CI attempt, and the artifact's
+producer job ID/attempt. Both job views and the run identity are checked again
+before writing the prepared output; an intervening rerun or changed job aborts
+preparation. These are API evidence checks, not a transaction that prevents a
+future rerun after preparation.
+
+### Process cleanup and uncertain identity
+
+The iPad, Recovery, Batch and Biometrics drivers retain their existing work,
+shutdown and cleanup budgets. Once an owned process leader has been reaped, its
+numeric PID/PGID no longer authorizes another TERM or KILL. The drivers either
+confirm absence without a destructive signal or retain the uncertainty as a
+failure within their existing deadlines. Successful cleanup requires both actual
+leader reap and group absence.
+This safety rule does not explain or repair the separate hosted RU iPad stall
+that exhausted its first stop window before making any process observation.
 
 Example, after replacing the placeholders with real identities:
 
