@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import signal
 import stat
 import sys
@@ -463,6 +464,7 @@ class SharedInstallBudgetTests(unittest.TestCase):
         owner.cleaning = owner.interrupted = False
         owner.owned = '11111111-1111-4111-8111-111111111111'
         owner.report = {}
+        owner.discover_installed = lambda *args, **kwargs: None
         clock, calls = [start], []
         class Process:
             def __init__(self, kind):
@@ -555,6 +557,144 @@ class SharedInstallBudgetTests(unittest.TestCase):
                 self.assertIsNotNone(error)
                 self.assertEqual(len(calls), 2)
                 self.assertNotIn('completed', owner.report['boot_install_phase'])
+
+
+class InstalledDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name).resolve()
+        self.clock = 100.
+        self.addCleanup(patch.stopall)
+        patch.object(s.Path, 'home', return_value=self.home).start()
+        patch.object(s.time, 'monotonic', side_effect=lambda: self.clock).start()
+        self.owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
+        o = self.owner
+        o.started, o.work_deadline, o.cleanup_deadline = 0., 900., 1080.
+        o.cleaning = o.interrupted = False
+        o.owned = '11111111-1111-4111-8111-111111111111'
+        o.baseline, o.report = {}, {}
+        o.out = self.home / 'reports'; o.out.mkdir()
+        o.qualification = load('qualify-release.py', 'discovery_qualification')
+        self.device = self.home / 'Library/Developer/CoreSimulator/Devices' / o.owned
+        self.root = self.device / 'data/Containers/Bundle/Application'
+        self.root.mkdir(parents=True)
+        self.serial = 0
+
+    def app(self, identifier=s.APP_ID, executable='Tripfolio'):
+        self.serial += 1
+        container = self.root / ('22222222-2222-4222-8222-%012d' % self.serial)
+        app = container / 'Tripfolio.app'; app.mkdir(parents=True)
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier,
+                                                       'CFBundleExecutable': executable}))
+        (app / 'Tripfolio').write_bytes(b'synthetic executable bytes')
+        (app / 'Tripfolio').chmod(0o755)
+        return app
+
+    def expect(self, app):
+        identity = self.owner.qualification.compiled_identity(app, self.owner.check)
+        self.owner.expected_manifest, self.owner.expected_modes = identity['content'], identity['modes']
+
+    def test_absent_then_one_exact_bundle_and_modes_before_and_after_launch(self):
+        self.assertIsNone(self.owner.discover_installed('before-install', absent=True))
+        app = self.app(); self.expect(app)
+        self.owner.verify_installed('installed-before')
+        self.owner.verify_installed('installed-after')
+        self.assertEqual(self.owner.installed, app)
+        self.assertEqual(self.owner.report['installed-before-modes']['sha256'],
+                         self.owner.report['installed-after-modes']['sha256'])
+        self.assertEqual(self.owner.report['installed_discovery']['installed-after']['candidates'], [str(app)])
+        for record in self.owner.report['installed_discovery'].values():
+            self.assertEqual(record['started_seconds'], 100.)
+            self.assertEqual(record['deadline_seconds'], 160.)
+            self.assertLessEqual(record['started_seconds'], record['finished_seconds'])
+            self.assertLess(record['finished_seconds'], record['deadline_seconds'])
+
+    def test_missing_root_only_allowed_before_install_and_never_creates_it(self):
+        self.root.rmdir()
+        self.assertIsNone(self.owner.discover_installed('before-install', absent=True))
+        self.assertFalse(self.root.exists())
+        with self.assertRaisesRegex(RuntimeError, 'root is missing'):
+            self.owner.discover_installed('installed-before')
+
+    def test_preexisting_or_ambiguous_app_is_rejected(self):
+        self.app()
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous'): self.owner.discover_installed('before-install', absent=True)
+        self.app()
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous'): self.owner.discover_installed('installed-before')
+
+    def test_wrong_identifier_or_executable_is_rejected(self):
+        app = self.app(identifier='synthetic.other')
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous'): self.owner.discover_installed('installed-before')
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': s.APP_ID, 'CFBundleExecutable': 'Other'}))
+        with self.assertRaisesRegex(RuntimeError, 'executable identity'): self.owner.discover_installed('installed-before')
+
+    def test_wrong_bytes_and_modes_fail_even_with_matching_identifier(self):
+        app = self.app(); self.expect(app)
+        (app / 'Tripfolio').write_bytes(b'changed synthetic bytes')
+        with self.assertRaisesRegex(RuntimeError, 'bytes or modes'): self.owner.verify_installed('installed-before')
+        (app / 'Tripfolio').write_bytes(b'synthetic executable bytes'); (app / 'Tripfolio').chmod(0o644)
+        with self.assertRaisesRegex(RuntimeError, 'bytes or modes'): self.owner.verify_installed('installed-before')
+
+    def test_symlink_root_container_app_and_plist_are_rejected(self):
+        for target in ('root', 'container', 'app', 'plist'):
+            with self.subTest(target=target):
+                app = self.app()
+                path = {'root': self.root, 'container': app.parent, 'app': app, 'plist': app / 'Info.plist'}[target]
+                moved = path.with_name(path.name + '-moved'); path.rename(moved); path.symlink_to(moved)
+                try:
+                    with self.assertRaises((RuntimeError, ValueError, OSError)):
+                        self.owner.discover_installed('installed-before')
+                finally:
+                    path.unlink(); moved.rename(path)
+                # Keep exactly one fixture for the next independent mutation.
+                import shutil
+                shutil.rmtree(app.parent)
+
+    def test_entry_and_plist_byte_caps(self):
+        for index in range(65): (self.root / ('33333333-3333-4333-8333-%012d' % index)).mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'entry cap'): self.owner.discover_installed('installed-before')
+        for path in self.root.iterdir(): path.rmdir()
+        app = self.app()
+        for index in range(8): (app.parent / ('metadata-%d' % index)).write_bytes(b'x')
+        with self.assertRaisesRegex(RuntimeError, 'entry cap'): self.owner.discover_installed('installed-before')
+        for path in app.parent.glob('metadata-*'): path.unlink()
+        (app / 'Info.plist').write_bytes(b'x' * (s.MIB + 1))
+        with self.assertRaises(RuntimeError): self.owner.discover_installed('installed-before')
+
+    def test_special_entry_cancel_and_expired_read_cannot_pass(self):
+        app = self.app(); fifo = app.parent / 'special'; os.mkfifo(fifo)
+        with self.assertRaisesRegex(RuntimeError, 'special'): self.owner.discover_installed('installed-before')
+        fifo.unlink(); self.owner.interrupted = True
+        with self.assertRaisesRegex(RuntimeError, 'interrupted'): self.owner.discover_installed('installed-before')
+        self.owner.interrupted = False
+        with self.assertRaisesRegex(RuntimeError, 'deadline'): self.owner.discover_installed('installed-before', deadline=100.)
+
+    def test_path_replacement_after_first_verified_bundle_is_rejected(self):
+        app = self.app(); self.expect(app); self.owner.verify_installed('installed-before')
+        moved = app.with_name('old'); app.rename(moved); app.mkdir()
+        for name in ('Info.plist', 'Tripfolio'):
+            (app / name).write_bytes((moved / name).read_bytes()); (app / name).chmod((moved / name).stat().st_mode & 0o777)
+        # Remove the old tree without letting its extra directory cause an earlier rejection.
+        import shutil
+        shutil.rmtree(moved)
+        with self.assertRaisesRegex(RuntimeError, 'path changed'): self.owner.verify_installed('installed-after')
+
+    def test_late_plist_read_and_replaced_owned_root_cannot_be_accepted(self):
+        self.app()
+        original = self.owner.qualification.bounded_read
+        def late(*args):
+            result = original(*args)
+            self.clock += 61.
+            return result
+        with patch.object(self.owner.qualification, 'bounded_read', side_effect=late):
+            with self.assertRaisesRegex(RuntimeError, 'deadline'): self.owner.discover_installed('installed-before')
+        self.clock = 100.
+        self.owner.discover_installed('installed-before')
+        moved = self.root.with_name('old-root'); self.root.rename(moved); self.root.mkdir()
+        for container in moved.iterdir(): container.rename(self.root / container.name)
+        moved.rmdir()
+        with self.assertRaisesRegex(RuntimeError, 'root was replaced'): self.owner.discover_installed('installed-after')
 
 
 class OrdinaryLaunchTests(unittest.TestCase):

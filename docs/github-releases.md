@@ -879,6 +879,26 @@ Sharing unused readiness time does not establish why installation was slow or
 prove the new attempt will succeed. Exact installed bytes, ordinary launch,
 screenshots and independent acceptance remain mandatory before publication.
 
+In the [next diagnostic attempt](https://github.com/4alvit/travel-documents-ios/actions/runs/42353843187),
+installation returned successfully in 44.0 seconds, but the subsequent
+`simctl get_app_container` query produced no output before its 60-second work
+limit. The app was never launched; cleanup again completed. This does not prove
+that the shared allocation cured the earlier stall or identify the IPC cause.
+
+The diagnostic helper now discovers installed products directly within the
+freshly owned Simulator's `data/Containers/Bundle/Application` directory. Before
+installation it proves the app is absent. After a successful native install and
+again after the one ordinary launch, it requires exactly one app with the exact
+bundle/executable identity and the complete original ZIP contents and modes.
+The same owned device, root and app identities must persist. Symlink roots or
+entries, special files, ambiguous matches, replaced paths and excess entries or
+bytes fail closed. Discovery has a 60-second bound clipped by the original work
+deadline; its pre-install observation also shares the existing readiness/install
+phase. Existing product depth and byte caps remain enforced. It never searches
+another Simulator or substitutes a second discovery command. Successful native
+installation and ordinary launch by bundle identifier remain mandatory: finding
+matching files alone does not establish registration or a working application.
+
 For `batch-import` and `privacy-biometric`, use `configuration: "Debug"` and the
 actual tested Debug product's file-manifest hash. The top-level
 `release_artifact_sha256` associates source-equivalent test evidence with the

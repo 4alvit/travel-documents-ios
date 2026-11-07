@@ -371,7 +371,7 @@ class OrdinarySmoke:
                 and build.get('code_signing_allowed') is False and
                 build.get('successful_verify_receipt_commit') == self.args.commit, 'ZIP provenance is not the expected Release build')
         self.report['producer_provenance_sha256'] = sha(provenance_data)
-        self.expected_manifest, self.zip_sha = expected, sha(zip_data)
+        self.expected_manifest, self.expected_modes, self.zip_sha = expected, modes, sha(zip_data)
         self.report['release_artifact_sha256'] = self.zip_sha
         self.report['zip_bytes'] = len(zip_data)
         self.report['bundle'] = {key: info.get(key) for key in ('CFBundleIdentifier', 'CFBundleShortVersionString',
@@ -431,7 +431,6 @@ class OrdinarySmoke:
             self.commands.limit = original
         self.command('boot', ['xcrun', 'simctl', 'boot', self.owned], 60)
         self.prepare_install()
-        self.installed = self.installed_path()
         self.verify_installed('installed-before')
         self.save()
 
@@ -453,6 +452,7 @@ class OrdinarySmoke:
         try:
             self.command('boot-ready', ['xcrun', 'simctl', 'bootstatus', self.owned, '-b'], 180)
             self.check()
+            self.discover_installed('before-install', absent=True, deadline=deadline - 8)
             remaining = deadline - time.monotonic()
             require(remaining > 8, 'No shared install/stop budget remains')
             phase['install_work_seconds'] = remaining - 8
@@ -465,21 +465,108 @@ class OrdinarySmoke:
             phase['finished_seconds'] = time.monotonic() - self.started
             self.commands.limit = original
 
-    def installed_path(self):
-        value = self.command('installed-container', ['xcrun', 'simctl', 'get_app_container', self.owned, APP_ID, 'app'], 60).strip()
-        path = Path(value)
-        prefix = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.owned / 'data/Containers/Bundle/Application'
-        require(path.is_absolute() and path.resolve(strict=True) == path and path.is_dir(), 'Invalid installed container')
-        relative = path.relative_to(prefix)
-        require(len(relative.parts) == 2 and str(uuid.UUID(relative.parts[0])).upper() == relative.parts[0]
-                and relative.parts[1] == 'Tripfolio.app', 'Unexpected installed container identity')
-        return path
+    def discover_installed(self, name, *, absent=False, deadline=None):
+        """Inspect only the freshly owned Simulator; never search other devices."""
+        self.check()
+        require(self.owned is not None and self.baseline is not None and self.owned not in self.baseline
+                and str(uuid.UUID(self.owned)).upper() == self.owned, 'No exclusive installed-device ownership')
+        started = time.monotonic()
+        end = min(self.work_deadline, started + 60,
+                  self.work_deadline if deadline is None else deadline)
+        def check():
+            self.check()
+            require(time.monotonic() < end, 'Installed discovery deadline expired')
+        def identity(path):
+            check()
+            info = path.lstat()
+            require(stat.S_ISDIR(info.st_mode) and path.resolve(strict=True) == path,
+                    'Indirect or invalid installed directory')
+            check()
+            return [info.st_dev, info.st_ino, info.st_mode]
+        def entries(path, maximum):
+            result = []
+            with os.scandir(path) as stream:
+                for entry in stream:
+                    check()
+                    result.append(Path(entry.path))
+                    require(len(result) <= maximum, 'Installed discovery entry cap exceeded')
+            return sorted(result)
+        device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.owned
+        device_identity = identity(device)
+        prefix = device / 'data/Containers/Bundle/Application'
+        chain = [device / 'data', device / 'data/Containers', device / 'data/Containers/Bundle', prefix]
+        identities = {}
+        candidates, entry_count, plist_bytes = [], 0, 0
+        missing = None
+        for part in chain:
+            check()
+            if not os.path.lexists(part):
+                require(absent, 'Installed application root is missing')
+                missing = str(part)
+                break
+            identities[part] = identity(part)
+        if missing is None:
+            containers = entries(prefix, 64)
+            for container in containers:
+                require(str(uuid.UUID(container.name)).upper() == container.name, 'Unexpected installed container name')
+                identities[container] = identity(container)
+                children = entries(container, 8)
+                entry_count += 1 + len(children)
+                for app in children:
+                    check()
+                    info = app.lstat()
+                    require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), 'Indirect or special installed entry')
+                    require(info.st_size <= 4 * MIB, 'Installed metadata size exceeded')
+                    if not stat.S_ISDIR(info.st_mode):
+                        continue  # Container-manager metadata is not an app.
+                    require(app.suffix == '.app', 'Unexpected installed directory depth')
+                    identities[app] = identity(app)
+                    body = self.qualification.bounded_read(app, 'Info.plist', MIB, check)
+                    plist_bytes += len(body)
+                    require(plist_bytes <= 8 * MIB, 'Installed plist byte cap exceeded')
+                    info = plistlib.loads(body)
+                    require(isinstance(info, dict), 'Invalid installed app plist')
+                    if info.get('CFBundleIdentifier') == APP_ID:
+                        require(app.name == 'Tripfolio.app' and info.get('CFBundleExecutable') == 'Tripfolio',
+                                'Unexpected installed app/executable identity')
+                        candidates.append(app)
+                require(entries(container, 8) == children, 'Installed container changed during discovery')
+            require(entries(prefix, 64) == containers, 'Installed root changed during discovery')
+        require(identity(device) == device_identity, 'Owned device path changed during discovery')
+        for path, before in identities.items():
+            require(identity(path) == before, 'Installed path changed during discovery')
+        require(missing is None or not os.path.lexists(missing), 'Missing installed root changed during discovery')
+        roots = {str(path): value for path, value in identities.items() if path in chain}
+        roots[str(device)] = device_identity
+        for path, before in getattr(self, 'installation_roots', {}).items():
+            require(roots.get(path) == before, 'Owned installation root was replaced')
+        check()
+        require(len(candidates) == (0 if absent else 1), 'Missing or ambiguous installed app')
+        self.installation_roots = roots
+        record = {'method': 'exclusive-owned-filesystem', 'device_uuid': self.owned,
+                  'root': str(prefix), 'root_missing_before_install': missing,
+                  'entries': entry_count, 'plist_bytes': plist_bytes,
+                  'started_seconds': started - self.started,
+                  'deadline_seconds': end - self.started, 'finished_seconds': time.monotonic() - self.started,
+                  'candidates': [str(path) for path in candidates], 'directory_identities': roots}
+        self.report.setdefault('installed_discovery', {})[name] = record
+        return candidates[0] if candidates else None
 
     def verify_installed(self, name):
-        actual = self.manifest(self.installed)
-        require(actual == self.expected_manifest, 'Installed app bytes differ from ZIP')
-        require((self.installed / 'Tripfolio').stat().st_mode & 0o111, 'Installed executable permission missing')
-        self.report[name] = self.write_record(name + '-manifest.json', actual)
+        path = self.discover_installed(name)
+        node = path.stat()
+        identity = [str(path), node.st_dev, node.st_ino]
+        previous = getattr(self, 'installed_identity', identity)
+        require(identity == previous, 'Installed app path changed after launch')
+        actual = self.qualification.compiled_identity(path, self.check)
+        require(actual['content'] == self.expected_manifest and actual['modes'] == self.expected_modes,
+                'Installed app bytes or modes differ from ZIP')
+        require(path.resolve(strict=True) == path and [str(path), path.stat().st_dev, path.stat().st_ino] == identity,
+                'Installed app path changed during verification')
+        self.check()
+        self.installed, self.installed_identity = path, identity
+        self.report[name] = self.write_record(name + '-manifest.json', actual['content'])
+        self.report[name + '-modes'] = self.write_record(name + '-modes.json', actual['modes'])
 
     def capture(self):
         require(self.launch_count == 0, 'Ordinary launch may run only once')
