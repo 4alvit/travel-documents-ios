@@ -314,13 +314,19 @@ Xcode 27.1 review below must still establish actual results and warnings.
 
 Core/purchase tests, phone guidance and the Release preview use Xcode 26.2
 (17C52). Core/purchase and phone guidance request standard `macos-15` ARM
-runners. Recovery now explicitly selects `hosted-arm-v1` on `macos-15`;
-iPad guidance and Swift CodeQL retain `macos-15-intel` (x86_64). Earlier ARM runner acquisition failures motivated the Intel
-configuration. Later ARM allocation and toolchain probes support trying ARM
-again for these cohorts; they do not prove native test reliability.
-The Core/Phone ARM jobs use their existing ordinary test and preparation
-limits, without Intel timing tokens. Their enclosing workflow limits, test cases and assertions
-remain unchanged. Recovery requires the exact `ARM64`/`arm64` hosted context
+runners. Recovery explicitly selects `hosted-arm-v1` on `macos-15`, and both
+iPad guidance locales use `macos-15` with their existing ARM profile. Swift
+CodeQL retains `macos-15-intel` (x86_64). Earlier ARM runner acquisition failures
+motivated the Intel capacity contingency; it was not an iPad architecture
+coverage requirement. Repeated Intel pre-build closure stalls in
+[#42](https://github.com/4alvit/travel-documents-ios/issues/42), together with
+available ARM producers, motivate returning iPad guidance to ARM. This runner
+choice does not establish the cause of those stalls or certify a future pass.
+The Core/Phone/iPad ARM jobs use their existing ordinary test and preparation
+limits, without Intel timing tokens. Core/Phone enclosing workflow limits remain
+unchanged. The iPad wrapper now follows its existing ARM work/cleanup profile as
+specified below. All test cases and assertions remain unchanged.
+Recovery requires the exact `ARM64`/`arm64` hosted context
 for its explicit ARM profile, retaining the Intel profile and CLI default. Each cohort requires fresh evidence for the current source;
 no previous architecture result is inherited. Neither runner class guarantees
 available hosted capacity.
@@ -585,7 +591,7 @@ retain their own existing profiles.
 An English iPad case later reached its480-second native limit during retained
 second-cancellation evidence; its raw log continued through fourth Cancel near660
 seconds but the native result remained failed, without final Trips evidence.
-Only the explicit `--hosted-intel-timing` CI option selects the hosted iPad
+The retained explicit `--hosted-intel-timing` option selects the hosted Intel iPad
 native allowances: English at standard type uses 1,200 seconds with a
 1,500-second command; Russian at maximum type uses 1,500 seconds with a
 1,800-second command. The producer
@@ -593,7 +599,8 @@ requires the exact GitHub-hosted macOS/X64 context. Separate
 `hosted-intel-ipad-en-v1` and `hosted-intel-ipad-ru-v1` tokens require the matching
 locale/type arguments in a Debug x86_64 iPad consumer. The token goes only to the
 test runner; inherited/conflicting Phone/iPad tokens fail before launch, and the
-app receives none. Standalone, ARM and Phone timing remain unchanged.
+app receives none. Current iPad CI uses ARM without this option or timing token;
+standalone, ARM and Phone timing remain unchanged.
 
 The Russian case in run `41928330972` reached its 480-second limit during the
 first confirmation's public-support warning. A historical complete ARM run used
@@ -616,7 +623,8 @@ without predicting that a future run will pass.
 Full admission is 2,117 seconds for hosted English and 2,417 for hosted Russian,
 including 372 seconds of preparation, the selected 1,500/1,800-second command,
 its separate 7-second stop reserve, and 238 seconds of post-validation.
-The original 4,500/360 work/cleanup windows and 83/95-minute step/job remain fixed.
+The Intel profile retains its original 4,500/360 work/cleanup windows; its former
+CI wrapper used an 83-minute step and 95-minute job.
 Summed phase maxima reach 4,743 seconds for English and 5,043 for Russian, so late
 preparation must fail admission; the larger command does not
 extend the original deadline or borrow cleanup time. All 24 text checks, four
@@ -631,9 +639,13 @@ reserves 372 seconds, including the extra 30; the full-case admission and global
 margins above include it. A timed-out or nonzero install still stops the case;
 installation and owned cleanup must be independently verified.
 
-Hosted iPad steps allow 83 minutes, with 95-minute jobs covering checkout,
-toolchain setup, artifact upload and cancellation. Fresh complete native results
-remain required.
+Current hosted iPad CI verifies both `RUNNER_ARCH=ARM64` and `uname -m=arm64`
+before toolchain setup. Each locale retains the ARM profile's 35-minute work and
+three-minute cleanup budgets. A 40-minute step includes two minutes of startup
+and finalization headroom; the 52-minute job also reserves checkout (two),
+toolchain setup (three), artifact upload (two), and cancellation (five).
+Both exact native cases, SDK matching, all text/link checks, and verified owned
+cleanup remain required. A historical ARM pass does not qualify the new source.
 
 The opt-in batch and biometric drivers read the complete Simulator inventory
 and validate the selected UUID's uniqueness, iOS runtime, availability and
@@ -670,8 +682,8 @@ lists the toolchain and runtime version, but does not establish a particular
 job's runtime build or successful execution. Acceptance still requires its own
 live preflight, exact source/product evidence, native results, cleanup and
 independent 27.1 review. Existing Arm results do not certify Intel execution.
-The Core/Release producer, Recovery and ordinary phone guidance jobs use
-`macos-15` ARM runners; iPad guidance and Swift CodeQL retain `macos-15-intel`.
+The Core/Release producer, Recovery, ordinary phone guidance and both iPad
+guidance locales use `macos-15` ARM runners; Swift CodeQL retains `macos-15-intel`.
 Each new candidate requires fresh results for its selected runner profiles;
 earlier results do not qualify the new candidate.
 
