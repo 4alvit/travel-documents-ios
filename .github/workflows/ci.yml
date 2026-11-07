@@ -207,12 +207,12 @@ jobs:
       matrix:
         include:
           - locale: en-US
-            step_minutes: 83
-            job_minutes: 95
+            step_minutes: 40
+            job_minutes: 52
           - locale: ru-RU
-            step_minutes: 83
-            job_minutes: 95
-    runs-on: macos-15-intel
+            step_minutes: 40
+            job_minutes: 52
+    runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}
@@ -224,17 +224,19 @@ jobs:
       - name: Toolchain
         timeout-minutes: 3
         run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
           TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)
           printf '%s\n' "$TRIPDOCKET_IPAD_XCODE_VERSION"
           test "$TRIPDOCKET_IPAD_XCODE_VERSION" = $'Xcode 26.2\nBuild version 17C52'
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
-        # 75m Intel work + 6m cleanup + 2m startup/finalization headroom.
-        # Job: checkout 2 + toolchain 3 + driver 83 + upload 2 + cancellation 5.
+        # 35m ARM work + 3m cleanup + 2m startup/finalization headroom.
+        # Job: checkout 2 + toolchain 3 + driver 40 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
         run: |
-          args=(--locale '${{ matrix.locale }}' --hosted-intel-timing)
+          args=(--locale '${{ matrix.locale }}')
           bash scripts/test-privacy-support-ipad.sh "${args[@]}"
       - name: iPad test evidence
         if: always()
