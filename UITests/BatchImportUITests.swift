@@ -496,17 +496,28 @@ final class BatchImportUITests: XCTestCase {
         app.launch()
         try await openTrip(app)
         try await verifySavedLibrary(app)
-        for title in ["QA corrected ticket", "QA reviewed insurance"] {
+        let savedOriginals: [(String, OriginalPreviewFixture)] = [
+            ("QA corrected ticket", .ticket), ("QA reviewed insurance", .insurance)
+        ]
+        for (title, fixture) in savedOriginals {
             let row = documentRow(title, in: app)
             try await reveal(row, app: app, navigation: "Coast weekend")
             row.tap()
-            try await wait("Saved original preview did not open: \(title)", app: app) {
-                app.navigationBars["Original document"].exists
-                    && app.otherElements["QLPreviewControllerView"].exists
-            }
-            // The renderer starts asynchronously. These captures require
-            // independent pixel inspection; a container alone proves no PDF.
-            try await Task.sleep(for: .seconds(5))
+            // One deadline includes presentation and rendered pixels; it
+            // replaces the former 15-second container wait plus five-second sleep.
+            let previewStarted = ContinuousClock.now
+            let rendered = try await waitForRenderedSyntheticOriginal(
+                app, timeout: .seconds(20), startedAt: previewStarted, fixture: fixture
+            )
+            let renderedScreenshot = XCTAttachment(screenshot: rendered.screenshot)
+            renderedScreenshot.name = "Saved original after relaunch — \(title) — accepted preview pixels"
+            renderedScreenshot.lifetime = .keepAlways
+            add(renderedScreenshot)
+            let recognizedText = XCTAttachment(string: rendered.lines.joined(separator: "\n"))
+            recognizedText.name = "Saved original after relaunch — \(title) — recognized preview text"
+            recognizedText.lifetime = .keepAlways
+            add(recognizedText)
+            // This later screenshot and AX tree remain separate observations.
             capture(app, "Saved original after relaunch — \(title) — inspect PDF pixels")
             let previewDone = app.navigationBars["Original document"].buttons["Done"]
             try check(previewDone.isHittable, app: app, "Original preview Done is not reachable")
@@ -2098,6 +2109,28 @@ final class BatchImportUITests: XCTestCase {
         let lines: [String]
     }
 
+    private enum OriginalPreviewFixture {
+        case recovery, ticket, insurance
+
+        var markers: [String] {
+            switch self {
+            case .recovery:
+                return ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL", "Sample reservation ABC-000"]
+            case .ticket, .insurance:
+                return [self == .ticket ? "SYNTHETIC TICKET" : "SYNTHETIC INSURANCE",
+                        "TripDocket batch UI QA", "SYNTHETIC - NOT VALID FOR TRAVEL", "No personal data"]
+            }
+        }
+
+        var evidenceName: String {
+            switch self {
+            case .recovery: return "Recovery original preview"
+            case .ticket: return "Batch ticket original preview"
+            case .insurance: return "Batch insurance original preview"
+            }
+        }
+    }
+
     private static func recoveryPreviewObservationTimeout(hosted: Bool) -> Duration {
         hosted ? .seconds(60) : .seconds(40)
     }
@@ -2148,20 +2181,22 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication,
-                                                  timeout: Duration = .seconds(40)) async throws -> RenderedOriginalEvidence {
-        let started = ContinuousClock.now
+                                                  timeout: Duration = .seconds(40),
+                                                  startedAt: ContinuousClock.Instant? = nil,
+                                                  fixture: OriginalPreviewFixture = .recovery) async throws -> RenderedOriginalEvidence {
+        let started = startedAt ?? ContinuousClock.now
         let deadline = started.advanced(by: timeout)
         var trace = PreviewAttemptTrace()
         defer {
             let timing = XCTAttachment(string: trace.json())
-            timing.name = "Recovery original preview — attempt timings"
+            timing.name = fixture.evidenceName + " — attempt timings"
             timing.lifetime = .keepAlways
             add(timing)
         }
         var lastObservation = "No preview observation completed"
         while ContinuousClock.now < deadline {
             let attemptStarted = ContinuousClock.now
-            if let rendered = renderedSyntheticOriginal(app, before: deadline, observe: { message in
+            if let rendered = renderedSyntheticOriginal(app, before: deadline, fixture: fixture, observe: { message in
                 var bytes = Array(message.utf8.prefix(2048))
                 while !bytes.isEmpty, String(bytes: bytes, encoding: .utf8) == nil { bytes.removeLast() }
                 lastObservation = String(decoding: bytes, as: UTF8.self)
@@ -2172,9 +2207,11 @@ final class BatchImportUITests: XCTestCase {
             }) { return rendered }
             if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
         }
-        let error = failure("Restored original PDF content did not render", app: app)
+        let message = fixture == .recovery ? "Restored original PDF content did not render"
+            : fixture.evidenceName + " did not render"
+        let error = failure(message, app: app)
         let observation = XCTAttachment(string: lastObservation)
-        observation.name = "Recovery original preview — last observation"
+        observation.name = fixture.evidenceName + " — last observation"
         observation.lifetime = .keepAlways
         add(observation)
         throw error
@@ -2182,6 +2219,7 @@ final class BatchImportUITests: XCTestCase {
 
     private func renderedSyntheticOriginal(_ app: XCUIApplication,
                                            before deadline: ContinuousClock.Instant,
+                                           fixture: OriginalPreviewFixture = .recovery,
                                            observe: (String) -> Void = { _ in },
                                            record: (PreviewAttempt) -> Void = { _ in }) -> RenderedOriginalEvidence? {
         let started = ContinuousClock.now
@@ -2197,6 +2235,9 @@ final class BatchImportUITests: XCTestCase {
         }
         observe("No unique visible preview within the observation deadline")
         guard ContinuousClock.now < deadline else { return nil }
+        if fixture != .recovery {
+            guard read(app.navigationBars["Original document"].exists) == true else { return nil }
+        }
         let previews = app.otherElements.matching(identifier: "QLPreviewControllerView")
         guard read(previews.count) == 1 else { return nil }
         let preview = previews.element
@@ -2243,8 +2284,7 @@ final class BatchImportUITests: XCTestCase {
             .flatMap { $0.components(separatedBy: .newlines) }.map(normalized)
         observe("Recognized preview lines:\n" + lines.joined(separator: "\n"))
         attempt.outcome = .markersRejected
-        let markers = ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL", "Sample reservation ABC-000"]
-        guard markers.allSatisfy({ marker in lines.filter { $0 == marker }.count == 1 }),
+        guard fixture.markers.allSatisfy({ marker in lines.filter { $0 == marker }.count == 1 }),
               ContinuousClock.now < deadline else { return nil }
         attempt.outcome = .accepted
         return RenderedOriginalEvidence(screenshot: screenshot, lines: lines)

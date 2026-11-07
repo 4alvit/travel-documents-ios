@@ -1705,7 +1705,7 @@ class DriverTests(unittest.TestCase):
         def present_group(pid, sig):
             if sig == 0:
                 world.calls.append(('probe', world.t))
-                return  # May be descendants or a reused numeric group.
+                return None  # May be descendants or a reused numeric group.
             return original(pid, sig)
         with patch('os.killpg', side_effect=present_group):
             with self.assertRaisesRegex(RuntimeError, 'finite timeout'):

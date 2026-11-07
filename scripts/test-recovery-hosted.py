@@ -5366,8 +5366,8 @@ class DocumentationScopeGateTests(unittest.TestCase):
             for value in ['', 'unknown', 'FALSE']:
                 variants.append(({**baseline, 'SCOPE_RUN': value}, False))
             if run == 'false':
-                for reason in ['', 'source-change', 'unavailable-history']:
-                    variants.append(({**baseline, 'SCOPE_REASON': reason}, False))
+                for invalid_reason in ['', 'source-change', 'unavailable-history']:
+                    variants.append(({**baseline, 'SCOPE_REASON': invalid_reason}, False))
             for env, expected in variants:
                 with self.subTest(env=env):
                     result = subprocess.run(['bash', '-c', script], env={**os.environ, **env}, capture_output=True)
