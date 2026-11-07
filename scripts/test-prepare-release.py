@@ -83,6 +83,13 @@ class Fixture:
     def args(self, stage="beta", output="output", tag=None):
         return argparse.Namespace(commit=self.commit, run_id=10, stage=stage, version="0.1.0", evidence=self.evidence, output=self.root / output, predecessor_tag=tag, repo=self.repo)
 
+    def producer_attempt(self, attempt):
+        self.provenance["ci"]["GITHUB_RUN_ATTEMPT"] = str(attempt)
+        self.files = checksummed({"TripDocket-Simulator.zip": self.app, "provenance.json": m.encode_json(self.provenance)})
+        self.outer = zipped([(name, value, stat.S_IFREG | 0o644) for name, value in self.files.items()])
+        self.artifact.update(name="TripDocket-simulator-%s-10-%s" % (self.commit, attempt),
+                             size_in_bytes=len(self.outer), digest="sha256:" + m.digest(self.outer))
+
 
 class FakeGitHub:
     def __init__(self, fixture, previous=None):
@@ -108,7 +115,13 @@ class FakeGitHub:
 
     def pages(self, path, field):
         self.calls.append(("GET", path))
-        return copy.deepcopy(self.fixture.jobs if field == "jobs" else [self.fixture.artifact])
+        if field == "jobs":
+            if path.endswith("/jobs?filter=all"):
+                return copy.deepcopy(getattr(self.fixture, "history", self.fixture.jobs))
+            if path.endswith("/jobs?filter=latest"):
+                return copy.deepcopy(getattr(self.fixture, "latest_jobs", self.fixture.jobs))
+            raise AssertionError("Expected explicit latest or complete job history: " + path)
+        return copy.deepcopy([self.fixture.artifact])
 
     def binary(self, path, *, accept="application/octet-stream"):
         self.calls.append(("GET", path))
@@ -162,6 +175,108 @@ class ReleaseTests(unittest.TestCase):
         for jobs in cases:
             with self.subTest(jobs=jobs), self.assertRaises(m.InvalidRelease):
                 m.validate_run(self.f.run, jobs, self.f.commit, 10)
+
+    def partial_attempt(self):
+        for job in self.f.jobs:
+            if job["name"] in {"Change scope", m.BUILD_JOB}:
+                job["run_attempt"] = 1
+        self.f.history = copy.deepcopy(self.f.jobs)
+        for job in self.f.jobs:
+            if job["name"] in {"CI gate", "iPad privacy and support (ru-RU)"}:
+                self.f.history.append({**job, "id": job["id"] + 100, "run_attempt": 1, "conclusion": "failure"})
+        self.f.producer_attempt(1)
+
+    def test_partial_rerun_preserves_actual_build_and_final_qualification_attempts(self):
+        self.partial_attempt()
+        api = FakeGitHub(self.f)
+        output = m.prepare(self.f.args(), api)
+        acceptance = m.decode_json((output / "acceptance.json").read_bytes())
+        build = next(job for job in self.f.jobs if job["name"] == m.BUILD_JOB)
+        self.assertEqual(acceptance["ci"]["run_attempt"], 2)
+        self.assertEqual(acceptance["ci_artifact"]["producer_job_id"], build["id"])
+        self.assertEqual(acceptance["ci_artifact"]["producer_run_attempt"], 1)
+        self.assertEqual(next(job for job in acceptance["jobs"] if job["name"] == m.BUILD_JOB)["run_attempt"], 1)
+        self.assertEqual((output / "provenance.json").read_bytes(), self.f.files["provenance.json"])
+        self.assertEqual((output / "TripDocket-Simulator.zip").read_bytes(), self.f.app)
+        self.assertEqual(sum(path.endswith("/jobs?filter=latest") for _, path in api.calls), 2)
+        self.assertEqual(sum(path.endswith("/jobs?filter=all") for _, path in api.calls), 2)
+
+    def test_partial_rerun_latest_view_can_contain_only_final_attempt(self):
+        self.partial_attempt()
+        self.f.latest_jobs = [job for job in self.f.jobs if job["run_attempt"] == 2]
+        output = m.prepare(self.f.args(), FakeGitHub(self.f))
+        acceptance = m.decode_json((output / "acceptance.json").read_bytes())
+        self.assertEqual(len(acceptance["jobs"]), 7)
+        self.assertEqual(acceptance["ci_artifact"]["producer_run_attempt"], 1)
+        self.assertEqual((output / "provenance.json").read_bytes(), self.f.files["provenance.json"])
+
+    def test_latest_view_cannot_omit_current_jobs_or_substitute_stale_rows(self):
+        self.partial_attempt()
+        current = [job for job in self.f.jobs if job["run_attempt"] == 2]
+        old = next(job for job in self.f.history if job["name"] == "CI gate" and job["run_attempt"] == 1)
+        cases = [current[:-1], current + [current[0]],
+                 [old if job["name"] == "CI gate" else job for job in current],
+                 [{**job, "id": job["id"] + 1000} for job in current]]
+        for reported in cases:
+            with self.subTest(reported=reported), self.assertRaises(m.InvalidRelease):
+                m.reconcile_jobs(self.f.run, reported, self.f.history, self.f.commit, 10)
+
+    def test_history_cannot_hide_newer_failure_or_substitute_old_job(self):
+        self.partial_attempt()
+        cases = []
+        build = next(job for job in self.f.jobs if job["name"] == m.BUILD_JOB)
+        for conclusion in ("failure", "success"):
+            cases.append(self.f.history + [{**build, "id": 400, "run_attempt": 2, "conclusion": conclusion}])
+        cases.append(self.f.history[:-1] + [{**self.f.history[-1], "id": build["id"]}])
+        cases.append(self.f.history + [{**build, "id": 500}])
+        cases.append([job for job in self.f.history if job["name"] != m.BUILD_JOB])
+        for history in cases:
+            with self.subTest(history=history), self.assertRaises(m.InvalidRelease):
+                m.validate_run(self.f.run, self.f.jobs, self.f.commit, 10, history=history)
+
+    def test_history_and_latest_require_positive_unique_ids_and_same_source(self):
+        self.partial_attempt()
+        for field, value in [("head_sha", "a" * 40), ("run_id", 99), ("run_attempt", 0),
+                             ("run_attempt", 3), ("run_attempt", True), ("name", "unknown"),
+                             ("id", 0), ("id", True)]:
+            history = copy.deepcopy(self.f.history); history[0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(m.InvalidRelease):
+                m.validate_run(self.f.run, self.f.jobs, self.f.commit, 10, history=history)
+        for value in (0, True, self.f.jobs[1]["id"]):
+            jobs = copy.deepcopy(self.f.jobs); jobs[0]["id"] = value
+            with self.subTest(value=value), self.assertRaises(m.InvalidRelease):
+                m.validate_run(self.f.run, jobs, self.f.commit, 10, history=self.f.history)
+
+    def test_final_gate_cannot_be_inherited_even_with_matching_history(self):
+        jobs = [{**job, "run_attempt": 1} if job["name"] == "CI gate" else job for job in self.f.jobs]
+        with self.assertRaises(m.InvalidRelease):
+            m.validate_run(self.f.run, jobs, self.f.commit, 10, history=jobs)
+
+    def test_old_build_cannot_be_relabelled_as_final_attempt(self):
+        self.partial_attempt()
+        self.f.producer_attempt(2)
+        with self.assertRaises(m.InvalidRelease):
+            m.prepare(self.f.args(), FakeGitHub(self.f))
+        self.assertFalse(self.f.args().output.exists())
+
+    def test_inherited_artifact_provenance_must_match_actual_producer(self):
+        self.partial_attempt()
+        self.f.producer_attempt(2)
+        self.f.artifact["name"] = "TripDocket-simulator-%s-10-1" % self.f.commit
+        with self.assertRaises(m.InvalidRelease):
+            m.prepare(self.f.args(), FakeGitHub(self.f))
+        self.assertFalse(self.f.args().output.exists())
+
+    def test_changed_latest_job_identity_aborts_before_output(self):
+        fixture = self.f
+        class ChangedJobs(FakeGitHub):
+            def pages(self, path, field):
+                if field == "jobs" and path.endswith("filter=latest") and any(p.endswith("filter=all") for _, p in self.calls):
+                    fixture.jobs[0]["id"] += 1000
+                return super().pages(path, field)
+        with self.assertRaisesRegex(m.InvalidRelease, "CI jobs changed during preparation"):
+            m.prepare(self.f.args(), ChangedJobs(self.f))
+        self.assertFalse(self.f.args().output.exists())
 
     def test_release_job_inventory_matches_actual_ci_with_matrix_expansion(self):
         # Read the actual workflow rather than deriving fixtures from JOBS, which

@@ -28,6 +28,8 @@ JOBS = {
     "iPad privacy and support (en-US)", "iPad privacy and support (ru-RU)",
     "Free backup and recovery", "CI gate", "Change scope",
 }
+BUILD_JOB = "Swift, hosted tests and purchase UI"
+JOB_IDENTITY = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion")
 BIOMETRIC_TESTS = {
     "testFailedAndCancelledAuthenticationKeepDocumentsPrivate",
     "testOriginalPreviewIsPrivateAcrossBackgroundAndReturn",
@@ -136,7 +138,7 @@ class GitHub:
         return command(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: " + accept, path])
 
 
-def validate_run(run, jobs, commit, run_id):
+def validate_run(run, jobs, commit, run_id, *, history=None):
     require(run.get("id") == run_id, "CI run ID mismatch")
     require(run.get("head_sha") == commit and run.get("head_branch") == "main", "CI source mismatch")
     require(run.get("event") in {"push", "workflow_dispatch"}, "CI must be a main push or dispatch")
@@ -146,14 +148,58 @@ def validate_run(run, jobs, commit, run_id):
     require(run.get("status") == "completed" and run.get("conclusion") == "success", "CI is not successful and complete")
     require(type(run.get("run_attempt")) is int and run["run_attempt"] > 0, "invalid CI attempt")
     require(len(jobs) == len(JOBS) and {job.get("name") for job in jobs} == JOBS, "required CI jobs missing or duplicated")
+    ids = set()
     for job in jobs:
+        require(type(job.get("id")) is int and job["id"] > 0 and job["id"] not in ids, "invalid or duplicate CI job ID")
+        ids.add(job["id"])
         require(job.get("status") == "completed" and job.get("conclusion") == "success", "CI job did not pass: " + str(job.get("name")))
         require(job.get("head_sha") == commit and job.get("run_id") == run_id, "CI job source/run mismatch")
-        require(job.get("run_attempt") == run["run_attempt"], "CI job attempt mismatch")
+        require(type(job.get("run_attempt")) is int and 0 < job["run_attempt"] <= run["run_attempt"], "CI job attempt mismatch")
+    require(next(job for job in jobs if job["name"] == "CI gate")["run_attempt"] == run["run_attempt"], "CI gate is not from the final attempt")
+    # A smaller attempt number alone is not sufficient evidence of inheritance.
+    # Verify every effective job against complete history for this same run.
+    if history is None:
+        require(all(job["run_attempt"] == run["run_attempt"] for job in jobs), "inherited jobs require complete history")
+    else:
+        require(job_identity(jobs) == job_identity(jobs_from_history(run, history, commit, run_id)), "latest CI jobs disagree with complete history")
     return {key: run[key] for key in ("id", "run_attempt", "head_sha", "head_branch", "event", "path", "conclusion")}
 
 
+def jobs_from_history(run, history, commit, run_id):
+    """Select actual executions, never infer producer attempts from run metadata."""
+    require(type(run.get("run_attempt")) is int and run["run_attempt"] > 0, "invalid CI attempt")
+    latest, seen_ids, seen_attempts = {}, set(), set()
+    for job in history:
+        require(job.get("name") in JOBS, "unexpected historical CI job")
+        require(job.get("head_sha") == commit and job.get("run_id") == run_id, "historical CI job source/run mismatch")
+        require(type(job.get("run_attempt")) is int and 0 < job["run_attempt"] <= run["run_attempt"], "invalid historical CI attempt")
+        require(type(job.get("id")) is int and job["id"] > 0 and job["id"] not in seen_ids, "invalid or duplicate historical CI job ID")
+        key = (job["name"], job["run_attempt"])
+        require(key not in seen_attempts, "ambiguous historical CI job attempt")
+        seen_ids.add(job["id"]); seen_attempts.add(key)
+        if job["name"] not in latest or job["run_attempt"] > latest[job["name"]]["run_attempt"]:
+            latest[job["name"]] = job
+    require(set(latest) == JOBS, "incomplete CI job history")
+    return list(latest.values())
+
+
+def reconcile_jobs(run, reported, history, commit, run_id):
+    jobs = jobs_from_history(run, history, commit, run_id)
+    validate_run(run, jobs, commit, run_id, history=history)
+    # REST's latest view may contain only the final execution. Complete history
+    # supplies untouched successful jobs; it must never supply a superseded job.
+    current = [job for job in jobs if job["run_attempt"] == run["run_attempt"]]
+    require(job_identity(reported) in (job_identity(current), job_identity(jobs)),
+            "latest CI view disagrees with final execution or complete history")
+    return jobs
+
+
+def job_identity(jobs):
+    return sorted([{key: job.get(key) for key in JOB_IDENTITY} for job in jobs], key=lambda row: row["name"])
+
+
 def select_artifact(artifacts, run, commit):
+    """Select the artifact of the verified build producer's actual attempt."""
     name = "TripDocket-simulator-%s-%s-%s" % (commit, run["id"], run["run_attempt"])
     matches = [item for item in artifacts if item.get("name") == name]
     require(len(matches) == 1, "exact CI artifact missing or duplicated")
@@ -452,15 +498,18 @@ def prepare(args, github=None):
     base = "repos/" + REPOSITORY
     run_path = base + "/actions/runs/" + str(args.run_id)
     run = github.api(run_path)
-    attempt = run.get("run_attempt", 0)
-    jobs = github.pages(run_path + "/attempts/" + str(attempt) + "/jobs", "jobs")
-    ci = validate_run(run, jobs, args.commit, args.run_id)
+    reported = github.pages(run_path + "/jobs?filter=latest", "jobs")
+    history = github.pages(run_path + "/jobs?filter=all", "jobs")
+    jobs = reconcile_jobs(run, reported, history, args.commit, args.run_id)
+    ci = validate_run(run, jobs, args.commit, args.run_id, history=history)
+    build_job = next(job for job in jobs if job["name"] == BUILD_JOB)
+    producer_run = {**run, "run_attempt": build_job["run_attempt"]}
     artifacts = github.pages(run_path + "/artifacts", "artifacts")
-    artifact = select_artifact(artifacts, run, args.commit)
+    artifact = select_artifact(artifacts, producer_run, args.commit)
     archive = github.binary(base + "/actions/artifacts/" + str(artifact["id"]) + "/zip", accept="application/vnd.github+json")
     require(len(archive) == artifact["size_in_bytes"] and "sha256:" + digest(archive) == artifact["digest"], "downloaded CI artifact mismatch")
     files = {name: entry[0] for name, entry in archive_members(archive).items()}
-    provenance = validate_payload(files, args.commit, tree, run, args.version)
+    provenance = validate_payload(files, args.commit, tree, producer_run, args.version)
     actual_parents = command(["git", "show", "-s", "--format=%P", args.commit], cwd=repo, maximum=2048).decode().strip().split()
     require(provenance["source"].get("parents") == actual_parents, "producer source parents mismatch")
     files.pop("SHA256SUMS")
@@ -470,14 +519,20 @@ def prepare(args, github=None):
     predecessor = None
     if args.predecessor_tag:
         predecessor = previous_release(github, args.predecessor_tag, args.stage, args.version, args.commit, tree, payload)
-    # Do not silently use evidence from an older attempt after a rerun starts.
+    # Reconcile both job views, then read the run last to detect an intervening
+    # rerun. Never relabel an inherited build as produced by the final attempt.
+    latest_reported = github.pages(run_path + "/jobs?filter=latest", "jobs")
+    latest_history = github.pages(run_path + "/jobs?filter=all", "jobs")
     latest = github.api(run_path)
     require(all(latest.get(key) == run.get(key) for key in ("id", "run_attempt", "head_sha", "head_branch", "event", "path", "status", "conclusion")), "CI run changed during preparation")
+    latest_jobs = reconcile_jobs(latest, latest_reported, latest_history, args.commit, args.run_id)
+    require(job_identity(latest_jobs) == job_identity(jobs), "CI jobs changed during preparation")
     acceptance = {
         "schema_version": 1, "scope": SCOPE, "stage": args.stage, "version": args.version,
         "source": {"commit": args.commit, "tree": tree}, "ci": ci,
-        "jobs": [{key: job[key] for key in ("id", "name", "conclusion")} for job in jobs],
-        "ci_artifact": {key: artifact[key] for key in ("id", "name", "digest")},
+        "jobs": [{key: job[key] for key in ("id", "name", "run_attempt", "conclusion")} for job in jobs],
+        "ci_artifact": {**{key: artifact[key] for key in ("id", "name", "digest")},
+                        "producer_job_id": build_job["id"], "producer_run_attempt": build_job["run_attempt"]},
         "payload": payload, "execution_receipts": records, "review": review,
         "operator_evidence_sha256": evidence_sha, "predecessor": predecessor,
         "prepared_at_utc": datetime.now(timezone.utc).isoformat(),

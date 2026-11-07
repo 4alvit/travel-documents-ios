@@ -1800,6 +1800,37 @@ class BoundaryTests(unittest.TestCase):
         r.active = {p.pid: p}
         return r, p, {}
 
+    def test_reaped_leader_present_group_is_never_signalled(self):
+        ops = Ops({'lingering': True, 'ignore_all': True})
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Reaped leader.*group identity'):
+            r.stop(p, 8., row)
+        self.assertEqual(ops.signals, [])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIs(r.active[p.pid], p)
+
+    def test_reaped_leader_with_absent_group_closes_without_signal(self):
+        ops = Ops({})
+        r, p, row = self.owned_stop(ops)
+        r.stop(p, 8., row)
+        self.assertEqual(ops.signals, [])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active)
+
+    def test_reaped_after_TERM_present_group_is_not_sent_KILL(self):
+        ops = Ops({'delay': float('inf')})
+        r, p, row = self.owned_stop(ops)
+        def present(_):
+            return False  # Presence alone cannot identify a group after reap.
+        ops.absent = present
+        with self.assertRaisesRegex(RuntimeError, 'Reaped leader.*group identity'):
+            r.stop(p, 8., row)
+        self.assertEqual([sig for _, sig, _ in ops.signals], [signal.SIGTERM])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIs(r.active[p.pid], p)
+
     def test_short_stop_reserves_kill_confirmation_after_slow_initial_probe(self):
         ops = PostKillOps()
         r, p, row = self.owned_stop(ops)
@@ -2114,7 +2145,13 @@ class BoundaryTests(unittest.TestCase):
         row=r.report['commands'][0]
         self.assertIn('Leader exited but process group remains',row['error'])
         self.assertFalse(row['process_observations']['command.group_probe']['result'])
-        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIn('Reaped leader', row['stop_error'])
+        self.assertEqual(r.ops.signals, [])
+        self.assertTrue(r.active)
+        with self.assertRaisesRegex(RuntimeError, 'ownership unresolved'):
+            r.command('next', ['synthetic'], 30)
 
     def test_many_polls_keep_fixed_diagnostics_and_existing_save_count(self):
         r=self.runner(Ops({'delay':25}))
