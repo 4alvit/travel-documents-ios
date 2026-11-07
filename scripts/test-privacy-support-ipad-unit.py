@@ -513,6 +513,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn('group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}', workflow)
         self.assertIn('cancel-in-progress: false', workflow)
         ipad_job = workflow.split('  privacy_ipad:\n', 1)[1].split('  recovery:\n', 1)[0]
+        self.assertIn('    runs-on: macos-15\n', ipad_job)
+        self.assertNotIn('macos-15-intel', ipad_job)
+        self.assertIn('test "$RUNNER_ARCH" = ARM64', ipad_job)
+        self.assertIn('test "$(uname -m)" = arm64', ipad_job)
         self.assertIn('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer', ipad_job)
         self.assertIn('TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)', ipad_job)
         self.assertIn("test \"$TRIPDOCKET_IPAD_XCODE_VERSION\" = $'Xcode 26.2\\nBuild version 17C52'", ipad_job)
@@ -826,16 +830,17 @@ class DriverTests(unittest.TestCase):
             self.assertRegex(independent_lane,r'(?m)^    needs: \[scope\]$')
             self.assertIn("if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}",independent_lane)
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 2',lane)
-        for locale,step,job in [('en-US',83,95),('ru-RU',83,95)]:
+        for locale,step,job in [('en-US',40,52),('ru-RU',40,52)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
-            profile=ipad.execution_profile('x86_64',locale)
+            profile=ipad.execution_profile('arm64',locale)
             self.assertEqual(step*60-profile['work_seconds']-profile['cleanup_seconds'],120)
             self.assertEqual(job,2+3+step+2+5)
         self.assertEqual(lane.count('        timeout-minutes: 2\n'),2)
         self.assertIn('        timeout-minutes: 3\n',lane)
         self.assertEqual(lane.count('- locale:'),2)
         self.assertIn('name: iPad privacy and support (${{ matrix.locale }})',lane)
-        self.assertIn("""args=(--locale '${{ matrix.locale }}' --hosted-intel-timing)
+        self.assertNotIn('--hosted-intel-timing', lane)
+        self.assertIn("""args=(--locale '${{ matrix.locale }}')
           bash scripts/test-privacy-support-ipad.sh "${args[@]}"
 """, lane)
         self.assertIn('name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',lane)
