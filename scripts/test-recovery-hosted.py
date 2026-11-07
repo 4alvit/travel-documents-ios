@@ -12,6 +12,8 @@ import shlex
 from pathlib import Path
 import signal
 import stat
+import sys
+import uuid
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -24,6 +26,7 @@ with patch('subprocess.Popen') as startup,patch('os.killpg') as signals:
     spec.loader.exec_module(hosted)
     startup.assert_not_called();signals.assert_not_called()
 PROFILE=json.loads((HERE/'recovery-hosted-profile.json').read_text())
+ARM_PROFILE=json.loads((HERE/'recovery-hosted-arm-profile.json').read_text())
 SHA='a'*40;BASE='b'*40;HEAD='c'*40
 FILES_ALREADY_ABSENT = b'An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=3):\nSimulator device failed to terminate com.apple.DocumentsApp.\nfound nothing to terminate\nUnderlying error (domain=NSPOSIXErrorDomain, code=3):\n\tThe request to terminate "com.apple.DocumentsApp" failed. found nothing to terminate\n\tfound nothing to terminate\n'
 
@@ -211,12 +214,92 @@ class BoundaryTests(unittest.TestCase):
     def tearDown(self):
         for guard in self.guards:guard.assert_not_called()
 
-    def env(self):
+    def env(self, profile=None):
+        profile = PROFILE if profile is None else profile
         return {'CI':'true','GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':PROFILE['repository'],'GITHUB_JOB':'recovery',
-                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':'macos-15','TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
-                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':'ARM64','ImageOS':'macos15','ImageVersion':'test-image',
+                'GITHUB_WORKFLOW':'CI','TRIPDOCKET_RUNNER_LABEL':profile['runner_label'],'TRIPDOCKET_RUNNER_ENVIRONMENT':'github-hosted',
+                'RUNNER_OS':'macOS','TRIPDOCKET_RUNNER_ARCH':profile['runner_arch'],'ImageOS':'macos15','ImageVersion':'test-image',
                 'GITHUB_RUN_ATTEMPT':'1','GITHUB_RUN_ID':'123','GITHUB_EVENT_NAME':'pull_request',
                 'GITHUB_SHA':SHA,'GITHUB_REF':'refs/pull/1/merge'}
+
+    def test_arm_profile_cli_is_closed_and_legacy_default_is_unchanged(self):
+        for args, expected in [(['--run'], 'hosted-intel-v1'),
+                               (['--run', '--profile', 'hosted-arm-v1'], 'hosted-arm-v1')]:
+            profile = PROFILE if expected == 'hosted-intel-v1' else ARM_PROFILE
+            with patch.object(hosted.core, 'json_file', return_value=profile) as read, \
+                 patch.object(hosted, 'job_context', side_effect=RuntimeError('stop before work')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(hosted.main(args), 1)
+                read.assert_called_once_with(hosted.PROFILE_FILES[expected])
+        with patch.object(hosted.core, 'json_file') as read, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hosted.main(['--profile', 'hosted-arm-v1']), 0)
+            read.assert_not_called()
+        for value in ('../recovery-hosted-profile.json', '/tmp/profile.json', 'default', 'hosted-arm-v1 '):
+            with self.subTest(value=value), patch.object(hosted.core, 'json_file') as read, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                hosted.main(['--run', '--profile', value])
+            read.assert_not_called()
+        with patch.object(hosted.core, 'json_file', return_value=PROFILE), \
+             patch.object(hosted, 'job_context') as context, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(hosted.main(['--run', '--profile', 'hosted-arm-v1']), 1)
+            context.assert_not_called()
+        with self.assertRaises(TypeError): hosted.PROFILE_FILES['other'] = Path('/tmp/profile.json')
+
+    def test_arm_profile_has_identical_bounds_and_exact_host_admission(self):
+        changed = {'runner_label', 'runner_arch', 'machine', 'execution_profile'}
+        self.assertEqual({k:v for k,v in ARM_PROFILE.items() if k not in changed},
+                         {k:v for k,v in PROFILE.items() if k not in changed})
+        intel = hosted.core.execution_profile('hosted-intel-v1')
+        arm = hosted.core.execution_profile('hosted-arm-v1')
+        self.assertEqual({k:v for k,v in arm.items() if k not in ('name', 'ui_profile')},
+                         {k:v for k,v in intel.items() if k not in ('name', 'ui_profile')})
+        for label in ('macos-15', 'macos-15-intel'):
+            for arch in ('ARM64', 'X64'):
+                for machine in ('arm64', 'x86_64'):
+                    env = {**self.env(ARM_PROFILE), 'TRIPDOCKET_RUNNER_LABEL': label,
+                           'TRIPDOCKET_RUNNER_ARCH': arch}
+                    with self.subTest(label=label, arch=arch, machine=machine):
+                        if (label, arch, machine) == ('macos-15', 'ARM64', 'arm64'):
+                            job = hosted.job_context(env, ARM_PROFILE, machine)
+                            self.assertIs(hosted.select_execution_profile(ARM_PROFILE, job, machine), arm)
+                        else:
+                            with self.assertRaises(RuntimeError): hosted.job_context(env, ARM_PROFILE, machine)
+                            with self.assertRaises(RuntimeError): hosted.select_execution_profile(ARM_PROFILE, env, machine)
+        with self.assertRaises(TypeError): arm['total_seconds'] = 9999
+        r = self.runner(execution_profile='hosted-arm-v1')
+        self.assertEqual((r.t0, r.limit, r.final), (0, 4980, 5340))
+        with self.assertRaisesRegex(AttributeError, 'reselected'): r._execution_profile = intel
+        for machine in ('x86_64', '', None):
+            with self.assertRaises(RuntimeError):
+                hosted.core.Recovery(Ops(), self.root/'not-created', {}, {'machine':machine}, 'test', 0,
+                    candidate=self.root/'source', source_manifest={}, execution_profile=arm)
+        self.assertFalse((self.root/'not-created').exists())
+        for field,value in [('total_seconds',5341), ('cleanup_seconds',361), ('runner_environment','self-hosted'),
+                            ('execution_profile','hosted-intel-v1')]:
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                hosted.select_execution_profile({**ARM_PROFILE,field:value}, self.env(ARM_PROFILE), 'arm64')
+
+    def test_arm_boot_finalization_requires_verified_success_and_original_bounds(self):
+        r,row,_,_,payload,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-success')
+        self.assertTrue(ok)
+        self.assertEqual(r.report['resources'][-1]['scan']['requested_scan_seconds'],60)
+        self.assertGreaterEqual(r.report['resources'][-1]['logical'],payload.stat().st_size)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],r.limit,r.final),(592.,600.,4980.,5340.))
+        for fault in ('unknown','active','unreaped','unconfirmed','unattempted','absence-cache',
+                      'identity','nonzero','boolean-exit','profile-copy','unowned','copied-record',
+                      'receipt-only','other-argv','other-command'):
+            with self.subTest(fault=fault):
+                r,row,_,_,_,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-'+fault,fault=fault)
+                self.assertFalse(ok)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        for label,options in [('scan',{'delay':60.}),('total',{'closed_at':599.,'delay':1.}),
+                              ('global',{'limit':505.}),('cancel',{'fault':'cancel'})]:
+            with self.subTest(boundary=label):
+                r,row,_,_,_,ok=self.hosted_boot_finalization(profile='hosted-arm-v1',label='arm-'+label,**options)
+                self.assertFalse(ok)
+                self.assertEqual(row['outcome'],'failed')
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
+                          hosted.core.CAPS['scan_entries'],hosted.core.CAPS['scan_depth']), (5,30,100000,40))
 
     def test_default_cli_and_invalid_environment_are_inert(self):
         with contextlib.redirect_stdout(io.StringIO()) as text:
@@ -227,41 +310,57 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(hosted.main(['--run']),1);boundary.assert_not_called()
 
     def test_job_requires_matching_host_profile_and_valid_attempt(self):
-        env=self.env();hosted.job_context(env,PROFILE,'arm64')
+        env=self.env();hosted.job_context(env,PROFILE,'x86_64')
         for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_REPOSITORY','other/repo'),('GITHUB_JOB','validate'),
-                          ('TRIPDOCKET_RUNNER_LABEL','macos-15-intel'),('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted'),
-                          ('TRIPDOCKET_RUNNER_ARCH','X64'),('GITHUB_RUN_ATTEMPT','0'),('ImageVersion',''),
+                          ('TRIPDOCKET_RUNNER_LABEL','macos-15'),('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted'),
+                          ('TRIPDOCKET_RUNNER_ARCH','ARM64'),('GITHUB_RUN_ATTEMPT','0'),('ImageVersion',''),
                           ('ImageOS','macos14'),('GITHUB_EVENT_NAME','pull_request_target'),('GITHUB_SHA','bad'),
                           ('SIMCTL_CHILD_TEST','1'),('DYLD_INSERT_LIBRARIES','/tmp/example')]:
-            with self.subTest(key=key),self.assertRaises(RuntimeError):hosted.job_context({**env,key:value},PROFILE,'arm64')
-        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'x86_64')
+            with self.subTest(key=key),self.assertRaises(RuntimeError):hosted.job_context({**env,key:value},PROFILE,'x86_64')
+        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'arm64')
+
+    def test_intel_job_requires_all_three_host_identity_fields(self):
+        env=self.env();job=hosted.job_context(env,PROFILE,'x86_64')
+        self.assertEqual((job['TRIPDOCKET_RUNNER_LABEL'],job['TRIPDOCKET_RUNNER_ARCH'],PROFILE['machine']),
+                         ('macos-15-intel','X64','x86_64'))
+        for label in ('macos-15-intel','macos-15'):
+            for architecture in ('X64','ARM64'):
+                for machine in ('x86_64','arm64'):
+                    if (label,architecture,machine)==('macos-15-intel','X64','x86_64'):
+                        continue
+                    crossed={**env,'TRIPDOCKET_RUNNER_LABEL':label,'TRIPDOCKET_RUNNER_ARCH':architecture}
+                    with self.subTest(label=label,architecture=architecture,machine=machine),self.assertRaises(RuntimeError):
+                        hosted.job_context(crossed,PROFILE,machine)
 
     def test_explicit_workflow_attempt_metadata_is_positive_and_canonical(self):
         for attempt in ('1', '2', '17'):
             with self.subTest(attempt=attempt):
                 env={**self.env(),'GITHUB_RUN_ATTEMPT':attempt}
-                self.assertEqual(hosted.job_context(env,PROFILE,'arm64')['GITHUB_RUN_ATTEMPT'],attempt)
+                self.assertEqual(hosted.job_context(env,PROFILE,'x86_64')['GITHUB_RUN_ATTEMPT'],attempt)
         for attempt in (None, '', '0', '-1', '+2', '02', '2.0', '2 ', ' 2', '2\n', '٢', 2):
             with self.subTest(attempt=attempt),self.assertRaises(RuntimeError):
-                hosted.job_context({**self.env(),'GITHUB_RUN_ATTEMPT':attempt},PROFILE,'arm64')
+                hosted.job_context({**self.env(),'GITHUB_RUN_ATTEMPT':attempt},PROFILE,'x86_64')
         env=self.env();del env['GITHUB_RUN_ATTEMPT']
-        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'arm64')
+        with self.assertRaises(RuntimeError):hosted.job_context(env,PROFILE,'x86_64')
 
     def test_explicit_attempts_keep_distinct_owned_identity_and_receipts(self):
         workspace=self.root/'repo';workspace.mkdir()
         runners=[];original=[]
         for run,attempt in [('123','1'),('123','2'),('124','2')]:
             env={**self.env(),'GITHUB_RUN_ID':run,'GITHUB_RUN_ATTEMPT':attempt}
-            job=hosted.job_context(env,PROFILE,'arm64')
+            job=hosted.job_context(env,PROFILE,'x86_64')
             out=hosted.attempt_output(workspace,job)
-            r=hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0)
+            selected=hosted.select_execution_profile(PROFILE,job,'x86_64')
+            r=hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0,
+                                    execution_profile=selected)
             receipt=(out/'receipt.json').read_bytes()
             self.assertEqual(json.loads(receipt)['job']['GITHUB_RUN_ID'],run)
             self.assertEqual(json.loads(receipt)['job']['GITHUB_RUN_ATTEMPT'],attempt)
             with self.assertRaisesRegex(RuntimeError,'never reused'):
                 hosted.attempt_output(workspace,job)
             with self.assertRaises(FileExistsError):
-                hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0)
+                hosted.HostedRecovery(Ops(),out,copy.deepcopy(PROFILE),job,self.event(),workspace,0,
+                                      execution_profile=selected)
             runners.append(r);original.append(receipt)
         self.assertEqual(len({r.out for r in runners}),3)
         self.assertEqual(len({r.folder_name for r in runners}),3)
@@ -270,7 +369,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(r.ops.processes,[])
 
     def test_attempt_output_rejects_dangling_evidence_and_symlink_parent(self):
-        workspace=self.root/'repo';workspace.mkdir();job=hosted.job_context(self.env(),PROFILE,'arm64')
+        workspace=self.root/'repo';workspace.mkdir();job=hosted.job_context(self.env(),PROFILE,'x86_64')
         out=hosted.attempt_output(workspace,job)
         out.symlink_to(self.root/'missing')
         with self.assertRaisesRegex(RuntimeError,'never reused'):hosted.attempt_output(workspace,job)
@@ -298,19 +397,30 @@ class BoundaryTests(unittest.TestCase):
                          {'*.json','PhaseLogs/','Capability/','*.xcresult/','BeforeReset/','AfterRestore/','*-attachments/'})
         self.assertNotIn('/*.log',workflow)
 
-    def test_recovery_workflow_pins_matched_toolchain_and_keeps_existing_budgets(self):
+    def test_recovery_workflow_bounds_hosted_profile_and_evidence(self):
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
         recovery=workflow.split('  recovery:\n',1)[1].split('\n  gate:\n',1)[0]
         environment=recovery.split('    env:\n',1)[1].split('    steps:\n',1)[0]
         self.assertEqual(environment.splitlines(),[
             '      TRIPDOCKET_RUNNER_LABEL: macos-15',
             '      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer'])
-        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 35\n',recovery)
+        self.assertIn('    runs-on: macos-15\n    timeout-minutes: 118\n',recovery)
+        checkout=recovery.split('    steps:\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 2\n',checkout)
+        regressions=recovery.split('      - name: Hosted adapter regression checks\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('        timeout-minutes: 15\n',regressions)
         attempt=recovery.split('      - name: One bounded recovery attempt\n',1)[1].split('      - name:',1)[0]
-        self.assertIn('        timeout-minutes: 27\n',attempt)
-        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run\n',attempt)
+        self.assertIn('        timeout-minutes: 91\n',attempt)
+        self.assertIn('        run: python3 -B scripts/recovery_hosted.py --run --profile hosted-arm-v1\n',attempt)
         evidence=recovery.split('      - name: Recovery evidence\n',1)[1]
         self.assertIn('        if: always()\n        timeout-minutes: 5\n',evidence)
+        step_minutes=[int(re.search(r'timeout-minutes: (\d+)',step).group(1))
+                      for step in (checkout,regressions,attempt,evidence)]
+        job_minutes=int(re.search(r'^    timeout-minutes: (\d+)$',recovery,re.M).group(1))
+        self.assertEqual(step_minutes,[2,15,91,5])
+        self.assertEqual(sum(step_minutes)+5,job_minutes)
+        self.assertEqual(PROFILE['total_seconds'],5340)
+        self.assertEqual(step_minutes[2]*60-PROFILE['total_seconds'],120)
 
     def test_main_cohorts_partition_test_targets_without_changing_local_default_or_case_limits(self):
         driver=(HERE/'test-simulator.sh').read_text()
@@ -351,7 +461,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(workflow.count('bash scripts/verify.sh'),1)
         self.assertEqual(workflow.count('bash scripts/package-ci-preview.sh'),1)
         gate=workflow.split('  gate:\n',1)[1]
-        self.assertIn('needs: [validate, ui_guidance, privacy_ipad, recovery]',gate)
+        self.assertIn('needs: [scope, validate, ui_guidance, privacy_ipad, recovery]',gate)
         for variable,job in [('CORE_PURCHASE_RESULT','validate'),('UI_GUIDANCE_RESULT','ui_guidance'),
                              ('IPAD_RESULT','privacy_ipad'),('RECOVERY_RESULT','recovery')]:
             self.assertIn(variable+': ${{ needs.'+job+'.result }}',gate)
@@ -400,7 +510,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_runtime_unknown_ambiguous_or_incompatible_fails(self):
         row=self.runtime()
-        variants=[[],[row,row],[{**row,'isAvailable':False}],[{**row,'supportedArchitectures':['x86_64']}],
+        variants=[[],[row,row],[{**row,'isAvailable':False}],[{**row,'supportedArchitectures':['arm64']}],
                   [{**row,'supportedArchitectures':'arm64'}],[{**row,'supportedDeviceTypes':[]}],
                   [{**row,'supportedDeviceTypes':row['supportedDeviceTypes']*2}]]
         for values in variants:
@@ -457,12 +567,202 @@ class BoundaryTests(unittest.TestCase):
         for raw in variants:
             with self.subTest(raw=raw),self.assertRaises((RuntimeError,ValueError)):hosted.parse_tree(raw)
 
-    def runner(self,ops=None):
-        workspace=self.root/'repo';workspace.mkdir();out=self.root/'out'
+    def runner(self,ops=None,*,execution_profile='default',label=''):
+        suffix='-'+label if label else ''
+        workspace=self.root/('repo'+suffix);workspace.mkdir();out=self.root/('out'+suffix)
         ops=ops or Ops();ops.env={};ops.cwd=workspace
-        r=hosted.HostedRecovery(ops,out,copy.deepcopy(PROFILE),self.env(),self.event(),workspace,0)
+        selected=hosted.core.execution_profile(execution_profile)
+        profile=copy.deepcopy(ARM_PROFILE if execution_profile == 'hosted-arm-v1' else PROFILE)
+        profile.update(execution_profile=selected['name'],total_seconds=selected['total_seconds'],
+                       cleanup_seconds=selected['cleanup_seconds'])
+        if execution_profile == 'default':
+            # Legacy injected-boundary tests exercise hosted methods with the
+            # portable budget. This fixture is not a production admission path.
+            r=hosted.HostedRecovery.__new__(hosted.HostedRecovery)
+            r.profile,r.job,r.event,r.workspace=profile,self.env(),self.event(),workspace
+            hosted.core.Recovery.__init__(r,ops,out,
+                {'runtime':'UNSELECTED','device_type':profile['device_type']},
+                {'machine':profile['machine'],'python':str(Path(sys.executable).resolve())},
+                str(uuid.uuid5(uuid.NAMESPACE_URL,r.job['GITHUB_REPOSITORY']+'/'+r.job['GITHUB_RUN_ID']+'/recovery/'+r.job['GITHUB_RUN_ATTEMPT'])),
+                0,candidate=out/'Source',source_manifest={},execution_profile=selected)
+            r.report['job']=r.job;r.save()
+        else:
+            r=hosted.HostedRecovery(ops,out,profile,self.env(profile),self.event(),workspace,0,
+                                    execution_profile=selected)
         r.report['source_manifest']={'path':'synthetic-only','sha256':'0'*64}
         return r
+
+    def test_execution_profile_is_known_immutable_and_selected_before_output(self):
+        r=self.runner(execution_profile='hosted-intel-v1')
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+        self.assertEqual(r.execution_profile['boot_scan_seconds'],60)
+        self.assertEqual(hosted.core.execution_profile()['boot_scan_seconds'],15)
+        self.assertEqual((r.execution_profile['cleanup_seconds'],r.execution_profile['cleanup_action_seconds'],
+                          r.execution_profile['cleanup_inventory_seconds']),(360,90,60))
+        default=hosted.core.execution_profile()
+        self.assertEqual((default['cleanup_seconds'],default['cleanup_action_seconds'],
+                          default['cleanup_inventory_seconds']),(120,30,20))
+        self.assertEqual(r.report['execution_profile'],dict(r.execution_profile))
+        with self.assertRaises(TypeError):r.execution_profile['total_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['boot_scan_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['cleanup_action_seconds']=9999
+        with self.assertRaises(TypeError):r.execution_profile['cleanup_inventory_seconds']=9999
+        with self.assertRaises(AttributeError):r.execution_profile=hosted.core.execution_profile()
+        selected=r.execution_profile;deadlines=(r.t0,r.limit,r.final)
+        with self.assertRaisesRegex(AttributeError,'reselected'):r._execution_profile=hosted.core.execution_profile()
+        self.assertIs(r.execution_profile,selected)
+        self.assertEqual((r.t0,r.limit,r.final),deadlines)
+        with self.assertRaisesRegex(AttributeError,'removed'):del r._execution_profile
+        self.assertIs(r.execution_profile,selected)
+        self.assertEqual((r.t0,r.limit,r.final),deadlines)
+        r.ordinary_attribute='allowed'
+        self.assertEqual(r.ordinary_attribute,'allowed')
+        del r.ordinary_attribute
+        self.assertFalse(hasattr(r,'ordinary_attribute'))
+        for name in ('unknown','',None,True):
+            with self.subTest(name=name),self.assertRaises(RuntimeError):hosted.core.execution_profile(name)
+        out=self.root/'unadmitted'
+        with self.assertRaisesRegex(RuntimeError,'immutable known policy'):
+            hosted.core.Recovery(Ops(),out,{}, {},'test',0,candidate=self.root/'source',source_manifest={},
+                                 execution_profile=dict(r.execution_profile))
+        self.assertFalse(out.exists())
+        for machine in ('arm64', '', None):
+            with self.subTest(machine=machine),self.assertRaisesRegex(RuntimeError,'requires an Intel host'):
+                hosted.core.Recovery(Ops(),out,{}, {'machine':machine},'test',0,
+                    candidate=self.root/'source',source_manifest={},execution_profile=r.execution_profile)
+            self.assertFalse(out.exists())
+        self.assertEqual((hosted.core.CAPS['total_seconds'],hosted.core.CAPS['cleanup_seconds'],
+                          hosted.core.PREPARE_PHASE_SECONDS,hosted.core.PREPARE_CASE_SECONDS),
+                         (1500,120,780,180))
+
+    def test_hosted_profile_rejects_crossed_host_or_policy_before_constructor_effects(self):
+        job=hosted.job_context(self.env(),PROFILE,'x86_64')
+        selected=hosted.select_execution_profile(PROFILE,job,'x86_64')
+        self.assertIs(selected,hosted.core.execution_profile('hosted-intel-v1'))
+        invalid=[(dict(PROFILE),dict(job),'arm64')]
+        for field,value in [('runner_label','macos-15'),('runner_arch','ARM64'),('machine','arm64'),
+                            ('runner_environment','self-hosted'),
+                            ('total_seconds',5341),('total_seconds',True),('cleanup_seconds',361),
+                            ('execution_profile','default'),('unexpected',1)]:
+            invalid.append(({**PROFILE,field:value},dict(job),'x86_64'))
+        for field,value in [('TRIPDOCKET_RUNNER_LABEL','macos-15'),('TRIPDOCKET_RUNNER_ARCH','ARM64'),
+                            ('TRIPDOCKET_RUNNER_ENVIRONMENT','self-hosted')]:
+            invalid.append((dict(PROFILE),{**job,field:value},'x86_64'))
+        for policy,context,machine in invalid:
+            with self.subTest(policy=policy,context=context,machine=machine),self.assertRaises(RuntimeError):
+                hosted.select_execution_profile(policy,context,machine)
+        out=self.root/'wrong-host'
+        with self.assertRaises(RuntimeError):
+            hosted.HostedRecovery(Ops(),out,PROFILE,{**job,'TRIPDOCKET_RUNNER_ARCH':'ARM64'},
+                                  self.event(),self.root,0,execution_profile=selected)
+        self.assertFalse(out.exists())
+        default_profile={**PROFILE,'execution_profile':'default','total_seconds':1500,'cleanup_seconds':120}
+        with self.assertRaisesRegex(RuntimeError,'Unexpected hosted execution profile'):
+            hosted.HostedRecovery(Ops(),out,default_profile,job,self.event(),self.root,0,
+                                  execution_profile=hosted.core.execution_profile())
+        self.assertFalse(out.exists())
+
+    def test_profiles_keep_independent_original_deadlines(self):
+        default=self.runner(label='default')
+        intel=self.runner(execution_profile='hosted-intel-v1',label='intel')
+        self.assertEqual((default.limit,default.final),(1380,1500))
+        self.assertEqual((intel.limit,intel.final),(4980,5340))
+        default.ops.t=intel.ops.t=400
+        self.assertEqual((default.limit,default.final,intel.limit,intel.final),(1380,1500,4980,5340))
+        self.assertEqual(default.execution_profile['ui_profile'],None)
+
+    def test_hosted_phases_use_one_profile_for_native_command_receipt_and_environment(self):
+        r=self.runner(execution_profile='hosted-intel-v1');r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+        r.report['files_ui_baseline']={'absent':True};r.report['files_folder']={'fixture_verified':True}
+        r.ops.plans=[{'delay':.1} for _ in range(3)];observed=[]
+        r.ops.on_spawn=lambda argv:observed.append((list(argv),dict(r.ops.env)))
+        old_env=r.ops.env
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read),patch.object(r,'app_state'), \
+             patch.object(r,'verify_folder'),patch.object(r,'authorize_restore'):
+            for phase,command_seconds,native_seconds in [('prepare',1200,300),('export',900,600),('restore',900,600)]:
+                hosted.core.Recovery.run_phase(r,phase)
+                row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
+                self.assertEqual(row['requested_cap_seconds'],command_seconds)
+                self.assertEqual(budget['selected_case_max_seconds'],native_seconds)
+                self.assertEqual(budget['original_work_deadline_elapsed'],4980)
+                self.assertEqual(row['stop_reserve_seconds'],8)
+                argv,env=observed[-1]
+                for flag in ['-default-test-execution-time-allowance','-maximum-test-execution-time-allowance']:
+                    self.assertEqual(argv[argv.index(flag)+1],str(native_seconds))
+                self.assertEqual(env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'],'hosted-intel-v1')
+                self.assertIs(r.ops.env,old_env)
+                self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertEqual(len(observed),3)
+        self.assertEqual((r.limit,r.final),(4980,5340))
+
+    def test_hosted_arm_phases_use_one_profile_for_native_command_receipt_and_environment(self):
+        r=self.runner(execution_profile='hosted-arm-v1');r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+        r.report['files_ui_baseline']={'absent':True};r.report['files_folder']={'fixture_verified':True}
+        r.ops.plans=[{'delay':.1} for _ in range(3)];observed=[]
+        r.ops.on_spawn=lambda argv:observed.append((list(argv),dict(r.ops.env)))
+        old_env=r.ops.env
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read),patch.object(r,'app_state'), \
+             patch.object(r,'verify_folder'),patch.object(r,'authorize_restore'):
+            for phase,command_seconds,native_seconds in [('prepare',1200,300),('export',900,600),('restore',900,600)]:
+                hosted.core.Recovery.run_phase(r,phase)
+                row=r.report['commands'][-1];budget=r.report['phase_budget'][phase]
+                self.assertEqual(row['requested_cap_seconds'],command_seconds)
+                self.assertEqual(budget['selected_case_max_seconds'],native_seconds)
+                self.assertEqual(budget['original_work_deadline_elapsed'],4980)
+                self.assertEqual(row['stop_reserve_seconds'],8)
+                argv,env=observed[-1]
+                for flag in ['-default-test-execution-time-allowance','-maximum-test-execution-time-allowance']:
+                    self.assertEqual(argv[argv.index(flag)+1],str(native_seconds))
+                self.assertEqual(env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'],'hosted-arm-v1')
+                self.assertIs(r.ops.env,old_env)
+                self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertEqual(len(observed),3)
+        self.assertEqual((r.limit,r.final),(4980,5340))
+
+    def test_hosted_prepare_budget_causally_accepts_startup_rejected_by_default(self):
+        for name,passes in [('default',False),('hosted-intel-v1',True)]:
+            with self.subTest(profile=name):
+                r=self.runner(execution_profile=name,label=name);r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+                r.report['files_ui_baseline']={'absent':True};r.ops.plans=[{'delay':1100}]
+                with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult') as preserve, \
+                     patch.object(r,'read_result'),patch.object(r,'failure_evidence'):
+                    if passes:
+                        hosted.core.Recovery.run_phase(r,'prepare');preserve.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'phase-prepare failed'):
+                            hosted.core.Recovery.run_phase(r,'prepare')
+                        preserve.assert_not_called()
+                self.assertEqual(len(r.ops.processes),1)
+                self.assertEqual(r.report['attempts']['phase-prepare'],1)
+                self.assertTrue(r.report['commands'][0]['stop']['group_absent'])
+
+    def test_hosted_prepare_still_clips_to_original_work_and_reserves_cleanup(self):
+        r=self.runner(execution_profile='hosted-intel-v1');r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+        r.report['files_ui_baseline']={'absent':True};r.ops.t=4960;r.ops.plans=[{'delay':35}]
+        with patch.object(r,'failure_evidence'),patch.object(r,'preserve_result') as preserve:
+            with self.assertRaisesRegex(RuntimeError,'phase-prepare failed'):
+                hosted.core.Recovery.run_phase(r,'prepare')
+        preserve.assert_not_called();row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),(1200,4972,4980))
+        self.assertEqual((r.limit,r.final),(4980,5340));self.assertFalse(r.active)
+        with self.assertRaisesRegex(RuntimeError,'One-shot action already attempted'):
+            hosted.core.Recovery.run_phase(r,'prepare')
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_default_phase_strips_inherited_hosted_token(self):
+        r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-4000-8000-000000000001'
+        r.report['files_ui_baseline']={'absent':True}
+        r.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE']='hosted-intel-v1'
+        observed=[];r.ops.on_spawn=lambda argv:observed.append(dict(r.ops.env))
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'),patch.object(r,'read_result'):
+            hosted.core.Recovery.run_phase(r,'prepare')
+        self.assertNotIn('TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE',observed[0])
+        self.assertEqual(r.report['commands'][0]['requested_cap_seconds'],780)
+        self.assertEqual(r.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'],'hosted-intel-v1')
 
     def test_recovery_index_policy_preserves_exact_phase_selection(self):
         r=self.runner();r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer';r.owned='10000000-0000-0000-0000-000000000001'
@@ -576,9 +876,12 @@ class BoundaryTests(unittest.TestCase):
         xcode=r.out/'1-stdout.log';xcode.write_text('xcode diagnostic')
         r.report['commands']=[{'id':'phase-export','logs':{'stdout':str(xcode)}},
                               {'id':'export-app-stopped','logs':{'stdout':str(ps)}}]
-        with patch.object(hosted.core.Recovery,'run_phase',side_effect=RuntimeError('app running')), \
+        primary=RuntimeError('app running')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=primary), \
              patch.object(Path,'rename',side_effect=OSError('failed move')):
-            with self.assertRaises(OSError):r.run_phase('export')
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('export')
+        self.assertIs(failure.exception,primary)
+        self.assertIn('failed move',r.report['phase_log_publication_error'])
         self.assertEqual(list((r.out/'PhaseLogs').glob('*')),[])
         self.assertEqual(ps.read_text(),'private process listing')
         workflow=(HERE.parent/'.github/workflows/ci.yml').read_text()
@@ -594,6 +897,125 @@ class BoundaryTests(unittest.TestCase):
             r.run_phase('export')
         self.assertEqual((r.out/'PhaseLogs/export-stdout.log').read_text(),'xcode diagnostic')
         self.assertEqual(ps.read_text(),'private process listing')
+
+    def attachment_argv(self,r,phase):
+        return ['/usr/bin/xcrun','xcresulttool','export','attachments',
+                '--path',str(r.out/(phase+'-inspection.xcresult')),
+                '--output-path',str(r.out/(phase+'-attachments')),
+                '--test-id',hosted.core.CASES[phase]]
+
+    def test_phase_retains_closed_attachment_failure_logs(self):
+        diagnostic=b'attachment export failed\n'
+        for profile in ('hosted-intel-v1','hosted-arm-v1'):
+            for phase in hosted.core.CASES:
+                with self.subTest(profile=profile,phase=phase):
+                    r=self.runner(Ops({'exit':1,'output':[('stderr',diagnostic)]}),
+                                  execution_profile=profile,label=profile+'-'+phase)
+                    def failed_export(actual_phase):
+                        self.assertEqual(actual_phase,phase)
+                        r.command(phase+'-attachments',self.attachment_argv(r,phase),60)
+                    with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_export):
+                        with self.assertRaisesRegex(RuntimeError,phase+'-attachments failed'):
+                            r.run_phase(phase)
+                    row=r.report['commands'][0]
+                    self.assertEqual(row['returncode'],1)
+                    self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                    self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+                    for channel,expected in [('stderr',diagnostic),('stdout',b'')]:
+                        public=r.out/'PhaseLogs'/(phase+'-attachments-'+channel+'.log')
+                        self.assertTrue(public.is_file(),str(public))
+                        self.assertEqual(public.read_bytes(),expected)
+                        self.assertEqual(row['logs'][channel],str(public))
+                        self.assertFalse((r.out/('1-'+channel+'.log')).exists())
+                    saved=json.loads((r.out/'receipt.json').read_text())
+                    self.assertEqual(saved['commands'][0]['logs'],row['logs'])
+                    self.assertEqual(r.log_total,len(diagnostic))
+                    self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_allowlist_keeps_prior_other_phase_and_raw_logs_private(self):
+        r=self.runner(Ops(*[{'output':[('stdout',b'private or selected output')]} for _ in range(4)]))
+        r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+        prior=dict(r.report['commands'][0]['logs'])
+        result=Path('/synthetic')
+        def phase_commands(_):
+            r.command('prepare-app-stopped',['/bin/ps','-axww'],60)
+            r.command('export-attachments',self.attachment_argv(r,'export'),60)
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return result
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=phase_commands):
+            self.assertIs(r.run_phase('prepare'),result)
+        self.assertEqual(r.report['commands'][0]['logs'],prior)
+        for row in r.report['commands'][:3]:
+            for path in row['logs'].values():
+                self.assertEqual(Path(path).parent,r.out);self.assertTrue(Path(path).is_file())
+        self.assertEqual({p.name for p in (r.out/'PhaseLogs').iterdir()},
+                         {'prepare-attachments-stdout.log','prepare-attachments-stderr.log'})
+        self.assertEqual(r.log_total,4*len(b'private or selected output'))
+        self.assertEqual(len(r.ops.processes),4);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_attachment_logs_require_exact_closed_bounded_owned_streams(self):
+        kinds=['argv','raw-path','symlink','unreaped','group-present','unclosed','unknown',
+               'collision','size','limit','deadline']
+        for kind in kinds:
+            with self.subTest(kind=kind),contextlib.ExitStack() as patches:
+                r=self.runner(Ops({'output':[('stdout',b'four')]}),label=kind)
+                private=r.out/'private-ps.log';private.write_text('private process listing')
+                def changed_export(_):
+                    r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+                    row=r.report['commands'][0]
+                    if kind=='argv':row['argv']=['/bin/ps','-axww']
+                    if kind=='raw-path':row['logs']['stdout']=str(private)
+                    if kind=='symlink':
+                        path=Path(row['logs']['stdout']);path.unlink();path.symlink_to(private)
+                    if kind=='unreaped':row['stop']['leader_reaped']=False
+                    if kind=='group-present':row['stop']['group_absent']=False
+                    if kind=='unclosed':row['log_close_errors']={'stdout':'unknown'}
+                    if kind=='unknown':r.unknown_spawn=True
+                    if kind=='collision':
+                        public=r.out/'PhaseLogs';public.mkdir()
+                        (public/'prepare-attachments-stdout.log').write_text('prior evidence')
+                    if kind=='size':row['bytes']['stdout']+=1
+                    if kind=='limit':patches.enter_context(patch.object(hosted.core.base,'PER_LOG',3))
+                    if kind=='deadline':r.ops.t=r.limit
+                with patch.object(hosted.core.Recovery,'run_phase',side_effect=changed_export):
+                    with self.assertRaises(RuntimeError):r.run_phase('prepare')
+                self.assertEqual(private.read_text(),'private process listing')
+                if (r.out/'PhaseLogs').exists():
+                    self.assertTrue(all(p.read_text()=='prior evidence' for p in (r.out/'PhaseLogs').iterdir()))
+                self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_phase_failure_identity_survives_attachment_log_publication_failure(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        primary=RuntimeError('original Recovery AX failure')
+        publication=OSError('attachment log move failed')
+        def failed_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            raise primary
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=failed_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(RuntimeError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,primary)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+
+    def test_successful_phase_still_fails_when_attachment_logs_cannot_be_published(self):
+        r=self.runner(Ops({'output':[('stderr',b'closed export diagnostic')]}))
+        publication=OSError('attachment log move failed')
+        def successful_phase(_):
+            r.command('prepare-attachments',self.attachment_argv(r,'prepare'),60)
+            return Path('/synthetic')
+        with patch.object(hosted.core.Recovery,'run_phase',side_effect=successful_phase), \
+             patch.object(r,'retain_closed_logs',side_effect=publication):
+            with self.assertRaises(OSError) as failure:r.run_phase('prepare')
+        self.assertIs(failure.exception,publication)
+        self.assertEqual(r.report['phase_log_publication_error'],repr(publication))
+        self.assertIn('Phase log publication: '+repr(publication),r.report['errors'])
+        self.assertEqual((r.out/'1-stderr.log').read_bytes(),b'closed export diagnostic')
+        self.assertFalse((r.out/'PhaseLogs').exists());self.assertFalse(r.active)
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
 
     def capability_ops(self):
         normal=(json.dumps({'kind':'normal','pid':101,'pgid':101})+'\n').encode()
@@ -711,7 +1133,9 @@ class BoundaryTests(unittest.TestCase):
             try:return original_stop(subject,p,deadline,record)
             finally:
                 stop_intervals.append((began,r.ops.t,deadline));stopping=False
-                if stage=='finalization':r.ops.t=106.
+                if stage=='finalization':
+                    r.ops.t=106.
+                    r.report['commands'].append({'id':'selected-tests','work_deadline':107.})
         def usage(_):
             nonlocal fired
             self.assertFalse(stopping,'Resource sampling must not enter process-stop grace')
@@ -743,6 +1167,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(stop_intervals[0][2],115.)
             self.assertLessEqual(stop_intervals[0][1],115.)
         # No probe deadline remains installed on parent work after finally.
+        if stage=='finalization':r.report['commands'][-1]['finish']=r.ops.t
         deadlines=[];original_scan=hosted.core.live_sizes
         def scan(*args,**kwargs):
             deadlines.append(args[3]);return original_scan(*args,**kwargs)
@@ -866,7 +1291,7 @@ class BoundaryTests(unittest.TestCase):
         developer=self.root/'Xcode_26.2.app/Contents/Developer'
         sdk_path=developer/'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator26.2.sdk'
         sdk_path.mkdir(parents=True)
-        selected={**self.runtime('26.2'),'buildversion':'23C54'}
+        selected={**self.runtime('26.2'),'buildversion':'23C54','supportedArchitectures':['x86_64']}
         older=self.runtime('18.5')
         texts=[str(developer),'Xcode 26.2\nBuild version 17C52','26.2',str(sdk_path),
                json.dumps({'runtimes':[older,self.runtime('27.0'),selected]})]
@@ -876,12 +1301,14 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(resolved['runtime'],selected)
         self.assertEqual(resolved['host']['xcode_version'],'Xcode 26.2\nBuild version 17C52')
         self.assertEqual(resolved['host']['sdk_version'],'26.2')
+        self.assertEqual(resolved['host']['machine'],'x86_64')
         self.assertEqual(r.ops.env['DEVELOPER_DIR'],str(developer))
         self.assertEqual(r.plan['runtime'],selected['identifier'])
         self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],
                          [20,20,20,20,300])
         self.assertEqual((r.t0,r.limit,r.final),(0,300,1500))
-        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected]]:
+        for runtimes in [[older],[{**selected,'isAvailable':False}],[selected,selected],
+                         [{**selected,'supportedArchitectures':['arm64']},older]]:
             with self.subTest(runtimes=runtimes),self.assertRaises(RuntimeError):
                 hosted.select_runtime('26.2',{'runtimes':runtimes},PROFILE)
 
@@ -1009,7 +1436,7 @@ class BoundaryTests(unittest.TestCase):
             ['profile-runtimes','runtime-inventory','baseline-inventory','create','created-inventory'])
         self.assertTrue(all(x['requested_cap_seconds']==300 and x['command_deadline']==300
                             and x['work_deadline']==292 for x in discovery))
-        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,120])
+        self.assertEqual([x['requested_cap_seconds'] for x in rows[9:]],[30,600])
         self.assertEqual(r.report['discovery_budget']['status'],'completed')
         self.assertGreaterEqual(r.report['discovery_budget']['finished_elapsed'],270)
         self.assertLess(r.report['discovery_budget']['finished_elapsed'],292)
@@ -1025,6 +1452,118 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(len(r.ops.processes),count)
         self.assertEqual(r.report['discovery_budget']['requested_seconds'],300)
         self.assertEqual(r.report['attempts'],{'create':1})
+
+    def test_hosted_owned_boot_ready_can_finish_after_300_without_renewing_global_budget(self):
+        r=self.runner(Ops({'delay':350.,'output':[('stdout',b'Finished synthetic boot')]}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        self.assertEqual(r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120),'Finished synthetic boot')
+        row=r.report['commands'][0]
+        self.assertEqual(row['argv'],['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b'])
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds']),(600,592.,600.,8))
+        self.assertEqual((row['outcome'],row['returncode']),('completed',0))
+        self.assertGreaterEqual(row['finish'],350.);self.assertLess(row['finish'],592.)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(r.ops.signals,[]);self.assertEqual(len(r.ops.processes),1)
+        self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
+        self.assertTrue(all(sample['scan']['requested_scan_seconds'] in (5,60)
+                            for sample in r.report['resources']))
+
+    def test_prior_hosted_boot_cap_rejects_same_delayed_success(self):
+        import types
+        current=hosted.HostedRecovery.sim
+        self.assertEqual(current.__code__.co_consts.count(600),1)
+        prior=types.FunctionType(current.__code__.replace(co_consts=tuple(
+            300 if value==600 else value for value in current.__code__.co_consts)),
+            current.__globals__,argdefs=current.__defaults__,closure=current.__closure__)
+        prior.__kwdefaults__=current.__kwdefaults__
+        r=self.runner(Ops({'delay':350.,'output':[('stdout',b'Finished synthetic boot')]}),
+                      execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with patch.object(hosted.HostedRecovery,'sim',prior):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (300,292.,300.))
+        self.assertEqual(row['outcome'],'failed')
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+
+    def test_standalone_boot_keeps_120_second_limit(self):
+        ops=Ops({'delay':180.})
+        r=hosted.core.Recovery(ops,self.root/'standalone',
+                              {'runtime':'synthetic-runtime','device_type':'synthetic-device'},
+                              {'machine':'arm64'},'test',0,
+                              candidate=self.root/'source',source_manifest={})
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (120,112.,120.))
+        self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_hosted_owned_boot_ready_exhaustion_stops_once_inside_original_reserve(self):
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual(row['error'],"RuntimeError('Command timeout')")
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds']),(600,592.,600.,8))
+        self.assertEqual(row['outcome'],'failed');self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],597.);self.assertLess(row['finish'],600.)
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active);self.assertFalse(r.unknown_spawn)
+        self.assertNotIn('resource_scan_failure',r.report);self.assertNotIn('cap_error',row)
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
+
+    def test_hosted_owned_boot_ready_is_clipped_by_remaining_work_not_cleanup_budget(self):
+        r=self.runner(Ops({'delay':float('inf'),'ignore_term':True,'exit':-9}),execution_profile='hosted-intel-v1');r.ops.t=4900.
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline']),
+                         (600,4972.,4980.))
+        self.assertEqual(row['stop']['signals'],[15,9])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],4977.);self.assertLess(row['finish'],4980.)
+        self.assertEqual((r.limit,r.final),(4980.,5340.));self.assertFalse(r.active)
+        with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(r.ops.processes),1)
+
+    def test_hosted_boot_ready_override_rejects_nonowned_or_changed_command_before_spawn(self):
+        r=self.runner();owned='10000000-0000-0000-0000-000000000001'
+        other='20000000-0000-0000-0000-000000000002'
+        for current,cleaning,args,cap in [
+                (None,False,('bootstatus',owned,'-b'),120),
+                (owned,True,('bootstatus',owned,'-b'),120),
+                (owned,False,('bootstatus',other,'-b'),120),
+                (owned,False,('bootstatus',owned),120),
+                (owned,False,('bootstatus',owned,'-b','--extra'),120),
+                (owned,False,('boot',owned),120),
+                (owned,False,('bootstatus',owned,'-b'),30),
+                (owned,False,('bootstatus',owned,'-b'),300)]:
+            with self.subTest(current=current,cleaning=cleaning,args=args,cap=cap):
+                r.owned=current;r.cleaning=cleaning
+                with self.assertRaisesRegex(RuntimeError,'Unexpected hosted boot readiness command'):
+                    r.sim('boot-ready',*args,cap=cap)
+        self.assertEqual(r.report['commands'],[]);self.assertEqual(r.ops.processes,[])
+        r.owned=owned;r.cleaning=False
+        r.sim('boot','boot',owned)
+        r.sim('other-readiness','bootstatus',owned,'-b',cap=120)
+        hosted.core.Recovery.sim(r,'boot-ready','bootstatus',owned,'-b',cap=120)
+        r.cleaning=True;r.sim('shutdown','shutdown',owned)
+        self.assertEqual([row['requested_cap_seconds'] for row in r.report['commands']],[30,120,120,30])
+        self.assertEqual((r.limit,r.final),(1380.,1500.))
 
     def test_late_runtime_parse_or_selection_does_not_admit_selected_profile(self):
         for stage in ('parse','selection'):
@@ -1082,6 +1621,125 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands'][-4:]],[20,30,30,20])
         self.assertEqual(r.report['attempts'],{'create':1,'shutdown':1,'delete':1})
         self.assertFalse(r.active or r.unknown_spawn)
+
+    @contextlib.contextmanager
+    def owned_cleanup(self, label, *, profile='hosted-intel-v1', recover=False,
+                      delays=(0,0,0,0), jump=None, start=0, shutdown_options=None):
+        """Real constructor/cleanup/command path; only OS clock/process/device effects are fake."""
+        ops=Ops();r=self.runner(ops,execution_profile=profile,label=label)
+        home=self.root/('home-'+label)
+        owned=str(uuid.uuid5(uuid.NAMESPACE_URL,label)).upper()
+        root=home/'Library/Developer/CoreSimulator/Devices'/owned
+        root.mkdir(parents=True)
+        baseline={'devices':{r.intent['runtime']:[]}}
+        created={'devices':{r.intent['runtime']:[{'udid':owned,'name':r.intent['name'],
+                                                 'deviceTypeIdentifier':r.intent['type']}]}}
+        r.create_attempted=True;r.report['baseline']=baseline;r.baseline=set()
+        if not recover:r.owned=owned;r.recovered=True
+        if recover:ops.plans.append({'delay':delays[0],'output':[('stdout',json.dumps(created).encode())]})
+        ops.plans.extend([{'delay':delays[1],**(shutdown_options or {})},{'delay':delays[2]},
+                          {'delay':delays[3],'output':[('stdout',json.dumps(baseline).encode())]}])
+        original_spawn=ops.spawn;original_sleep=ops.sleep
+        def spawn(argv):
+            p=original_spawn(argv);p.action=argv[2]
+            original_poll=p.poll
+            def poll():
+                result=original_poll()
+                if p.action=='delete' and result==0 and not p.dead and root.exists():root.rmdir()
+                return result
+            p.poll=poll
+            return p
+        jumped=False
+        def sleep(amount):
+            nonlocal jumped
+            if jump is not None and not jumped and ops.processes[-1].action=='shutdown':
+                ops.t=ops.processes[-1].started+jump;jumped=True
+            else:original_sleep(amount)
+        ops.spawn=spawn;ops.sleep=sleep;ops.t=start
+        with patch.object(Path,'home',return_value=home):yield r,owned,root
+
+    def test_hosted_cleanup_actions_cover_late_wakeup_without_changing_default(self):
+        for profile,accepted in [('hosted-intel-v1',True),('default',False)]:
+            with self.subTest(profile=profile),self.owned_cleanup(profile,profile=profile,
+                    delays=(0,61,0,0),jump=61.4) as (r,owned,root):
+                r.cleanup()
+                self.assertEqual(r.report['cleanup_verified'],accepted)
+                first=r.report['commands'][0]
+                self.assertEqual((first['requested_cap_seconds'],first['stop_reserve_seconds']),
+                                 (90 if accepted else 30,8))
+                self.assertEqual(first['argv'],['/usr/bin/xcrun','simctl','shutdown',owned])
+                if accepted:
+                    self.assertEqual([x['id'] for x in r.report['commands']],['shutdown','delete','final-inventory'])
+                    self.assertFalse(r.active or r.unknown_spawn or root.exists())
+                else:
+                    self.assertEqual(len(r.report['commands']),1)
+                    self.assertTrue(r.active);self.assertTrue(root.exists())
+                    self.assertEqual(first['stop']['signals'],[])
+
+    def test_hosted_cleanup_optional_recovery_and_queries_share_one_window(self):
+        with self.owned_cleanup('full-cleanup',recover=True,delays=(40,70,70,40)) as (r,owned,root):
+            r.cleanup()
+            self.assertTrue(r.report['cleanup_verified']);self.assertFalse(root.exists())
+            self.assertEqual([x['id'] for x in r.report['commands']],
+                             ['recover-created','shutdown','delete','final-inventory'])
+            self.assertEqual([x['requested_cap_seconds'] for x in r.report['commands']],[60,90,90,60])
+            self.assertTrue(all(x['stop_reserve_seconds']==8 and x['stop']['group_absent']
+                                and x['stop']['leader_reaped'] for x in r.report['commands']))
+            self.assertEqual((r.t0,r.final,r.limit,r.write_deadline),(0,5340,350,360))
+            self.assertGreaterEqual(r.ops.t,220);self.assertLess(r.ops.t,221)
+            self.assertEqual(r.report['attempts'],{'shutdown':1,'delete':1})
+
+    def test_old_cleanup_window_causally_rejects_the_same_delayed_chain(self):
+        source=(HERE/'recovery_core.py').read_text()
+        method=source[source.index('    def cleanup(self):'):source.index('    def run(self):')]
+        import textwrap
+        changed=method.replace("self.execution_profile['cleanup_seconds']",'120')
+        self.assertNotEqual(method,changed)
+        scope=dict(vars(hosted.core));exec(textwrap.dedent(changed),scope)
+        with self.owned_cleanup('old-cleanup',recover=True,delays=(40,70,70,40)) as (r,_,root), \
+             patch.object(hosted.core.Recovery,'cleanup',scope['cleanup']):
+            r.cleanup()
+            self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+            self.assertEqual((r.final,r.limit,r.write_deadline),(5340,110,120))
+            self.assertTrue(r.report['errors']);self.assertLessEqual(r.ops.t,120)
+
+    def test_hosted_cleanup_global_final_and_action_deadlines_are_not_reset(self):
+        for label,start,jump,end in [('late-action',0,91,90),('late-global',5280,61.4,5330)]:
+            with self.subTest(label=label),self.owned_cleanup(label,start=start,jump=jump,
+                    delays=(0,1000,0,0)) as (r,_,root):
+                r.cleanup()
+                self.assertEqual(len(r.report['commands']),1)
+                row=r.report['commands'][0]
+                self.assertEqual((row['command_deadline'],row['work_deadline']),(end,end-8))
+                self.assertEqual(row['stop']['signals'],[])
+                self.assertTrue(r.active);self.assertTrue(root.exists())
+                self.assertFalse(r.report['cleanup_verified']);self.assertEqual(r.final,5340)
+                self.assertEqual(r.write_deadline,min(5340,start+360))
+
+    def test_cleanup_ownership_errors_still_withhold_later_commands(self):
+        with self.owned_cleanup('unknown-group',shutdown_options={'delay':float('inf'),'probe_error':True}) as (r,_,root):
+            r.cleanup()
+            self.assertEqual(len(r.report['commands']),1);self.assertTrue(r.active)
+            self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+        for reason in ['active','unknown-spawn']:
+            with self.subTest(reason=reason),self.owned_cleanup(reason) as (r,_,root):
+                if reason=='active':r.active[999]=object()
+                else:r.unknown_spawn=True
+                r.cleanup()
+                self.assertEqual(r.report['commands'],[])
+                self.assertFalse(r.report['cleanup_verified']);self.assertTrue(root.exists())
+
+    def test_interruption_allows_only_existing_owned_cleanup_and_nonnative_query_caps_stay_default(self):
+        with self.owned_cleanup('interrupted') as (r,owned,root):
+            r.interrupted=True;r.cleanup()
+            self.assertTrue(r.report['cleanup_verified']);self.assertTrue(r.interrupted)
+            self.assertEqual([x['argv'] for x in r.report['commands'][:2]],
+                             [['/usr/bin/xcrun','simctl',action,owned] for action in ['shutdown','delete']])
+            self.assertFalse(root.exists())
+        r=self.runner(label='ordinary-query',execution_profile='hosted-intel-v1')
+        with patch.object(r,'monitor'):
+            r.sim('ordinary-query','list','devices','--json',cap=20)
+        self.assertEqual(r.report['commands'][0]['requested_cap_seconds'],20)
 
     def test_nested_capability_restores_discovery_limit_instead_of_global_work_limit(self):
         r=self.discovery_runner(delay=250);self.discover(r)
@@ -1141,6 +1799,37 @@ class BoundaryTests(unittest.TestCase):
         p = ops.spawn(['synthetic'])
         r.active = {p.pid: p}
         return r, p, {}
+
+    def test_reaped_leader_present_group_is_never_signalled(self):
+        ops = Ops({'lingering': True, 'ignore_all': True})
+        r, p, row = self.owned_stop(ops)
+        with self.assertRaisesRegex(RuntimeError, 'Reaped leader.*group identity'):
+            r.stop(p, 8., row)
+        self.assertEqual(ops.signals, [])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIs(r.active[p.pid], p)
+
+    def test_reaped_leader_with_absent_group_closes_without_signal(self):
+        ops = Ops({})
+        r, p, row = self.owned_stop(ops)
+        r.stop(p, 8., row)
+        self.assertEqual(ops.signals, [])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active)
+
+    def test_reaped_after_TERM_present_group_is_not_sent_KILL(self):
+        ops = Ops({'delay': float('inf')})
+        r, p, row = self.owned_stop(ops)
+        def present(_):
+            return False  # Presence alone cannot identify a group after reap.
+        ops.absent = present
+        with self.assertRaisesRegex(RuntimeError, 'Reaped leader.*group identity'):
+            r.stop(p, 8., row)
+        self.assertEqual([sig for _, sig, _ in ops.signals], [signal.SIGTERM])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIs(r.active[p.pid], p)
 
     def test_short_stop_reserves_kill_confirmation_after_slow_initial_probe(self):
         ops = PostKillOps()
@@ -1456,7 +2145,13 @@ class BoundaryTests(unittest.TestCase):
         row=r.report['commands'][0]
         self.assertIn('Leader exited but process group remains',row['error'])
         self.assertFalse(row['process_observations']['command.group_probe']['result'])
-        self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
+        self.assertTrue(row['stop']['leader_reaped'])
+        self.assertFalse(row['stop']['group_absent'])
+        self.assertIn('Reaped leader', row['stop_error'])
+        self.assertEqual(r.ops.signals, [])
+        self.assertTrue(r.active)
+        with self.assertRaisesRegex(RuntimeError, 'ownership unresolved'):
+            r.command('next', ['synthetic'], 30)
 
     def test_many_polls_keep_fixed_diagnostics_and_existing_save_count(self):
         r=self.runner(Ops({'delay':25}))
@@ -1882,6 +2577,152 @@ class BoundaryTests(unittest.TestCase):
                 self.assertTrue(row['stop']['group_absent'] and row['stop']['leader_reaped'])
         authorize.assert_called_once_with();self.assertEqual(len(r.ops.processes),2)
         self.assertEqual((r.limit,r.final),(1380,1500))
+
+    def native_prepared_files_runner(self):
+        r,provider=self.files_runner()
+        r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.plans=[{'delay':.1}]
+        # Model the native writer creating its leaf while the phase is active.
+        r.ops.on_spawn=lambda argv:(provider/r.folder_name).mkdir(mode=0o700)
+        def read(phase,path):r.report.setdefault('phase_passed',{})[phase]=True
+        with patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result',side_effect=read):
+            hosted.core.Recovery.run_phase(r,'prepare')
+        r.ops.on_spawn=None
+        return r,provider
+
+    def test_native_fixture_adopts_empty_ui_leaf_without_host_write_or_command(self):
+        r,provider=self.native_prepared_files_runner()
+        before=len(r.report['commands'])
+        with patch.object(hosted.core.os,'mkdir',side_effect=AssertionError('host mkdir')), \
+             patch.object(r,'setup_files',side_effect=AssertionError('host fixture route')):
+            r.adopt_native_files_fixture()
+        self.assertEqual(r.folder,provider/r.folder_name)
+        self.assertEqual(r.folder_id,hosted.core.identity_of(r.folder))
+        self.assertEqual(list(r.folder.iterdir()),[])
+        self.assertTrue(r.report['files_folder']['fixture_verified'])
+        self.assertEqual(r.report['files_folder']['creation'],
+                         'native Files New Folder during prepare; host adopted after fixture stopped')
+        self.assertNotIn('files_fixture_creation',r.report)
+        self.assertEqual(len(r.report['commands']),before)
+        self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+        self.assertEqual((r.limit,r.final),(1380,1500))
+        with self.assertRaisesRegex(RuntimeError,'already initialized'):r.adopt_native_files_fixture()
+
+    def test_native_fixture_requires_exact_intent_success_and_closed_writer(self):
+        r,provider=self.native_prepared_files_runner()
+        original=copy.deepcopy(r.report)
+        for fault in ['missing_intent','wrong_folder','wrong_phase','missing_pass','active','unknown',
+                      'missing_command','duplicate_command','nonzero','failed','unreaped','group_live','pipe_error','log_error']:
+            with self.subTest(fault=fault):
+                r.report=copy.deepcopy(original);r.active={};r.unknown_spawn=False
+                if fault=='missing_intent':r.report.pop('native_files_preparation')
+                elif fault=='wrong_folder':r.report['native_files_preparation']['folder_name']='other'
+                elif fault=='wrong_phase':r.report['native_files_preparation']['phase']='export'
+                elif fault=='missing_pass':r.report['phase_passed']={}
+                elif fault=='active':r.active={999:object()}
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='missing_command':r.report['commands']=[]
+                elif fault=='duplicate_command':r.report['commands']*=2
+                elif fault=='nonzero':r.report['commands'][0]['returncode']=1
+                elif fault=='failed':r.report['commands'][0]['outcome']='failed'
+                elif fault=='unreaped':r.report['commands'][0]['stop']['leader_reaped']=False
+                elif fault=='group_live':r.report['commands'][0]['stop']['group_absent']=False
+                elif fault=='pipe_error':r.report['commands'][0]['close_error']='synthetic'
+                elif fault=='log_error':r.report['commands'][0]['log_close_errors']=['synthetic']
+                with patch.object(r,'discover_ui_files_folder',side_effect=AssertionError('premature lookup')):
+                    with self.assertRaises(RuntimeError):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder)
+        r.active={};r.unknown_spawn=False
+
+    def test_native_fixture_rejects_missing_nonempty_duplicate_and_symlink_leaves(self):
+        base=self.root
+        for fault in ['missing','nonempty','duplicate','symlink']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir()
+                r,provider=self.native_prepared_files_runner();folder=provider/r.folder_name
+                if fault=='missing':folder.rmdir()
+                elif fault=='nonempty':(folder/'unexpected').write_bytes(b'not a fixture')
+                elif fault=='duplicate':
+                    other=provider.parent.parent/'30000000-0000-0000-0000-000000000003'/'File Provider Storage'
+                    other.mkdir(parents=True);(other/r.folder_name).mkdir()
+                else:folder.rmdir();folder.symlink_to(provider,target_is_directory=True)
+                with self.assertRaises((RuntimeError,OSError)):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder);self.assertNotIn('fixture_verified',r.report.get('files_folder',{}))
+                self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+                with self.assertRaisesRegex(RuntimeError,'One-shot'):r.adopt_native_files_fixture()
+        self.root=base
+
+    def test_native_fixture_rejects_baseline_and_opened_leaf_identity_changes(self):
+        base=self.root
+        for fault in ['baseline','leaf_open']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir()
+                r,provider=self.native_prepared_files_runner();folder=provider/r.folder_name
+                if fault=='baseline':
+                    groups=provider.parent.parent;groups.rename(groups.with_name('OldAppGroup'))
+                    (groups/provider.parent.name/'File Provider Storage'/r.folder_name).mkdir(parents=True)
+                    with self.assertRaisesRegex(RuntimeError,'baseline ancestor changed'):r.adopt_native_files_fixture()
+                else:
+                    original=hosted.core.os.open;changed=[]
+                    def opened(path,*args,**kwargs):
+                        if path==folder and not changed:
+                            folder.rename(provider/'retained-ui-leaf');folder.mkdir();changed.append(True)
+                        return original(path,*args,**kwargs)
+                    with patch.object(hosted.core.os,'open',side_effect=opened):
+                        with self.assertRaisesRegex(RuntimeError,'directory changed'):r.adopt_native_files_fixture()
+                    self.assertTrue(changed)
+                self.assertIsNone(r.folder)
+        self.root=base
+
+    def test_native_fixture_preserves_permission_and_original_scan_deadlines(self):
+        base=self.root
+        for fault in ['permission','scan_time','global_time']:
+            with self.subTest(fault=fault):
+                self.root=base/fault;self.root.mkdir();r,provider=self.native_prepared_files_runner()
+                original=hosted.core.os.scandir
+                def scanned(path):
+                    if fault=='permission':raise PermissionError('denied')
+                    result=original(path);r.ops.t+=5.1 if fault=='scan_time' else .2;return result
+                if fault=='global_time':r.ops.t=1379.9
+                with patch.object(hosted.core.os,'scandir',side_effect=scanned):
+                    with self.assertRaises((RuntimeError,PermissionError)):r.adopt_native_files_fixture()
+                self.assertIsNone(r.folder);self.assertEqual((r.limit,r.final),(1380,1500))
+                self.assertEqual(r.report['attempts']['native-files-adopt'],1)
+        self.root=base
+
+    def test_native_create_flag_is_prepare_only_and_restores_inherited_environment(self):
+        r,provider=self.files_runner();r.prepare_files_ui_baseline()
+        r.host['developer_dir']='/Applications/Controlled.app/Contents/Developer'
+        r.ops.env['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER']='untrusted-inherited'
+        original=r.ops.env;r.report['phase_passed']={'prepare':True};r.report['files_folder']={'fixture_verified':True}
+        observed=[]
+        def command(label,argv,cap):
+            observed.append((label,r.ops.env.get('TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER'),cap))
+        with patch.object(r,'command',side_effect=command),patch.object(r,'verify_folder'), \
+             patch.object(r,'authorize_restore'),patch.object(r,'preserve_result',return_value=r.out/'copy.xcresult'), \
+             patch.object(r,'read_result'),patch.object(r,'app_state'):
+            for phase in ['prepare','export','restore']:
+                hosted.core.Recovery.run_phase(r,phase)
+                self.assertIs(r.ops.env,original)
+        self.assertEqual(observed,[('phase-prepare','1',780),('phase-export',None,600),('phase-restore',None,600)])
+        self.assertEqual(original['TEST_RUNNER_TRIPDOCKET_RECOVERY_CREATE_FOLDER'],'untrusted-inherited')
+        self.assertEqual(r.report['native_files_preparation'],
+                         {'folder_name':r.folder_name,'phase':'prepare','request':'native_new_folder'})
+
+    def test_native_fixture_work_orders_adoption_before_export_without_host_creation(self):
+        r,provider=self.files_runner();calls=[]
+        def phase(name):
+            calls.append(name)
+            if name=='export':raise RuntimeError('stop before unrelated snapshot work')
+        with patch.object(r,'setup',side_effect=lambda:calls.append('setup')), \
+             patch.object(r,'run_phase',side_effect=phase), \
+             patch.object(r,'adopt_native_files_fixture',side_effect=lambda:calls.append('adopt')), \
+             patch.object(r,'create_owned_files_fixture',side_effect=AssertionError('legacy host create')), \
+             patch.object(r,'take_snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError,'stop before unrelated'):hosted.core.Recovery.work(r)
+        self.assertEqual(calls,['setup','prepare','adopt','export']);snapshot.assert_not_called()
 
     def files_runner(self, group=None):
         home=self.root/'home'
@@ -2555,6 +3396,151 @@ class BoundaryTests(unittest.TestCase):
             r.cleaning=True;r.interrupted=True
             r.checkpoint(force_resources=True);self.assertEqual(monitor.call_count,2)
 
+    def final_checkout_accounting(self, *, profile='hosted-arm-v1', label='',
+                                  target='active', command='git-final-head', delay=6.,
+                                  fault=None, limit=None, prior_delays=None):
+        ops=Ops({'output':[('stdout',(SHA+'\n').encode())]}, {})
+        r=self.runner(ops,execution_profile=profile,label=label)
+        if limit is not None:r.limit=limit
+        original_limit=r.limit
+        payload=r.out/'accounted.bin';payload.write_bytes(b'full final checkout accounting'*100)
+        checkpoint=r.checkpoint;scandir=hosted.core.os.scandir;close=r.ops.close
+        current=[None];injected=[];seen=[];prior_delays=dict(prior_delays or {})
+        def checked(**kwargs):
+            scope=getattr(r,'_final_checkout_scope',None)
+            row=r.report['commands'][-1] if r.report['commands'] else None
+            if scope is not None:
+                stage=('admission' if len(r.report['commands'])==scope.index else
+                       'final' if row and 'pgid' in row and not r.active else
+                       'active' if r.active else 'forced')
+                current[:]=[(scope.command[0],stage)]
+                if current[0]==(command,target) and not injected:
+                    if fault=='scope-receipt':
+                        r.report['_final_checkout_scope']=scope;r._final_checkout_scope=None
+                    elif fault=='profile-copy':object.__setattr__(r,'_execution_profile',dict(r.execution_profile))
+                    elif fault=='wrong-argv':row['argv']=['/usr/bin/git','status','--short']
+                    elif fault=='wrong-id':row['id']='other'
+                    elif fault=='copied-record':r.report['commands'][-1]=dict(row)
+                    elif fault=='extra-record':r.report['commands'].append(dict(row))
+                    elif fault=='cancel':r.signal()
+                    elif fault=='wrong-owner':scope.owner=SimpleNamespace()
+                    elif fault=='wrong-order':scope.command=hosted.core._FINAL_CHECKOUT_COMMANDS[1]
+                    elif fault=='delegated':
+                        kwargs['command_owner']=SimpleNamespace(report=r.report,active=r.active,
+                            unknown_spawn=r.unknown_spawn,limit=r.limit,t0=r.t0,absent_groups=r.absent_groups)
+                if current[0][0]==command and stage in prior_delays:
+                    r.ops.t+=prior_delays.pop(stage)
+            else:
+                # Portable/default still exercises the same final commands.
+                stage='final' if getattr(r,'_finalizing_success',None) else 'active' if r.active else 'forced' if row and 'finish' not in row else 'admission'
+                current[:]=[(row['id'] if row and 'finish' not in row else 'git-final-head',stage)]
+            r.next_scan=0.
+            return checkpoint(**kwargs)
+        def closed(process):
+            close(process)
+            if fault and current[0] and current[0][0]==command:
+                row=r.report['commands'][-1]
+                if fault=='unreaped':row['stop']['leader_reaped']=False
+                elif fault=='unconfirmed':row['stop']['group_absent']=False
+                elif fault=='unknown':r.unknown_spawn=True
+                elif fault=='nonzero':process.returncode=7
+                elif fault=='boolean-exit':process.returncode=False
+                elif fault=='absence-cache':r.absent_groups.clear()
+        @contextlib.contextmanager
+        def scanned(fd):
+            if current[0]==(command,target) and not injected:
+                injected.append(r.ops.now());r.ops.t+=delay
+            with scandir(fd) as entries:yield entries
+        def record_scan(*args,**kwargs):
+            seen.append((current[0],args[3]))
+            return real_scan(*args,**kwargs)
+        real_scan=hosted.core.live_sizes
+        with patch.object(r,'checkpoint',side_effect=checked), \
+             patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(hosted.core.os,'scandir',side_effect=scanned), \
+             patch.object(hosted.core,'live_sizes',side_effect=record_scan):
+            try:r._verify_final_checkout(SHA);ok=True
+            except RuntimeError:ok=False
+        self.assertEqual(r.limit,original_limit)
+        self.assertIsNone(getattr(r,'_final_checkout_scope',None))
+        return r,ok,injected,seen,payload
+
+    def test_final_checkout_full_scans_cover_both_commands_and_all_stages(self):
+        for profile in ('hosted-arm-v1','hosted-intel-v1'):
+            for command in ('git-final-head','git-final-clean'):
+                for stage in ('admission','forced','active','final'):
+                    with self.subTest(profile=profile,command=command,stage=stage):
+                        label=profile+command+stage
+                        r,ok,delays,seen,payload=self.final_checkout_accounting(profile=profile,label=label,target=stage,command=command)
+                        self.assertTrue(ok);self.assertEqual(len(delays),1)
+                        self.assertEqual([x['id'] for x in r.report['commands']],['git-final-head','git-final-clean'])
+                        self.assertTrue(all(x['outcome']=='completed' for x in r.report['commands']))
+                        self.assertTrue(all(x['scan']['requested_scan_seconds']==30 for x in r.report['resources']))
+                        self.assertTrue(all(x['logical']>=payload.stat().st_size for x in r.report['resources']))
+                        self.assertEqual(r.ops.signals,[]);self.assertFalse(r.active)
+                        for row in r.report['commands']:
+                            self.assertEqual(row['command_deadline']-row['work_deadline'],8)
+                            self.assertLessEqual(row['finish'],row['command_deadline'])
+                        if command=='git-final-head':self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+
+    def test_final_checkout_admission_and_work_share_original_twelve_seconds(self):
+        for stage,prior,delay,expected in [('admission',{},12.,0),('forced',{'admission':6.},6.,0),('active',{'admission':6.},6.,1)]:
+            with self.subTest(stage=stage):
+                r,ok,_,seen,_=self.final_checkout_accounting(label=stage,target=stage,delay=delay,prior_delays=prior)
+                self.assertFalse(ok);self.assertEqual(len(r.ops.processes),expected)
+                self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],12)
+                if r.report['commands']:self.assertEqual(r.report['commands'][0]['command_deadline'],20)
+                self.assertLessEqual(r.ops.t,20)
+
+    def test_final_checkout_finalization_keeps_total_global_and_cancel_boundaries(self):
+        cases=[('total',dict(target='final',delay=20.)),('global',dict(target='admission',delay=6.,limit=14.)),('cancel',dict(fault='cancel'))]
+        for label,options in cases:
+            with self.subTest(label=label):
+                r,ok,_,_,_=self.final_checkout_accounting(label=label,**options)
+                self.assertFalse(ok)
+                if label=='total':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],20)
+                elif label=='global':self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],6)
+                else:self.assertTrue(r.interrupted)
+                self.assertLessEqual(len(r.ops.processes),1)
+
+    def test_final_checkout_live_scope_rejects_spoofed_or_changed_context(self):
+        for fault in ('scope-receipt','profile-copy','wrong-argv','wrong-id','copied-record','extra-record','wrong-owner','wrong-order','delegated'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,fault=fault)
+                self.assertFalse(ok)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        r,ok,_,_,_=self.final_checkout_accounting(profile='default',label='default')
+        self.assertFalse(ok);self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+
+    def test_final_checkout_finalization_requires_verified_owned_success(self):
+        for fault in ('unreaped','unconfirmed','unknown','nonzero','boolean-exit','absence-cache'):
+            with self.subTest(fault=fault):
+                r,ok,_,_,_=self.final_checkout_accounting(label=fault,target='final',fault=fault)
+                self.assertFalse(ok)
+                self.assertLessEqual(len(r.ops.processes),1)
+                self.assertNotEqual(r.report['commands'][0]['outcome'],'completed')
+
+    def test_final_checkout_complete_accounting_still_enforces_resource_caps(self):
+        for key,value in [('output_bytes',1),('scan_entries',1)]:
+            with self.subTest(key=key),patch.dict(hosted.core.CAPS,{key:value}):
+                r,ok,_,_,_=self.final_checkout_accounting(label=key,delay=0)
+                self.assertFalse(ok);self.assertEqual(r.ops.processes,[])
+                self.assertEqual(r.report['resources'],[])
+
+    def test_final_checkout_order_nested_scope_and_original_checks_remain(self):
+        r=self.runner(label='order')
+        with patch.object(r,'command',return_value='wrong') as command:
+            with self.assertRaisesRegex(RuntimeError,'commit changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_count,1)
+        r=self.runner(label='dirty')
+        with patch.object(r,'command',side_effect=[SHA,' M tracked']) as command:
+            with self.assertRaisesRegex(RuntimeError,'Checkout changed'):r._verify_final_checkout(SHA)
+            self.assertEqual(command.call_args_list[1].args,('git-final-clean',['/usr/bin/git','status','--porcelain'],20))
+        r=self.runner(execution_profile='hosted-arm-v1',label='nested');r._final_checkout_scope=object()
+        with self.assertRaisesRegex(RuntimeError,'already active'):r._verify_final_checkout(SHA)
+        r._final_checkout_scope=None;r.report['commands'].append({'id':'git-final-clean','finish':0})
+        with self.assertRaisesRegex(RuntimeError,'already attempted'):r._verify_final_checkout(SHA)
+
     def test_phase_scan_ceiling_only_applies_to_unfinished_native_phase_context(self):
         r=self.runner();deadlines=[]
         def scan(*args,**kwargs):
@@ -2592,6 +3578,381 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('resource_scan_failure',r.report)
         self.assertEqual(r.ops.processes,[])
 
+    def boot_exit_accounting(self, *, drain_seconds=1.7, scan_seconds=1.,
+                             cancel=False, output_cap=False):
+        r=self.runner(Ops())
+        r.owned='10000000-0000-0000-0000-000000000001'
+        def spawned(_):
+            r.ops.t=589.;r.next_scan=590.
+        r.ops.on_spawn=spawned
+        reads=0;scans=[]
+        def read(_):
+            nonlocal reads
+            reads+=1
+            r.ops.t+=.6 if reads==1 else drain_seconds
+            if reads==2 and cancel:r.signal()
+            if reads==2 and output_cap:
+                r.log_total=hosted.core.base.ALL_LOG-1
+                return [('stdout',b'xx')]
+            return []
+        r.ops.read=read
+        original_scan=hosted.core.live_sizes
+        def scan(*args,**kwargs):
+            if r.ops.t>=590.:
+                scans.append({'started':r.ops.t,'deadline':args[3],
+                              'active':bool(r.active),
+                              'finalizing':getattr(r,'_finalizing_success',None) is not None})
+                r.ops.t+=scan_seconds
+            return original_scan(*args,**kwargs)
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            try:
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                succeeded=True
+            except RuntimeError:succeeded=False
+        return r,r.report['commands'][-1],scans,succeeded
+
+    def test_boot_exit_drain_defers_due_scan_until_verified_closure(self):
+        r,row,scans,ok=self.boot_exit_accounting()
+        self.assertTrue(ok)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                         (592.,600.,8))
+        self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(len(scans),1)
+        self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
+        self.assertAlmostEqual(scans[0]['started'],591.3)
+        self.assertAlmostEqual(row['finish'],592.3)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[])
+        self.assertFalse(r.active)
+        self.assertAlmostEqual(row['post_exit_scan_deferral']['elapsed'],591.3)
+        self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
+        self.assertAlmostEqual(r.report['resources'][-1]['elapsed'],592.3)
+
+    def test_boot_exit_drain_keeps_work_cancel_and_output_bounds(self):
+        cases=[('deadline',{'drain_seconds':2.4},'Command timeout'),
+               ('cancel',{'cancel':True},'Interrupted'),
+               ('output',{'output_cap':True},'Output cap exceeded')]
+        for name,options,error in cases:
+            with self.subTest(name=name):
+                parent=self.root;self.root=parent/name;self.root.mkdir()
+                try:r,row,scans,ok=self.boot_exit_accounting(**options)
+                finally:self.root=parent
+                self.assertFalse(ok);self.assertIn(error,row['error'])
+                self.assertNotIn('post_exit_scan_deferral',row)
+                self.assertEqual(scans,[])
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertLess(row['finish'],600.)
+                self.assertFalse(r.active)
+
+    def test_boot_exit_deferral_requires_complete_final_accounting(self):
+        r,row,scans,ok=self.boot_exit_accounting(scan_seconds=5.)
+        self.assertFalse(ok)
+        self.assertIn('post_exit_scan_deferral',row)
+        self.assertIn('Output scan deadline exceeded',row['finalization_error'])
+        self.assertEqual(row['outcome'],'failed')
+        self.assertEqual(len(scans),1)
+        self.assertFalse(scans[0]['active']);self.assertTrue(scans[0]['finalizing'])
+        self.assertAlmostEqual(scans[0]['deadline'],596.3)
+        self.assertLess(row['finish'],600.)
+        self.assertFalse(r.active)
+
+    def hosted_boot_finalization(self, *, label='', profile='hosted-intel-v1',
+                                 delay=6.9002, closed_at=500., fault=None, limit=None):
+        r=self.runner(Ops(),execution_profile=profile,label=label)
+        r.owned='10000000-0000-0000-0000-000000000001'
+        payload=r.out/'final-accounting.bin';payload.write_bytes(b'complete accounting\n'*512)
+        original_close=r.ops.close;original_scan=hosted.core.os.scandir
+        original_checkpoint=r.checkpoint;calls=[];contexts=[]
+        def closed(process):
+            original_close(process);r.ops.t=closed_at;r.next_scan=0.
+            if limit is not None:r.limit=limit
+            row=r.report['commands'][-1]
+            if fault=='unknown':r.unknown_spawn=True
+            if fault=='active':r.active[999]=SimpleNamespace(pid=999)
+            if fault=='unreaped':row['stop']['leader_reaped']=False
+            if fault=='unconfirmed':row['stop']['group_absent']=False
+            if fault=='unattempted':row['stop']['attempted']=False
+            if fault=='absence-cache':r.absent_groups.clear()
+            if fault=='identity':row['pgid']=999
+            if fault=='nonzero':process.returncode=7
+            if fault=='boolean-exit':process.returncode=False
+            if fault=='profile-copy':
+                # Deliberately bypass immutability to test the monitor's identity guard.
+                object.__setattr__(r,'_execution_profile',dict(r.execution_profile))
+            if fault=='unowned':r.owned=None
+            if fault=='cancel':r.signal()
+        def checkpoint(**kwargs):
+            context=getattr(r,'_finalizing_success',None)
+            if context is not None:
+                if fault=='copied-record':r._finalizing_success=(dict(context[0]),context[1])
+                if fault=='receipt-only':
+                    context[0]['_finalizing_success']=True;r._finalizing_success=None
+                contexts.append(r._finalizing_success)
+            return original_checkpoint(**kwargs)
+        @contextlib.contextmanager
+        def scanned(fd):
+            with original_scan(fd) as children:
+                def entries():
+                    for child in children:
+                        def read(*,follow_symlinks,child=child):
+                            if child.name==payload.name and r.ops.t>=closed_at and not calls:
+                                calls.append((r.ops.t,follow_symlinks));r.ops.t+=delay
+                            return child.stat(follow_symlinks=follow_symlinks)
+                        yield SimpleNamespace(name=child.name,stat=read)
+                yield entries()
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        if fault=='other-argv':argv[-1]='--other'
+        command='other' if fault=='other-command' else 'boot-ready'
+        with patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(r,'checkpoint',side_effect=checkpoint), \
+             patch.object(hosted.core.os,'scandir',side_effect=scanned):
+            try:r.command(command,argv,600);ok=True
+            except RuntimeError:ok=False
+        self.assertIsNone(getattr(r,'_finalizing_success',None))
+        self.assertEqual(len(r.ops.processes),1)
+        self.assertEqual(r.ops.signals,[])
+        return r,r.report['commands'][-1],calls,contexts,payload,ok
+
+    def test_hosted_boot_finalization_accounts_full_tree_after_observed_slow_span(self):
+        r,row,calls,contexts,payload,ok=self.hosted_boot_finalization()
+        self.assertTrue(ok);self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(calls,[(500.,False)]);self.assertEqual(len(contexts),1)
+        self.assertFalse(r.active);self.assertTrue(row['stop']['group_absent'])
+        sample=r.report['resources'][-1]
+        self.assertEqual(sample['scan']['requested_scan_seconds'],60)
+        self.assertAlmostEqual(sample['scan']['duration_seconds'],6.9002)
+        self.assertGreaterEqual(sample['logical'],payload.stat().st_size)
+        self.assertGreaterEqual(sample['allocated'],payload.stat().st_blocks*512)
+        self.assertGreaterEqual(sample['entries'],4)
+        self.assertEqual((row['work_deadline'],row['command_deadline'],r.limit,r.final),
+                         (592.,600.,4980.,5340.))
+
+    def test_hosted_boot_finalization_rejects_unverified_and_receipt_only_context(self):
+        faults=('unknown','active','unreaped','unconfirmed','unattempted','absence-cache',
+                'identity','nonzero','boolean-exit','profile-copy','unowned',
+                'copied-record','receipt-only','other-argv','other-command')
+        for fault in faults:
+            with self.subTest(fault=fault):
+                r,row,calls,_,_,ok=self.hosted_boot_finalization(label=fault,fault=fault)
+                self.assertFalse(ok);self.assertEqual(row['outcome'],'failed')
+                self.assertEqual(len(calls),1)
+                self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+
+    def test_hosted_boot_finalization_keeps_default_five_seconds(self):
+        r,row,calls,_,_,ok=self.hosted_boot_finalization(profile='default')
+        self.assertFalse(ok);self.assertEqual(len(calls),1)
+        self.assertEqual(r.report['resource_scan_failure']['requested_scan_seconds'],5)
+        self.assertEqual(row['outcome'],'failed')
+
+    def test_hosted_boot_finalization_keeps_scan_total_and_global_boundaries(self):
+        cases=[('scan',dict(delay=60.),560.),
+               ('total',dict(closed_at=599.,delay=1.),600.),
+               ('global',dict(limit=505.),505.)]
+        for label,options,deadline in cases:
+            with self.subTest(label=label):
+                r,row,calls,_,_,ok=self.hosted_boot_finalization(label=label,**options)
+                self.assertFalse(ok);self.assertEqual(len(calls),1)
+                self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],deadline)
+                self.assertEqual(row['outcome'],'failed')
+                self.assertTrue(r.report['resource_scan_failure']['partial_counts_are_not_valid_accounting'])
+
+    def test_hosted_boot_finalization_cancellation_prevents_scan(self):
+        r,row,calls,_,_,ok=self.hosted_boot_finalization(fault='cancel')
+        self.assertFalse(ok);self.assertEqual(calls,[])
+        self.assertIn('Interrupted',row['finalization_error'])
+
+    def boot_exit_checkpoint(self):
+        r=self.runner(Ops())
+        r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        process=r.ops.spawn(argv)
+        row={'id':'boot-ready','argv':argv,'pgid':process.pid,'work_deadline':292.}
+        r.report['commands'].append(row);r.active[process.pid]=process
+        hosted.core.base.observed(r,row,'command','poll',process.poll)
+        r.ops.t=10.;r.next_scan=9.
+        return r,row,process
+
+    def test_boot_exit_defers_one_due_scan_without_moving_schedule(self):
+        r,row,process=self.boot_exit_checkpoint()
+        with patch.object(r,'monitor') as monitor:
+            r.checkpoint()
+            monitor.assert_not_called()
+            self.assertEqual(r.next_scan,9.)
+            self.assertEqual(row['post_exit_scan_deferral'],{'elapsed':10.})
+            r.checkpoint()
+            monitor.assert_called_once_with()
+        self.assertIs(r.active[process.pid],process)
+
+    def test_boot_exit_deferral_requires_exact_live_owned_success(self):
+        cases=('other-label','other-device','other-argv','missing-process','extra-process',
+               'nonzero','running','boolean-exit','missing-poll','raised-poll','boolean-poll',
+               'error','stop','finished','unknown-spawn','forced','delegated','not-due','cleaning')
+        for name in cases:
+            with self.subTest(name=name):
+                parent=self.root;self.root=parent/name;self.root.mkdir()
+                try:r,row,process=self.boot_exit_checkpoint()
+                finally:self.root=parent
+                kwargs={}
+                if name=='other-label':row['id']='phase-prepare'
+                if name=='other-device':r.owned='10000000-0000-0000-0000-000000000002'
+                if name=='other-argv':row['argv']=row['argv'][:-1]
+                if name=='missing-process':r.active.clear()
+                if name=='extra-process':r.active[999]=SimpleNamespace(pid=999)
+                if name=='nonzero':process.returncode=7
+                if name=='running':process.returncode=None
+                if name=='boolean-exit':process.returncode=False
+                if name=='missing-poll':row.pop('process_observations')
+                if name=='raised-poll':row['process_observations']['command.poll']['outcome']='raised'
+                if name=='boolean-poll':row['process_observations']['command.poll']['result']=False
+                if name=='error':row['error']='failure'
+                if name=='stop':row['stop']={}
+                if name=='finished':row['finish']=9.
+                if name=='unknown-spawn':r.unknown_spawn=True
+                if name=='forced':kwargs['force_resources']=True
+                if name=='delegated':kwargs['command_owner']=r
+                if name=='not-due':r.next_scan=11.
+                if name=='cleaning':r.cleaning=True
+                with patch.object(r,'monitor') as monitor:
+                    r.checkpoint(**kwargs)
+                    self.assertNotIn('post_exit_scan_deferral',row)
+                    self.assertEqual(monitor.call_count,0 if name in ('not-due','cleaning') else 1)
+
+    def final_accounting_command(self, *, closed_at=111.4, scan_seconds=1.2,
+                                 fault=None, owner_limit=None, delegated=False):
+        r=self.runner(Ops({'exit':7} if fault=='accepted-nonzero' else {}))
+        r.owned='10000000-0000-0000-0000-000000000001'
+        owner=r
+        if delegated:
+            owner=hosted.core.Recovery(r.ops,r.out/'child',r.plan,r.host,'child',0,
+                candidate=r.candidate,source_manifest=r.source_manifest)
+            owner.checkpoint=lambda *,force_resources=False:r.checkpoint(
+                force_resources=force_resources,command_owner=owner)
+            r.report['commands']=[{'id':'selected-tests','work_deadline':112.,'command_deadline':120.}]
+            if delegated=='idle':r.report['commands'][-1]['finish']=0.
+            else:r.active[999]=SimpleNamespace(pid=999)
+        close=r.ops.close;scan=hosted.core.live_sizes;observations=[];log_handles=[]
+        original_open=Path.open
+        def opened(path,*args,**kwargs):
+            stream=original_open(path,*args,**kwargs)
+            if path.parent==owner.out and args and args[0]=='wb':log_handles.append(stream)
+            return stream
+        def closed(process):
+            close(process)
+            r.ops.t=closed_at;r.next_scan=0.
+            if owner_limit is not None:owner.limit=owner_limit
+            row=owner.report['commands'][-1]
+            if fault=='unknown':owner.unknown_spawn=True
+            if fault=='active':owner.active[999]=SimpleNamespace(pid=999)
+            if fault=='identity':row['pgid']=999
+            if fault=='unreaped':row['stop']['leader_reaped']=False
+            if fault=='unconfirmed':row['stop']['group_absent']=False
+            if fault=='unattempted':row['stop']['attempted']=False
+            if fault=='absence-cache':owner.absent_groups.clear()
+            if fault=='close':raise OSError('synthetic pipe close failure')
+            if fault=='cancel':r.signal()
+        def scanned(*args,**kwargs):
+            if r.ops.t>=closed_at:
+                context=getattr(owner,'_finalizing_success',None)
+                if context is not None:
+                    self.assertEqual(len(log_handles),2)
+                    self.assertTrue(all(stream.closed for stream in log_handles))
+                observations.append((args[3],context))
+                r.ops.t+=scan_seconds
+            return scan(*args,**kwargs)
+        owner.accept_nonzero_exit=lambda *_:fault=='accepted-nonzero'
+        with patch.object(r.ops,'close',side_effect=closed), \
+             patch.object(Path,'open',opened), \
+             patch.object(hosted.core,'live_sizes',side_effect=scanned):
+            try:
+                owner.command('boot-ready',['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b'],120)
+                succeeded=True
+            except RuntimeError:succeeded=False
+        self.assertIsNone(getattr(owner,'_finalizing_success',None))
+        row=owner.report['commands'][-1]
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),(112.,120.,8))
+        self.assertEqual(len(r.ops.processes),1)
+        return r,owner,row,observations,succeeded
+
+    def test_closed_success_accounting_can_finish_after_work_before_original_total(self):
+        r,owner,row,scans,ok=self.final_accounting_command()
+        self.assertTrue(ok);self.assertEqual(row['outcome'],'completed')
+        self.assertEqual(len(scans),1);self.assertAlmostEqual(scans[0][0],116.4)
+        self.assertIs(scans[0][1][0],row);self.assertIs(scans[0][1][1],r.ops.processes[0])
+        self.assertAlmostEqual(row['finish'],112.6)
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[]);self.assertFalse(r.active)
+        sample=r.report['resources'][-1]
+        self.assertGreaterEqual(sample['entries'],2)
+        self.assertEqual(sample['scan']['requested_scan_seconds'],5)
+        # Context ends with this checkpoint; later work cannot reuse its allowance.
+        with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):
+            r.report['commands'].append({'id':'new','work_deadline':112.,'command_deadline':120.})
+            r.monitor()
+
+    def test_closed_child_accounting_uses_total_without_leaking_into_idle_parent(self):
+        r,owner,row,scans,ok=self.final_accounting_command(delegated='idle')
+        self.assertTrue(ok);self.assertIsNot(owner,r)
+        self.assertAlmostEqual(scans[0][0],116.4)
+        self.assertIs(scans[0][1][0],row)
+        self.assertIsNone(getattr(r,'_finalizing_success',None))
+        self.assertEqual((owner.limit,r.limit),(1380.,1380.))
+        r.monitor()
+        self.assertAlmostEqual(r.report['resources'][-1]['scan']['deadline_elapsed'],117.6)
+
+    def test_closed_accounting_keeps_total_scan_owner_and_parent_deadlines(self):
+        cases=[('total',dict(closed_at=119.,scan_seconds=1.),120.),
+               ('scan',dict(scan_seconds=5.),116.4),
+               ('owner',dict(owner_limit=112.),112.),
+               ('parent',dict(delegated=True),112.)]
+        for name,options,end in cases:
+            with self.subTest(name=name):
+                old=self.root;self.root=old/name;self.root.mkdir()
+                try:
+                    r,owner,row,scans,ok=self.final_accounting_command(**options)
+                    self.assertFalse(ok);self.assertIn('finalization_error',row)
+                    self.assertAlmostEqual(scans[0][0],end)
+                    self.assertIsNotNone(scans[0][1])
+                    self.assertEqual(row['outcome'],'failed')
+                finally:self.root=old
+
+    def test_final_accounting_never_uses_receipt_only_or_unverified_closure(self):
+        for fault in ('accepted-nonzero','unknown','active','identity','unreaped','unconfirmed','unattempted','absence-cache','close','cancel'):
+            with self.subTest(fault=fault):
+                old=self.root;self.root=old/fault;self.root.mkdir()
+                try:
+                    r,owner,row,scans,ok=self.final_accounting_command(fault=fault)
+                    self.assertFalse(ok);self.assertEqual(row['outcome'],'failed')
+                    for end,context in scans:
+                        self.assertEqual(end,112.);self.assertIsNone(context)
+                    if fault in ('close','cancel'):self.assertEqual(scans,[])
+                finally:self.root=old
+        r=self.runner();r.ops.t=111.4
+        r.report['commands']=[{'id':'boot-ready','pgid':123,'returncode':0,
+            'work_deadline':112.,'command_deadline':120.,'stop':{
+                'attempted':True,'leader_reaped':True,'group_absent':True},
+            '_finalizing_success':True}]
+        r.absent_groups.add(123)
+        with patch.object(hosted.core.shutil,'disk_usage',side_effect=lambda _: (
+                setattr(r.ops,'t',112.) or SimpleNamespace(free=32*hosted.core.GIB))):
+            with self.assertRaisesRegex(RuntimeError,'Output scan deadline exceeded'):r.monitor()
+        self.assertEqual(r.report['resource_scan_failure']['deadline_elapsed'],112.)
+
+    def test_final_accounting_context_is_conditional_and_cleared_on_base_exception(self):
+        r=self.runner();original=r.checkpoint;seen=[]
+        def checkpoint(**kwargs):
+            context=getattr(r,'_finalizing_success',None)
+            if context is not None:
+                seen.append(context);raise KeyboardInterrupt('synthetic cancellation')
+            return original(**kwargs)
+        with patch.object(r,'checkpoint',side_effect=checkpoint):
+            with self.assertRaises(RuntimeError):r.command('normal',['synthetic'],120)
+        self.assertEqual(len(seen),1);self.assertIsNone(r._finalizing_success)
+        self.assertIn('KeyboardInterrupt',r.report['commands'][-1]['finalization_error'])
+        # A fast command does not force another resource sample at finalization.
+        r.command('normal-again',['synthetic'],120)
+        self.assertIsNone(r._finalizing_success)
+        self.assertEqual(len(r.report['resources']),3)
+
     def test_boot_scan_15_requires_active_exact_owned_wait_and_keeps_restart_disabled(self):
         r=self.runner();r.owned='10000000-0000-0000-0000-000000000001'
         argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
@@ -2628,7 +3989,7 @@ class BoundaryTests(unittest.TestCase):
             if r.active and not delayed:delayed=True;r.ops.t+=6.
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
-            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+            hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         self.assertTrue(delayed);self.assertNotIn('resource_scan_failure',r.report)
         self.assertGreaterEqual(r.report['resources'][-1]['logical'],len(payload))
         self.assertGreaterEqual(r.report['resources'][-1]['entries'],2)
@@ -2636,6 +3997,163 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual((row['work_deadline'],row['command_deadline'],row['returncode']),(112.,120.,0))
         self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
         self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    @contextlib.contextmanager
+    def delayed_boot_stat(self, r, delay, *, repeat=False, cancel=False):
+        """Delay one real no-follow file stat using only the injected clock."""
+        payload=r.out/'scan-payload.bin';payload.write_bytes(b'complete accounting\n'*512)
+        original=hosted.core.os.scandir;calls=[]
+        @contextlib.contextmanager
+        def scan(fd):
+            with original(fd) as children:
+                def entries():
+                    for child in children:
+                        def read(*,follow_symlinks,child=child):
+                            if child.name==payload.name and r.active and (repeat or not calls):
+                                calls.append((r.ops.now(),follow_symlinks))
+                                r.ops.t+=delay
+                                if cancel:r.interrupted=True
+                            return child.stat(follow_symlinks=follow_symlinks)
+                        yield SimpleNamespace(name=child.name,stat=read)
+                yield entries()
+        with patch.object(hosted.core.os,'scandir',side_effect=scan):
+            yield calls,payload
+
+    def test_hosted_boot_scan_60_requires_exact_owned_context(self):
+        r=self.runner(execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        argv=['/usr/bin/xcrun','simctl','bootstatus',r.owned,'-b']
+        row={'id':'boot-ready','argv':argv,'pgid':123,'work_deadline':592.}
+        r.report['commands'].append(row);observed=[]
+        def scan(*args,**kwargs):
+            observed.append((args[3],kwargs['allow_xcresult_restart'],kwargs['allow_products_restart']))
+            return {'logical':0,'allocated':0,'entries':0,'xcresults':{}}
+        with patch.object(hosted.core,'live_sizes',side_effect=scan):
+            r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);r.monitor()
+            r.active[123]=SimpleNamespace(pid=456);r.monitor()
+            r.active[123]=SimpleNamespace(pid=123);row['finish']=0.;r.monitor();del row['finish']
+            row['argv']=argv[:-2]+['unowned','-b'];r.monitor();row['argv']=argv
+            row['id']='boot';r.monitor();row['id']='boot-ready'
+            r.owned=None;r.monitor();r.owned=argv[3]
+            row['work_deadline']=7.;r.monitor();row['work_deadline']=592.
+            r.limit=4.;r.monitor();r.limit=4980.
+            probe=SimpleNamespace(t0=0.,limit=60.,report={'commands':[dict(row)]},
+                                  active={123:SimpleNamespace(pid=123)},owned=r.owned)
+            r.monitor(command_owner=probe)
+            row['id']='phase-prepare';r.monitor()
+        self.assertEqual(observed,[(end,False,False) for end in [5.,60.,5.,5.,5.,5.,5.,7.,4.,5.]]
+                         +[(30.,True,True)])
+        self.assertEqual((r.limit,r.final),(4980.,5340.))
+        self.assertEqual((hosted.core.CAPS['scan_seconds'],hosted.core.CAPS['phase_scan_seconds'],
+                          hosted.core.CAPS['boot_scan_seconds']),(5,30,15))
+        self.assertEqual(r.ops.processes,[])
+
+    def test_hosted_boot_scan_completes_full_traversal_after_26_second_stat(self):
+        r=self.runner(Ops({'delay':26.}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.) as (calls,payload):
+            r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1);self.assertFalse(calls[0][1])
+        scans=[x for x in r.report['resources'] if x['scan']['requested_scan_seconds']==60]
+        self.assertEqual(len(scans),1)
+        self.assertEqual(scans[0]['scan']['traversal_duration_seconds'],26.)
+        self.assertEqual(scans[0]['entries'],4)
+        self.assertGreaterEqual(scans[0]['logical'],payload.stat().st_size)
+        self.assertGreaterEqual(scans[0]['allocated'],payload.stat().st_blocks*512)
+        self.assertNotIn('resource_scan_failure',r.report)
+        row=r.report['commands'][0]
+        self.assertEqual((row['requested_cap_seconds'],row['work_deadline'],row['command_deadline'],
+                          row['stop_reserve_seconds'],row['returncode']),(600,592.,600.,8,0))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(len(r.ops.processes),1);self.assertEqual(r.ops.signals,[])
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+
+    def test_default_boot_scan_still_rejects_26_second_stat(self):
+        ops=Ops({'delay':float('inf'),'exit':-15})
+        r=hosted.core.Recovery(ops,self.root/'portable',
+                              {'runtime':'synthetic-runtime','device_type':'synthetic-device'},
+                              {'machine':'arm64'},'test',0,
+                              candidate=self.root/'source',source_manifest={})
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1)
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(failure['requested_scan_seconds'],15)
+        self.assertTrue(failure['partial_counts_are_not_valid_accounting'])
+        self.assertEqual((row['work_deadline'],row['command_deadline']),(112.,120.))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,1380,1500))
+
+    def test_hosted_boot_scan_over_60_fails_once_and_stops_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,60.25) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual(len(calls),1);self.assertEqual(failure['requested_scan_seconds'],60)
+        self.assertEqual(failure['deadline_elapsed']-failure['started_elapsed'],60)
+        self.assertEqual(failure['traversal']['last_operation']['operation'],'entry_stat')
+        self.assertEqual(failure['traversal']['last_operation']['duration_seconds'],60.25)
+        self.assertTrue(failure['partial_counts_are_not_valid_accounting'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[15]);self.assertLess(row['finish'],600.)
+        self.assertEqual(len(r.ops.processes),1);self.assertFalse(r.active)
+
+    def test_hosted_boot_scan_late_stat_keeps_command_and_global_deadlines(self):
+        for name,start,wakeup,work,deadline in [('command',0.,590.,592.,600.),
+                                                 ('global',4900.,4970.,4972.,4980.)]:
+            with self.subTest(name=name):
+                r=self.runner(Ops({'delay':float('inf'),'exit':-15}),
+                              execution_profile='hosted-intel-v1',label=name)
+                r.owned='10000000-0000-0000-0000-000000000001';r.ops.t=start
+                r.ops.on_spawn=lambda argv:setattr(r.ops,'t',wakeup)
+                with self.delayed_boot_stat(r,2.25):
+                    with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                        r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+                self.assertEqual((failure['requested_scan_seconds'],failure['started_elapsed'],
+                                  failure['deadline_elapsed'],failure['finished_elapsed']),
+                                 (60,wakeup,work,wakeup+2.25))
+                self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                                 (work,deadline,8))
+                self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+                self.assertLess(row['finish'],deadline);self.assertFalse(r.active)
+                self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+
+    def test_hosted_repeated_boot_scans_cannot_renew_original_command(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.,repeat=True) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertGreaterEqual(len(calls),20)
+        scans=[x for x in r.report['resources'] if x['scan']['requested_scan_seconds']==60]
+        self.assertGreaterEqual(len(scans),19)
+        self.assertTrue(all(x['scan']['deadline_elapsed']<=592 for x in scans))
+        failure=r.report['resource_scan_failure'];row=r.report['commands'][0]
+        self.assertEqual((failure['requested_scan_seconds'],failure['deadline_elapsed']),(60,592.))
+        self.assertEqual((row['work_deadline'],row['command_deadline'],row['stop_reserve_seconds']),
+                         (592.,600.,8))
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertGreaterEqual(row['finish'],592.);self.assertLess(row['finish'],600.)
+        self.assertEqual(row['stop']['signals'],[15]);self.assertEqual(len(r.ops.processes),1)
+        self.assertFalse(r.active);self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
+
+    def test_hosted_boot_scan_cancellation_still_closes_owned_process(self):
+        r=self.runner(Ops({'delay':float('inf'),'exit':-15}),execution_profile='hosted-intel-v1')
+        r.owned='10000000-0000-0000-0000-000000000001'
+        with self.delayed_boot_stat(r,26.,cancel=True) as (calls,_):
+            with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
+                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+        self.assertEqual(len(calls),1);row=r.report['commands'][0]
+        self.assertIn('Interrupted',row['error'])
+        self.assertTrue(row['stop']['leader_reaped'] and row['stop']['group_absent'])
+        self.assertEqual(row['stop']['signals'],[15]);self.assertFalse(r.active)
+        self.assertEqual((r.t0,r.limit,r.final),(0,4980,5340))
 
     def test_boot_scan_over_15_fails_once_and_stops_owned_process(self):
         r=self.runner(Ops({'delay':float('inf')}));r.owned='10000000-0000-0000-0000-000000000001'
@@ -2646,7 +4164,7 @@ class BoundaryTests(unittest.TestCase):
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
-                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
         self.assertEqual(len(delays),1);self.assertEqual(failed['requested_scan_seconds'],15)
         self.assertEqual(failed['deadline_elapsed']-failed['started_elapsed'],15)
@@ -2665,7 +4183,7 @@ class BoundaryTests(unittest.TestCase):
             return value
         with patch.object(hosted.core.os,'scandir',side_effect=scan):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):
-                r.sim('boot-ready','bootstatus',r.owned,'-b',cap=120)
+                hosted.core.Recovery.sim(r,'boot-ready','bootstatus',r.owned,'-b',cap=120)
         failed=r.report['resource_scan_failure'];row=r.report['commands'][0]
         self.assertEqual((failed['started_elapsed'],failed['deadline_elapsed'],failed['finished_elapsed']),
                          (110.,112.,112.25))
@@ -3044,7 +4562,7 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'boot-ready failed'):r.setup()
         rows=r.report['commands']
         self.assertEqual([row['id'] for row in rows],['runtime-cache-ready','boot-ready'])
-        self.assertEqual(rows[-1]['requested_cap_seconds'],120)
+        self.assertEqual(rows[-1]['requested_cap_seconds'],600)
         self.assertEqual((r.out/'PhaseLogs/boot-ready-stdout.log').read_bytes(),b'Waiting for synthetic boot')
         self.assertEqual(len(r.ops.processes),2)
         private=r.out/'3-stdout.log';private.write_text('private process listing')
@@ -3806,5 +5324,53 @@ class ResourceAccountingTests(unittest.TestCase):
         self.assertEqual(observation['status'],'failed')
         self.assertEqual(observation['last_operation']['operation'],'root_identity')
 
+
+class DocumentationScopeGateTests(unittest.TestCase):
+    def test_complete_merge_group_docs_and_source_diffs(self):
+        import subprocess
+        spec = importlib.util.spec_from_file_location('ci_change_scope', HERE / 'change_scope.py')
+        scope = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scope)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            def git(*arguments):
+                return subprocess.check_output(['git', '-c', 'user.name=Scope Test', '-c', 'user.email=scope@example.invalid', '-c', 'commit.gpgsign=false', *arguments], cwd=repo, stderr=subprocess.DEVNULL).decode().strip()
+            git('init', '-q')
+            (repo / 'README.md').write_text('Initial documentation\n')
+            git('add', '.'); git('commit', '-qm', 'initial')
+            base = git('rev-parse', 'HEAD')
+            (repo / 'README.md').write_text('Updated documentation\n')
+            git('add', '.'); git('commit', '-qm', 'documentation')
+            docs = git('rev-parse', 'HEAD')
+            self.assertEqual(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': base, 'head_sha': docs}}), {'run': False, 'reason': 'documentation-only'})
+            (repo / 'source.swift').write_text('struct Source {}\n')
+            git('add', '.'); git('commit', '-qm', 'source')
+            head = git('rev-parse', 'HEAD')
+            self.assertTrue(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': base, 'head_sha': head}})['run'])
+            self.assertTrue(scope.classify(repo, 'workflow_dispatch', {})['run'])
+            self.assertTrue(scope.classify(repo, 'merge_group', {'merge_group': {'base_sha': 'a' * 40, 'head_sha': head}})['run'])
+
+    def test_real_gate_accepts_only_complete_native_or_documentation_vectors(self):
+        import subprocess
+        workflow = (HERE.parent / '.github/workflows/ci.yml').read_text()
+        gate = workflow.split('  gate:\n', 1)[1]
+        script = '\n'.join(line[10:] for line in gate.split('        run: |\n', 1)[1].splitlines())
+        keys = ['CORE_PURCHASE_RESULT', 'UI_GUIDANCE_RESULT', 'IPAD_RESULT', 'RECOVERY_RESULT']
+        for run, reason, expected_result in [('false', 'documentation-only', 'skipped'), ('true', 'source-change', 'success')]:
+            baseline = {key: expected_result for key in keys}
+            baseline.update(SCOPE_RESULT='success', SCOPE_RUN=run, SCOPE_REASON=reason)
+            variants = [(baseline, True)]
+            for key in keys + ['SCOPE_RESULT']:
+                for value in ['success', 'failure', 'cancelled', 'skipped', '']:
+                    variants.append(({**baseline, key: value}, value == baseline[key]))
+            for value in ['', 'unknown', 'FALSE']:
+                variants.append(({**baseline, 'SCOPE_RUN': value}, False))
+            if run == 'false':
+                for reason in ['', 'source-change', 'unavailable-history']:
+                    variants.append(({**baseline, 'SCOPE_REASON': reason}, False))
+            for env, expected in variants:
+                with self.subTest(env=env):
+                    result = subprocess.run(['bash', '-c', script], env={**os.environ, **env}, capture_output=True)
+                    self.assertEqual(result.returncode == 0, expected, result.stderr.decode())
 
 if __name__=='__main__':unittest.main(verbosity=2)

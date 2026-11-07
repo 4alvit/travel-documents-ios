@@ -174,6 +174,10 @@ class Smoke:
                     check()
                     sent = None
                     if not stop['group_absent']:
+                        # A reaped leader no longer reserves its numeric PID.
+                        # Group presence alone cannot authorize another signal.
+                        require(not stop['leader_reaped'] and p.returncode is None,
+                                'Reaped leader leaves uncertain process group identity')
                         sent = observed(self, record, 'stop', 'signal_' + str(int(sig)),
                                         lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))
@@ -228,6 +232,7 @@ class Smoke:
                   'work_deadline': end - 8 - self.t0, 'command_deadline': end - self.t0}
         self.report['commands'].append(record)
         p, failure, stdout_text = None, None, None
+        process_closed = False
         paths = {k: self.out / (str(len(self.report['commands'])) + '-' + k + '.log') for k in ('stdout', 'stderr')}
         record['logs'] = {k: str(v) for k, v in paths.items()}
         handles = {}
@@ -281,6 +286,7 @@ class Smoke:
                     record['stop_error'] = repr(error)
                 try:
                     self.ops.close(p)
+                    process_closed = True
                 except BaseException as error:
                     failure = failure or error
                     record['close_error'] = repr(error)
@@ -298,7 +304,20 @@ class Smoke:
                     failure = error
             if failure is None:
                 try:
-                    self.checkpoint()
+                    # Only this live call can grant post-success accounting
+                    # time. Never derive that authority from a saved receipt.
+                    stop = record.get('stop', {})
+                    if (p is not None and p.pid == record.get('pgid') and p.returncode == 0
+                            and process_closed and not self.active and not self.unknown_spawn
+                            and p.pid in self.absent_groups and stop.get('attempted') is True
+                            and stop.get('leader_reaped') is True and stop.get('group_absent') is True
+                            and set(handles) == {'stdout', 'stderr'}
+                            and all(stream.closed for stream in handles.values())):
+                        self._finalizing_success = (record, p)
+                    try:
+                        self.checkpoint()
+                    finally:
+                        self._finalizing_success = None
                 except BaseException as error:
                     record['finalization_error'] = repr(error)
                     failure = error

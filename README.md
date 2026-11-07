@@ -69,8 +69,11 @@ device. The result bundle is written under `build/`.
 Pass `--require-sdk-match` before any `--cohort` option to require an available
 iPhone in the selected Xcode's exact Simulator SDK runtime; a supplied device
 UUID is checked against the same requirements. Ordinary local use keeps its
-existing selection behavior. Core/purchase and phone guidance CI use Xcode 26.2
-(17C52) and require its matching Simulator runtime. Their test artifacts retain
+existing selection behavior. Core/purchase and phone guidance CI use standard
+`macos-15` ARM runners with Xcode 26.2 (17C52) and require its matching Simulator
+runtime. They retain the existing ordinary ARM test and preparation limits;
+iPad guidance remains on Intel. Recovery explicitly selects its hosted ARM
+profile with the same bounded policy as its retained Intel profile. Their test artifacts retain
 the selected device and captured inventories. The Release preview is built with
 the same Xcode version; its provenance records the actual producer. The separate
 recovery compatibility job keeps its own toolchain/profile.
@@ -207,3 +210,14 @@ and executable permissions; its bytes and modes are checked before upload.
 Provenance identifies the actual tested checkout, which can be a PR merge commit.
 It is an unsigned Simulator candidate: a successful CI upload does not establish
 physical-device, App Store or separate release-smoke acceptance.
+
+### Documentation-only CI
+
+The required CI gate classifies the complete PR or push diff before scheduling
+native runners. Ordinary documentation skips the macOS simulator and recovery
+cohorts; the gate accepts only a successful classification and all four cohorts
+explicitly skipped. Source, workflow, fixture and file-mode changes, unknown
+history and manual runs keep the complete native qualification. Merge-group
+runs also classify the complete merge-queue diff.
+Independent CodeQL scanning retains its existing behavior. A documentation-only
+result does not attest to a new Simulator package or runtime acceptance evidence.

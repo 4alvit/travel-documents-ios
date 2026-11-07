@@ -73,8 +73,10 @@ class Commands:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if absent():
                 break
-            if cleanup_error is not None and process.poll() is not None:
-                break  # An unverified old PGID may have been reused after exit.
+            if process.returncode is not None or process.poll() is not None:
+                break  # Reaping releases the numeric PGID's signaling authority.
+            if time.monotonic() >= self.deadline:
+                break
             try:
                 os.killpg(process.pid, sig)
             except ProcessLookupError:
@@ -92,7 +94,7 @@ class Commands:
             end = min(self.deadline, time.monotonic() + 3)
             while time.monotonic() < end:
                 process.poll()
-                if absent() or (cleanup_error is not None and process.returncode is not None):
+                if absent() or process.returncode is not None:
                     break
                 time.sleep(.02)
         process.poll()
@@ -153,10 +155,14 @@ def origin(preparer, api, commit, run_id, artifact_id):
     prefix = 'repos/' + preparer.REPOSITORY + '/actions/'
     run = api.api(prefix + 'runs/' + str(run_id))
     require(run.get('event') == 'push', 'Only a successful main push is eligible')
-    jobs = api.pages(prefix + 'runs/%d/attempts/%s/jobs' % (run_id, run.get('run_attempt')), 'jobs')
-    identity = preparer.validate_run(run, jobs, commit, run_id)
+    reported = api.pages(prefix + 'runs/%d/jobs?filter=latest' % run_id, 'jobs')
+    history = api.pages(prefix + 'runs/%d/jobs?filter=all' % run_id, 'jobs')
+    jobs = preparer.reconcile_jobs(run, reported, history, commit, run_id)
+    identity = preparer.validate_run(run, jobs, commit, run_id, history=history)
+    build_job = next(job for job in jobs if job['name'] == preparer.BUILD_JOB)
+    producer = {**run, 'run_attempt': build_job['run_attempt']}
     artifacts = api.pages(prefix + 'runs/%d/artifacts' % run_id, 'artifacts')
-    artifact = preparer.select_artifact(artifacts, run, commit)
+    artifact = preparer.select_artifact(artifacts, producer, commit)
     require(type(artifact.get('id')) is int and artifact['id'] == artifact_id,
             'Requested artifact ID does not match exact successful-main artifact')
     return run, identity, artifact, jobs
@@ -229,16 +235,19 @@ def prepare(args, report):
                         'version': versions[0]}
     report['stage'] = 'successful-main-ci'
     run, identity, artifact, jobs = origin(preparer, api, args.commit, args.run_id, args.artifact_id)
+    build_job = next(job for job in jobs if job['name'] == preparer.BUILD_JOB)
+    producer = {**run, 'run_attempt': build_job['run_attempt']}
     report.update(ci=identity, jobs=[{key: job.get(key) for key in
                   ('id', 'name', 'run_id', 'run_attempt', 'head_sha', 'status', 'conclusion')} for job in jobs],
-                  artifact={key: artifact[key] for key in ('id', 'name', 'size_in_bytes', 'digest', 'workflow_run')})
+                  artifact={**{key: artifact[key] for key in ('id', 'name', 'size_in_bytes', 'digest', 'workflow_run')},
+                            'producer_job_id': build_job['id'], 'producer_run_attempt': build_job['run_attempt']})
     report['stage'] = 'download-and-payload'
     data = api.binary('repos/' + preparer.REPOSITORY + '/actions/artifacts/%d/zip' % args.artifact_id,
                       accept='application/vnd.github+json')
     require(len(data) == artifact['size_in_bytes'] and 'sha256:' + preparer.digest(data) == artifact['digest'],
             'Downloaded artifact size or digest mismatch')
     files = {name: value[0] for name, value in preparer.archive_members(data).items()}
-    provenance = preparer.validate_payload(files, args.commit, tree, run, versions[0])
+    provenance = preparer.validate_payload(files, args.commit, tree, producer, versions[0])
     require(provenance['source'].get('parents') == parents, 'Producer parent identity mismatch')
     inputs = args.out / 'inputs'
     inputs.mkdir(mode=0o700)
@@ -261,8 +270,13 @@ def prepare(args, report):
     report['host'].update(macos=os_version, developer_dir=DEVELOPER_DIR,
                           required_runtime='com.apple.CoreSimulator.SimRuntime.iOS-26-2', required_runtime_build='23C54')
     report['stage'] = 'final-ci-identity'
-    latest = api.api('repos/' + preparer.REPOSITORY + '/actions/runs/' + str(args.run_id))
-    require(preparer.validate_run(latest, jobs, args.commit, args.run_id) == identity,
+    run_path = 'repos/' + preparer.REPOSITORY + '/actions/runs/' + str(args.run_id)
+    latest_reported = api.pages(run_path + '/jobs?filter=latest', 'jobs')
+    latest_history = api.pages(run_path + '/jobs?filter=all', 'jobs')
+    latest = api.api(run_path)
+    latest_jobs = preparer.reconcile_jobs(latest, latest_reported, latest_history, args.commit, args.run_id)
+    require(preparer.validate_run(latest, latest_jobs, args.commit, args.run_id, history=latest_history) == identity
+            and preparer.job_identity(latest_jobs) == preparer.job_identity(jobs),
             'CI identity changed during acquisition')
     commands.check()
     report.update(status='prepared_pending_ordinary_smoke', public_receipt_created=False,

@@ -192,12 +192,62 @@ class CloudTests(unittest.TestCase):
         self.assertTrue(all(argv[0] == 'git' for argv in self.calls))
 
     def test_missing_or_wrong_attempt_job_never_reaches_download(self):
-        for field, value in [('conclusion', 'failure'), ('run_attempt', 1)]:
+        for field, value in [('conclusion', 'failure'), ('run_attempt', 3)]:
             before = copy.deepcopy(self.f.jobs)
             self.f.jobs[0][field] = value
             with self.assertRaises(p.InvalidRelease): self.prepare()
             self.assertFalse(any(path.endswith('/zip') for _, path in self.api.calls))
             self.f.jobs = before
+
+    def partial_attempt(self):
+        build = next(job for job in self.f.jobs if job['name'] == p.BUILD_JOB)
+        build['run_attempt'] = 1
+        self.f.history = copy.deepcopy(self.f.jobs)
+        self.f.latest_jobs = [job for job in self.f.jobs if job['run_attempt'] == 2]
+        self.f.producer_attempt(1)
+        return build
+
+    def test_partial_rerun_preserves_actual_producer_and_original_payload(self):
+        build = self.partial_attempt()
+        self.assertEqual(self.prepare(), self.f.tree)
+        self.assertEqual(self.report['ci']['run_attempt'], 2)
+        self.assertEqual(self.report['artifact']['producer_job_id'], build['id'])
+        self.assertEqual(self.report['artifact']['producer_run_attempt'], 1)
+        for name, body in self.f.files.items():
+            self.assertEqual((self.out / 'inputs' / name).read_bytes(), body)
+        self.assertEqual(sum(path.endswith('/jobs?filter=latest') for _, path in self.api.calls), 2)
+        self.assertEqual(sum(path.endswith('/jobs?filter=all') for _, path in self.api.calls), 2)
+
+    def test_partial_rerun_wrong_producer_payload_cannot_prepare(self):
+        self.partial_attempt()
+        self.f.producer_attempt(2)
+        self.f.artifact['name'] = 'TripDocket-simulator-%s-10-1' % self.f.commit
+        with self.assertRaises(p.InvalidRelease):
+            self.prepare()
+        self.assertFalse((self.out / 'inputs').exists())
+
+    def test_latest_view_missing_current_gate_cannot_download(self):
+        self.partial_attempt()
+        self.f.latest_jobs = [job for job in self.f.latest_jobs if job['name'] != 'CI gate']
+        with self.assertRaises(p.InvalidRelease):
+            self.prepare()
+        self.assertFalse(any(path.endswith('/zip') for _, path in self.api.calls))
+
+    def test_changed_effective_job_after_download_cannot_prepare(self):
+        fixture = self.f
+        original = self.api.pages
+        latest_reads = 0
+        def pages(path, field):
+            nonlocal latest_reads
+            if path.endswith('/jobs?filter=latest'):
+                latest_reads += 1
+                if latest_reads == 2:
+                    fixture.jobs[0]['id'] += 1000
+            return original(path, field)
+        with patch.object(self.api, 'pages', side_effect=pages), \
+                self.assertRaisesRegex(ValueError, 'CI identity changed'):
+            self.prepare()
+        self.assertNotEqual(self.report.get('status'), 'prepared_pending_ordinary_smoke')
 
     def test_change_scope_job_is_required_before_artifact_download(self):
         self.assertIn("Change scope", p.JOBS)
@@ -232,6 +282,36 @@ class CloudTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_reaped_leader_present_group_never_receives_a_signal(self):
+        commands = c.Commands({})
+        process = SimpleNamespace(pid=1234, returncode=0, poll=lambda: 0)
+        with patch.object(commands, 'absent', return_value=False), \
+                patch.object(c.os, 'killpg') as signals, \
+                self.assertRaisesRegex(ValueError, 'cleanup unverified'):
+            commands.close(process)
+        signals.assert_not_called()
+
+    def test_reaped_after_term_present_group_never_receives_kill(self):
+        commands = c.Commands({})
+        process = SimpleNamespace(pid=1234, returncode=None)
+        process.poll = lambda: process.returncode
+        def sent(_pid, sig):
+            self.assertEqual(sig, signal.SIGTERM)
+            process.returncode = -signal.SIGTERM
+        with patch.object(commands, 'absent', return_value=False), \
+                patch.object(c.os, 'killpg', side_effect=sent) as signals, \
+                self.assertRaisesRegex(ValueError, 'cleanup unverified'):
+            commands.close(process)
+        self.assertEqual([call.args[1] for call in signals.call_args_list], [signal.SIGTERM])
+
+    def test_reaped_leader_closes_only_after_observed_group_absence(self):
+        commands = c.Commands({})
+        process = SimpleNamespace(pid=1234, returncode=0, poll=lambda: 0)
+        with patch.object(commands, 'absent', side_effect=[False, True]), \
+                patch.object(c.os, 'killpg') as signals:
+            commands.close(process)
+        signals.assert_not_called()
+
     @staticmethod
     def child_absent(process):
         # These synthetic children never fork. The desktop sandbox denies the

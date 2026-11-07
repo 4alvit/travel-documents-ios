@@ -12,15 +12,35 @@ concurrency:
   # Preserve the recovery job's bounded owned-process cleanup window.
   cancel-in-progress: false
 jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        run: python3 scripts/change_scope.py
   validate:
+    needs: [scope]
+    if: ${{ (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     name: Swift, hosted tests and purchase UI
     runs-on: macos-15
-    timeout-minutes: 35
+    # 85m = checkout2 + toolchain5 + toolchain evidence2 + selector2
+    #       + Verify10 + package2 + integration45 + cancellation5
+    #       + raw evidence3 + optional extraction3/upload2 + Simulator2 + finalization2.
+    timeout-minutes: 85
     env:
       # Keep the Release producer and core tests on matched Xcode 26.2.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Toolchain
@@ -54,6 +74,7 @@ jobs:
           python3 -B scripts/test-select-simulator.py
           python3 -B scripts/test-prepare-guidance-files.py
       - name: Verify
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           TRIPDOCKET_VERIFY_COMMIT=$(git rev-parse HEAD)
@@ -61,10 +82,24 @@ jobs:
           test "$TRIPDOCKET_VERIFY_COMMIT" = "$(git rev-parse HEAD)"
           printf '%s\n' "$TRIPDOCKET_VERIFY_COMMIT" > build/ci-toolchain/verified-commit.txt
       - name: Package verified Simulator preview
+        timeout-minutes: 2
         run: bash scripts/package-ci-preview.sh
       - name: Simulator integration and StoreKit tests
         id: integration
+        timeout-minutes: 45
         run: bash scripts/test-simulator.sh --require-sdk-match --cohort core-purchase
+      # Preserve raw results before optional failure extraction consumes its budget.
+      - name: Test evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/*.xcresult
+            build/ci-toolchain/simulator-selection.*/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Extract existing Files/payment failure pairs
         if: ${{ failure() && steps.integration.outcome == 'failure' }}
         continue-on-error: true
@@ -85,17 +120,8 @@ jobs:
             build/FilesPickerFailure-${{ github.run_id }}-${{ github.run_attempt }}/public/payment-failure-ax.txt
           if-no-files-found: warn
           retention-days: 7
-      - name: Test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: TripDocket-tests-core-purchase-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/*.xcresult
-            build/ci-toolchain/simulator-selection.*/
-          if-no-files-found: warn
-          retention-days: 7
       - name: Simulator artifact
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-simulator-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -106,16 +132,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   ui_guidance:
+    needs: [scope]
     name: Accessibility, localization and guidance UI
-    # Limit this workflow to two eligible macOS jobs during hosted capacity shortages.
-    needs: validate
-    if: ${{ !cancelled() }}
+    # Independent checkout and Simulator; the final gate still requires every cohort.
+    if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     runs-on: macos-15
-    # Run 41440392190 completed all phone cases in 37m56s but exceeded the old 35m job cap.
-    # Cold startup in run 41577208390 consumed about 711s before its preparation case.
-    # 65m = checkout2 + toolchain3 + integration45 + cancellation5
+    # 108m integration covers1480s bootstrap +4380s case ceilings +600s other work,
+    # plus20s rounding; other work is an engineering allocation, not a guarantee.
+    # Hosted Phone case limits preserve all assertions, captures and cleanup.
+    # 128m = checkout2 + toolchain3 + integration108 + cancellation5
     #       + raw evidence3 + optional extraction3/upload2 + finalization2.
-    timeout-minutes: 65
+    timeout-minutes: 128
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
@@ -134,7 +161,7 @@ jobs:
           brew install xcodegen
       - name: Simulator integration and StoreKit tests
         id: integration
-        timeout-minutes: 45
+        timeout-minutes: 108
         # Provider initialization is explicit; this is not cold Files first-use coverage.
         run: bash scripts/test-simulator.sh --require-sdk-match --prepare-files --cohort ui-guidance
       # Preserve raw results before optional failure extraction consumes its budget.
@@ -170,27 +197,28 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   privacy_ipad:
+    needs: [scope]
     name: iPad privacy and support (${{ matrix.locale }})
-    # Keep iPad diagnostics eligible after ordinary Recovery failures.
-    needs: recovery
-    if: ${{ !cancelled() }}
+    # Each locale owns a fresh checkout and Simulator; both remain required by the gate.
+    if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - locale: en-US
-            step_minutes: 40
-            job_minutes: 46
+            step_minutes: 83
+            job_minutes: 95
           - locale: ru-RU
-            step_minutes: 40
-            job_minutes: 46
-    runs-on: macos-15
+            step_minutes: 83
+            job_minutes: 95
+    runs-on: macos-15-intel
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     timeout-minutes: ${{ matrix.job_minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Toolchain
@@ -202,10 +230,15 @@ jobs:
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
+        # 75m Intel work + 6m cleanup + 2m startup/finalization headroom.
+        # Job: checkout 2 + toolchain 3 + driver 83 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
-        run: bash scripts/test-privacy-support-ipad.sh --locale '${{ matrix.locale }}'
+        run: |
+          args=(--locale '${{ matrix.locale }}' --hosted-intel-timing)
+          bash scripts/test-privacy-support-ipad.sh "${args[@]}"
       - name: iPad test evidence
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: TripDocket-privacy-ipad-${{ matrix.locale }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -213,19 +246,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   recovery:
+    needs: [scope]
+    if: ${{ (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}
     name: Free backup and recovery
+    # 118m = checkout 2 + regressions 15 + native 91 + evidence 5 + cancellation 5.
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 118
     env:
       TRIPDOCKET_RUNNER_LABEL: macos-15
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           fetch-depth: 2
           persist-credentials: false
       - name: Hosted adapter regression checks
-        timeout-minutes: 2
+        timeout-minutes: 15
         run: |
           python3 -B scripts/test-recovery-hosted.py
           python3 -B scripts/test-files-picker-failure.py
@@ -241,11 +278,11 @@ jobs:
           python3 -B scripts/test-batch-import-diagnostics.py
           python3 -B scripts/test-simulator-driver-inventory.py
       - name: One bounded recovery attempt
-        timeout-minutes: 27
+        timeout-minutes: 91
         env:
           TRIPDOCKET_RUNNER_ARCH: ${{ runner.arch }}
           TRIPDOCKET_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: python3 -B scripts/recovery_hosted.py --run
+        run: python3 -B scripts/recovery_hosted.py --run --profile hosted-arm-v1
       - name: Recovery evidence
         if: always()
         timeout-minutes: 5
@@ -266,17 +303,30 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [validate, ui_guidance, privacy_ipad, recovery]
+    needs: [scope, validate, ui_guidance, privacy_ipad, recovery]
     runs-on: ubuntu-latest
     steps:
       - name: Require successful validation
         env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_RUN: ${{ needs.scope.outputs.run }}
+          SCOPE_REASON: ${{ needs.scope.outputs.reason }}
           CORE_PURCHASE_RESULT: ${{ needs.validate.result }}
           UI_GUIDANCE_RESULT: ${{ needs.ui_guidance.result }}
           # Aggregate matrix result requires both fixed locales to succeed.
           IPAD_RESULT: ${{ needs.privacy_ipad.result }}
           RECOVERY_RESULT: ${{ needs.recovery.result }}
         run: |
+          set -euo pipefail
+          test "$SCOPE_RESULT" = success
+          if [[ "$SCOPE_RUN" == false && "$SCOPE_REASON" == documentation-only ]]; then
+            for result in "$CORE_PURCHASE_RESULT" "$UI_GUIDANCE_RESULT" "$IPAD_RESULT" "$RECOVERY_RESULT"; do
+              test "$result" = skipped
+            done
+            echo 'Documentation-only change; native simulator qualification was not exercised.'
+            exit 0
+          fi
+          test "$SCOPE_RUN" = true
           test "$CORE_PURCHASE_RESULT" = success
           test "$UI_GUIDANCE_RESULT" = success
           test "$IPAD_RESULT" = success

@@ -5,6 +5,8 @@ The production helper is extracted unchanged; the fixture supplies only query,
 wait and tap boundaries so delayed root arrival exercises the real control flow.
 """
 from pathlib import Path
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -35,6 +37,10 @@ final class World {
     var transitionOccurrence = 1
     var transitionReachesRoot = true
     var reads: [String: Int] = [:]
+    var rootDelayAfterLocation: Int?
+    var locationTapped = false
+    var finalWaitElapsed = 0
+    var waitSeconds: [Int64] = []
     init(_ frames: [Snapshot]) { self.frames = frames }
     var current: Snapshot { frames[index] }
     func advance() { index = min(index + 1, frames.count - 1) }
@@ -48,6 +54,8 @@ final class World {
         taps.append(kind)
         if kind == "browse" {
             frames = [Snapshot(location: Control(count: 1))]
+        } else if rootDelayAfterLocation != nil {
+            locationTapped = true
         } else {
             frames = [Snapshot(root: true)]
         }
@@ -110,7 +118,20 @@ final class Harness {
             world.frames = [Snapshot(root: true)]; world.index = 0
         }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.waitSeconds.append(timeout.components.seconds)
+        if world.locationTapped, let delay = world.rootDelayAfterLocation {
+            // Controlled seconds exercise the actual helper's timeout argument
+            // without real sleeps or claiming XCTest reads cannot overrun it.
+            for second in 0..<Int(timeout.components.seconds) {
+                world.finalWaitElapsed = second
+                if second >= delay { world.frames = [Snapshot(root: true)]; world.index = 0 }
+                if condition() { return }
+            }
+            world.finalWaitElapsed = Int(timeout.components.seconds)
+            throw FixtureFailure()
+        }
         // Advance fake native state between checks, not a second route algorithm.
         for _ in 0..<8 {
             if condition() { return }
@@ -138,6 +159,10 @@ final class Harness {
         case "delayed-root": world = World([Snapshot(), Snapshot(), Snapshot(root: true)])
         case "location":
             world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+        case "location-root-after-20-seconds", "location-root-after-31-seconds":
+            world = World([Snapshot(location: Control(count: 1))]); expected = ["location"]
+            world.rootDelayAfterLocation = name == "location-root-after-20-seconds" ? 20 : 31
+            mustFail = name == "location-root-after-31-seconds"
         case "browse":
             world = World([Snapshot(browse: Control(count: 1))]); expected = ["browse", "location"]
         case "root-before-action":
@@ -173,6 +198,10 @@ final class Harness {
         var failed = false
         do { try await Harness(world).run() } catch { failed = true }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
+        if let delay = world.rootDelayAfterLocation {
+            guard world.waitSeconds == [15, 15, 30], world.finalWaitElapsed == min(delay, 30)
+            else { print("FAIL allowance " + name); exit(1) }
+        }
         print("PASS " + name)
     }
 }
@@ -193,7 +222,7 @@ class ReadinessTests(unittest.TestCase):
         path.write_text(FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = root / 'readiness-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def run_case(self, name):
         result = subprocess.run([str(self.binary), name], capture_output=True, text=True,
@@ -203,6 +232,10 @@ class ReadinessTests(unittest.TestCase):
     def test_already_at_verified_root_never_navigates(self): self.run_case('already-root')
     def test_delayed_verified_root_arrival_never_requires_browse(self): self.run_case('delayed-root')
     def test_existing_location_route_taps_once(self): self.run_case('location')
+    def test_post_tap_root_can_arrive_after_fifteen_seconds_without_retapping(self):
+        self.run_case('location-root-after-20-seconds')
+    def test_post_tap_root_still_fails_after_thirty_second_allowance(self):
+        self.run_case('location-root-after-31-seconds')
     def test_existing_browse_route_remains_bounded(self): self.run_case('browse')
     def test_verified_root_before_action_prevents_redundant_tap(self): self.run_case('root-before-action')
     def test_route_can_disappear_between_query_and_read_without_spurious_failure(self):
@@ -218,16 +251,27 @@ class ReadinessTests(unittest.TestCase):
     def test_disabled_controls_fail_without_taps(self): self.run_case('disabled')
     def test_hidden_controls_fail_without_taps(self): self.run_case('hidden')
 
-    def test_prepare_initializes_real_provider_without_native_folder_creation(self):
+    def test_prepare_default_retains_provider_only_with_guarded_native_creation(self):
         source = SOURCE.read_text()
         prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    func testNativeCreateOwnedFilesFolder')]
-        self.assertIn('try await presentRecoverySave(app)', prepare)
+        self.assertNotIn('try await presentRecoverySave(app)', prepare)
         self.assertIn('try await reachRecoveryLocalRoot', prepare)
         self.assertIn('directory.count == 0', prepare)
         self.assertIn('app.state == .notRunning', prepare)
         for forbidden in ['newFolder.tap()', 'newFolder.element.tap()', 'field.typeText(', 'create.element.tap()', 'Save"].tap()']:
             self.assertNotIn(forbidden, prepare)
         self.assertLess(prepare.index('directory.count == 0'), prepare.index('app.state == .notRunning'))
+        branch = prepare[prepare.index('        if createFolder {'):prepare.index('        // Dedicated Recovery adopts')]
+        create, provider = branch.split('        } else {', 1)
+        self.assertEqual(create.count('createNativeEmptyFilesFolder('), 1)
+        self.assertNotIn('createNativeEmptyFilesFolder(', provider)
+        self.assertIn('real local Files provider before fixture shutdown', provider)
+        self.assertLess(prepare.index('Self.recoveryNativeFolderCreation('), prepare.index('app.launch()'))
+        self.assertIn('directory.count == 0', provider)
+        self.assertNotIn('presentRecoverySave(app)', create)
+        self.assertLess(create.index('openNativeFilesRoot('), create.index('createNativeEmptyFilesFolder('))
+        self.assertLess(prepare.index('try recoveryConfiguration(phase: "prepare")'),
+                        prepare.index('let initialObservationTimeout: Duration'))
 
     def test_production_call_and_original_deadline_remain(self):
         source = SOURCE.read_text()
@@ -236,7 +280,7 @@ class ReadinessTests(unittest.TestCase):
         call = 'try await reachRecoveryLocalRoot(localTitle,'
         self.assertEqual(prepare.count(call), 1)
         self.assertEqual(native_folder.count(call), 0)
-        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app)"), 1)
+        self.assertEqual(native_folder.count("try await openNativeFilesRoot(app, initialTimeout: .seconds(30))"), 1)
         self.assertNotIn("presentRecoverySave(app)", native_folder)
         self.assertEqual(source.count(call), 1)
         self.assertIn('timeout: Duration = .seconds(15)', source)
@@ -244,6 +288,609 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('titles.count == 1 && titles.element(boundBy: 0).isHittable', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('python3 -B scripts/test-files-readiness.py', workflow)
+
+
+RECOVERY_MODE_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+struct Harness {
+    // ACTUAL_HELPER
+    // ACTUAL_PROFILE_HELPER
+    static func allowance(_ environment: [String: String], _ phase: String, _ debug: Bool, _ arm: Bool = false) throws -> TimeInterval {
+        try recoveryExecutionTimeAllowance(environment, phase: phase, debugIntelSimulator: debug, debugARMSimulator: arm)
+    }
+    static func run(_ environment: [String: String], _ debug: Bool) throws -> Bool {
+        try recoveryNativeFolderCreation(environment, debugSimulator: debug)
+    }
+    static func sourceArguments(_ folder: String, _ token: String) throws -> [String] {
+        try recoveryNativeSourceArguments(folder: folder, sourceToken: token)
+    }
+}
+let data = Data(CommandLine.arguments[1].utf8)
+let environment = try JSONDecoder().decode([String: String].self, from: data)
+do {
+    if CommandLine.arguments.count >= 5 {
+        print(try Harness.allowance(environment, CommandLine.arguments[3], CommandLine.arguments[2] == "true",
+                                    CommandLine.arguments.count == 6 && CommandLine.arguments[5] == "true"))
+    } else if CommandLine.arguments.count == 4 {
+        let arguments = try Harness.sourceArguments(environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? "",
+                                                    CommandLine.arguments[3])
+        print(String(data: try JSONEncoder().encode(arguments), encoding: .utf8)!)
+    } else {
+        print(try Harness.run(environment, CommandLine.arguments[2] == "true") ? "create" : "provider-only")
+    }
+} catch { print("rejected") }
+'''
+
+
+class RecoveryNativeFolderModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private static func recoveryNativeFolderCreation(')
+        end = source.index('    // Opt-in prepare/export/restore phases.', start)
+        helper = source[start:end]
+        root = Path(cls.directory.name)
+        path = root / 'RecoveryMode.swift'
+        profile_start = source.index('    private static func recoveryExecutionTimeAllowance(')
+        profile_end = source.index('    private func recoveryTab(', profile_start)
+        path.write_text(RECOVERY_MODE_FIXTURE.replace('    // ACTUAL_HELPER', helper)
+                        .replace('    // ACTUAL_PROFILE_HELPER', source[profile_start:profile_end]))
+        cls.binary = root / 'recovery-mode-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=60)
+
+    @staticmethod
+    def environment():
+        return {
+            'TRIPDOCKET_RECOVERY_UI': '1',
+            'TRIPDOCKET_RECOVERY_PHASE': 'prepare',
+            'TRIPDOCKET_RECOVERY_FOLDER': 'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc',
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': '1',
+        }
+
+    def probe(self, environment, debug=True):
+        result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower()],
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def allowance(self, environment, phase, debug=True, arm=False):
+        result = subprocess.run([str(self.binary), json.dumps(environment), str(debug).lower(), phase, 'allowance', str(arm).lower()],
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_real_bootstrap_profile_reaches_existing_native_policy_without_folder_creation(self):
+        import runpy
+        module = runpy.run_path(str(ROOT / 'scripts/test-prepare-guidance-files.py'))
+        for architecture, expected in [('arm64', 180), ('x86_64', 300)]:
+            case = module['BootstrapTests']()
+            try:
+                runner = case.make(architecture=architecture)
+                self.assertEqual(case.run_bootstrap(runner), 0, runner.report)
+                environment = {key.removeprefix('TEST_RUNNER_'): value
+                               for key, value in runner.prep_env.items() if key.startswith('TEST_RUNNER_')}
+                self.assertEqual(self.probe(environment), 'provider-only')
+                self.assertEqual(self.allowance(environment, 'prepare', architecture == 'x86_64'),
+                                 str(float(expected)))
+                _, argv, _ = next(call for call in runner.calls if call[0] == 'prepare-ui')
+                for flag in ['-default-test-execution-time-allowance', '-maximum-test-execution-time-allowance']:
+                    self.assertEqual(argv[argv.index(flag) + 1], str(expected))
+                if architecture == 'x86_64':
+                    old = dict(environment)
+                    del old['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE']
+                    self.assertEqual(self.allowance(old, 'prepare'), '180.0')
+                    self.assertEqual(self.allowance(environment, 'prepare', False), 'rejected')
+                    environment['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = 'invalid'
+                    self.assertEqual(self.allowance(environment, 'prepare'), 'rejected')
+            finally:
+                case.doCleanups()
+
+    def test_default_native_allowances_do_not_depend_on_host_architecture(self):
+        for debug in (False, True):
+            for phase, expected in (('prepare', '180.0'), ('export', '300.0'), ('restore', '300.0')):
+                with self.subTest(debug=debug, phase=phase):
+                    self.assertEqual(self.allowance({}, phase, debug), expected)
+
+    def test_hosted_arm_native_allowances_require_matching_architecture_and_scope(self):
+        environment = self.environment() | {'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': 'hosted-arm-v1'}
+        for phase, expected in (('prepare', '300.0'), ('export', '600.0'), ('restore', '600.0')):
+            current = environment | {'TRIPDOCKET_RECOVERY_PHASE': phase}
+            self.assertEqual(self.allowance(current, phase, False, True), expected)
+            for intel, arm in ((False, False), (True, False), (True, True)):
+                self.assertEqual(self.allowance(current, phase, intel, arm), 'rejected')
+            self.assertEqual(self.allowance(current | {'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': 'hosted-intel-v1'},
+                                            phase, False, True), 'rejected')
+        for key, value in [('TRIPDOCKET_RECOVERY_UI','0'), ('TRIPDOCKET_RECOVERY_PHASE','export'),
+                           ('TRIPDOCKET_RECOVERY_FOLDER','TripDocket-Recovery-not-a-uuid'),
+                           ('TRIPDOCKET_RECOVERY_EXECUTION_PROFILE','hosted-arm-v1 ')]:
+            self.assertEqual(self.allowance(environment | {key:value}, 'prepare', False, True), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI','TRIPDOCKET_RECOVERY_PHASE','TRIPDOCKET_RECOVERY_FOLDER'):
+            current=environment.copy();del current[key]
+            self.assertEqual(self.allowance(current, 'prepare', False, True), 'rejected')
+        self.assertEqual(self.allowance({}, 'prepare', False, True), '180.0')
+        self.assertEqual(self.allowance({}, 'restore', False, True), '300.0')
+
+    def test_hosted_native_allowances_require_exact_debug_intel_opt_in(self):
+        environment = self.environment() | {'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': 'hosted-intel-v1'}
+        for phase, expected in (('prepare', '300.0'), ('export', '600.0'), ('restore', '600.0')):
+            current = environment | {'TRIPDOCKET_RECOVERY_PHASE': phase}
+            with self.subTest(phase=phase):
+                self.assertEqual(self.allowance(current, phase), expected)
+                self.assertEqual(self.allowance(current, phase, False), 'rejected')
+        for key, values in {
+            'TRIPDOCKET_RECOVERY_EXECUTION_PROFILE': ['', 'default', 'hosted-intel-v1 ', 'HOSTED-INTEL-V1'],
+            'TRIPDOCKET_RECOVERY_UI': ['', '0', 'true'],
+            'TRIPDOCKET_RECOVERY_PHASE': ['', 'export', 'prepare '],
+            'TRIPDOCKET_RECOVERY_FOLDER': ['', 'TripDocket-Recovery-provider-probe',
+                'TripDocket-Recovery-12345678-1234-4234-8234-123456789ABC',
+                'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc/child'],
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.allowance(environment | {key: value}, 'prepare'), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            current = environment.copy(); del current[key]
+            self.assertEqual(self.allowance(current, 'prepare'), 'rejected')
+        self.assertEqual(self.allowance(environment, 'other'), 'rejected')
+
+    def test_only_explicit_debug_prepare_can_create(self):
+        self.assertEqual(self.probe(self.environment()), 'create')
+        self.assertEqual(self.probe(self.environment(), debug=False), 'rejected')
+        for key, values in {
+            'TRIPDOCKET_RECOVERY_CREATE_FOLDER': ['', '0', 'true', '01', ' 1'],
+            'TRIPDOCKET_RECOVERY_UI': ['', '0', 'true'],
+            'TRIPDOCKET_RECOVERY_PHASE': ['', 'export', 'restore', 'prepare '],
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            environment = self.environment()
+            del environment[key]
+            with self.subTest(missing=key):
+                self.assertEqual(self.probe(environment), 'rejected')
+
+    def test_absent_mode_preserves_only_admitted_provider_callers(self):
+        environment = self.environment()
+        del environment['TRIPDOCKET_RECOVERY_CREATE_FOLDER']
+        self.assertEqual(self.probe(environment), 'provider-only')
+        self.assertEqual(self.probe(environment, debug=False), 'rejected')
+        self.assertEqual(self.probe({}), 'rejected')
+        self.assertEqual(self.probe(environment | {'TRIPDOCKET_RECOVERY_FOLDER':
+                                                  'TripDocket-Recovery-provider-probe'}), 'rejected')
+        for key in ('TRIPDOCKET_RECOVERY_UI', 'TRIPDOCKET_RECOVERY_PHASE', 'TRIPDOCKET_RECOVERY_FOLDER'):
+            invalid = environment.copy()
+            del invalid[key]
+            with self.subTest(missing=key):
+                self.assertEqual(self.probe(invalid), 'rejected')
+        for key in ('TRIPDOCKET_BATCH_PREPARE_UI', 'TRIPDOCKET_BATCH_PREPARE_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_UI', 'TRIPDOCKET_NATIVE_FOLDER_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN', 'TRIPDOCKET_NATIVE_SEED_UI',
+                    'TRIPDOCKET_NATIVE_SEED_TOKEN', 'TRIPDOCKET_NATIVE_ROOT_UI',
+                    'TRIPDOCKET_NATIVE_ROOT_TOKEN', 'TRIPDOCKET_BATCH_UI',
+                    'TRIPDOCKET_BATCH_FOLDER', 'TRIPDOCKET_COMBINED_BATCH_UI',
+                    'TRIPDOCKET_BATCH_CHECKPOINT_SESSION', 'TRIPDOCKET_NATIVE_REOPEN_CONTROL'):
+            for value in ('', '1'):
+                with self.subTest(conflict=key, value=value):
+                    self.assertEqual(self.probe(environment | {key: value}), 'rejected')
+
+    def test_native_folder_requires_exact_canonical_recovery_uuid(self):
+        for folder in ('', 'TripDocket-Recovery-', 'TripDocket-Recovery-provider-probe',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789ABC',
+                       'TripDocket-Recovery-{12345678-1234-4234-8234-123456789abc}',
+                       'TripDocket-Batch-12345678-1234-4234-8234-123456789abc',
+                       'TripDocket-Recovery-12345678-1234-4234-8234-123456789abc/child'):
+            with self.subTest(folder=folder):
+                self.assertEqual(self.probe(self.environment() | {'TRIPDOCKET_RECOVERY_FOLDER': folder}), 'rejected')
+
+    def test_native_folder_rejects_every_other_ui_mode_even_if_empty(self):
+        for key in ('TRIPDOCKET_BATCH_PREPARE_UI', 'TRIPDOCKET_BATCH_PREPARE_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_UI', 'TRIPDOCKET_NATIVE_FOLDER_TOKEN',
+                    'TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN', 'TRIPDOCKET_NATIVE_SEED_UI',
+                    'TRIPDOCKET_NATIVE_SEED_TOKEN', 'TRIPDOCKET_NATIVE_ROOT_UI',
+                    'TRIPDOCKET_NATIVE_ROOT_TOKEN', 'TRIPDOCKET_BATCH_UI',
+                    'TRIPDOCKET_BATCH_FOLDER', 'TRIPDOCKET_COMBINED_BATCH_UI',
+                    'TRIPDOCKET_BATCH_CHECKPOINT_SESSION', 'TRIPDOCKET_NATIVE_REOPEN_CONTROL'):
+            for value in ('', '1'):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(self.environment() | {key: value}), 'rejected')
+
+    def test_creation_is_confined_to_existing_prepare_phase_and_allowance(self):
+        source = SOURCE.read_text()
+        config = source[source.index('    private func recoveryConfiguration('):source.index('    private func recoveryTab(')]
+        self.assertIn('env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare"', config)
+        self.assertIn('#if DEBUG && targetEnvironment(simulator) && arch(x86_64)', config)
+        self.assertIn('executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(', config)
+        self.assertIn('return phase == "prepare" ? 180 : 300', config)
+        self.assertEqual(source.count('try await createNativeEmptyFilesFolder('), 2)
+        cases = [line.strip().split('(')[0] for line in source.splitlines() if line.strip().startswith('func testRecovery')]
+        self.assertEqual(cases, ['func testRecoveryPrepareFilesProvider', 'func testRecoveryExportFullBackupThroughFiles',
+                                 'func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal'])
+
+
+    def test_direct_source_arguments_require_distinct_canonical_identity(self):
+        source = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+        folder = self.environment()['TRIPDOCKET_RECOVERY_FOLDER']
+        def arguments(token, destination=folder):
+            result = subprocess.run([str(self.binary), json.dumps({'TRIPDOCKET_RECOVERY_FOLDER': destination}),
+                                     'true', token], capture_output=True, text=True, check=True, timeout=5)
+            return result.stdout.strip()
+        self.assertEqual(json.loads(arguments(source)),
+                         ['--ui-testing-native-batch-seed', '--ui-testing-native-batch-token', source])
+        for token in ('', source.upper(), '{' + source + '}', source + '/child', folder.removeprefix('TripDocket-Recovery-')):
+            with self.subTest(token=token):
+                self.assertEqual(arguments(token), 'rejected')
+        for destination in ('', source, folder.upper(), folder + '/child'):
+            with self.subTest(destination=destination):
+                self.assertEqual(arguments(source, destination), 'rejected')
+
+    def test_direct_route_has_single_admitted_source_and_common_stop(self):
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        create, remainder = prepare.split('        if createFolder {', 1)[1].split('        } else {', 1)
+        provider, stop = remainder.split('        // Dedicated Recovery adopts', 1)
+        self.assertEqual(create.count('UUID().uuidString.lowercased()'), 1)
+        self.assertEqual(create.count('app.launch()'), 1)
+        self.assertEqual(create.count('source.element.tap()'), 1)
+        self.assertLess(create.index('Self.recoveryNativeSourceArguments'), create.index('app.launch()'))
+        self.assertIn('app.launchArguments = recoveryArguments + sourceArguments', create)
+        self.assertNotIn('--demo', create)
+        self.assertIn('app.launchArguments = recoveryArguments + sourceArguments', provider)
+        self.assertEqual(provider.count('UUID().uuidString.lowercased()'), 1)
+        self.assertEqual(provider.count('source.element.tap()'), 1)
+        self.assertIn('reachRecoveryLocalRoot(localTitle,', provider)
+        for forbidden in ('--demo', 'presentRecoverySave(app)', 'createNativeEmptyFilesFolder(', 'openNativeFilesRoot('):
+            self.assertNotIn(forbidden, provider)
+        self.assertIn('app.terminate()', stop)
+        self.assertIn('app.state == .notRunning', stop)
+        self.assertIn('defer { app.terminate() }', prepare)
+
+
+DIRECT_RECOVERY_FIXTURE = r'''
+import Foundation
+struct BatchTestFailure: Error { let message: String }
+final class World {
+    var count = 1, saved = 0, directoryCount = 0
+    var enabled = true, hittable = true, failed = false, navigationReady = true
+    var navigationCount = 1, pickerCount = 1
+    var navigationExists = true, pickerExists = true
+    var presentationDelay: Int?, presentationElapsed = 0
+    var events: [String] = []
+    var waitSeconds: [Int64] = []
+    var folderObservationSeconds: [Int64] = []
+    var textObservationSeconds: [Int64] = []
+    let scenario: String
+    init(_ scenario: String) {
+        self.scenario = scenario
+        if scenario == "missing" { count = 0 }
+        if scenario == "ambiguous" { count = 2 }
+        if scenario == "disabled" { enabled = false }
+        if scenario == "hidden" { hittable = false }
+        if scenario == "failed" { failed = true }
+        if scenario == "already-saved" { saved = 1 }
+        if scenario == "navigation-missing" { navigationReady = false }
+        if scenario.contains("after-20-seconds") || scenario.contains("after-31-seconds") {
+            presentationDelay = scenario.contains("after-20-seconds") ? 20 : 31
+            navigationReady = false
+        }
+        if scenario.hasPrefix("ambiguous-navigation-") { navigationCount = 2 }
+        if scenario.hasPrefix("ambiguous-picker-") { pickerCount = 2 }
+        if scenario.hasPrefix("missing-picker-") { pickerCount = 0 }
+        if scenario.hasPrefix("absent-navigation-") { navigationExists = false }
+        if scenario.hasPrefix("absent-picker-") { pickerExists = false }
+        if scenario == "probe-exists" { directoryCount = 1 }
+    }
+}
+enum DeviceIdiom { case phone, pad }
+final class UIDevice {
+    static let current = UIDevice()
+    var userInterfaceIdiom: DeviceIdiom { CommandLine.arguments[1].hasPrefix("ipad-") ? .pad : .phone }
+}
+final class Element {
+    let world: World, kind: String
+    init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
+    var exists: Bool {
+        if kind == "failure" { return world.failed }
+        if kind == "navigation" { return world.navigationReady && world.navigationExists }
+        if kind == "picker" { return world.navigationReady && world.pickerExists }
+        return world.navigationReady
+    }
+    var cells: Query { Query(world, "directory") }
+    var buttons: Query { Query(world, "browse") }
+    var isEnabled: Bool { precondition(world.count == 1); return world.enabled }
+    var isHittable: Bool { precondition(world.count == 1); return world.hittable }
+    func tap() {
+        precondition(kind == "source" && world.count == 1 && world.enabled && world.hittable)
+        world.events.append("source-tap")
+    }
+}
+final class Query {
+    let world: World, kind: String
+    init(_ world: World, _ kind: String) { self.world = world; self.kind = kind }
+    var count: Int {
+        if kind == "saved" { return world.saved }
+        if kind == "directory" { return world.directoryCount }
+        if kind == "navigation" { return world.navigationReady ? world.navigationCount : 0 }
+        if kind == "picker" { return world.navigationReady ? world.pickerCount : 0 }
+        return world.count
+    }
+    var element: Element { Element(world, kind) }
+    func matching(identifier: String) -> Query {
+        if kind == "navigation" { precondition(identifier == "FullDocumentManagerViewControllerNavigationBar"); return self }
+        if kind == "picker" { precondition(identifier == "Browse View (Picker)"); return self }
+        if kind == "directory" {
+            precondition(identifier == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc, Folder")
+            return self
+        }
+        precondition(identifier == "nativeSeed.synthetic-ticket.pdf")
+        return Query(world, "source")
+    }
+    func matching(_ predicate: NSPredicate) -> Query {
+        if kind == "cells" {
+            precondition(predicate.evaluate(with: ["identifier": "DOC.sidebar.item.On My iPhone"]))
+            precondition(predicate.evaluate(with: ["identifier": "DOC.sidebar.item.On My iPad"]))
+            precondition(!predicate.evaluate(with: ["identifier": "Other"]))
+            return Query(world, "location")
+        }
+        if kind == "browse" {
+            precondition(predicate.evaluate(with: ["label": "Browse"]))
+            precondition(!predicate.evaluate(with: ["label": "Other"]))
+            return self
+        }
+        precondition(predicate.evaluate(with: ["identifier": "nativeSeed.saved.synthetic-ticket.pdf"]))
+        precondition(!predicate.evaluate(with: ["identifier": "nativeSeed.failure"]))
+        return Query(world, "saved")
+    }
+    subscript(_ identifier: String) -> Element {
+        if kind == "tabBars" { precondition(identifier == "DOC.browsingModeTabBar"); return Element(world, "tabBar") }
+        precondition(identifier == "nativeSeed.failure"); return Element(world, "failure")
+    }
+}
+final class XCUIApplication {
+    let world: World
+    var launchArguments: [String] = []
+    init(_ world: World) { self.world = world }
+    var buttons: Query { Query(world, "buttons") }
+    var staticTexts: Query { Query(world, "staticTexts") }
+    var navigationBars: Query { Query(world, "navigation") }
+    var otherElements: Query { Query(world, "picker") }
+    var tabBars: Query { Query(world, "tabBars") }
+    var cells: Query { Query(world, "cells") }
+    func launch() { world.events.append("launch") }
+}
+final class Harness {
+    let world: World
+    let recoveryArguments = ["existing-recovery-arguments"]
+    init(_ world: World) { self.world = world }
+    // ACTUAL_ARGUMENT_HELPER
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15), condition: () -> Bool) async throws {
+        world.waitSeconds.append(timeout.components.seconds)
+        if world.events.contains("source-tap") {
+            // Controlled seconds exercise the extracted branch's actual timeout
+            // and readiness predicate without real sleeps or native UI launches.
+            for second in 0..<Int(timeout.components.seconds) {
+                world.presentationElapsed = second
+                if let delay = world.presentationDelay, second >= delay { world.navigationReady = true }
+                if condition() { return }
+            }
+            world.presentationElapsed = Int(timeout.components.seconds)
+            throw BatchTestFailure(message: message)
+        }
+        if !condition() { throw BatchTestFailure(message: message) }
+    }
+    func reachRecoveryLocalRoot(_ title: String, navigation: Query, location: Query, browse: Query,
+                               app: XCUIApplication) async throws {
+        precondition(navigation.kind == "navigation" && location.kind == "location" && browse.kind == "browse")
+        world.events.append("generic-root:" + title)
+        if world.scenario == "root-failed" { throw BatchTestFailure(message: "root") }
+        if world.scenario == "saved-at-root" { world.saved = 1 }
+        if world.scenario == "failed-at-root" { world.failed = true }
+    }
+    func check(_ value: Bool, app: XCUIApplication, _ message: String) throws {
+        if !value { throw BatchTestFailure(message: message) }
+    }
+    func capture(_ app: XCUIApplication, _ label: String) {
+        world.events.append("capture")
+        if world.scenario == "changed-at-capture" { world.count = 2 }
+    }
+    func openNativeFilesRoot(_ app: XCUIApplication, initialTimeout: Duration) async throws -> Element {
+        precondition(initialTimeout == .seconds(30)); world.events.append("root")
+        if world.scenario == "root-failed" { throw BatchTestFailure(message: "root") }
+        if world.scenario == "saved-at-root" { world.saved = 1 }
+        return Element(world, "picker")
+    }
+    func createNativeEmptyFilesFolder(_ app: XCUIApplication, picker: Element, ownedFolder: String,
+                                     initialObservationTimeout: Duration, textCompletionTimeout: Duration) async throws {
+        precondition(picker.kind == "picker" && ownedFolder == "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc")
+        world.folderObservationSeconds.append(initialObservationTimeout.components.seconds)
+        world.textObservationSeconds.append(textCompletionTimeout.components.seconds)
+        world.events.append("create")
+        if world.scenario == "saved-at-create" { world.saved = 1 }
+        if world.scenario == "failed-at-create" { world.failed = true }
+    }
+    func run(_ app: XCUIApplication, recoveryFolder: String) async throws {
+        // ACTUAL_BRANCH
+    }
+}
+let world = World(CommandLine.arguments[1])
+let app = XCUIApplication(world)
+var status = "passed"
+do { try await Harness(world).run(app, recoveryFolder: "TripDocket-Recovery-12345678-1234-4234-8234-123456789abc") }
+catch { status = "rejected" }
+print(String(data: try JSONEncoder().encode(["status": [status], "events": world.events,
+                                            "arguments": app.launchArguments,
+                                            "presentationElapsed": [String(world.presentationElapsed)],
+                                            "folderObservationSeconds": world.folderObservationSeconds.map(String.init),
+                                            "textObservationSeconds": world.textObservationSeconds.map(String.init),
+                                            "waitSeconds": world.waitSeconds.map(String.init)]), encoding: .utf8)!)
+'''
+
+
+class DirectRecoveryPreparationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        branch = prepare.split('        if createFolder {', 1)[1].split('        } else {', 1)[0]
+        start = source.index('    private static func recoveryNativeSourceArguments(')
+        helper = source[start:source.index('    // Opt-in prepare/export/restore phases.', start)]
+        selector_start = source.index('    private static func recoveryFolderTextObservationTimeout(')
+        helper += source[selector_start:source.index('    private static func observeNativeFolderTextCompletion(', selector_start)]
+        hosted_start = source.index('    private static func isHostedRecoveryProfile(')
+        helper += source[hosted_start:source.index('    private func recoveryTab(', hosted_start)]
+        fixture = DIRECT_RECOVERY_FIXTURE.replace('    // ACTUAL_ARGUMENT_HELPER', helper).replace('        // ACTUAL_BRANCH', branch)
+        root = Path(cls.directory.name)
+        path = root / 'DirectRecovery.swift'
+        path.write_text(fixture)
+        cls.binary = root / 'direct-recovery-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=60)
+
+    def probe(self, scenario, profile=None):
+        import os
+        env = dict(os.environ)
+        env.pop('TRIPDOCKET_RECOVERY_EXECUTION_PROFILE', None)
+        if profile is not None:
+            env['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = profile
+        result = subprocess.run([str(self.binary), scenario], env=env,
+                                capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_actual_direct_branch_opens_once_and_creates_only_after_root(self):
+        value = self.probe('ready')
+        self.assertEqual(value['status'], ['passed'])
+        self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'root', 'create', 'capture'])
+        self.assertEqual(value['arguments'][:3], ['existing-recovery-arguments', '--ui-testing-native-batch-seed',
+                                                '--ui-testing-native-batch-token'])
+        import uuid
+        token = value['arguments'][3]
+        self.assertEqual(str(uuid.UUID(token)), token)
+        self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
+        self.assertEqual(len(value['arguments']), 4)
+        self.assertEqual(value['folderObservationSeconds'], ['30'])
+        self.assertEqual(value['textObservationSeconds'], ['15'])
+
+    def test_validated_hosted_profile_selects_only_folder_observation_window(self):
+        value = self.probe('ready', 'hosted-intel-v1')
+        self.assertEqual(value['status'], ['passed'])
+        self.assertEqual(value['folderObservationSeconds'], ['60'])
+        self.assertEqual(value['textObservationSeconds'], ['60'])
+        self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'root', 'create', 'capture'])
+        self.assertEqual(value['waitSeconds'], ['15'])
+
+    def test_actual_direct_branch_rejects_unusable_or_changed_source_before_tap(self):
+        for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertNotIn('source-tap', value['events'])
+                self.assertNotIn('create', value['events'])
+
+    def test_actual_direct_branch_never_creates_after_failed_root_or_export(self):
+        for scenario in ('root-failed', 'saved-at-root'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertNotIn('create', value['events'])
+
+    def test_actual_direct_branch_rejects_export_or_failure_after_creation(self):
+        for scenario in ('saved-at-create', 'failed-at-create'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertEqual(value['events'].count('create'), 1)
+                self.assertEqual(value['events'][-1], 'create')
+
+
+class ProviderOnlyPreparationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        prepare = source[source.index('    func testRecoveryPrepareFilesProvider'):source.index('    // Batch-only provider initialization.')]
+        branch = prepare.split('        } else {', 1)[1].split('        // Dedicated Recovery adopts', 1)[0].rsplit('        }', 1)[0]
+        start = source.index('    private static func recoveryNativeSourceArguments(')
+        helper = source[start:source.index('    // Opt-in prepare/export/restore phases.', start)]
+        fixture = DIRECT_RECOVERY_FIXTURE.replace('    // ACTUAL_ARGUMENT_HELPER', helper).replace('        // ACTUAL_BRANCH', branch)
+        root = Path(cls.directory.name)
+        path = root / 'ProviderPreparation.swift'
+        path.write_text(fixture)
+        cls.binary = root / 'provider-preparation-tests'
+        subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
+                       capture_output=True, check=True, timeout=60)
+
+    def probe(self, scenario):
+        result = subprocess.run([str(self.binary), scenario], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_actual_provider_branch_uses_generic_phone_and_ipad_roots_without_create(self):
+        import uuid
+        for scenario, title in [('ready', 'On My iPhone'), ('ipad-ready', 'On My iPad')]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['passed'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap', 'generic-root:' + title, 'capture'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
+                self.assertEqual(value['arguments'][:3], ['existing-recovery-arguments', '--ui-testing-native-batch-seed',
+                                                        '--ui-testing-native-batch-token'])
+                token = value['arguments'][3]
+                self.assertEqual(str(uuid.UUID(token)), token)
+                self.assertNotEqual(token, '12345678-1234-4234-8234-123456789abc')
+                self.assertEqual(len(value['arguments']), 4)
+
+    def test_actual_provider_accepts_delayed_presentation_without_retapping(self):
+        for scenario, title in [('after-20-seconds', 'On My iPhone'),
+                                ('ipad-after-20-seconds', 'On My iPad')]:
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['passed'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
+                self.assertEqual(value['presentationElapsed'], ['20'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap',
+                                                  'generic-root:' + title, 'capture'])
+
+    def test_actual_provider_rejects_late_missing_or_wrong_native_controls_at_bound(self):
+        for scenario in ('after-31-seconds', 'navigation-missing',
+                         'ambiguous-navigation-after-20-seconds', 'ambiguous-picker-after-20-seconds',
+                         'missing-picker-after-20-seconds', 'absent-navigation-after-20-seconds',
+                         'absent-picker-after-20-seconds'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['waitSeconds'], ['15', '30'])
+                self.assertEqual(value['presentationElapsed'], ['30'])
+                self.assertEqual(value['events'], ['launch', 'capture', 'source-tap'])
+
+    def test_actual_provider_branch_rejects_unusable_source_without_tap(self):
+        for scenario in ('missing', 'ambiguous', 'disabled', 'hidden', 'failed', 'already-saved', 'changed-at-capture'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertNotIn('source-tap', value['events'])
+
+    def test_actual_provider_branch_rejects_missing_navigation_root_and_occupied_probe(self):
+        for scenario in ('navigation-missing', 'root-failed', 'probe-exists'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertNotIn('create', value['events'])
+                self.assertNotEqual(value['events'][-1], 'capture')
+
+    def test_actual_provider_branch_rejects_export_or_failure_after_root(self):
+        for scenario in ('saved-at-root', 'failed-at-root'):
+            with self.subTest(scenario=scenario):
+                value = self.probe(scenario)
+                self.assertEqual(value['status'], ['rejected'])
+                self.assertEqual(value['events'].count('source-tap'), 1)
+                self.assertEqual(value['events'][-1], 'generic-root:On My iPhone')
 
 
 TITLE_FIXTURE = r'''
@@ -322,7 +969,7 @@ class FolderIdentityTests(unittest.TestCase):
         path.write_text(TITLE_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'folder-identity-tests'
         subprocess.run(['/usr/bin/swiftc', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_exact_native_headings_and_rejected_distractors(self):
         for name in ['static-title', 'actions-heading', 'other-controls', 'missing',
@@ -358,6 +1005,7 @@ final class World {
     var frames: [State]
     var index = 0
     var taps: [String] = []
+    var timeouts: [Duration] = []
     var browseFrames = [State(location: true)]
     init(_ frames: [State]) { self.frames = frames }
     var current: State { frames[index] }
@@ -439,11 +1087,19 @@ final class Harness {
     func check(_ condition: Bool, app: XCUIApplication, _ message: String) throws {
         if !condition { throw FixtureFailure() }
     }
-    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+    func wait(_ message: String, app: XCUIApplication, timeout: Duration = .seconds(15),
+              condition: () -> Bool) async throws {
+        world.timeouts.append(timeout)
         for _ in 0..<8 { if condition() { return }; world.advance() }
         throw FixtureFailure()
     }
-    func run() async throws { _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world)) }
+    func run(seedAllowance: Bool = false) async throws {
+        if seedAllowance {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world), initialNavigationTimeout: .seconds(30))
+        } else {
+            _ = try await openLocalFilesFolder("Exact folder", app: XCUIApplication(world))
+        }
+    }
     // ACTUAL_HELPER
 }
 @main struct Main {
@@ -453,6 +1109,9 @@ final class Harness {
         var expected: [String] = []
         var mustFail = false
         switch name {
+        case "seed-ready": world = World([State(destination: true)])
+        case "seed-absent": world = World([State(navigationCount: 0)]); mustFail = true
+        case "seed-ambiguous": world = World([State(navigationCount: 2)]); mustFail = true
         case "already-current": world = World([State(destination: true)])
         case "delayed-current": world = World([State(), State(destination: true)])
         case "recents-route":
@@ -505,7 +1164,11 @@ final class Harness {
         default: fatalError("Unknown fixture")
         }
         var failed = false
-        do { try await Harness(world).run() } catch { failed = true }
+        let seedAllowance = name.hasPrefix("seed-")
+        do { try await Harness(world).run(seedAllowance: seedAllowance) } catch { failed = true }
+        precondition(world.timeouts.first == (seedAllowance ? .seconds(30) : .seconds(15)))
+        precondition(world.timeouts.dropFirst().allSatisfy { $0 == .seconds(15) })
+        if name == "seed-absent" || name == "seed-ambiguous" { precondition(world.timeouts.count == 1) }
         guard failed == mustFail, world.taps == expected else { print("FAIL " + name); exit(1) }
         print("PASS " + name)
     }
@@ -531,7 +1194,7 @@ class OpenFolderTests(unittest.TestCase):
         path.write_text(OPEN_FOLDER_FIXTURE.replace('    // ACTUAL_HELPER', helper))
         cls.binary = Path(cls.directory.name) / 'open-folder-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_remembered_destinations_routing_and_ambiguity(self):
         for name in ['already-current', 'delayed-current', 'normal-route',
@@ -542,6 +1205,13 @@ class OpenFolderTests(unittest.TestCase):
                      'wrong-recents-source', 'wrong-recents-heading', 'ambiguous-native-tabs',
                      'wrong-native-tabs', 'wrong-browse-label', 'ambiguous-browse',
                      'disabled-browse', 'unhittable-browse']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_initial_seed_allowance_preserves_later_waits_and_rejects_absent_or_ambiguous_navigation(self):
+        for name in ['seed-ready', 'seed-absent', 'seed-ambiguous']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
@@ -620,7 +1290,7 @@ class PresentationWaitTests(unittest.TestCase):
         path.write_text(WAIT_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'presentation-wait-tests'
         subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                       capture_output=True, check=True, timeout=30)
+                       capture_output=True, check=True, timeout=60)
 
     def test_remote_readiness_has_one_bounded_wait_and_failure_capture(self):
         for name in ['ready', 'cold-remote', 'never-ready', 'ordinary-default']:
@@ -642,7 +1312,571 @@ class PresentationWaitTests(unittest.TestCase):
         self.assertIn('liveAction.isHittable', source)
         self.assertEqual(source.count('app.snapshot()'), 1)
         self.assertNotIn('actions.count', source)
-        self.assertIn('executionTimeAllowance = phase == "prepare" ? 180 : 300', SOURCE.read_text())
+        self.assertIn('return phase == "prepare" ? 180 : 300', SOURCE.read_text())
+
+
+SAVE_COMPLETION_FIXTURE = r'''
+import Foundation
+
+struct BatchTestFailure: Error { let message: String }
+func XCTSkipUnless(_ condition: Bool, _ message: String) throws {
+    if !condition { throw BatchTestFailure(message: message) }
+}
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        @MainActor func advanced(by duration: Duration) -> Instant {
+            ContinuousClock.deadlines += 1
+            return Instant(time: time + duration)
+        }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.time < rhs.time }
+    }
+    static var elapsed: Duration = .seconds(9)
+    static var deadlines = 0
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static func sleep(for duration: Duration) async throws { ContinuousClock.elapsed += duration }
+}
+@MainActor final class World {
+    let scenario: String
+    var taps = 0
+    var savedAt: Duration = .zero
+    init(_ scenario: String) { self.scenario = scenario }
+    var completed: Bool { ContinuousClock.elapsed - savedAt >= .seconds(26) }
+}
+@MainActor struct Element {
+    let world: World
+    let kind: String
+    var exists: Bool {
+        if kind == "picker" {
+            return world.scenario != "no-settings" && (world.scenario == "pending" || !world.completed)
+        }
+        return kind == "Settings" && world.scenario != "no-settings"
+    }
+    func tap() { world.taps += 1; world.savedAt = ContinuousClock.elapsed }
+}
+@MainActor struct NavigationBars {
+    let world: World
+    subscript(_ name: String) -> Element { Element(world: world, kind: name) }
+}
+@MainActor struct XCUIApplication {
+    let world: World
+    var navigationBars: NavigationBars { NavigationBars(world: world) }
+}
+@MainActor final class Harness {
+    var executionTimeAllowance: TimeInterval = 0
+    var continueAfterFailure = true
+    var captures = 0
+    func capture(_ app: XCUIApplication, _ message: String, springboard: XCUIApplication?,
+                 batchDiagnostic: Bool = false) { captures += 1 }
+    // ACTUAL_CONFIGURATION
+    // ACTUAL_WAIT
+    func run(_ scenario: String) async {
+        let world = World(scenario)
+        var outcome = "passed"
+        do {
+            // ACTUAL_POLICY
+            _ = recoveryFolder
+            let app = XCUIApplication(world: world)
+            let picker = Element(world: world, kind: "picker")
+            let save = Element(world: world, kind: "Save")
+            // ACTUAL_SAVE_AND_WAIT
+        } catch { outcome = "rejected" }
+        let elapsed = (ContinuousClock.elapsed - .seconds(9)).components
+        print("\(outcome) \(world.taps) \(captures) \(ContinuousClock.deadlines) \(elapsed.seconds)")
+    }
+}
+@main struct Main {
+    @MainActor static func main() async { await Harness().run(CommandLine.arguments[1]) }
+}
+'''
+
+
+class RecoverySaveCompletionTests(unittest.TestCase):
+    """Run actual configuration, selected allowance and wait with a synthetic clock."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        cls.export = source[start:end]
+        policy = cls.export[cls.export.index('        let recoveryFolder ='):
+                            cls.export.index('        let app =')]
+        save = cls.export[cls.export.index('        save.tap()'):
+                          cls.export.index('        capture(app, "Recovery export — UI completed')]
+        start = source.index('    private func recoveryConfiguration(')
+        end = source.index('    private func recoveryTab(', start)
+        configuration = source[start:end]
+        # Stub only the compile-time host boundary; validation itself is unchanged.
+        configuration = configuration.replace('#if DEBUG && targetEnvironment(simulator) && arch(x86_64)',
+                                              '#if HOSTED_FIXTURE')
+        configuration = configuration.replace('#if DEBUG && targetEnvironment(simulator) && arch(arm64)',
+                                              '#if ARM_HOSTED_FIXTURE')
+        start = source.index('    private func wait(')
+        end = source.index('    private func check(', start)
+        fixture = (SAVE_COMPLETION_FIXTURE.replace('            // ACTUAL_POLICY', policy)
+                   .replace('            // ACTUAL_SAVE_AND_WAIT', save)
+                   .replace('    // ACTUAL_CONFIGURATION', configuration)
+                   .replace('    // ACTUAL_WAIT', source[start:end]))
+        cls.binaries = {}
+        for name, flags, text in (
+            ('hosted', ['-D', 'HOSTED_FIXTURE'], fixture),
+            ('arm-hosted', ['-D', 'ARM_HOSTED_FIXTURE'], fixture),
+            ('unsupported', [], fixture),
+            ('old-cap', ['-D', 'HOSTED_FIXTURE'], fixture.replace(
+                '? .seconds(60) : .seconds(15)', '? .seconds(15) : .seconds(15)')),
+        ):
+            path = Path(cls.directory.name) / (name + '.swift')
+            path.write_text(text)
+            cls.binaries[name] = path.with_suffix('')
+            subprocess.run(['/usr/bin/swiftc', '-parse-as-library', *flags, str(path),
+                            '-o', str(cls.binaries[name])], capture_output=True, check=True, timeout=60)
+
+    def probe(self, scenario='delayed', binary='hosted', profile='hosted-intel-v1', **overrides):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith('TRIPDOCKET_')}
+        environment.update(RecoveryNativeFolderModeTests.environment())
+        environment['TRIPDOCKET_RECOVERY_PHASE'] = 'export'
+        del environment['TRIPDOCKET_RECOVERY_CREATE_FOLDER']
+        if profile is not None:
+            environment['TRIPDOCKET_RECOVERY_EXECUTION_PROFILE'] = profile
+        environment.update(overrides)
+        result = subprocess.run([str(self.binaries[binary]), scenario], env=environment,
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_arm_hosted_save_keeps_same_wait_and_rejects_crossed_token(self):
+        self.assertEqual(self.probe(binary='arm-hosted', profile='hosted-arm-v1'), 'passed 1 0 1 26')
+        self.assertEqual(self.probe(binary='arm-hosted', profile=None), 'rejected 1 1 1 15')
+        self.assertEqual(self.probe(binary='arm-hosted'), 'rejected 0 0 0 0')
+        self.assertEqual(self.probe(profile='hosted-arm-v1'), 'rejected 0 0 0 0')
+
+    def test_hosted_late_completion_passes_once_and_old_cap_mutation_rejects(self):
+        self.assertEqual(self.probe(), 'passed 1 0 1 26')
+        self.assertEqual(self.probe(binary='old-cap'), 'rejected 1 1 1 15')
+
+    def test_default_stays_fifteen_seconds_on_supported_and_unsupported_builds(self):
+        for binary in ('hosted', 'unsupported'):
+            with self.subTest(binary=binary):
+                self.assertEqual(self.probe(binary=binary, profile=None), 'rejected 1 1 1 15')
+
+    def test_pending_picker_with_settings_behind_never_completes(self):
+        self.assertEqual(self.probe(scenario='pending'), 'rejected 1 1 1 60')
+
+    def test_absent_picker_without_settings_never_completes(self):
+        self.assertEqual(self.probe(scenario='no-settings'), 'rejected 1 1 1 60')
+
+    def test_invalid_opt_in_rejects_before_save_or_deadline(self):
+        for arguments in (
+            {'binary': 'unsupported'}, {'profile': 'hosted-intel-v1 '},
+            {'TRIPDOCKET_RECOVERY_PHASE': 'restore'},
+            {'TRIPDOCKET_RECOVERY_FOLDER': 'TripDocket-Recovery-not-a-uuid'},
+            {'TRIPDOCKET_RECOVERY_CREATE_FOLDER': '1'},
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.probe(**arguments), 'rejected 0 0 0 0')
+
+    def test_policy_is_scoped_after_configuration_before_single_save(self):
+        self.assertLess(self.export.index('try recoveryConfiguration(phase: "export")'),
+                        self.export.index('let saveCompletionTimeout: Duration'))
+        self.assertLess(self.export.index('let saveCompletionTimeout: Duration'), self.export.index('save.tap()'))
+        self.assertEqual(self.export.count('save.tap()'), 1)
+        self.assertEqual(SOURCE.read_text().count('timeout: saveCompletionTimeout'), 1)
+
+
+class HostedPhoneTimingTests(unittest.TestCase):
+    """Execute actual allowance branches with only environment/device/build stubs."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        definitions = [
+            ('AccessibilityUITests.swift', 'testMaximumTypeFreeCardAndProDismissal', 'let app =', ''),
+            ('AccessibilityUITests.swift', 'testMaximumTypeCompleteBackupWarningAndCancellation', 'let app =', ''),
+            ('LocalizationUITests.swift', 'testRussianMaximumTypeCompleteBackupWarningAndCancellation', 'let app =', ''),
+            ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = false; let maximumType = false'),
+            ('PrivacySupportUITests.swift', 'verifyGuidance', 'continueAfterFailure =', 'let russian = true; let maximumType = true'),
+            ('AccessibilityUITests.swift', 'testMaximumTypeReadinessAndImportCancellation', 'let app =', ''),
+        ]
+        code = '''import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["PHONE_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        '''
+        for index, (filename, method, stop, locals_) in enumerate(definitions):
+            source = (ROOT / 'UITests' / filename).read_text()
+            start = source.index('    private enum PhoneTimingError:')
+            end = (source.index('    private struct Copy {', start)
+                   if filename == 'PrivacySupportUITests.swift' else
+                   source.index('\n    private ', source.index('    private func useHostedPhoneTiming()', start) + 10))
+            helper = source[start:end]
+            condition = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+            assert helper.count(condition) == (2 if filename == 'PrivacySupportUITests.swift' else 1)
+            # Native build conditions are separately SDK-typechecked. This fixture
+            # executes both actual bodies on any host, without launching XCTest.
+            helper = helper.replace(condition, '#if PHONE_TEST_SUPPORTED_BUILD')
+            start = source.index('func ' + method + '(')
+            start = source.index('{', start) + 1
+            prefix = source[start:source.index(stop, start)]
+            code += f'\n@MainActor final class Case{index} {{\nvar executionTimeAllowance: Double = 777\n'
+            code += helper + '\nfunc run() throws -> Double {\n' + locals_ + prefix
+            code += '\nreturn executionTimeAllowance\n}\n}\n'
+        code += '''
+        @main enum Main {
+            @MainActor static func main() {
+                func capture(_ action: () throws -> Double) -> String {
+                    do { return String(try action()) }
+                    catch { return "rejected" }
+                }
+                let values = [capture { try Case0().run() }, capture { try Case1().run() },
+                              capture { try Case2().run() }, capture { try Case3().run() },
+                              capture { try Case4().run() }, capture { try Case5().run() }]
+                print("[" + values.joined(separator: ", ") + "]")
+            }
+        }
+        '''
+        cls.code = code
+        cls.binaries = {}
+        for supported in (False, True):
+            cls.binaries[supported] = cls.compile(code, str(supported), supported)
+
+    @classmethod
+    def compile(cls, code, name, supported=True):
+        path = Path(cls.directory.name) / (name + '.swift'); path.write_text(code)
+        binary = Path(cls.directory.name) / name
+        flags = ['-D', 'PHONE_TEST_SUPPORTED_BUILD'] if supported else []
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
+                                 *flags, str(path), '-o', str(binary)], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode != 0: raise AssertionError(result.stderr)
+        return binary
+
+    def invoke(self, supported, token=None, idiom='phone', binary=None):
+        env = dict(os.environ); env.pop('TRIPDOCKET_PHONE_TIMING', None)
+        env.pop('TRIPDOCKET_IPAD_TIMING', None)
+        env['PHONE_TEST_IDIOM'] = idiom
+        if token is not None: env['TRIPDOCKET_PHONE_TIMING'] = token
+        result = subprocess.run([str(binary or self.binaries[supported])], env=env, capture_output=True,
+                                text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_absent_token_preserves_explicit_and_inherited_defaults(self):
+        for supported in (False, True):
+            for idiom in ('phone', 'pad'):
+                self.assertEqual(self.invoke(supported, idiom=idiom), '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
+
+    def test_exact_supported_phone_profile_selects_only_expected_case_allowances(self):
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1'), '[360.0, 360.0, 240.0, 1080.0, 1500.0, 360.0]')
+
+    def test_reverting_each_changed_phone_policy_loses_only_its_allowances(self):
+        cases = [
+            ('executionTimeAllowance = 360', 'executionTimeAllowance = 240',
+             '[240.0, 360.0, 240.0, 1080.0, 1500.0, 360.0]'),
+            ('useHostedPhoneTiming() ? 360 : 180', 'useHostedPhoneTiming() ? 240 : 180',
+             '[360.0, 240.0, 240.0, 1080.0, 1500.0, 360.0]'),
+            ('hostedPhone ? (russian && maximumType ? 1500 : 1080)',
+             'hostedPhone ? (russian && maximumType ? 600 : 720)',
+             '[360.0, 360.0, 240.0, 720.0, 600.0, 360.0]'),
+        ]
+        for index, (new, old, expected) in enumerate(cases):
+            with self.subTest(policy=new):
+                self.assertEqual(self.code.count(new), 2 if index in (0, 2) else 1)
+                mutant = self.compile(self.code.replace(new, old, 2 if index == 2 else 1),
+                                      'old-phone-' + str(index))
+                self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', binary=mutant), expected)
+                self.assertEqual(self.invoke(True, binary=mutant),
+                                 '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
+
+    def test_removing_readiness_allowance_loses_only_hosted_readiness_margin(self):
+        start = self.code.index('@MainActor final class Case5 {')
+        guard = 'if try useHostedPhoneTiming() { executionTimeAllowance = 360 }'
+        self.assertEqual(self.code[start:].count(guard), 1)
+        mutant = self.compile(self.code[:start] + self.code[start:].replace(guard, ''),
+                              'old-readiness')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', binary=mutant),
+                         '[360.0, 360.0, 240.0, 1080.0, 1500.0, 777.0]')
+        self.assertEqual(self.invoke(True, binary=mutant),
+                         '[777.0, 180.0, 120.0, 480.0, 600.0, 777.0]')
+
+    def test_invalid_token_wrong_build_or_ipad_rejects_before_any_case_body(self):
+        for token in ('', 'wrong', 'hosted-intel-phone-v1 '):
+            self.assertEqual(self.invoke(True, token), '[rejected, rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(False, 'hosted-intel-phone-v1'), '[rejected, rejected, rejected, rejected, rejected, rejected]')
+        self.assertEqual(self.invoke(True, 'hosted-intel-phone-v1', 'pad'), '[rejected, rejected, rejected, rejected, rejected, rejected]')
+
+
+class HostedIPadTimingTests(unittest.TestCase):
+    """Execute the actual pre-launch selector, including its existing Phone path."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
+        start = source.index('    private enum PhoneTimingError:')
+        helper = source[start:source.index('    private struct Copy {', start)]
+        condition = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+        assert helper.count(condition) == 2
+        helper = helper.replace(condition, '#if IPAD_TEST_SUPPORTED_BUILD')
+        start = source.index('    private func verifyGuidance(')
+        start = source.index('{', start) + 1
+        prefix = source[start:source.index('        continueAfterFailure =', start)]
+        assert 'XCUIApplication' not in helper + prefix
+        cls.code = '''import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["IPAD_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        @MainActor final class Harness {
+            var executionTimeAllowance: Double = 777
+        ''' + helper + '''
+            func run(russian: Bool, maximumType: Bool) throws -> Double {
+        ''' + prefix + '''
+                return executionTimeAllowance
+            }
+        }
+        @main enum Main {
+            @MainActor static func main() {
+                do {
+                    let value = try Harness().run(russian: CommandLine.arguments[1] == "true",
+                                                  maximumType: CommandLine.arguments[2] == "true")
+                    print(value)
+                } catch { print("rejected") }
+            }
+        }
+        '''
+        cls.binaries = {supported: cls.compile(cls.code, str(supported), supported)
+                        for supported in (False, True)}
+
+    @classmethod
+    def compile(cls, code, name, supported):
+        path = Path(cls.directory.name) / (name + '.swift'); path.write_text(code)
+        binary = Path(cls.directory.name) / name
+        flags = ['-D', 'IPAD_TEST_SUPPORTED_BUILD'] if supported else []
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-parse-as-library',
+                                 *flags, str(path), '-o', str(binary)], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode != 0: raise AssertionError(result.stderr)
+        return binary
+
+    def invoke(self, supported=True, token=None, phone=None, idiom='pad',
+               russian=False, maximum=False, binary=None):
+        env = dict(os.environ)
+        for key in ('TRIPDOCKET_PHONE_TIMING', 'TRIPDOCKET_IPAD_TIMING'):
+            env.pop(key, None)
+        env['IPAD_TEST_IDIOM'] = idiom
+        if token is not None: env['TRIPDOCKET_IPAD_TIMING'] = token
+        if phone is not None: env['TRIPDOCKET_PHONE_TIMING'] = phone
+        result = subprocess.run([str(binary or self.binaries[supported]),
+                                 str(russian).lower(), str(maximum).lower()],
+                                env=env, capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_exact_hosted_intel_english_ipad_selector_sets_1200(self):
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1'), '1200.0')
+
+    def test_exact_hosted_intel_russian_maximum_ipad_selector_sets_1500(self):
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1',
+                                     russian=True, maximum=True), '1500.0')
+
+    def test_missing_ipad_token_preserves_phone_and_both_default_locales(self):
+        for supported in (False, True):
+            for idiom in ('pad', 'phone'):
+                self.assertEqual(self.invoke(supported=supported, idiom=idiom), '480.0')
+                self.assertEqual(self.invoke(supported=supported, idiom=idiom,
+                                             russian=True, maximum=True), '600.0')
+        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone'), '1080.0')
+        self.assertEqual(self.invoke(phone='hosted-intel-phone-v1', idiom='phone',
+                                     russian=True, maximum=True), '1500.0')
+
+    def test_invalid_conflicting_or_out_of_scope_ipad_tokens_reject(self):
+        for token in ('', 'wrong', 'hosted-intel-ipad-en-v1 ', 'hosted-intel-ipad-ru-v1 '):
+            with self.subTest(token=token):
+                self.assertEqual(self.invoke(token=token), 'rejected')
+        for kwargs in ({'supported': False}, {'idiom': 'phone'}, {'russian': True},
+                       {'maximum': True}, {'russian': True, 'maximum': True},
+                       {'phone': ''}, {'phone': 'hosted-intel-phone-v1'}, {'phone': 'wrong'}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', **kwargs), 'rejected')
+
+    def test_russian_token_rejects_each_wrong_case_build_idiom_or_phone_conflict(self):
+        for kwargs in ({'supported': False}, {'idiom': 'phone'}, {'russian': False},
+                       {'maximum': False}, {'russian': False, 'maximum': False},
+                       {'phone': ''}, {'phone': 'hosted-intel-phone-v1'}, {'phone': 'wrong'}):
+            arguments = {'russian': True, 'maximum': True, **kwargs}
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', **arguments), 'rejected')
+
+    def test_removing_only_native_allowance_loses_required_hosted_behavior(self):
+        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle, 'executionTimeAllowance = hostedIPad ? 480 :'),
+                               'without-native-allowance', True)
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '480.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
+
+    def test_reverting_only_russian_native_allowance_loses_required_policy(self):
+        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle,
+            'executionTimeAllowance = hostedIPad ? (russian ? 1200 : 1200) :'), 'old-russian-allowance', True)
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                     maximum=True, binary=mutated), '1200.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                        maximum=True, binary=mutated), '1500.0')
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
+
+    def test_reverting_only_english_native_allowance_loses_required_margin(self):
+        needle = 'executionTimeAllowance = hostedIPad ? (russian ? 1500 : 1200) :'
+        self.assertEqual(self.code.count(needle), 1)
+        mutated = self.compile(self.code.replace(needle,
+            'executionTimeAllowance = hostedIPad ? (russian ? 1500 : 900) :'), 'old-english-allowance', True)
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '900.0')
+        self.assertNotEqual(self.invoke(token='hosted-intel-ipad-en-v1', binary=mutated), '1200.0')
+        self.assertEqual(self.invoke(token='hosted-intel-ipad-ru-v1', russian=True,
+                                     maximum=True, binary=mutated), '1500.0')
+
+
+class HostedCoreAppearanceTests(unittest.TestCase):
+    """Execute the actual selector and fulfillment call with a deterministic callback."""
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        cls.source = (ROOT / 'AppTests/PrivacySupportTests.swift').read_text()
+        start = cls.source.index('    private enum CoreTimingError:')
+        end = cls.source.index('    func testOfflineGuidanceIsPresent', start)
+        selector = cls.source[start:end]
+        build_guard = '#if DEBUG && arch(x86_64) && targetEnvironment(simulator)'
+        assert selector.count(build_guard) == 1
+        selector = selector.replace(build_guard, '#if CORE_FIXTURE')
+        allowance = next(line for line in cls.source.splitlines()
+                         if 'let appearanceAllowance =' in line)
+        expectation = next(line for line in cls.source.splitlines()
+                           if 'let didAppear = XCTestExpectation(' in line)
+        fulfillment = next(line for line in cls.source.splitlines()
+                           if 'let appearance = await XCTWaiter.fulfillment(' in line)
+        fixture = r"""import Foundation
+        @MainActor enum UIDevice {
+            enum Idiom { case phone, pad }
+            static var current: UIDevice.Type { self }
+            static var userInterfaceIdiom: Idiom {
+                ProcessInfo.processInfo.environment["CORE_TEST_IDIOM"] == "pad" ? .pad : .phone
+            }
+        }
+        @MainActor final class XCTestExpectation {
+            let description: String
+            init(description: String) { self.description = description }
+        }
+        @MainActor enum XCTWaiter {
+            enum Result { case completed, timedOut }
+            static var calls = 0
+            static var requested = 0.0
+            static func fulfillment(of expectations: [XCTestExpectation], timeout: TimeInterval) async -> Result {
+                precondition(expectations.count == 1)
+                precondition(expectations[0].description == "Guidance host finished appearing")
+                calls += 1; requested = timeout
+                let environment = ProcessInfo.processInfo.environment
+                let callback = Double(environment["CORE_TEST_CALLBACK_AT"] ?? "8")!
+                // The fake clock emits only the UIKit expectation callback.
+                // A SwiftUI-only rendering event deliberately never fulfills it.
+                return environment["CORE_TEST_SWIFTUI_ONLY"] != "1" && callback <= timeout
+                    ? .completed : .timedOut
+            }
+        }
+        @MainActor final class Harness {
+        // SELECTOR
+            func run() async throws -> Bool {
+        // ALLOWANCE
+        // EXPECTATION
+        // FULFILLMENT
+                return appearance == .completed
+            }
+        }
+        @main struct Main {
+            @MainActor static func main() async {
+                do {
+                    let passed = try await Harness().run()
+                    print("\(passed ? "passed" : "timedOut") \(Int(XCTWaiter.requested)) \(XCTWaiter.calls)")
+                } catch {
+                    print("rejected \(Int(XCTWaiter.requested)) \(XCTWaiter.calls)")
+                }
+            }
+        }
+        """
+        fixture = (fixture.replace('// SELECTOR', selector)
+                   .replace('// ALLOWANCE', allowance)
+                   .replace('// EXPECTATION', expectation)
+                   .replace('// FULFILLMENT', fulfillment))
+        cls.binaries = {}
+        for name, flags, source in (
+            ('hosted', ['-D', 'CORE_FIXTURE'], fixture),
+            ('unsupported', [], fixture),
+            ('old-cap', ['-D', 'CORE_FIXTURE'], fixture.replace('return 30', 'return 5')),
+        ):
+            path = Path(cls.directory.name) / (name + '.swift'); path.write_text(source)
+            binary = path.with_suffix(''); cls.binaries[name] = binary
+            subprocess.run(['/usr/bin/swiftc', '-parse-as-library', '-swift-version', '6',
+                            *flags, str(path), '-o', str(binary)], capture_output=True,
+                           check=True, timeout=60)
+
+    def probe(self, binary='hosted', token='hosted-intel-core-v1', **overrides):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(('TRIPDOCKET_', 'CORE_TEST_'))}
+        if token is not None: environment['TRIPDOCKET_CORE_TIMING'] = token
+        environment.update(overrides)
+        result = subprocess.run([str(self.binaries[binary])], env=environment,
+                                capture_output=True, text=True, check=True, timeout=5)
+        return result.stdout.strip()
+
+    def test_delayed_real_expectation_and_old_cap_causal_rejection(self):
+        self.assertEqual(self.probe(), 'passed 30 1')
+        self.assertEqual(self.probe(binary='old-cap'), 'timedOut 5 1')
+
+    def test_missing_token_keeps_default_on_both_builds(self):
+        for binary in ('hosted', 'unsupported'):
+            with self.subTest(binary=binary):
+                self.assertEqual(self.probe(binary=binary, token=None), 'timedOut 5 1')
+                self.assertEqual(self.probe(binary=binary, token=None,
+                                           CORE_TEST_CALLBACK_AT='4'), 'passed 5 1')
+
+    def test_swiftui_only_or_late_uikit_never_satisfies_wait(self):
+        self.assertEqual(self.probe(CORE_TEST_SWIFTUI_ONLY='1'), 'timedOut 30 1')
+        self.assertEqual(self.probe(CORE_TEST_CALLBACK_AT='31'), 'timedOut 30 1')
+
+    def test_invalid_token_build_or_device_rejects_before_wait(self):
+        for options in ({'token': ''}, {'token': 'wrong'}, {'token': 'hosted-intel-core-v1 '},
+                        {'binary': 'unsupported'}, {'CORE_TEST_IDIOM': 'pad'}):
+            with self.subTest(options=options):
+                self.assertEqual(self.probe(**options), 'rejected 0 0')
+
+    def test_conflicting_profiles_reject_before_wait(self):
+        for key in ('TRIPDOCKET_PHONE_TIMING', 'TRIPDOCKET_IPAD_TIMING'):
+            for value in ('', 'hosted-intel-phone-v1'):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.probe(**{key: value}), 'rejected 0 0')
+
+    def test_callback_order_assertions_and_cleanup_are_retained(self):
+        source = self.source.split('    private enum CoreTimingError:', 1)[0]
+        self.assertLess(source.index('try guidanceAppearanceAllowance()'),
+                        source.index('UIWindow(windowScene: scene)'))
+        self.assertLess(source.index('host.onDidAppear ='), source.index('window.isHidden = false'))
+        self.assertLess(source.index('trace.record(.uiKitViewDidAppear)'), source.index('didAppear.fulfill()'))
+        self.assertEqual(source.count('didAppear.fulfill()'), 1)
+        self.assertIn('XCTAssertEqual(appearance, .completed,', source)
+        self.assertIn('XCTAssertTrue(appeared,', source)
+        self.assertIn('XCTAssertTrue(requestedURLs.isEmpty,', source)
+        self.assertIn('window.isHidden = true\n            window.rootViewController = nil\n            host.onDidAppear = nil', source)
+        self.assertEqual(source.count('await XCTWaiter.fulfillment('), 1)
 
 
 class SDKSourceTests(unittest.TestCase):
@@ -652,14 +1886,17 @@ class SDKSourceTests(unittest.TestCase):
         platform = subprocess.run(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-platform-path'],
                                   capture_output=True, text=True, check=True, timeout=15).stdout.strip()
         frameworks = str(Path(platform) / 'Developer/Library/Frameworks')
-        for source in (SOURCE, ROOT / 'UITests/PrivacySupportUITests.swift'):
-            with self.subTest(source=source.name):
+        for source, target, flags in ((SOURCE, 'arm64', []), (SOURCE, 'x86_64', ['-D', 'DEBUG']),
+                                      (SOURCE, 'arm64', ['-D', 'DEBUG']), (SOURCE, 'x86_64', []),
+                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'arm64', []),
+                                      (ROOT / 'UITests/PrivacySupportUITests.swift', 'x86_64', ['-D', 'DEBUG'])):
+            with self.subTest(source=source.name, target=target, flags=flags):
                 result = subprocess.run(
                     ['xcrun', 'swiftc', '-typecheck', '-swift-version', '6',
-                     '-target', 'arm64-apple-ios17.0-simulator', '-sdk', sdk,
+                     '-target', target + '-apple-ios17.0-simulator', '-sdk', sdk,
                      '-F', frameworks, '-F', str(Path(sdk) / 'Developer/Library/Frameworks'),
-                     '-I', str(Path(platform) / 'Developer/usr/lib'), str(source)],
-                    capture_output=True, text=True, timeout=45)
+                     '-I', str(Path(platform) / 'Developer/usr/lib'), *flags, str(source)],
+                    capture_output=True, text=True, timeout=180)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 SHARE_FIXTURE = r'''
@@ -687,6 +1924,7 @@ struct ShareFrame {
     var bounds = CGRect(x: 0, y: 0, width: 402, height: 874)
     var action = CGRect(x: 114, y: 295, width: 82, height: 134)
     var header = CGRect(x: 0, y: 78, width: 402, height: 95)
+    var headerLabel = ""
     var identifier = "actionGroupCell"
     var label = "Save to Files"
     var type = XCUIElement.ElementType.cell
@@ -747,7 +1985,7 @@ struct ShareFrame {
         }
         children += (0..<f.fillers).map { _ in XCUIElementSnapshot(traversalCost: f.traversalCost) }
         for _ in 0..<f.headers {
-            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", frame: f.header))
+            children.append(XCUIElementSnapshot(.navigationBar, identifier: "UIActivityContentView", label: f.headerLabel, frame: f.header))
         }
         if f.staticTextDecoy { children.append(XCUIElementSnapshot(.staticText, label: "Save to Files", frame: f.action)) }
         if let lateOverflow = f.lateOverflow {
@@ -835,6 +2073,7 @@ struct ShareFrame {
         case "tolerance-boundary": moved.action.origin.y = ready.action.origin.y + 0.5; frames = [ready, moved]; expectedPolls = 3
         case "tolerance-exceeded": moved.action.origin.y = ready.action.origin.y + 0.5001; frames = [ready, ready, moved]; expectedPolls = 5
         case "header-resets": moved = ready; moved.header.origin.y += 5; frames = [ready, ready, moved]; expectedPolls = 5
+        case "header-label-resets": moved = ready; moved.headerLabel = "Different document"; frames = [ready, ready, moved]; expectedPolls = 5
         case "identity-resets": frames = [ready, ready, otherIdentity]; expectedPolls = 5
         case "unavailable-resets": invalid.actions = 0; frames = [ready, ready, invalid, ready]; expectedPolls = 6
         case "disabled-resets": invalid.enabled = false; frames = [ready, ready, invalid, ready]; expectedPolls = 6
@@ -914,7 +2153,7 @@ class ShareReadinessTests(unittest.TestCase):
                         .replace('    // ACTUAL_WAIT', source[wait_start:wait_end]))
         cls.binary = root / 'share-readiness-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -941,14 +2180,292 @@ class ShareReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
-    def test_shared_export_path_waits_before_its_single_tap(self):
+    def test_header_label_is_part_of_original_share_proof(self):
+        result = subprocess.run([str(self.binary), 'header-label-resets'], capture_output=True,
+                                text=True, check=True, timeout=5)
+        self.assertEqual(result.stdout.strip(), 'PASS header-label-resets')
+
+    def test_shared_export_path_retains_proof_before_bounded_navigation(self):
         source = SOURCE.read_text()
         start = source.index('    private func presentRecoverySave(')
         end = source.index('    private func waitForStableShareAction(', start)
         body = source[start:end]
-        self.assertEqual(body.count('saveToFiles.element.tap()'), 1)
+        self.assertEqual(body.count('export.tap()'), 1)
+        self.assertEqual(body.count('app.buttons["Export…"].tap()'), 1)
+        self.assertEqual(body.count('.action.tap()'), 3)
+        self.assertIn('retryNavigation: Bool = false', body)
         self.assertLess(body.index('try await waitForStableShareAction(saveToFiles, app: app)'),
-                        body.index('saveToFiles.element.tap()'))
+                        body.index('try await openRecoveryFilesFromShare(saveToFiles, app: app, first: proof)'))
+
+
+SHARE_TRANSITION_FIXTURE = r'''
+import Foundation
+import CoreGraphics
+@MainActor enum ContinuousClock {
+    struct Instant: Comparable {
+        let time: Duration
+        func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        func duration(to other: Instant) -> Duration { other.time - time }
+        static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
+    }
+    static var elapsed: Duration = .zero
+    static var now: Instant { Instant(time: elapsed) }
+}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw CancellationError() } }
+    static func sleep(for value: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        ContinuousClock.elapsed += value
+    }
+}
+struct BatchTestFailure: Error { let message: String }
+typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
+@MainActor final class World {
+    let mode: String
+    var initial: Proof { ([CGRect(x: 114, y: 304, width: 82, height: 138.3),
+                           CGRect(x: 0, y: 78, width: 402, height: 95)], "75:actionGroupCell:Save to Files", XCUIElement(self)) }
+    var taps: [Duration] = []
+    var records: [String] = []
+    var captures = 0
+    var observations = 0
+    var eligibleObservations = 0
+    var pickerResolutions = 0
+    var navigationQueries = 0
+    var boundSnapshotGenerations: [Int] = []
+    init(_ mode: String) { self.mode = mode }
+    var navigation: Int {
+        navigationQueries += 1
+        let now = ContinuousClock.elapsed
+        if mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(8); return 0 }
+        if mode == "slow-navigation-count" { ContinuousClock.elapsed += .seconds(31); return 1 }
+        if mode == "ambiguous-navigation" && now >= .seconds(1) && now < .seconds(2) { return 2 }
+        if mode == "immediate" || mode == "slow-navigation-exists" { return 1 }
+        if mode == "delayed-first" && now >= .seconds(10) { return 1 }
+        if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return 1 }
+        if mode == "retry-opens" && taps.count == 2 { return 1 }
+        return 0
+    }
+    var pickerPresent: Bool {
+        if ["slow-picker-ready", "late-picker-snapshot", "wrong-picker-identity", "duplicate-picker-navigation",
+            "unrelated-picker-navigation", "partial-picker-snapshot", "duplicate-picker", "omitted-app-subtree"].contains(mode)
+            || mode.hasPrefix("picker-") { return true }
+        if mode == "immediate" { return true }
+        if mode == "delayed-first" && ContinuousClock.elapsed >= .seconds(10) { return true }
+        if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return true }
+        if mode == "retry-opens" && taps.count == 2 { return true }
+        if mode == "partial-picker" && ContinuousClock.elapsed >= .seconds(1)
+            && ContinuousClock.elapsed < .seconds(2) { return true }
+        return false
+    }
+    func observation() -> Proof? {
+        observations += 1
+        if ContinuousClock.elapsed >= .seconds(15) { eligibleObservations += 1 }
+        if mode == "slow-snapshot" { ContinuousClock.elapsed += .seconds(31) }
+        if mode == "exact-deadline-snapshot" { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "exact-deadline-third" && eligibleObservations == 3 { ContinuousClock.elapsed = .seconds(30) }
+        if mode == "slow-third-proof" && eligibleObservations == 3 { ContinuousClock.elapsed += .seconds(31) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot"].contains(mode) && observations == 2 { return nil }
+        if mode == "changed-geometry" && observations == 2 {
+            var changed = initial; changed.frames[0].origin.y += 1; return changed
+        }
+        if mode == "changed-header" && observations == 2 {
+            var changed = initial; changed.frames[1].size.height += 1; return changed
+        }
+        if mode == "changed-identity" && observations == 2 { return (initial.frames, "different", initial.action) }
+        if mode == "changed-header-label" && observations == 2 { return (initial.frames, initial.identity + "Different document", initial.action) }
+        return initial
+    }
+}
+@MainActor final class XCUIElementSnapshot {
+    let elementType: XCUIElement.ElementType
+    let identifier: String
+    let frame: CGRect
+    let children: [XCUIElementSnapshot]
+    init(_ type: XCUIElement.ElementType, _ identifier: String, _ frame: CGRect,
+         _ children: [XCUIElementSnapshot] = []) {
+        self.elementType = type; self.identifier = identifier; self.frame = frame; self.children = children
+    }
+}
+@MainActor final class XCUIElement {
+    enum ElementType { case other, navigationBar, button }
+    let world: World
+    let generation: Int
+    init(_ world: World, generation: Int = 0) { self.world = world; self.generation = generation }
+    var exists: Bool {
+        if world.mode == "slow-navigation-exists" { ContinuousClock.elapsed += .seconds(31) }
+        return true
+    }
+    func tap() {
+        world.taps.append(ContinuousClock.elapsed)
+        if world.mode == "slow-first-tap" { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(7) }
+    }
+    func snapshot() throws -> XCUIElementSnapshot {
+        precondition(generation > 0 && generation == world.pickerResolutions, "stale or unbound picker")
+        world.boundSnapshotGenerations.append(generation)
+        if world.mode == "picker-snapshot-error" { throw BatchTestFailure(message: "snapshot unavailable") }
+        if world.mode == "late-picker-snapshot" { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "picker-exact-deadline" { ContinuousClock.elapsed = .seconds(30) }
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(1) }
+        let navigationFrame = world.mode == "picker-navigation-outside" ? CGRect(x: 800, y: 88, width: 402, height: 114)
+            : world.mode == "picker-navigation-invalid" ? .infinite : CGRect(x: 0, y: 88, width: 402, height: 114)
+        let navigation = XCUIElementSnapshot(.navigationBar,
+            world.mode == "unrelated-picker-navigation" ? "Settings" : "FullDocumentManagerViewControllerNavigationBar",
+            navigationFrame)
+        var children = ["partial-picker", "partial-picker-snapshot"].contains(world.mode) ? []
+            : world.mode == "duplicate-picker-navigation" ? [navigation, navigation] : [navigation]
+        if world.mode == "picker-duplicate-subtree" {
+            children.append(XCUIElementSnapshot(.other, "Browse View (Picker)", .zero))
+        }
+        if world.mode == "picker-node-overflow" {
+            children += Array(repeating: XCUIElementSnapshot(.other, "", .zero), count: 4096)
+        }
+        if world.mode == "picker-depth-overflow" {
+            var node = XCUIElementSnapshot(.other, "", .zero)
+            for _ in 0..<65 { node = XCUIElementSnapshot(.other, "", .zero, [node]) }
+            children.append(node)
+        }
+        return XCUIElementSnapshot(world.mode == "picker-wrong-type" ? .button : .other,
+            world.mode == "wrong-picker-identity" ? "Other view" : "Browse View (Picker)",
+            world.mode == "picker-empty-frame" ? .zero : CGRect(x: 0, y: 72, width: 402, height: 802), children)
+    }
+}
+@MainActor final class XCUIElementQuery {
+    let world: World
+    let kind: String
+    init(_ world: World, kind: String = "actions") { self.world = world; self.kind = kind }
+    func matching(identifier: String) -> XCUIElementQuery { self }
+    var element: XCUIElement { XCUIElement(world) }
+    var allElementsBoundByAccessibilityElement: [XCUIElement] {
+        precondition(kind == "picker")
+        world.pickerResolutions += 1
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(17) }
+        if world.mode == "picker-late-binding" { ContinuousClock.elapsed += .seconds(31) }
+        guard world.pickerPresent else { return [] }
+        let picker = XCUIElement(world, generation: world.pickerResolutions)
+        return world.mode == "duplicate-picker" ? [picker, picker] : [picker]
+    }
+    var count: Int {
+        if kind == "navigation" { return world.navigation }
+        if kind == "picker" && world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(17); return 1 }
+        if kind == "picker" && world.mode == "partial-picker"
+            && ContinuousClock.elapsed >= .seconds(1) && ContinuousClock.elapsed < .seconds(2) { return 1 }
+        return 0
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, background }
+    let world: World
+    init(_ world: World) { self.world = world }
+    var state: State {
+        if world.mode == "slow-final-state" && world.eligibleObservations >= 3 { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "background" && ContinuousClock.elapsed >= .seconds(1)
+            && ContinuousClock.elapsed < .seconds(2) { return .background }
+        return .runningForeground
+    }
+    var navigationBars: XCUIElementQuery { XCUIElementQuery(world, kind: "navigation") }
+    var otherElements: XCUIElementQuery { XCUIElementQuery(world, kind: "picker") }
+}
+@MainActor final class Harness {
+    let world: World
+    init(_ world: World) { self.world = world }
+    func recordRecoveryShareTransition(_ message: String) {
+        world.records.append(message)
+        if world.mode == "cancel-before-retry" && message.contains("dispatch intent 2") { Task.cancelled = true }
+        if world.mode == "slow-dispatch-record" && message.contains("dispatch intent 2") {
+            ContinuousClock.elapsed += .seconds(31)
+        }
+    }
+    func shareActionObservation(_ actions: XCUIElementQuery, app: XCUIApplication,
+                                before deadline: ContinuousClock.Instant) -> Proof? { world.observation() }
+    func capture(_ app: XCUIApplication, _ message: String, batchDiagnostic: Bool) { world.captures += 1 }
+    // ACTUAL_TRANSITION
+    func run() async throws {
+        try await openRecoveryFilesFromShare(XCUIElementQuery(world), app: XCUIApplication(world), first: world.initial)
+    }
+}
+@main struct Main {
+    @MainActor static func main() async {
+        let mode = CommandLine.arguments[1]
+        let world = World(mode)
+        var failed = false
+        var cancelled = false
+        Task.cancelled = mode == "cancel-before-first"
+        do { try await Harness(world).run() } catch { failed = true; cancelled = error is CancellationError }
+        precondition(cancelled == mode.hasPrefix("cancel-"))
+        let succeeds = ["immediate", "delayed-first", "retry-opens", "navigation-during-retry-proof",
+                        "slow-picker-ready", "omitted-app-subtree"].contains(mode)
+        precondition(failed != succeeds, "Wrong result for " + mode)
+        let twoTaps = ["retry-opens", "retry-still-pending"].contains(mode)
+        precondition(world.taps.count == (mode == "cancel-before-first" ? 0 : (twoTaps ? 2 : 1)), "Wrong tap count for " + mode)
+        precondition(world.taps.allSatisfy { $0 < .seconds(30) }, "Late tap")
+        if twoTaps { precondition(world.taps[1] >= .seconds(15) && world.eligibleObservations >= 3) }
+        if mode == "retry-still-pending" { precondition(ContinuousClock.elapsed >= .seconds(30) && ContinuousClock.elapsed < .seconds(31)) }
+        if ["missing-share", "ambiguous-share", "failed-snapshot", "changed-geometry", "changed-header",
+            "changed-identity", "changed-header-label", "background", "partial-picker", "ambiguous-navigation"].contains(mode) {
+            precondition(world.records.filter { $0.contains("retry disabled:") }.count == 1)
+        }
+        precondition(world.captures == (succeeds || cancelled ? 0 : 1))
+        if mode == "slow-picker-ready" {
+            precondition(ContinuousClock.elapsed == .seconds(25) && world.navigationQueries == 0)
+            precondition(world.pickerResolutions == 1 && world.boundSnapshotGenerations == [1])
+        }
+        if mode == "picker-late-binding" { precondition(world.boundSnapshotGenerations.isEmpty) }
+        print("PASS " + mode)
+    }
+}
+'''
+
+
+class ShareTransitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        path = Path(cls.directory.name) / 'ShareTransition.swift'
+        path.write_text(SHARE_TRANSITION_FIXTURE.replace('    // ACTUAL_TRANSITION', source[start:end]))
+        cls.binary = Path(cls.directory.name) / 'share-transition-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def test_one_navigation_retry_requires_unchanged_share_and_original_deadline(self):
+        for name in ['immediate', 'delayed-first', 'retry-opens', 'retry-still-pending',
+                     'navigation-during-retry-proof', 'missing-share', 'ambiguous-share',
+                     'failed-snapshot', 'changed-geometry', 'changed-header', 'changed-identity', 'changed-header-label',
+                     'background', 'partial-picker', 'ambiguous-navigation', 'slow-snapshot',
+                     'slow-third-proof', 'slow-navigation-count', 'slow-navigation-exists', 'slow-dispatch-record',
+                     'slow-first-tap', 'exact-deadline-snapshot', 'exact-deadline-third',
+                     'slow-final-state', 'cancel-before-first', 'cancel-before-retry',
+                     'slow-picker-ready', 'late-picker-snapshot', 'wrong-picker-identity',
+                     'duplicate-picker-navigation', 'unrelated-picker-navigation',
+                     'partial-picker-snapshot', 'duplicate-picker', 'omitted-app-subtree',
+                     'picker-snapshot-error', 'picker-exact-deadline', 'picker-navigation-outside',
+                     'picker-navigation-invalid', 'picker-duplicate-subtree', 'picker-node-overflow',
+                     'picker-depth-overflow', 'picker-wrong-type', 'picker-empty-frame', 'picker-late-binding']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_retry_does_not_repeat_export_or_destination_save(self):
+        source = SOURCE.read_text()
+        start = source.index('    private func openRecoveryFilesFromShare(')
+        end = source.index('    private func waitForStableShareAction(', start)
+        transition = source[start:end]
+        self.assertEqual(transition.count('.action.tap()'), 2)
+        for forbidden in ['Export…', 'export.tap()', 'save.tap()', 'launch()', 'terminate()']:
+            self.assertNotIn(forbidden, transition)
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        self.assertEqual(source[start:end].count('save.tap()'), 1)
+        self.assertIn('presentRecoverySave(app, retryNavigation: true)', source[start:end])
+        self.assertEqual(source.count('presentRecoverySave(app, retryNavigation: true)'), 1)
 
 PREVIEW_FIXTURE = r'''
 import Foundation
@@ -958,6 +2475,7 @@ import CoreGraphics
     struct Instant: Comparable {
         let time: Duration
         func advanced(by value: Duration) -> Instant { Instant(time: time + value) }
+        func duration(to other: Instant) -> Duration { other.time - time }
         static func < (a: Instant, b: Instant) -> Bool { a.time < b.time }
     }
     static var elapsed: Duration = .zero
@@ -1065,7 +2583,7 @@ final class XCTAttachment {
 @MainActor final class PreviewHarness {
     var failures = 0
     var attachments: [XCTAttachment] = []
-    func add(_ attachment: XCTAttachment) { precondition(failures == 1); attachments.append(attachment) }
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
     func failure(_ message: String, app: XCUIApplication) -> FixtureFailure {
         precondition(message == "Restored original PDF content did not render")
         failures += 1
@@ -1083,6 +2601,33 @@ final class XCTAttachment {
         var expected = false
         var expectedCaptures = 1
         switch name {
+        case "hosted-45", "default-45":
+            world.images[0].ocrTime = .seconds(45); expected = name == "hosted-45"
+        case "hosted-at-deadline", "hosted-overrun":
+            world.images[0].ocrTime = .seconds(name == "hosted-at-deadline" ? 60 : 61)
+        case "hosted-two-attempts":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(25)), FakeImage(lines: positive.lines, ocrTime: .seconds(40))]
+            expectedCaptures = 2
+        case "hosted-trace-bound":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(8))]; expectedCaptures = 8
+        case "hosted-trace-truncated":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(2))]; expectedCaptures = 29
+        case "trace-max-fields":
+            var trace = PreviewAttemptTrace()
+            for _ in 0..<10 {
+                var attempt = PreviewAttempt()
+                attempt.startedSeconds = Double.greatestFiniteMagnitude
+                attempt.querySeconds = Double.greatestFiniteMagnitude
+                attempt.captureSeconds = Double.greatestFiniteMagnitude
+                attempt.ocrSeconds = Double.greatestFiniteMagnitude
+                attempt.totalSeconds = Double.greatestFiniteMagnitude
+                trace.append(attempt)
+            }
+            let data = Data(trace.json().utf8)
+            let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            precondition(data.count <= 8192 && (object["attempts"] as! [Any]).count == 8)
+            precondition(object["truncated"] as! Bool && object["totalAttempts"] as! Int == 10)
+            print("PASS " + name); return
         case "rendered": expected = true
         case "normalized":
             world.images = [FakeImage(lines: [" SYNTHETIC  DEMO – NOT VALID FOR TRAVEL ", "Sample\treservation ABC-000"])]; expected = true
@@ -1116,14 +2661,33 @@ final class XCTAttachment {
         default: fatalError("Unknown fixture")
         }
         let app = XCUIApplication(nodes, world)
-        if ["blank-then-rendered", "ocr-overrun", "ocr-at-deadline", "capture-overrun", "error-until-deadline", "bounded-lines"].contains(name) {
+        if name.hasPrefix("hosted-") || name == "default-45" || ["blank-then-rendered", "ocr-overrun", "ocr-at-deadline", "capture-overrun", "error-until-deadline", "bounded-lines"].contains(name) {
             var acceptedToken: Int?
-            do { acceptedToken = try await waitForRenderedSyntheticOriginal(app).screenshot.token }
+            let timeout = Self.recoveryPreviewObservationTimeout(hosted: name.hasPrefix("hosted-"))
+            do { acceptedToken = try await waitForRenderedSyntheticOriginal(app, timeout: timeout).screenshot.token }
             catch { precondition(!expected) }
             precondition((acceptedToken != nil) == expected)
-            if expected { precondition(acceptedToken == 2 && failures == 0) }
+            let timing = attachments.last!
+            precondition(timing.name == "Recovery original preview — attempt timings" && timing.lifetime == .keepAlways)
+            let data = Data(timing.text.utf8)
+            let trace = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let attempts = trace["attempts"] as! [[String: Any]]
+            precondition(data.count <= 8192 && attempts.count == min(expectedCaptures, 8))
+            precondition(trace["totalAttempts"] as! Int == expectedCaptures)
+            precondition(trace["truncated"] as! Bool == (expectedCaptures > 8))
+            precondition(attempts[0]["number"] as! Int == 1 && attempts[0]["startedSeconds"] as! Double == 0)
+            if name == "hosted-45" || name == "default-45" {
+                precondition(attempts[0]["ocrSeconds"] as! Double == 45)
+                precondition(attempts[0]["outcome"] as! String == (expected ? "accepted" : "ocrLate"))
+            }
+            if name == "hosted-two-attempts" {
+                precondition(attempts[0]["outcome"] as! String == "markersRejected")
+                precondition(attempts[1]["outcome"] as! String == "ocrLate")
+                precondition(attempts[1]["startedSeconds"] as! Double >= 25)
+            }
+            if expected { precondition(acceptedToken == (name == "hosted-45" ? 1 : 2) && failures == 0) }
             else {
-                precondition(failures == 1 && attachments.count == 1)
+                precondition(failures == 1 && attachments.count == 2)
                 let text = attachments[0].text
                 precondition(text.utf8.count <= 2048 && attachments[0].lifetime == .keepAlways)
                 if name == "error-until-deadline" { precondition(text.contains("Vision error: domain=") && text.contains("code=")) }
@@ -1142,7 +2706,7 @@ final class XCTAttachment {
             let index = order.firstIndex(of: String(name.dropFirst(5)))!
             precondition(world.reads == Array(order[...index]) && world.requests == 0)
         }
-        if expected { precondition(attachments.isEmpty) }
+        if expected { precondition(attachments.count == (name == "hosted-45" || name == "blank-then-rendered" ? 1 : 0)) }
         if ["capture-overrun", "missing-pixels", "already-expired"].contains(name) {
             precondition(world.requests == 0)
         }
@@ -1170,7 +2734,7 @@ class PreviewReadinessTests(unittest.TestCase):
         path.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = root / 'preview-readiness-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -1186,12 +2750,57 @@ class PreviewReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
+    def test_hosted_preview_deadline_and_bounded_attempt_diagnostics(self):
+        for name in ['hosted-45', 'default-45', 'hosted-at-deadline', 'hosted-overrun',
+                     'hosted-two-attempts', 'hosted-trace-bound', 'hosted-trace-truncated',
+                     'trace-max-fields']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_preview_policy_and_late_acceptance_mutations_are_detected(self):
+        source = SOURCE.read_text()
+        start = source.index('    private struct RenderedOriginalEvidence {')
+        end = source.index('    private func reachRecoveryLocalRoot(', start)
+        helper = source[start:end]
+        old_policy = 'hosted ? .seconds(60) : .seconds(40)'
+        self.assertEqual(helper.count(old_policy), 1)
+        mutations = [
+            ('old-hosted-window', helper.replace(old_policy, 'hosted ? .seconds(40) : .seconds(40)'), 'hosted-45'),
+            ('late-acceptance', helper.replace('guard ContinuousClock.now < deadline else { return nil }',
+                                               'guard true else { return nil }')
+                                      .replace('ContinuousClock.now < deadline else { return nil }',
+                                               'true else { return nil }'), 'hosted-at-deadline'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label, mutated, case in mutations:
+                with self.subTest(label=label):
+                    swift = root / (label + '.swift')
+                    binary = root / label
+                    swift.write_text(PREVIEW_FIXTURE.replace('    // ACTUAL_HELPER', mutated))
+                    subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(swift), '-o', str(binary)],
+                                   check=True, capture_output=True, text=True, timeout=60)
+                    result = subprocess.run([str(binary), case], capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+
+    def test_preview_policy_is_selected_after_existing_profile_validation(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
+        end = source.index('    private struct RenderedOriginalEvidence {', start)
+        body = source[start:end]
+        self.assertLess(body.index('try recoveryConfiguration(phase: "restore")'),
+                        body.index('Self.recoveryPreviewObservationTimeout('))
+        self.assertIn('Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])', body)
+        self.assertEqual(body.count('timeout: previewObservationTimeout'), 1)
+
     def test_recovery_attaches_the_screenshot_that_satisfied_ocr(self):
         source = SOURCE.read_text()
         start = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(')
         end = source.index('    private struct RenderedOriginalEvidence {', start)
         body = source[start:end]
-        self.assertIn('let rendered = try await waitForRenderedSyntheticOriginal(app)', body)
+        self.assertIn('let rendered = try await waitForRenderedSyntheticOriginal(app, timeout: previewObservationTimeout)', body)
         self.assertIn('XCTAttachment(screenshot: rendered.screenshot)', body)
         self.assertLess(body.index('add(renderedScreenshot)'),
                         body.index('capture(app, "Recovery restored original'))
@@ -1358,7 +2967,7 @@ class SelectionDiagnosticTests(unittest.TestCase):
         path.write_text(SELECTION_DIAGNOSTIC_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = root / 'selection-diagnostic-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -1387,7 +2996,11 @@ import CoreGraphics
     var now: Instant { Instant(time: Self.elapsed) }
 }
 @MainActor enum Task {
-    static func sleep(for duration: Duration) async throws { ContinuousClock.elapsed += duration }
+    static var cancelled = false
+    static func sleep(for duration: Duration) async throws {
+        if cancelled { throw CancellationError() }
+        ContinuousClock.elapsed += duration
+    }
 }
 enum ElementType { case other, button, navigationBar }
 @MainActor final class XCUIElementSnapshot {
@@ -1421,8 +3034,13 @@ enum ElementType { case other, button, navigationBar }
     var failures = 0
     var tappedAt: Duration = .zero
     init(_ name: String) { self.name = name }
-    func snapshot() -> XCUIElementSnapshot {
+    func snapshot() throws -> XCUIElementSnapshot {
         snapshots += 1
+        if name == "hosted-snapshot-error" { throw FixtureFailure() }
+        if taps == 0 && name.contains("slow-readiness") { ContinuousClock.elapsed += .seconds(14) }
+        if taps == 0 && name == "hosted-late-readiness" { ContinuousClock.elapsed += .seconds(30) }
+        if taps > 0 && name.contains("slow-transition") { ContinuousClock.elapsed += .seconds(14) }
+        if taps > 0 && name == "hosted-late-transition" { ContinuousClock.elapsed += .seconds(30) }
         ContinuousClock.elapsed += taps == 0 ? .milliseconds(500) :
             (name == "late-snapshot" ? .seconds(5) : .milliseconds(500))
         let bounds = CGRect(x: 0, y: 0, width: 1032, height: 1376)
@@ -1431,7 +3049,7 @@ enum ElementType { case other, button, navigationBar }
         let initialIdentifier = name.contains("empty-id") && name != "nonempty-id-changed" && taps == 0 ? "" : "gearshape"
         let leaf = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
         leaf.isEnabled = name != "disabled-snapshot"
-        leaf.isSelected = taps > 0 && name != "unselected"
+        leaf.isSelected = taps > 0 && !name.contains("unselected") && name != "hosted-cancelled"
         if name == "single-button" || (name.contains("empty-id") && !name.contains("pair")) || name == "nonempty-id-changed" { root.storedChildren = [leaf] }
         else {
             let parent = XCUIElementSnapshot(.button, title, initialIdentifier, frame)
@@ -1491,6 +3109,7 @@ enum ElementType { case other, button, navigationBar }
     }
     var isHittable: Bool {
         world.hittableReads += 1
+        if world.name == "hosted-late-hittable" { ContinuousClock.elapsed += .seconds(30) }
         if world.name == "late-live-hittable" { ContinuousClock.elapsed += .seconds(5) }
         guard query.nodes().count == 1, world.name != "unhittable-tab" else { return false }
         if world.name.contains("before-tap") { world.identifierChanged = true }
@@ -1534,27 +3153,38 @@ enum ElementType { case other, button, navigationBar }
 @MainActor final class XCUIApplication {
     let world: World
     init(_ world: World) { self.world = world }
-    func snapshot() throws -> XCUIElementSnapshot { world.snapshot() }
+    func snapshot() throws -> XCUIElementSnapshot { try world.snapshot() }
     var buttons: XCUIElementQuery { XCUIElementQuery(world) }
     var navigationBars: XCUIElementQuery { XCUIElementQuery(world) }
 }
 struct FixtureFailure: Error {}
+@MainActor final class XCTAttachment {
+    enum Lifetime { case keepAlways }
+    var name = ""
+    var lifetime = Lifetime.keepAlways
+    let string: String
+    init(string: String) { self.string = string }
+}
 @MainActor final class Harness {
+    var attachments: [XCTAttachment] = []
+    func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
     func require(_ value: Bool, app: XCUIApplication, _ message: String) throws {
         if !value { app.world.failures += 1; throw FixtureFailure() }
     }
     // ACTUAL_HELPER
     func run(_ app: XCUIApplication) async throws {
-        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app)
+        try await selectTab(app.world.title, navigationTitle: app.world.title, failure: "Settings did not open", in: app, hostedTiming: app.world.name.hasPrefix("hosted-"))
     }
 }
 @main struct Main {
     @MainActor static func main() async {
         let name = CommandLine.arguments[1], world = World(CommandLine.arguments[1])
-        let success = ["redundant-enabled-cost", "ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
-        let beforeTapFailure = ["disabled-snapshot", "late-live-hittable", "late-identity-resolution", "ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
+        let success = ["hosted-slow-readiness", "hosted-slow-transition", "redundant-enabled-cost", "ready", "single-button", "label-navigation", "empty-id-stable", "empty-id-before-hit", "empty-id-before-tap", "empty-id-pair-before-tap", "russian-empty-id-before-tap"].contains(name)
+        let beforeTapFailure = ["default-slow-readiness", "hosted-late-readiness", "hosted-late-hittable", "hosted-snapshot-error", "disabled-snapshot", "late-live-hittable", "late-identity-resolution", "ambiguous-tab", "unhittable-tab", "empty-id-live-duplicate", "nonempty-id-changed"].contains(name)
         var failed = false
-        do { try await Harness().run(XCUIApplication(world)) } catch { failed = true }
+        Task.cancelled = name == "hosted-cancelled"
+        let harness = Harness()
+        do { try await harness.run(XCUIApplication(world)) } catch { failed = true }
         precondition(failed != success)
         precondition(world.taps == (beforeTapFailure ? 0 : 1))
         precondition(world.enabledReads == 0)
@@ -1562,8 +3192,36 @@ struct FixtureFailure: Error {}
         if name == "disabled-snapshot" || name == "late-identity-resolution" { precondition(world.hittableReads == 0) }
         precondition(world.navigationQueries == 0)
         precondition(world.rejectedTapResolutions == 0)
-        precondition(world.failures == (success ? 0 : 1))
-        if success { precondition(world.snapshots == 2 && ContinuousClock.elapsed < .seconds(5)) }
+        precondition(world.failures == (success || ["hosted-cancelled", "hosted-snapshot-error"].contains(name) ? 0 : 1))
+        if success {
+            precondition(world.snapshots == 2)
+            precondition(ContinuousClock.elapsed < .seconds(name.hasPrefix("hosted-") ? 30 : 5))
+        }
+        precondition(harness.attachments.count == 1)
+        let attachment = harness.attachments[0]
+        let data = Data(attachment.string.utf8)
+        precondition(data.count <= 8192 && attachment.name == "Guidance tab observation")
+        let trace = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        precondition(trace["schemaVersion"] as? Int == 1)
+        precondition(trace["budgetSeconds"] as? Int == (name.hasPrefix("hosted-") ? 30 : 5))
+        precondition(trace["tapAttempted"] as? Bool == (world.taps == 1))
+        precondition(trace["observations"] as? Int == world.snapshots)
+        let rows = trace["samples"] as! [[String: Any]]
+        precondition(rows.count == min(16, world.snapshots))
+        precondition(trace["truncated"] as? Bool == (world.snapshots > 16))
+        precondition(trace["outcome"] as? String == (success ? "completed" :
+            (["hosted-cancelled", "hosted-snapshot-error"].contains(name) ? "incomplete" :
+             (beforeTapFailure ? "readiness-deadline" : "transition-deadline"))))
+        for row in rows {
+            let start = row["startedSeconds"] as! Double, end = row["finishedSeconds"] as! Double
+            precondition(start.isFinite && end.isFinite && start >= 0 && end >= start)
+            precondition(["readiness", "transition"].contains(row["phase"] as! String))
+        }
+        if name == "hosted-unselected" { precondition(world.snapshots > 16 && rows.first?["phase"] as? String == "readiness") }
+        if name == "hosted-snapshot-error" { precondition(rows[0]["reason"] as? String == "snapshot-error") }
+        if name.contains("late-transition") || name == "default-slow-transition" {
+            precondition(rows.last?["reason"] as? String == "deadline-after-snapshot")
+        }
         if name == "late-snapshot" || name == "late-traversal" { precondition(world.snapshots == 2) }
         print("PASS " + name)
     }
@@ -1577,13 +3235,13 @@ class TabNavigationTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.directory.cleanup)
         source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
-        start = source.index('    private func selectTab(')
-        end = source.index('    private func scrollTo(', start)
+        start = source.index('    private struct TabObservationTrace:')
+        end = source.index('    private struct ScrollObservation', start)
         path = Path(cls.directory.name) / 'TabNavigation.swift'
         path.write_text(TAB_FIXTURE.replace('    // ACTUAL_HELPER', source[start:end]))
         cls.binary = Path(cls.directory.name) / 'tab-navigation-tests'
         result = subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(path), '-o', str(cls.binary)],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stderr)
 
@@ -1614,6 +3272,44 @@ class TabNavigationTests(unittest.TestCase):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_hosted_tab_window_and_bounded_existing_snapshot_trace(self):
+        for name in ['hosted-slow-readiness', 'hosted-slow-transition',
+                     'default-slow-readiness', 'default-slow-transition',
+                     'hosted-late-readiness', 'hosted-late-transition',
+                     'hosted-late-hittable', 'hosted-unselected',
+                     'hosted-cancelled', 'hosted-snapshot-error']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_old_five_second_hosted_window_rejects_measured_slow_observation(self):
+        path = Path(self.directory.name) / 'TabNavigation.swift'
+        source = path.read_text()
+        self.assertEqual(source.count('let budgetSeconds = hostedTiming ? 30 : 5'), 1)
+        mutant = Path(self.directory.name) / 'OldTabNavigation.swift'
+        mutant.write_text(source.replace('let budgetSeconds = hostedTiming ? 30 : 5',
+                                         'let budgetSeconds = hostedTiming ? 5 : 5'))
+        binary = Path(self.directory.name) / 'old-tab-navigation-tests'
+        subprocess.run(['/usr/bin/swiftc', '-parse-as-library', str(mutant), '-o', str(binary)],
+                       capture_output=True, text=True, check=True, timeout=60)
+        # The actual hosted path must fail its expected-success assertion at the old cap.
+        result = subprocess.run([str(binary), 'hosted-slow-transition'], capture_output=True,
+                                text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_only_validated_guidance_profiles_select_hosted_tab_window(self):
+        source = (ROOT / 'UITests/PrivacySupportUITests.swift').read_text()
+        body = source[source.index('    private func verifyGuidance('):source.index('    /// Cover every')]
+        self.assertEqual(body.count('hostedTiming: hostedIPad || hostedPhone'), 2)
+        self.assertLess(body.index('try useHostedIPadTiming'), body.index('app.launch()'))
+        self.assertLess(body.index('try useHostedPhoneTiming'), body.index('app.launch()'))
+        helper = source[source.index('    private func selectTab('):source.index('    private struct ScrollObservation')]
+        self.assertEqual(helper.count('target.tap()'), 1)
+        self.assertEqual(helper.count('app.snapshot()'), 1)
+        self.assertEqual(helper.count('clock.now.advanced(by: .seconds(budgetSeconds))'), 2)
+        self.assertNotIn('ProcessInfo', helper)
 
 
 UI = SOURCE.read_text()
@@ -1808,7 +3504,6 @@ class RestoreFolderNavigation(unittest.TestCase):
         if result.returncode: raise AssertionError(result.stdout + result.stderr)
 
     def probe(self, *args):
-        import json
         result = subprocess.run([str(self.binary), *args], check=True, capture_output=True, text=True, timeout=5)
         return json.loads(result.stdout.strip().splitlines()[-1])
 
@@ -1881,11 +3576,307 @@ class RestoreFolderNavigation(unittest.TestCase):
     def test_only_restore_explicitly_opts_in_and_original_actions_remain(self):
         self.assertEqual(UI.count('retryRecoveryFolderEntry: true'), 1)
         restore = UI[UI.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal()'):UI.index('    private func isRecoveryFolder(')]
-        self.assertIn('openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)', restore)
+        self.assertIn('openLocalFilesFolder(recoveryFolder, app: app, initialNavigationTimeout: .seconds(30), retryRecoveryFolderEntry: true)', restore)
         self.assertIn('let recoveryFolder = try recoveryConfiguration(phase: "restore")', restore)
         self.assertIn('retryRecoveryFolderEntry: Bool = false', UI)
 
 
+
+
+RECOVERY_PERSON_INTRODUCTION = r'''
+import Foundation
+import CoreGraphics
+struct NSPredicate {
+    let value: String
+    init(format: String, _ value: String) { precondition(format == "label == %@"); self.value = value }
+}
+struct Rejected: Error {}
+struct Cancelled: Error {}
+@MainActor enum Task {
+    static var cancelled = false
+    static func checkCancellation() throws { if cancelled { throw Cancelled() } }
+}
+@MainActor final class PersonWorld {
+    var introduction = 1, alerts = 1, matchingAlerts = 1, fields = 1, matchingFields = 1
+    var explanations = 1, buttons = 1
+    var value = "Recovery Sentinel"
+    var fieldEnabled = true, explanationHittable = true, buttonEnabled = true, buttonHittable = true
+    var foreground = true
+    var taps = 0, captures = 0, waits = 0, elementTaps = 0
+    var rootFrame = CGRect(x: 0, y: 0, width: 402, height: 874)
+    var introFrame = CGRect(x: 0, y: 539, width: 402, height: 335)
+    var buttonFrame = CGRect(x: 89, y: 819, width: 224, height: 21)
+    var appAnchor = false, point = CGPoint.zero
+    let mode: String
+    init(_ mode: String) {
+        self.mode = mode
+        switch mode {
+        case "absent", "late": introduction = 0
+        case "duplicate-intro": introduction = 2
+        case "extra-alert": alerts = 2
+        case "wrong-alert": matchingAlerts = 0
+        case "extra-field": fields = 2
+        case "wrong-field": matchingFields = 0
+        case "wrong-value": value = "Foreign person"
+        case "partial-value": value = "Recovery"
+        case "disabled-field": fieldEnabled = false
+        case "missing-explanation": explanations = 0
+        case "duplicate-explanation": explanations = 2
+        case "hidden-explanation": explanationHittable = false
+        case "missing-continue": buttons = 0
+        case "duplicate-continue": buttons = 2
+        case "disabled-continue": buttonEnabled = false
+        case "hidden-continue": buttonHittable = false
+        case "background": foreground = false
+        case "cancelled": Task.cancelled = true
+        case "empty-button": buttonFrame.size.width = 0
+        case "nan-button": buttonFrame.origin.x = .nan
+        case "infinite-intro": introFrame.size.height = .infinity
+        case "button-outside-intro": buttonFrame.origin.y = 500
+        case "intro-outside-app": introFrame.size.height = 400
+        case "empty-root": rootFrame.size.height = 0
+        case "invalid-root": rootFrame.origin.x = .infinity
+        case "app-origin":
+            rootFrame = rootFrame.offsetBy(dx: 101, dy: 203)
+            introFrame = introFrame.offsetBy(dx: 101, dy: 203)
+            buttonFrame = buttonFrame.offsetBy(dx: 101, dy: 203)
+        default: break
+        }
+    }
+}
+@MainActor final class XCUIApplication {
+    enum State { case runningForeground, runningBackground }
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    var state: State { world.foreground ? .runningForeground : .runningBackground }
+    var otherElements: PersonQuery { PersonQuery(world, "other") }
+    var alerts: PersonQuery { PersonQuery(world, "alerts") }
+    var frame: CGRect { world.rootFrame }
+    func coordinate(withNormalizedOffset offset: CGVector) -> PersonCoordinate {
+        precondition(offset == .zero)
+        world.appAnchor = true
+        return PersonCoordinate(world)
+    }
+}
+@MainActor final class PersonCoordinate {
+    let world: PersonWorld
+    init(_ world: PersonWorld) { self.world = world }
+    func withOffset(_ offset: CGVector) -> PersonCoordinate {
+        world.point = CGPoint(x: offset.dx, y: offset.dy)
+        return self
+    }
+    func tap() {
+        precondition(world.appAnchor && world.elementTaps == 0)
+        precondition(world.point == CGPoint(x: world.buttonFrame.midX - world.rootFrame.minX,
+                                          y: world.buttonFrame.midY - world.rootFrame.minY))
+        world.taps += 1
+        if world.mode != "stays-open" { world.introduction = 0 }
+        if world.mode == "changed-after-tap" { world.value = "Foreign person" }
+        if world.mode == "form-dismissed" { world.alerts = 0 }
+    }
+}
+@MainActor final class PersonQuery {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var count: Int {
+        switch kind {
+        case "intro": return world.introduction
+        case "alerts": return world.alerts
+        case "alert": return world.matchingAlerts
+        case "fields": return world.fields
+        case "field": return world.matchingFields
+        case "explanation": return world.explanations
+        case "continue": return world.buttons
+        default: preconditionFailure("Unscoped query")
+        }
+    }
+    var element: PersonElement { PersonElement(world, kind) }
+    func matching(identifier: String) -> PersonQuery {
+        switch (kind, identifier) {
+        case ("other", "UIContinuousPathIntroductionView"): return PersonQuery(world, "intro")
+        case ("alerts", "Add a person"): return PersonQuery(world, "alert")
+        case ("fields", "Name or nickname"): return PersonQuery(world, "field")
+        default: preconditionFailure("Unexpected identity")
+        }
+    }
+    func matching(_ predicate: NSPredicate) -> PersonQuery {
+        if kind == "texts" {
+            precondition(predicate.value == "Speed up your typing by sliding your finger across the letters to compose a word.")
+            return PersonQuery(world, "explanation")
+        }
+        precondition(kind == "buttons" && predicate.value == "Continue")
+        return PersonQuery(world, "continue")
+    }
+}
+@MainActor final class PersonElement {
+    let world: PersonWorld, kind: String
+    init(_ world: PersonWorld, _ kind: String) { self.world = world; self.kind = kind }
+    var textFields: PersonQuery { precondition(kind == "alert"); return PersonQuery(world, "fields") }
+    var staticTexts: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "texts") }
+    var buttons: PersonQuery { precondition(kind == "intro"); return PersonQuery(world, "buttons") }
+    var value: Any? { precondition(kind == "field"); return world.value }
+    var isEnabled: Bool { kind == "field" ? world.fieldEnabled : world.buttonEnabled }
+    var isHittable: Bool {
+        switch kind {
+        case "field": return world.introduction == 0
+        case "explanation": return world.explanationHittable
+        case "continue": return world.buttonHittable
+        default: preconditionFailure("Unexpected hit test")
+        }
+    }
+    var frame: CGRect {
+        precondition(kind == "intro" || kind == "continue")
+        return kind == "intro" ? world.introFrame : world.buttonFrame
+    }
+    func tap() {
+        // Model the observed XCTest default handler cancelling the expected
+        // form before the Continue element can receive its event.
+        precondition(kind == "continue"); world.elementTaps += 1
+        world.alerts = 0; world.introduction = 0
+    }
+}
+@MainActor final class PersonHarness {
+    func check(_ value: Bool, app: XCUIApplication, _ message: String) throws { if !value { throw Rejected() } }
+    func capture(_ app: XCUIApplication, _ name: String) {
+        app.world.captures += 1
+        if app.world.mode == "changed-after-capture" { app.world.value = "Foreign person" }
+        if app.world.mode == "cancel-after-capture" { Task.cancelled = true }
+        if app.world.mode == "changed-button-frame" { app.world.buttonFrame.origin.x += 1 }
+        if app.world.mode == "changed-intro-frame" { app.world.introFrame.origin.y -= 1 }
+        if app.world.mode == "changed-root-frame" { app.world.rootFrame.size.width += 1 }
+    }
+    func wait(_ message: String, app: XCUIApplication, condition: () -> Bool) async throws {
+        app.world.waits += 1
+        if !condition() { throw Rejected() }
+    }
+    // ACTUAL_RECOVERY_PERSON_HELPER
+    func run(_ app: XCUIApplication, expectedName: String, acknowledged: inout Bool) async throws {
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(app, expectedName: expectedName, acknowledged: &acknowledged)
+    }
+}
+@main struct PersonMain {
+    @MainActor static func main() async throws {
+        let mode = CommandLine.arguments[1], world = PersonWorld(CommandLine.arguments[1])
+        let app = XCUIApplication(world), harness = PersonHarness()
+        var acknowledged = false, outcome = "returned"
+        do {
+            if ["pretype", "placeholder", "late", "repeated"].contains(mode) {
+                world.value = mode == "placeholder" ? "Name or nickname" : ""
+                try await harness.run(app, expectedName: world.value, acknowledged: &acknowledged)
+                world.value = "Recovery Sentinel"
+                if mode == "late" || mode == "repeated" { world.introduction = 1 }
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            } else {
+                try await harness.run(app, expectedName: "Recovery Sentinel", acknowledged: &acknowledged)
+            }
+        } catch is Cancelled { outcome = "cancelled" }
+        catch { outcome = "rejected" }
+        var result: [String: Any] = ["outcome": outcome, "acknowledged": acknowledged,
+            "taps": world.taps, "captures": world.captures, "waits": world.waits]
+        if mode == "app-origin" {
+            result["appAnchor"] = world.appAnchor; result["elementTaps"] = world.elementTaps
+            result["point"] = [world.point.x, world.point.y]
+        }
+        print(String(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
+    }
+}
+'''
+
+
+class RecoveryPersonIntroductionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix='recovery-person-introduction-')
+        cls.addClassCleanup(cls.scratch.cleanup)
+        source = SOURCE.read_text()
+        start = source.index('    private func acknowledgeRecoveryPersonKeyboardIntroduction(')
+        end = source.index('    private func localStoreSession(', start)
+        swift = Path(cls.scratch.name) / 'Person.swift'
+        swift.write_text(RECOVERY_PERSON_INTRODUCTION.replace('    // ACTUAL_RECOVERY_PERSON_HELPER', source[start:end]))
+        cls.binary = Path(cls.scratch.name) / 'person-tests'
+        result = subprocess.run(['/usr/bin/swiftc', '-swift-version', '6', '-strict-concurrency=complete',
+                                 '-parse-as-library', str(swift), '-o', str(cls.binary)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+
+    def probe(self, mode):
+        result = subprocess.run([str(self.binary), mode], capture_output=True, text=True, check=True, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_absent_introduction_has_no_action_or_wait(self):
+        self.assertEqual(self.probe('absent'), {'outcome': 'returned', 'acknowledged': False,
+                                              'taps': 0, 'captures': 0, 'waits': 0})
+
+    def test_first_use_at_focus_or_during_typing_uses_one_acknowledgement(self):
+        for mode in ['pretype', 'placeholder', 'late']:
+            with self.subTest(mode=mode):
+                self.assertEqual(self.probe(mode), {'outcome': 'returned', 'acknowledged': True,
+                                                   'taps': 1, 'captures': 1, 'waits': 1})
+
+    def test_only_unique_expected_intro_form_and_value_can_be_acknowledged(self):
+        for mode in ['duplicate-intro', 'extra-alert', 'wrong-alert', 'extra-field', 'wrong-field',
+                     'wrong-value', 'partial-value', 'disabled-field', 'missing-explanation',
+                     'duplicate-explanation', 'hidden-explanation', 'missing-continue',
+                     'duplicate-continue', 'disabled-continue', 'hidden-continue', 'background']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_changed_form_and_cancellation_do_not_tap(self):
+        for mode, outcome in [('changed-after-capture', 'rejected'), ('cancelled', 'cancelled'),
+                              ('cancel-after-capture', 'cancelled')]:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 (outcome, False, 0))
+
+    def test_reappearance_or_failed_dismissal_never_repeats_continue(self):
+        for mode in ['repeated', 'stays-open', 'changed-after-tap']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', True, 1))
+
+    def test_coordinate_uses_application_origin_and_avoids_element_interruption(self):
+        self.assertEqual(self.probe('app-origin'), {
+            'outcome': 'returned', 'acknowledged': True, 'taps': 1, 'captures': 1, 'waits': 1,
+            'appAnchor': True, 'elementTaps': 0, 'point': [201, 829.5]})
+
+    def test_invalid_or_changed_geometry_never_authorizes_continue(self):
+        for mode in ['empty-button', 'nan-button', 'infinite-intro', 'button-outside-intro',
+                     'intro-outside-app', 'empty-root', 'invalid-root',
+                     'changed-button-frame', 'changed-intro-frame', 'changed-root-frame']:
+            with self.subTest(mode=mode):
+                result = self.probe(mode)
+                self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                                 ('rejected', False, 0))
+
+    def test_disappeared_expected_form_is_not_accepted_as_acknowledgement(self):
+        result = self.probe('form-dismissed')
+        self.assertEqual((result['outcome'], result['acknowledged'], result['taps']),
+                         ('rejected', True, 1))
+
+    def test_recovery_retains_single_type_and_add_with_pre_post_intro_checks(self):
+        source = SOURCE.read_text()
+        start = source.index('    func testRecoveryExportFullBackupThroughFiles(')
+        end = source.index('    func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal(', start)
+        case = source[start:end]
+        self.assertEqual(case.count('var keyboardIntroductionAcknowledged = false'), 1)
+        self.assertEqual(case.count('acknowledgeRecoveryPersonKeyboardIntroduction('), 2)
+        self.assertEqual(case.count('name.typeText("Recovery Sentinel")'), 1)
+        self.assertEqual(case.count('confirm.tap()'), 1)
+        first = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(')
+        second = case.index('acknowledgeRecoveryPersonKeyboardIntroduction(', first + 1)
+        self.assertLess(first, case.index('name.typeText("Recovery Sentinel")'))
+        self.assertLess(case.index('name.typeText("Recovery Sentinel")'), second)
+        self.assertLess(second, case.index('confirm.tap()'))
+        self.assertIn('name.value as? String == "Recovery Sentinel"', case[second:case.index('confirm.tap()')])
+        self.assertIn('UIContinuousPathIntroductionView").count == 0', case[second:case.index('confirm.tap()')])
+        self.assertIn('app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists', case)
+        self.assertIn('recoveryCounts(trips: 1, people: 2, documents: 1, app: app)', case)
+        self.assertNotIn('timeout:', case[:case.index('save.tap()')])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

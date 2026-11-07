@@ -14,15 +14,24 @@ import stat
 import sys
 import time
 import uuid
+from types import MappingProxyType
 
 HERE = Path(__file__).resolve().parent
-CORE_SHA = 'e433715a203fe85f092ae2a7fb48f3a569ecab09ff41721ea90c8e34ac5254ab'
+CORE_SHA = '5fe7743919e0681811fe056e929d7d47ef2fd5112be73ee2d188192866038f1d'
 if hashlib.sha256((HERE/'recovery_core.py').read_bytes()).hexdigest() != CORE_SHA:
     raise RuntimeError('Recovery core changed before import')
 spec = importlib.util.spec_from_file_location('hosted_recovery_core',HERE/'recovery_core.py')
 core = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core)
 require = core.require
+PROFILE_FILES = MappingProxyType({
+    'hosted-intel-v1': HERE/'recovery-hosted-profile.json',
+    'hosted-arm-v1': HERE/'recovery-hosted-arm-profile.json',
+})
+PROFILE_HOSTS = MappingProxyType({
+    'hosted-intel-v1': ('macos-15-intel', 'X64', 'x86_64', 'github-hosted'),
+    'hosted-arm-v1': ('macos-15', 'ARM64', 'arm64', 'github-hosted'),
+})
 
 
 def job_context(env, profile, machine):
@@ -46,6 +55,31 @@ def job_context(env, profile, machine):
     return {k:env[k] for k in ['GITHUB_REPOSITORY','GITHUB_WORKFLOW','GITHUB_JOB','GITHUB_EVENT_NAME',
             'GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_REF','GITHUB_SHA','ImageOS','ImageVersion',
             'TRIPDOCKET_RUNNER_LABEL','TRIPDOCKET_RUNNER_ARCH','TRIPDOCKET_RUNNER_ENVIRONMENT']}
+
+
+def select_execution_profile(profile, job, machine):
+    require(set(profile) == {'schema','repository','runner_label','runner_environment','runner_arch','machine',
+            'image_os_prefix','python_minimum','xcode_minimum_major','xcode_selection','runtime_selection',
+            'device_type','case_attempts','execution_profile','total_seconds','cleanup_seconds','prep_seconds',
+            'minimum_admission_free_GiB','minimum_work_free_GiB','maximum_output_GiB','maximum_xcresult_GiB','project'},
+            'Unexpected hosted profile fields')
+    require(profile['execution_profile'] in PROFILE_HOSTS, 'Unexpected hosted execution profile')
+    label, architecture, host_machine, environment = PROFILE_HOSTS[profile['execution_profile']]
+    require((profile['runner_label'], profile['runner_arch'], profile['machine'], profile['runner_environment'],
+             job['TRIPDOCKET_RUNNER_LABEL'], job['TRIPDOCKET_RUNNER_ARCH'],
+             job['TRIPDOCKET_RUNNER_ENVIRONMENT'], machine)
+            == (label, architecture, host_machine, environment, label, architecture, environment, host_machine),
+            'Hosted Recovery execution profile requires its exact host')
+    selected = core.execution_profile(profile['execution_profile'])
+    require(type(profile['total_seconds']) is int and type(profile['cleanup_seconds']) is int
+            and (profile['total_seconds'], profile['cleanup_seconds'])
+            == (selected['total_seconds'], selected['cleanup_seconds']), 'Hosted timing policy changed')
+    require((profile['minimum_admission_free_GiB'], profile['minimum_work_free_GiB'],
+             profile['maximum_output_GiB'], profile['maximum_xcresult_GiB']) == (16,8,8,2)
+            and profile['prep_seconds'] == 60
+            and profile['case_attempts'] == {'prepare':1,'export':1,'restore':1}
+            and all(type(value) is int for value in profile['case_attempts'].values()), 'Policy changed')
+    return selected
 
 
 def attempt_output(workspace, job):
@@ -177,14 +211,45 @@ def capability_result(normal, failed, observations, elapsed, actual):
 
 
 class HostedRecovery(core.Recovery):
-    def __init__(self,ops,out,profile,job,event,workspace,started):
+    def __init__(self,ops,out,profile,job,event,workspace,started, *, execution_profile):
+        core.validated_execution_profile(execution_profile)
+        require((profile['execution_profile'], profile['total_seconds'], profile['cleanup_seconds'])
+                == (execution_profile['name'], execution_profile['total_seconds'], execution_profile['cleanup_seconds']),
+                'Hosted profile and selected timing disagree')
+        require(select_execution_profile(profile, job, profile['machine']) is execution_profile,
+                'Hosted execution profile mismatch')
         self.profile,self.job,self.event,self.workspace=profile,job,event,Path(workspace)
         plan={'runtime':'UNSELECTED','device_type':profile['device_type']}
         host={'machine':profile['machine'],'python':str(Path(sys.executable).resolve())}
         run_id=str(uuid.uuid5(uuid.NAMESPACE_URL,job['GITHUB_REPOSITORY']+'/'+job['GITHUB_RUN_ID']+'/recovery/'+job['GITHUB_RUN_ATTEMPT']))
-        super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={})
+        super().__init__(ops,out,plan,host,run_id,started,candidate=Path(out)/'Source',source_manifest={},
+                         execution_profile=execution_profile)
         self.report['job']=job
         self.save()  # Persist the actual run/attempt before any process acquisition.
+
+    def checkpoint(self, *, force_resources=False, command_owner=None):
+        self.timecheck()
+        rows=self.report['commands']
+        pending=rows[-1] if rows else None
+        if (not self.cleaning and not force_resources and command_owner is None
+                and self.ops.now()>=self.next_scan and pending is not None
+                and pending.get('id')=='boot-ready'
+                and not any(key in pending for key in ('finish','error','stop','post_exit_scan_deferral'))
+                and self.owned is not None and not self.unknown_spawn
+                and pending.get('argv')==['/usr/bin/xcrun','simctl','bootstatus',self.owned,'-b']
+                and self.ops.now()<self.t0+pending['work_deadline']):
+            process=self.active.get(pending.get('pgid'))
+            poll=pending.get('process_observations',{}).get('command.poll',{})
+            if (process is not None and len(self.active)==1 and process.pid==pending['pgid']
+                    and type(process.returncode) is int and process.returncode==0
+                    and poll.get('outcome')=='returned'
+                    and type(poll.get('result')) is int and poll['result']==0):
+                # One post-exit pipe drain can finish before a due disk scan.
+                # pump() still enforces output/work bounds. Do not move next_scan:
+                # verified closure must perform the due scan at finalization.
+                pending['post_exit_scan_deferral']={'elapsed':self.ops.now()-self.t0}
+                return
+        super().checkpoint(force_resources=force_resources,command_owner=command_owner)
 
     def sim(self,label,*args,cap=30):
         discovery=getattr(self,'_discovery_deadline',None)
@@ -203,6 +268,14 @@ class HostedRecovery(core.Recovery):
             require(self.ops.now()<self.t0+row['work_deadline'],
                     'Discovery command work deadline reached')
             return result
+        if label=='boot-ready':
+            require(not self.cleaning and self.owned
+                    and args==('bootstatus',self.owned,'-b') and cap==120,
+                    'Unexpected hosted boot readiness command')
+            # Two hosted attempts exhausted 300s before native work; retained
+            # migration progress supports finite headroom, not a readiness guarantee.
+            # This one owned wait keeps the original work deadline and eight-second stop reserve.
+            cap=600
         # Only the initial owned Files preparation gets a larger command cap.
         action={'files-launch':'launch','files-terminate':'terminate'}.get(label)
         if action:
@@ -540,42 +613,83 @@ class HostedRecovery(core.Recovery):
     def work(self):
         super().work()
         identity=core.json_file(self.out/'source-identity.json')['checkout']
-        require(self.command('git-final-head',['/usr/bin/git','rev-parse','HEAD'],20).strip()==identity['commit'],
-                'Checkout commit changed during recovery')
-        require(not self.command('git-final-clean',['/usr/bin/git','status','--porcelain'],20).strip(),
-                'Checkout changed during recovery')
+        self._verify_final_checkout(identity['commit'])
+
+    def _verify_final_checkout(self, commit):
+        require(getattr(self, '_final_checkout_scope', None) is None,
+                'Final checkout scope already active')
+        require(not any(row.get('id') in ('git-final-head', 'git-final-clean')
+                        for row in self.report['commands']), 'Final checkout already attempted')
+        for label, argv in core._FINAL_CHECKOUT_COMMANDS:
+            previous_limit = self.limit
+            try:
+                if any(self.execution_profile is core.EXECUTION_PROFILES[name]
+                       for name in ('hosted-intel-v1', 'hosted-arm-v1')):
+                    self.timecheck()
+                    require(not self.active and not self.unknown_spawn,
+                            'Final checkout process ownership unresolved')
+                    # Include the first pre-record checkpoint in this same20s
+                    # command. Base.command retains its original8s stop reserve.
+                    self.limit = min(previous_limit, self.ops.now() + 20)
+                    self._final_checkout_scope = core._FinalCheckoutScope(self, (label, argv), self.limit)
+                output = self.command(label, list(argv), 20).strip()
+                require(output == commit if label == 'git-final-head' else not output,
+                        'Checkout commit changed during recovery' if label == 'git-final-head'
+                        else 'Checkout changed during recovery')
+            finally:
+                self.limit = previous_limit
+                self._final_checkout_scope = None
 
     def run_phase(self,phase):
+        first=len(self.report['commands'])
+        primary=None
         try:return super().run_phase(phase)
+        except BaseException as error:
+            primary=error
+            raise
         finally:
-            # Raw root logs are never public. This route selects only Xcode
-            # phase logs; the separate Files route also excludes every ps log.
-            for record in self.report['commands']:
-                if record['id']=='phase-'+phase:
-                    directory=self.out/'PhaseLogs'
-                    directory.mkdir(exist_ok=True);core.identity_of(directory)
-                    for key,value in list(record.get('logs',{}).items()):
-                        path=Path(value)
-                        if path.exists():
-                            require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
-                            public=directory/(phase+'-'+key+'.log')
-                            require(not os.path.lexists(public),'Public phase log already exists')
-                            path.rename(public);record['logs'][key]=str(public)
-            self.save()
+            try:
+                # Raw root logs are never public. This route selects only Xcode
+                # phase logs and exact closed attachment exports, never ps logs.
+                for record in self.report['commands']:
+                    if record['id']=='phase-'+phase:
+                        directory=self.out/'PhaseLogs'
+                        directory.mkdir(exist_ok=True);core.identity_of(directory)
+                        for key,value in list(record.get('logs',{}).items()):
+                            path=Path(value)
+                            if path.exists():
+                                require(path.parent==self.out and not path.is_symlink() and path.is_file(),'Unexpected phase log path')
+                                public=directory/(phase+'-'+key+'.log')
+                                require(not os.path.lexists(public),'Public phase log already exists')
+                                path.rename(public);record['logs'][key]=str(public)
+                if phase in core.CASES:
+                    self.retain_closed_logs(first,{phase+'-attachments':[
+                        '/usr/bin/xcrun','xcresulttool','export','attachments',
+                        '--path',str(self.out/(phase+'-inspection.xcresult')),
+                        '--output-path',str(self.out/(phase+'-attachments')),
+                        '--test-id',core.CASES[phase],
+                    ]},'Attachment export')
+                self.save()
+            except BaseException as error:
+                self.report['phase_log_publication_error']=repr(error)
+                self.error('Phase log publication: '+repr(error))
+                if primary is None:
+                    raise
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--run',action='store_true')
+    parser.add_argument('--profile', choices=tuple(PROFILE_FILES), default='hosted-intel-v1')
     args=parser.parse_args(argv)
     if not args.run:
         print(json.dumps({'status':'NOT_RUN','native_calls':0}));return 0
     try:
-        started=time.monotonic();profile=core.json_file(HERE/'recovery-hosted-profile.json')
+        started=time.monotonic();profile=core.json_file(PROFILE_FILES[args.profile])
+        require(profile['execution_profile'] == args.profile, 'Selected profile identity changed')
         require(sys.version_info[:2]>=tuple(profile['python_minimum']),'Python version unsupported')
-        require((profile['total_seconds'],profile['cleanup_seconds'],profile['minimum_admission_free_GiB'],
-                 profile['minimum_work_free_GiB'],profile['maximum_output_GiB'],profile['maximum_xcresult_GiB'])
-                ==(1500,120,16,8,8,2) and profile['prep_seconds']==60 and profile['case_attempts']=={'prepare':1,'export':1,'restore':1},'Policy changed')
-        job=job_context(os.environ,profile,platform.machine())
+        machine=platform.machine()
+        job=job_context(os.environ,profile,machine)
+        selected_profile=select_execution_profile(profile,job,machine)
         workspace=Path(os.environ['GITHUB_WORKSPACE']);core.identity_of(workspace)
         require(HERE==workspace/'scripts','Entrypoint not from checked-out source')
         event=core.json_file(os.environ['GITHUB_EVENT_PATH'],8*core.MIB)
@@ -583,7 +697,8 @@ def main(argv=None):
         out=attempt_output(workspace,job)
         env={k:os.environ[k] for k in ['HOME','USER','TMPDIR','DEVELOPER_DIR'] if k in os.environ}
         env.update(PATH='/usr/bin:/bin:/usr/sbin:/sbin',GIT_OPTIONAL_LOCKS='0')
-        runner=HostedRecovery(core.base.RealOps(env,workspace),out,profile,job,event,workspace,started)
+        runner=HostedRecovery(core.base.RealOps(env,workspace),out,profile,job,event,workspace,started,
+                              execution_profile=selected_profile)
         old={s:signal.signal(s,runner.signal) for s in [signal.SIGTERM,signal.SIGINT]}
         try:return runner.run()
         finally:

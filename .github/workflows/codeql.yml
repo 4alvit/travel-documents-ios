@@ -22,7 +22,7 @@ jobs:
       actions: read
       contents: read
       security-events: write
-    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/security-scan.yml@86c9afca5625a97ef3d69ef10348ccd28a27e0cf
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/security-scan.yml@86c9afca5625a97ef3d69ef10348ccd28a27e0cf # main
     with:
       languages: python,actions
       run-codeql: true
@@ -31,8 +31,8 @@ jobs:
       run-dependency-review: false
   swift:
     name: Swift security analysis
-    runs-on: macos-15
-    timeout-minutes: 30
+    runs-on: macos-15-intel
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     permissions:
@@ -43,9 +43,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Require reviewed ARM toolchain profile
+      - name: Require reviewed Intel toolchain profile
         run: |
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = x86_64
           test "$(xcodebuild -version)" = $'Xcode 26.2\nBuild version 17C52'
       - name: Initialize Swift analysis
         uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1

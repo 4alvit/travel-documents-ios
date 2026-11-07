@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from types import MappingProxyType
 import uuid
 
 
@@ -27,11 +28,49 @@ RUNNER_BUNDLE_ID = BUNDLE_ID + ".uitests.xctrunner"
 WORK_SECONDS = {"en-US": 35 * 60, "ru-RU": 35 * 60}
 DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
-# Two installs, two fresh container lookups, and two content-size commands.
+# Default: two installs, two fresh container lookups, and two content-size commands.
+# Intel adds its selected AUT-install margin to this preparation admission.
 # Every command includes its 7s stop reserve; post-validation also reserves
 # 30s for local manifests/copy/validation in addition to both fresh lookups.
 CASE_PREP_SECONDS = 4 * (60 + 7) + 2 * (30 + 7)
 CASE_POST_SECONDS = 2 * (60 + 7) + 2 * (30 + 7) + 30
+
+
+def execution_profile(architecture, locale):
+    require(architecture in ("arm64", "x86_64"), "Unsupported iPad host architecture")
+    intel = architecture == "x86_64"
+    return MappingProxyType({"name": "intel-ipad" if intel else "arm-ipad",
+                             "architecture": architecture,
+                             "work_seconds": 4500 if intel else WORK_SECONDS[locale],
+                             "boot_seconds": 600 if intel else 180,
+                             "build_seconds": 1200 if intel else 480,
+                             "aut_install_seconds": 90 if intel else 60,
+                             "cleanup_seconds": 360 if intel else CLEANUP_SECONDS})
+
+
+TIMING_ENV_KEYS = tuple(prefix + name for prefix in ("", "TEST_RUNNER_", "SIMCTL_CHILD_")
+                        for name in ("TRIPDOCKET_IPAD_TIMING", "TRIPDOCKET_PHONE_TIMING"))
+HOSTED_TIMING_CONTEXT = {"GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS", "RUNNER_ARCH": "X64",
+                         "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_JOB": "privacy_ipad",
+                         "GITHUB_WORKFLOW": "CI", "GITHUB_REPOSITORY": "4alvit/travel-documents-ios"}
+
+
+def require_clean_timing_environment(environment):
+    require(not any(key in environment for key in TIMING_ENV_KEYS), "Inherited Phone/iPad timing token")
+
+
+def timing_policy(architecture, locale, hosted, environment):
+    require_clean_timing_environment(environment)
+    require(type(hosted) is bool, "Invalid hosted timing opt-in")
+    if hosted:
+        require(architecture == "x86_64" and locale in ("en-US", "ru-RU"), "Hosted timing requires a supported Intel iPad locale")
+        require(all(environment.get(key) == value for key, value in HOSTED_TIMING_CONTEXT.items()),
+                "Hosted timing requires the exact GitHub-hosted iPad CI context")
+    token = ("hosted-intel-ipad-ru-v1" if locale == "ru-RU" else "hosted-intel-ipad-en-v1") if hosted else None
+    return MappingProxyType({"name": token if hosted else "default",
+                             "xcode_case_max_seconds": (1500 if locale == "ru-RU" else 1200) if hosted else 480,
+                             "command_seconds": (1800 if locale == "ru-RU" else 1500) if hosted else 900,
+                             "runner_token": token})
 
 
 def selected_case(locale):
@@ -163,16 +202,20 @@ def validate_result(summary, tree, method, udid):
 
 
 class Driver:
-    def __init__(self, root, locale):
-        self.case = selected_case(locale)
+    def __init__(self, root, locale, hosted_timing=False):
+        case = selected_case(locale)
+        architecture = os.uname().machine
+        self.profile = execution_profile(architecture, locale)
+        self.timing = timing_policy(architecture, locale, hosted_timing, os.environ)
+        self.case = (*case[:3], self.timing["command_seconds"])
         self.root = Path(root).resolve()
         self.out = self.root / "build/PrivacySupport-iPad" / locale
         self.out.mkdir(parents=True)  # Refuse to overwrite another run's evidence.
         self.derived = self.root / ("build/PrivacySupport-iPad-DerivedData-" + locale)
         require(not self.derived.exists(), "DerivedData must be fresh; no build reuse")
         self.start = time.monotonic()
-        self.work_deadline = self.start + WORK_SECONDS[locale]
-        self.final_deadline = self.work_deadline + CLEANUP_SECONDS
+        self.work_deadline = self.start + self.profile["work_seconds"]
+        self.final_deadline = self.work_deadline + self.profile["cleanup_seconds"]
         self.cleaning = False
         self.discovery_deadline = None
         self.active = {}
@@ -188,7 +231,8 @@ class Driver:
         self.products = None
         self.originals = {}
         self.report = {"status": "running", "started_at": self.now(), "commands": [], "cases": [],
-                       "work_seconds": WORK_SECONDS[locale], "cleanup_reserve_seconds": CLEANUP_SECONDS,
+                       "execution_profile": dict(self.profile), "timing_policy": dict(self.timing),
+                       "work_seconds": self.profile["work_seconds"], "cleanup_reserve_seconds": self.profile["cleanup_seconds"],
                        "selected_locale": locale, "requested_method": self.case[1], "expected_case_count": 1,
                        "cleanup": {"verified": False}, "errors": []}
         self.save()
@@ -278,6 +322,10 @@ class Driver:
             leader_exited = observed("poll", process.poll) is not None  # Reap our child when possible.
             record["leader_returncode"] = process.returncode
             record["group_absent"] = group_absent()
+            # Reaping releases the leader's numeric PID. A still-present PGID
+            # may have been reused; its identity no longer permits signaling.
+            require(not leader_exited or record["group_absent"],
+                    "Reaped leader leaves uncertain process group identity")
             confirmed_stopped = leader_exited and record["group_absent"]
             return confirmed_stopped
 
@@ -314,7 +362,16 @@ class Driver:
                 if failure is None:
                     raise
 
-    def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0):
+    def command(self, argv, label, timeout=30, check=True, stream=False, required_after=0, native_timing=False):
+        environment = dict(os.environ)
+        require_clean_timing_environment(environment)
+        if native_timing:
+            require(label == self.case[0] + "-test" and list(argv[:2]) == ["xcodebuild", "test-without-building"],
+                    "Timing token is restricted to the selected native test command")
+            if self.timing["runner_token"] is not None:
+                require(all(environment.get(key) == value for key, value in HOSTED_TIMING_CONTEXT.items()),
+                        "Hosted timing context changed before native execution")
+                environment["TEST_RUNNER_TRIPDOCKET_IPAD_TIMING"] = self.timing["runner_token"]
         limit = self.phase_limit()
         deadline = min(limit - 7, time.monotonic() + timeout)
         prefix = f"commands/{len(self.report['commands']):03d}-{label}"
@@ -323,6 +380,8 @@ class Driver:
         item = {"argv": [str(v) for v in argv], "label": label, "start": self.now(),
                 "timeout_seconds": timeout, "wait_deadline_monotonic": deadline, "phase_deadline_monotonic": limit,
                 "stdout": str(stdout.relative_to(self.out)), "stderr": str(stderr.relative_to(self.out))}
+        if native_timing:
+            item["timing_policy"] = dict(self.timing)
         self.report["commands"].append(item)
         process, failure, traceback = None, None, None
         try:
@@ -337,7 +396,8 @@ class Driver:
                             label + " lacks full test/post-validation budget; no test spawned")
                 self.registering_process = True
                 try:
-                    process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors, start_new_session=True)
+                    process = subprocess.Popen(item["argv"], cwd=self.root, stdout=output, stderr=errors,
+                                               start_new_session=True, env=environment)
                     self.confirmed_absent_groups.discard(process.pid)
                     self.active[process.pid] = process
                     item["owned_process_group"] = process.pid
@@ -444,7 +504,7 @@ class Driver:
         self.save()
         print("Owned iPad: " + json.dumps(self.report["destination"], sort_keys=True), flush=True)
         self.command(["xcrun", "simctl", "boot", self.owned], "boot", timeout=45)
-        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=180)
+        self.command(["xcrun", "simctl", "bootstatus", self.owned, "-b"], "bootstatus", timeout=self.profile["boot_seconds"])
 
     def discover_owned_ipad(self):
         """All discovery, acquisition and identity checks share one phase limit."""
@@ -455,6 +515,7 @@ class Driver:
         self.checkpoint()
         architecture = self.command(["uname", "-m"], "architecture")[1].strip()
         self.checkpoint()
+        require(architecture == self.profile["architecture"], "Captured architecture differs from initial iPad profile")
         pair = choose_pair(runtimes, dtypes, architecture, self.sdk_version)
         self.checkpoint()
         inventory = self.json_command(["xcrun", "simctl", "list", "devices", "--json"], "devices-before")
@@ -486,7 +547,7 @@ class Driver:
         return ["-destination", "platform=iOS Simulator,id=" + self.owned, "-destination-timeout", "60",
                 "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                 "-collect-test-diagnostics", "never", "-default-test-execution-time-allowance", "180",
-                "-maximum-test-execution-time-allowance", "480"]
+                "-maximum-test-execution-time-allowance", str(self.timing["xcode_case_max_seconds"])]
 
     def discover_products(self):
         products = self.derived / "Build/Products"
@@ -502,11 +563,15 @@ class Driver:
         target = targets[0]
 
         def resolve(value, host=None):
-            value = value.replace("__TESTROOT__", str(products))
+            replacements = {"__TESTROOT__": str(products)}
             if host:
-                value = value.replace("__TESTHOST__", str(host))
+                replacements["__TESTHOST__"] = str(host)
+            tokens = "|".join(re.escape(token) for token in replacements)
+            require("__" not in re.sub(tokens, "", value), "Unresolved/outside generated product path")
+            # Expand the template once; parent directory names are literal data.
+            value = re.sub(tokens, lambda match: replacements[match.group()], value)
             path = Path(value).resolve()
-            require("__" not in value and path.is_relative_to(products.resolve()) and path.exists(), "Unresolved/outside generated product path")
+            require(path.is_relative_to(products.resolve()) and path.exists(), "Unresolved/outside generated product path")
             return path
 
         runner = resolve(target["TestHostPath"])
@@ -533,7 +598,7 @@ class Driver:
                       "-testPlan", "Tripfolio-iPad",
                       "-configuration", "Debug", "-derivedDataPath", self.derived,
                       "-only-testing:TripfolioUITests/PrivacySupportUITests/" + self.case[1],
-                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=480, stream=True)
+                      *self.common_xcode(), "CODE_SIGNING_ALLOWED=NO"], "build-for-testing", timeout=self.profile["build_seconds"], stream=True)
         self.discover_products()
         self.built = self.product_snapshot("products-after-build")
 
@@ -603,7 +668,8 @@ class Driver:
         entry = {"locale": locale, "method": method, "system_content_size_expected": size,
                  "original_xcresult": str(original), "status": "not_admitted"}
         self.report["cases"].append(entry)
-        required = CASE_PREP_SECONDS + allowance + 7 + CASE_POST_SECONDS
+        preparation = CASE_PREP_SECONDS + self.profile["aut_install_seconds"] - 60
+        required = preparation + allowance + 7 + CASE_POST_SECONDS
         entry["admission"] = {"required_seconds": required, "remaining_seconds": self.work_deadline - time.monotonic(),
                               "post_validation_seconds": CASE_POST_SECONDS, "work_deadline": self.work_deadline}
         self.save()
@@ -611,7 +677,8 @@ class Driver:
                 label + " lacks full case/post-validation budget; no case started")
         entry["status"] = "started"
         self.product_snapshot(label + "/products-before")
-        self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]], label + "-install", timeout=60)
+        self.command(["xcrun", "simctl", "install", self.owned, self.products["aut"]],
+                     label + "-install", timeout=self.profile["aut_install_seconds"])
         self.command(["xcrun", "simctl", "install", self.owned, self.products["runner"]], label + "-runner-install", timeout=60)
         entry["installed_before"] = self.installed(label + "/installed-before", required=True)["available"]
         entry["runner_installed_before"] = self.installed(label + "/runner-installed-before", required=True, product="runner")["available"]
@@ -626,7 +693,7 @@ class Driver:
                                    *self.common_xcode(), "-resultBundlePath", original,
                                    "-only-testing:TripfolioUITests/PrivacySupportUITests/" + method],
                                   label + "-test", timeout=allowance, check=False, stream=True,
-                                  required_after=CASE_POST_SECONDS)
+                                  required_after=CASE_POST_SECONDS, native_timing=True)
             entry["xcodebuild_exit_code"] = code
             require(code == 0, "xcodebuild failed; result data cannot override nonzero exit")
         except BaseException as error:
@@ -657,7 +724,7 @@ class Driver:
 
     def cleanup(self):
         self.cleaning = True
-        self.final_deadline = min(self.final_deadline, time.monotonic() + CLEANUP_SECONDS)
+        self.final_deadline = min(self.final_deadline, time.monotonic() + self.profile["cleanup_seconds"])
         cleanup = self.report["cleanup"]
         cleanup["started_at"] = self.now()
         stop_errors = []
@@ -687,6 +754,8 @@ class Driver:
             cleanup["owned_uuid_absent"] = absent
             require(cleanup.get("delete_exit_code") == 0 and absent, "Owned iPad deletion not confirmed")
         require(not stop_errors, "Owned command process cleanup could not be confirmed")
+        # Cleanup commands may have left groups active after the initial sweep.
+        require(not self.active, "Owned process groups remain unconfirmed after cleanup")
         cleanup["verified"] = True
         cleanup["finished_at"] = self.now()
         self.save()
@@ -743,5 +812,7 @@ class Driver:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--locale", required=True, choices=[case[0] for case in CASES])
+    parser.add_argument("--hosted-intel-timing", action="store_true",
+                        help="Use the fixed locale-specific Intel iPad timing policy in GitHub-hosted CI only")
     args = parser.parse_args()
-    sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale).run())
+    sys.exit(Driver(Path(__file__).resolve().parent.parent, args.locale, args.hosted_intel_timing).run())

@@ -35,8 +35,10 @@ final class BatchImportUITests: XCTestCase {
         guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
               applicationSnapshot.elementType == .application,
               let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
-              !all.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }),
-              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField" || $0.elementType == .keyboard }) else { diagnostic?("snapshot-scope-or-editor-or-keyboard"); return nil }
+              !all.contains(where: { $0.identifier == "DOC.inlineRenameField"
+                  || $0.identifier == "UIContinuousPathIntroductionView" || $0.elementType == .keyboard }),
+              !environment.contains(where: { $0.identifier == "DOC.inlineRenameField"
+                  || $0.identifier == "UIContinuousPathIntroductionView" || $0.elementType == .keyboard }) else { diagnostic?("snapshot-scope-or-editor-or-keyboard"); return nil }
         let pickers = all.filter { $0.elementType == .other && $0.identifier == "Browse View (Picker)" }
         let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + localTitle
         let roots = all.filter { $0.elementType == .other && $0.identifier == rootID }
@@ -66,7 +68,7 @@ final class BatchImportUITests: XCTestCase {
     private static func nativeFolderEditorFrame(
         in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot,
         expectedName: String, localTitle: String,
-        keyboardIntroduction: Bool = false,
+        keyboardIntroduction: Bool = false, observationAllowsEmptyName: Bool = false,
         diagnostic: ((String) -> Void)? = nil
     ) -> CGRect? {
         @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
@@ -87,7 +89,8 @@ final class BatchImportUITests: XCTestCase {
         }
         guard snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)",
               applicationSnapshot.elementType == .application,
-              let all = nodes(snapshot), let environment = nodes(applicationSnapshot), !expectedName.isEmpty,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
+              (observationAllowsEmptyName || !expectedName.isEmpty),
               !all.contains(where: { $0.identifier == "UIContinuousPathIntroductionView" }),
               environment.filter({ $0.elementType == .other && $0.identifier == "UIContinuousPathIntroductionView" }).count
                 == (keyboardIntroduction ? 1 : 0),
@@ -99,9 +102,14 @@ final class BatchImportUITests: XCTestCase {
         let navigations = all.filter { $0.elementType == .navigationBar && $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }
         let editors = all.filter { $0.elementType == .textView && $0.identifier == "DOC.inlineRenameField" }
         let keyboards = environment.filter { $0.elementType == .keyboard }
+        let introductions = environment.filter { $0.identifier == "UIContinuousPathIntroductionView" }
+        // The first-use introduction can replace the Keyboard accessibility node.
+        // It still needs its own visible, non-overlapping bounds before Continue.
+        let obstructions = keyboards + introductions
         let windows = applicationSnapshot.children.filter { $0.elementType == .window }
         guard pickers.count == 1, roots.count == 1, grids.count == 1, navigations.count == 1,
-              editors.count == 1, keyboards.count == 1, !windows.isEmpty,
+              editors.count == 1, (keyboardIntroduction ? keyboards.count <= 1 : keyboards.count == 1),
+              !windows.isEmpty,
               let pickerNodes = nodes(pickers[0]), let rootNodes = nodes(roots[0]),
               pickerNodes.filter({ $0.elementType == .other && $0.identifier == rootID }).count == 1,
               rootNodes.filter({ $0.elementType == .collectionView && $0.identifier == "File View" }).count == 1,
@@ -116,15 +124,16 @@ final class BatchImportUITests: XCTestCase {
                 || ($0.elementType == .button && $0.label == localTitle + ", Actions Menu")
         }
         guard titles.count == 1,
-              [grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
-               titles[0].frame, keyboards[0].frame].allSatisfy(visibleFrame),
+              ([grids[0].frame, navigations[0].frame, cells[0].frame, editors[0].frame,
+                titles[0].frame] + obstructions.map(\.frame)).allSatisfy(visibleFrame),
               windows.allSatisfy({ visibleFrame($0.frame) }) else { diagnostic?("title-or-nonfinite-frame"); return nil }
         let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
         guard visibleFrame(window), window.contains(titles[0].frame), window.contains(editors[0].frame),
               window.contains(cells[0].frame), navigations[0].frame.contains(titles[0].frame),
               grids[0].frame.contains(editors[0].frame), grids[0].frame.contains(cells[0].frame),
-              !keyboards[0].frame.intersects(editors[0].frame),
-              !keyboards[0].frame.intersects(titles[0].frame) else { diagnostic?("window-or-containment-or-keyboard"); return nil }
+              introductions.allSatisfy({ window.contains($0.frame) }),
+              obstructions.allSatisfy({ !$0.frame.intersects(editors[0].frame)
+                  && !$0.frame.intersects(titles[0].frame) }) else { diagnostic?("window-or-containment-or-keyboard"); return nil }
         // The real inline editor extends beyond the folder cell's horizontal
         // bounds. Ownership is its ancestry; visible bounds are grid/window.
         return editors[0].frame
@@ -158,6 +167,77 @@ final class BatchImportUITests: XCTestCase {
         return (frame != nil, frame)
     }
 
+    // Files can open the newly created empty child instead of its name editor.
+    // This is only an intention to return to the parent, never a ready folder.
+    @MainActor
+    private static func nativeFolderParentReturnFrame(
+        in snapshot: XCUIElementSnapshot, applicationSnapshot: XCUIElementSnapshot, localTitle: String
+    ) -> CGRect? {
+        @MainActor func nodes(_ root: XCUIElementSnapshot) -> [XCUIElementSnapshot]? {
+            var result: [XCUIElementSnapshot] = []
+            var pending: [(XCUIElementSnapshot, Int)] = [(root, 0)]
+            while let (node, depth) = pending.popLast() {
+                guard depth <= 96, result.count < 4_096 else { return nil }
+                result.append(node)
+                let children = node.children
+                guard children.count <= 4_096 - result.count - pending.count else { return nil }
+                pending.append(contentsOf: children.reversed().map { ($0, depth + 1) })
+            }
+            return result
+        }
+        func visibleFrame(_ frame: CGRect) -> Bool {
+            [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width > 0 && frame.height > 0
+        }
+        guard localTitle == "On My iPhone", snapshot.elementType == .other,
+              snapshot.identifier == "Browse View (Picker)", applicationSnapshot.elementType == .application,
+              let all = nodes(snapshot), let environment = nodes(applicationSnapshot),
+              !(all + environment).contains(where: {
+                  $0.elementType == .cell || $0.elementType == .keyboard
+                      || $0.identifier == "DOC.inlineRenameField"
+                      || $0.identifier == "UIContinuousPathIntroductionView"
+              }) else { return nil }
+        let rootID = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: untitled folder"
+        let roots = all.filter { $0.identifier.hasPrefix("DOC.browsingRoot Source:") }
+        let environmentRoots = environment.filter { $0.identifier.hasPrefix("DOC.browsingRoot Source:") }
+        let pickers = all.filter { $0.identifier == "Browse View (Picker)" }
+        let navigations = all.filter {
+            $0.elementType == .navigationBar || $0.identifier == "FullDocumentManagerViewControllerNavigationBar"
+        }
+        let backs = all.filter { $0.identifier == "BackButton" || $0.label == localTitle }
+        let titles = all.filter { $0.label.hasSuffix(", Actions Menu") }
+        let empty = all.filter { $0.label == "Folder is Empty" }
+        let grids = all.filter { $0.elementType == .collectionView || $0.identifier == "File View" }
+        guard pickers.count == 1, roots.count == 1, roots[0].elementType == .other,
+              roots[0].identifier == rootID, environmentRoots.count <= 1,
+              environmentRoots.allSatisfy({ $0.elementType == .other && $0.identifier == rootID }),
+              navigations.count == 1, navigations[0].elementType == .navigationBar,
+              navigations[0].identifier == "FullDocumentManagerViewControllerNavigationBar",
+              backs.count == 1, backs[0].elementType == .button, backs[0].identifier == "BackButton",
+              backs[0].label == localTitle, backs[0].isEnabled,
+              titles.count == 1, titles[0].elementType == .button,
+              titles[0].label == "untitled folder, Actions Menu",
+              empty.count == 1, empty[0].elementType == .staticText, grids.count <= 1,
+              grids.allSatisfy({ $0.elementType == .collectionView && $0.identifier == "File View" }),
+              let rootNodes = nodes(roots[0]), let navigationNodes = nodes(navigations[0]),
+              rootNodes.filter({ $0.identifier == "FullDocumentManagerViewControllerNavigationBar" }).count == 1,
+              rootNodes.filter({ $0.label == "Folder is Empty" }).count == 1,
+              rootNodes.filter({ $0.identifier == "File View" }).count == grids.count,
+              navigationNodes.filter({ $0.identifier == "BackButton" }).count == 1,
+              navigationNodes.filter({ $0.label == "untitled folder, Actions Menu" }).count == 1 else { return nil }
+        let windows = applicationSnapshot.children.filter { $0.elementType == .window }
+        guard !windows.isEmpty, windows.allSatisfy({ visibleFrame($0.frame) }),
+              ([snapshot.frame, roots[0].frame, navigations[0].frame, backs[0].frame,
+                titles[0].frame, empty[0].frame] + grids.map(\.frame)).allSatisfy(visibleFrame) else { return nil }
+        let window = windows.dropFirst().reduce(windows[0].frame) { $0.intersection($1.frame) }
+        guard visibleFrame(window), snapshot.frame.contains(roots[0].frame),
+              roots[0].frame.contains(navigations[0].frame), roots[0].frame.contains(empty[0].frame),
+              navigations[0].frame.contains(backs[0].frame), navigations[0].frame.contains(titles[0].frame),
+              window.contains(backs[0].frame), window.contains(titles[0].frame), window.contains(empty[0].frame),
+              grids.allSatisfy({ roots[0].frame.contains($0.frame) && window.contains($0.frame) }) else { return nil }
+        return backs[0].frame
+    }
+
     // Evidence storage only; none of these fields participate in readiness.
     // A new attempt clears partial inputs without erasing the last bound pair.
     private struct NativeFolderInitialObservation {
@@ -169,6 +249,8 @@ final class BatchImportUITests: XCTestCase {
         var acquisitionError: String?
         var errorTruncated = false
         var rejections: [String] = []
+        var classification = "not-classified"
+        var parentReturnChecks: [(name: String, result: Bool)] = []
 
         mutating func begin() {
             attempt += 1
@@ -178,6 +260,8 @@ final class BatchImportUITests: XCTestCase {
             acquisitionError = nil
             errorTruncated = false
             rejections = []
+            parentReturnChecks = []
+            classification = "not-classified"
         }
 
         mutating func failed(_ error: Error) {
@@ -186,18 +270,28 @@ final class BatchImportUITests: XCTestCase {
             errorTruncated = acquisitionError != description
         }
 
+        // Record only a value already evaluated by the existing short-circuit guard.
+        mutating func recordParentReturnCheck(_ name: String, _ result: Bool) -> Bool {
+            parentReturnChecks.append((name: name, result: result))
+            return result
+        }
+
         func metadata() -> Data {
             let payload: [String: Any] = [
                 "version": 1, "attempt": attempt, "acquisitionStage": String(stage.prefix(128)),
                 "currentPickerPresent": picker != nil, "currentApplicationPresent": application != nil,
                 "currentPairBound": lastBound?.attempt == attempt,
+                "classification": classification,
+                "parentReturnChecks": parentReturnChecks.prefix(7).map {
+                    ["name": $0.name, "result": $0.result] as [String: Any]
+                },
                 "lastBoundAttempt": lastBound.map { $0.attempt as Any } ?? NSNull(),
                 "acquisitionError": acquisitionError.map { $0 as Any } ?? NSNull(),
                 "errorTruncated": errorTruncated,
                 "alternativeFirstRejections": Array(rejections.prefix(3)).map { String($0.prefix(160)) },
                 "snapshotScope": "Sequential existing picker/application observations; not atomic. Prior bound pair is not the current failed acquisition.",
                 "limits": ["errorCharacters": 512, "stageCharacters": 128, "rejections": 3,
-                           "rejectionCharacters": 160, "bytes": 16_384]
+                           "rejectionCharacters": 160, "parentReturnChecks": 7, "bytes": 16_384]
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
                   data.count <= 16_384 else {
@@ -420,46 +514,132 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
-    // Opt-in prepare/export/restore phases. Preparation returns before the host
-    // creates and verifies the exclusively owned empty folder. Export/restore
+    private static func recoveryNativeFolderCreation(
+        _ environment: [String: String], debugSimulator: Bool
+    ) throws -> Bool {
+        let mode = environment["TRIPDOCKET_RECOVERY_CREATE_FOLDER"]
+        let prefix = "TripDocket-Recovery-"
+        let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"] ?? ""
+        let token = String(folder.dropFirst(prefix.count))
+        let conflicting = ["TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
+                           "TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN",
+                           "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
+                           "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
+                           "TRIPDOCKET_BATCH_UI", "TRIPDOCKET_BATCH_FOLDER",
+                           "TRIPDOCKET_COMBINED_BATCH_UI", "TRIPDOCKET_BATCH_CHECKPOINT_SESSION",
+                           "TRIPDOCKET_NATIVE_REOPEN_CONTROL"]
+        guard debugSimulator, mode == nil || mode == "1", environment["TRIPDOCKET_RECOVERY_UI"] == "1",
+              environment["TRIPDOCKET_RECOVERY_PHASE"] == "prepare", folder.hasPrefix(prefix),
+              UUID(uuidString: token)?.uuidString.lowercased() == token,
+              conflicting.allSatisfy({ environment[$0] == nil }) else {
+            throw BatchTestFailure(message: "Files preparation requires its isolated Debug Simulator prepare phase")
+        }
+        return mode != nil
+    }
+
+    private static func recoveryNativeSourceArguments(folder: String, sourceToken: String) throws -> [String] {
+        let prefix = "TripDocket-Recovery-"
+        let folderToken = String(folder.dropFirst(prefix.count))
+        guard folder.hasPrefix(prefix),
+              UUID(uuidString: folderToken)?.uuidString.lowercased() == folderToken,
+              UUID(uuidString: sourceToken)?.uuidString.lowercased() == sourceToken,
+              sourceToken != folderToken else {
+            throw BatchTestFailure(message: "Recovery preparation requires distinct canonical source and folder identities")
+        }
+        return ["--ui-testing-native-batch-seed", "--ui-testing-native-batch-token", sourceToken]
+    }
+
+    // Opt-in prepare/export/restore phases. Dedicated Recovery preparation
+    // creates its folder through Files before host empty-leaf verification. Export/restore
     // retain the file and library snapshot boundary. No StoreKit transaction is created.
     func testRecoveryPrepareFilesProvider() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "prepare")
+        #if DEBUG && targetEnvironment(simulator)
+        let debugSimulator = true
+        #else
+        let debugSimulator = false
+        #endif
+        let createFolder = try Self.recoveryNativeFolderCreation(
+            ProcessInfo.processInfo.environment, debugSimulator: debugSimulator
+        )
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
-        app.launchArguments = recoveryArguments + ["--demo"]
-        app.launch()
-        try await wait("The preparation demo did not finish loading", app: app) {
-            app.staticTexts["Coast weekend"].exists
+        if createFolder {
+            // recoveryConfiguration already validated the matching hosted opt-in.
+            let initialObservationTimeout: Duration = Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
+                ? .seconds(60) : .seconds(30)
+            let textCompletionTimeout = Self.recoveryFolderTextObservationTimeout(
+                hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
+            )
+            let sourceToken = UUID().uuidString.lowercased()
+            let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
+            app.launchArguments = recoveryArguments + sourceArguments
+            app.launch()
+            let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+            let failed = app.staticTexts["nativeSeed.failure"]
+            let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+            try await wait("Recovery native-folder export source is unavailable", app: app) {
+                failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
+            }
+            capture(app, "Recovery prepare — direct native exporter; no Save performed")
+            try check(!failed.exists && saved.count == 0 && source.count == 1
+                      && source.element.isEnabled && source.element.isHittable,
+                      app: app, "Recovery preparation has no unique live, unsaved export source")
+            source.element.tap()
+            let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Recovery preparation unexpectedly exported a destination")
+            try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder,
+                                                  initialObservationTimeout: initialObservationTimeout,
+                                                  textCompletionTimeout: textCompletionTimeout)
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Recovery preparation unexpectedly exported a destination")
+            capture(app, "Recovery prepare — native folder rename requested; host empty-folder verification pending")
+        } else {
+            // Provider-only preparation opens Files without exercising the app's Settings flow.
+            let sourceToken = UUID().uuidString.lowercased()
+            let sourceArguments = try Self.recoveryNativeSourceArguments(folder: recoveryFolder, sourceToken: sourceToken)
+            app.launchArguments = recoveryArguments + sourceArguments
+            app.launch()
+            let source = app.buttons.matching(identifier: "nativeSeed.synthetic-ticket.pdf")
+            let failed = app.staticTexts["nativeSeed.failure"]
+            let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+            try await wait("Files preparation export source is unavailable", app: app) {
+                failed.exists || (source.count == 1 && source.element.isEnabled && source.element.isHittable)
+            }
+            capture(app, "Files preparation — direct native exporter; no Save performed")
+            try check(!failed.exists && saved.count == 0 && source.count == 1
+                      && source.element.isEnabled && source.element.isHittable,
+                      app: app, "Files preparation has no unique live, unsaved export source")
+            source.element.tap()
+            let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+            let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
+            // Cold Files presentation uses the same bounded allowance as native preparation.
+            try await wait("Real Files preparation picker did not open", app: app, timeout: .seconds(30)) {
+                navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
+            }
+            let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
+            let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
+            let location = app.cells.matching(NSPredicate(
+                format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
+            ))
+            try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
+            let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
+            try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
+            try check(saved.count == 0 && !failed.exists, app: app,
+                      "Files preparation unexpectedly exported a destination")
+            capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
         }
-        try await recoveryTab("Settings", app: app)
-        try await recoveryFreeCard(app)
-        try await recoveryCounts(trips: 1, people: 1, documents: 1, app: app)
-        try await presentRecoverySave(app)
-        let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
-        let picker = app.otherElements.matching(identifier: "Browse View (Picker)")
-        try await wait("Real Files preparation picker did not open", app: app) {
-            navigation.count == 1 && navigation.element.exists && picker.count == 1 && picker.element.exists
-        }
-        let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
-        let browse = app.tabBars["DOC.browsingModeTabBar"].buttons.matching(NSPredicate(format: "label == %@", "Browse"))
-        let location = app.cells.matching(NSPredicate(
-            format: "identifier == %@ OR identifier == %@", "DOC.sidebar.item.On My iPhone", "DOC.sidebar.item.On My iPad"
-        ))
-        try await reachRecoveryLocalRoot(localTitle, navigation: navigation, location: location, browse: browse, app: app)
-        let directory = picker.element.cells.matching(identifier: recoveryFolder + ", Folder")
-        try check(directory.count == 0, app: app, "Owned folder already exists before fixture creation")
-        capture(app, "Recovery prepare — real local Files provider before fixture shutdown")
-        // Native New Folder/rename is not a product acceptance requirement.
-        // The host creates only an exclusive empty run-UUID leaf after this
-        // real provider initialization and proven fixture stop; never a backup.
+        // Dedicated Recovery adopts the native-created empty leaf only after
+        // this fixture stops. No backup is saved during either prepare mode.
         app.terminate()
         try await wait("Preparation fixture did not stop before host fixture creation", app: app) {
             app.state == .notRunning
         }
         // The existing defer remains cleanup on every success/failure path.
-        // Host must now create and independently prove the exact folder empty.
+        // Host must independently prove the dedicated Recovery folder empty.
     }
 
 
@@ -493,8 +673,8 @@ final class BatchImportUITests: XCTestCase {
                   app: app, "Direct preparation has no unique live native export source")
         capture(app, "Batch preparation — native exporter before opening Files; no Save performed")
         source.element.tap()
-        // Cold Files service navigation appeared after the default 15s wait on Intel.
-        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+        // A cold Files service presented after 33–35s in the retained Arm run.
+        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(45))
         let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
         try check(isNativeFilesRoot(app) && picker.cells.matching(identifier: absentFolder + ", Folder").count == 0
                   && saved.count == 0 && !failed.exists,
@@ -510,6 +690,7 @@ final class BatchImportUITests: XCTestCase {
                                                debugSimulator: Bool) throws -> String {
         let token = environment["TRIPDOCKET_BATCH_PREPARE_TOKEN"] ?? ""
         let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_RECOVERY_CREATE_FOLDER",
                            "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                            "TRIPDOCKET_NATIVE_FOLDER_UI", "TRIPDOCKET_NATIVE_FOLDER_TOKEN",
                            "TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN",
@@ -530,6 +711,7 @@ final class BatchImportUITests: XCTestCase {
         let token = environment["TRIPDOCKET_NATIVE_FOLDER_TOKEN"] ?? ""
         let sourceToken = environment["TRIPDOCKET_NATIVE_FOLDER_SOURCE_TOKEN"] ?? ""
         let conflicting = ["TRIPDOCKET_RECOVERY_UI", "TRIPDOCKET_RECOVERY_PHASE", "TRIPDOCKET_RECOVERY_FOLDER",
+                           "TRIPDOCKET_RECOVERY_CREATE_FOLDER",
                            "TRIPDOCKET_BATCH_PREPARE_UI", "TRIPDOCKET_BATCH_PREPARE_TOKEN",
                            "TRIPDOCKET_NATIVE_SEED_UI", "TRIPDOCKET_NATIVE_SEED_TOKEN",
                            "TRIPDOCKET_NATIVE_ROOT_UI", "TRIPDOCKET_NATIVE_ROOT_TOKEN",
@@ -615,15 +797,43 @@ final class BatchImportUITests: XCTestCase {
                   app: app, "Native-folder preparation has no unique live export source")
         capture(app, "Native folder — direct exporter before opening Files; no Save performed")
         source.element.tap()
-        let picker = try await openNativeFilesRoot(app)
+        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
+        try check(saved.count == 0 && !failed.exists, app: app,
+                  "Native-folder preparation unexpectedly exported a destination")
+        try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: ownedFolder)
+        // This fixture requests the native rename, then yields to the host's
+        // mandatory no-follow proof of the exact empty leaf. Editor dismissal
+        // is not its completion signal. The separate seed phase must navigate
+        // the real folder before it can save either synthetic original.
+        try check(saved.count == 0 && !failed.exists, app: app,
+                  "Native-folder preparation unexpectedly exported a destination")
+        capture(app, "Native folder rename requested; host empty-folder verification pending")
+        // Never tap Save: the host must independently prove this native-created
+        // leaf empty after the fixture stops, before the separate seed phase.
+        app.terminate()
+        try await wait("Native-folder fixture did not stop before host verification", app: app) {
+            app.state == .notRunning
+        }
+    }
+
+    // Both callers supply their separately validated canonical UUID name.
+    // This helper performs native folder actions only; caller-owned launch,
+    // no-export checks, fixture stop and host adoption remain separate.
+    private func createNativeEmptyFilesFolder(
+        _ app: XCUIApplication, picker: XCUIElement, ownedFolder: String,
+        initialObservationTimeout: Duration = .seconds(60),
+        textCompletionTimeout: Duration = .seconds(15)
+    ) async throws {
+        try check(UIDevice.current.userInterfaceIdiom == .phone, app: app,
+                  "Native folder creation requires its selected iPhone")
         let navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let localTitle = "On My iPhone"
         let files = picker.collectionViews.matching(identifier: "File View")
         let directory = picker.cells.matching(identifier: ownedFolder + ", Folder")
-        let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
         try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 0
-                  && directory.count == 0 && saved.count == 0 && !failed.exists,
-                  app: app, "Native folder requires the empty local root and no exported destination")
+                  && directory.count == 0,
+                  app: app, "Native folder requires the empty local root and absent owned name")
         let more = navigation.element.buttons.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "OverflowBarButtonItem", "More"
         ))
@@ -641,10 +851,22 @@ final class BatchImportUITests: XCTestCase {
         let keyboardIntroduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
         var keyboardIntroductionAcknowledged = false
         var renameFrame: CGRect?
+        var pendingRenameFrame: CGRect?
+        var renameSnapshots: (picker: XCUIElementSnapshot, application: XCUIElementSnapshot)?
+        var renameCandidateCaptured = false
+        var renameCandidateRejected = false
         var initialObservation = NativeFolderInitialObservation()
+        var parentReturnAttempted = false
+        var parentReturnRejected = false
+        // Resolve initial and fresh state, including at most one parent return,
+        // inside one selected window. Late queries cannot start Back or a long press.
+        let initialDeadline = ContinuousClock.now.advanced(by: initialObservationTimeout)
         do {
-            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app) {
+            try await wait("Native folder has neither its editor nor a unique new untitled folder", app: app, timeout: initialObservationTimeout) {
                 renameFrame = nil
+                renameSnapshots = nil
+                guard !parentReturnRejected, !renameCandidateRejected,
+                      ContinuousClock.now < initialDeadline else { return false }
                 initialObservation.begin()
                 do {
                     let snapshots = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
@@ -657,8 +879,87 @@ final class BatchImportUITests: XCTestCase {
                         in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle,
                         diagnostic: { initialObservation.rejections.append($0) }
                     )
-                    renameFrame = state.renameFrame
-                    return state.ready
+                    initialObservation.classification = state.ready
+                        ? (state.renameFrame == nil ? "editor" : "rename-candidate") : "unresolved"
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    if state.ready {
+                        guard let frame = state.renameFrame else {
+                            pendingRenameFrame = nil
+                            return true
+                        }
+                        if let pending = pendingRenameFrame {
+                            guard frame == pending else {
+                                renameCandidateRejected = true
+                                initialObservation.classification = "rename-candidate-changed"
+                                return false
+                            }
+                            renameFrame = state.renameFrame
+                            renameSnapshots = snapshots
+                            initialObservation.classification = "rename-confirmed"
+                            return true
+                        }
+                        pendingRenameFrame = frame
+                        if !renameCandidateCaptured {
+                            renameCandidateCaptured = true
+                            capture(app, "Native folder initial Rename candidate before fresh state validation")
+                        }
+                        return false
+                    }
+                    // A candidate may become the opened empty child as the
+                    // next query is in flight. Resolve it with the same one-Back
+                    // allowance; never act on the earlier candidate frame.
+                    pendingRenameFrame = nil
+                    guard let before = Self.nativeFolderParentReturnFrame(
+                        in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
+                    ) else { return false }
+                    initialObservation.classification = "empty-child"
+                    guard !parentReturnAttempted else {
+                        // A completed Back can still expose the old child
+                        // as navigation settles. Wait, without another tap.
+                        return false
+                    }
+                    // Consume even a rejected opportunity. A changed target or
+                    // failed fresh query must never cause a later Back attempt.
+                    parentReturnAttempted = true
+                    parentReturnRejected = true
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    initialObservation.begin()
+                    let current = try self.nativeFolderSnapshots(app, diagnostic: { stage, picker, application in
+                        initialObservation.stage = stage
+                        initialObservation.picker = picker
+                        initialObservation.application = application
+                    })
+                    initialObservation.lastBound = (initialObservation.attempt, current.picker, current.application)
+                    initialObservation.classification = "parent-return-fresh-proof"
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    guard Self.nativeFolderParentReturnFrame(
+                        in: current.picker, applicationSnapshot: current.application, localTitle: localTitle
+                    ) == before else {
+                        initialObservation.rejections.append("parent-return: fresh child proof changed")
+                        return false
+                    }
+                    let back = navigation.element.buttons.matching(NSPredicate(
+                        format: "identifier == %@ AND label == %@", "BackButton", localTitle
+                    ))
+                    guard initialObservation.recordParentReturnCheck("navigationUnique", navigation.count == 1),
+                          initialObservation.recordParentReturnCheck("backUnique", back.count == 1),
+                          initialObservation.recordParentReturnCheck("backFrameMatches", back.element.frame == before),
+                          initialObservation.recordParentReturnCheck("backEnabled", back.element.isEnabled),
+                          initialObservation.recordParentReturnCheck("backHittable", back.element.isHittable),
+                          initialObservation.recordParentReturnCheck("noSavedFixture", app.staticTexts.matching(NSPredicate(
+                              format: "identifier BEGINSWITH %@", "nativeSeed.saved."
+                          )).count == 0),
+                          initialObservation.recordParentReturnCheck("noFixtureFailure", !app.staticTexts["nativeSeed.failure"].exists) else {
+                        initialObservation.rejections.append("parent-return: live Back or unsaved fixture changed")
+                        return false
+                    }
+                    try Task.checkCancellation()
+                    guard ContinuousClock.now < initialDeadline else { return false }
+                    back.element.tap()
+                    parentReturnRejected = false
+                    // Child navigation is not readiness. The next observation
+                    // must prove the unchanged parent editor or unique cell.
+                    return false
                 } catch {
                     initialObservation.failed(error)
                     return false
@@ -669,15 +970,16 @@ final class BatchImportUITests: XCTestCase {
             throw error
         }
         if let before = renameFrame {
-            // The editor can appear after the initial observation selected the
-            // unedited-folder route. Reclassify the existing fresh pair before
-            // choosing any action; an unknown state still fails closed.
+            // Recheck the confirmed immutable pair and the live target. The
+            // resolution loop already handled any candidate-to-child transition.
             let created = files.element.cells.matching(NSPredicate(
                 format: "identifier == %@ AND label == %@",
                 "untitled folder, Folder", "untitled folder, 0 items"
             ))
-            capture(app, "Native folder initial Rename candidate before fresh state validation")
-            let snapshots = try nativeFolderSnapshots(app)
+            guard let snapshots = renameSnapshots else {
+                recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                throw BatchTestFailure(message: "Native folder Rename has no confirmed state")
+            }
             let currentState = Self.nativeFolderInitialState(
                 in: snapshots.picker, applicationSnapshot: snapshots.application, localTitle: localTitle
             )
@@ -685,11 +987,19 @@ final class BatchImportUITests: XCTestCase {
                       && (currentState.renameFrame == nil || currentState.renameFrame == before),
                       app: app, "New native folder changed before Rename request")
             if currentState.renameFrame != nil {
-                try check(isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
-                          && created.count == 1 && created.element.frame == before
-                          && created.element.isEnabled && created.element.isHittable,
-                          app: app, "New native folder changed before Rename request")
+                let liveReady = isNativeFilesRoot(app) && files.count == 1 && files.element.cells.count == 1
+                    && created.count == 1 && created.element.frame == before
+                    && created.element.isEnabled && created.element.isHittable
+                if !liveReady {
+                    initialObservation.classification = "rename-live-target-changed"
+                    recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                }
+                try check(liveReady, app: app, "New native folder changed before Rename request")
                 try Task.checkCancellation()
+                guard ContinuousClock.now < initialDeadline else {
+                    recordNativeFolderInitialFailure(initialObservation, localTitle: localTitle)
+                    throw BatchTestFailure(message: "Native folder resolution expired before Rename request")
+                }
                 created.element.press(forDuration: 1)
                 let rename = app.buttons.matching(NSPredicate(format: "label == %@", "Rename"))
                 try await wait("Native folder context menu has no unique Rename action", app: app) {
@@ -745,8 +1055,30 @@ final class BatchImportUITests: XCTestCase {
         try check(pretypeLiveReady && pretypeFramesMatch,
                   app: app, "Native folder editor left the single newly created local folder")
         inlineNames.element.typeText(ownedFolder)
-        try check(inlineNames.count == 1 && inlineNames.element.value as? String == ownedFolder,
-                  app: app, "Native folder name differs from the exact owned UUID name")
+        var textTrace = NativeFolderTextTrace()
+        defer {
+            let attachment = XCTAttachment(string: textTrace.json())
+            attachment.name = "Native folder text completion observations"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        do {
+            try await Self.observeNativeFolderTextCompletion(
+                expectedName: ownedFolder,
+                timeout: textCompletionTimeout,
+                foreground: { app.state == .runningForeground },
+                pickerSnapshot: {
+                    // .element requires one matching live picker; no firstMatch.
+                    try app.otherElements.matching(identifier: "Browse View (Picker)").element.snapshot()
+                },
+                applicationSnapshot: { try app.snapshot() },
+                trace: &textTrace
+            )
+        } catch {
+            if error is CancellationError { throw error }
+            capture(app, "Native folder name differs from the exact owned UUID name")
+            throw error
+        }
         try await acknowledgeNativeFolderKeyboardIntroduction(
             app, expectedName: ownedFolder, acknowledged: &keyboardIntroductionAcknowledged
         )
@@ -778,19 +1110,6 @@ final class BatchImportUITests: XCTestCase {
             throw BatchTestFailure(message: "Native folder blank grid area changed before end-editing")
         }
         files.element.coordinate(withNormalizedOffset: current.normalized).tap()
-        // This fixture requests the native rename, then yields to the host's
-        // mandatory no-follow proof of the exact empty leaf. Editor dismissal
-        // is not its completion signal. The separate seed phase must navigate
-        // the real folder before it can save either synthetic original.
-        try check(saved.count == 0 && !failed.exists, app: app,
-                  "Native-folder preparation unexpectedly exported a destination")
-        capture(app, "Native folder rename requested; host empty-folder verification pending")
-        // Never tap Save: the host must independently prove this native-created
-        // leaf empty after the fixture stops, before the separate seed phase.
-        app.terminate()
-        try await wait("Native-folder fixture did not stop before host verification", app: app) {
-            app.state == .notRunning
-        }
     }
 
     func testNativeSaveSeedsBothSyntheticOriginals() async throws {
@@ -838,7 +1157,7 @@ final class BatchImportUITests: XCTestCase {
                 picker = try await openNativeFilesRoot(app)
                 navigation = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar").element
             } else {
-                picker = try await openLocalFilesFolder(folder, app: app)
+                picker = try await openLocalFilesFolder(folder, app: app, initialNavigationTimeout: .seconds(30))
                 navigation = try await recoveryFilesNavigation(folder, picker: picker, app: app)
             }
             let save = navigation.buttons["Save"]
@@ -1183,7 +1502,7 @@ final class BatchImportUITests: XCTestCase {
         return (picker, application)
     }
 
-    private func presentRecoverySave(_ app: XCUIApplication) async throws {
+    private func presentRecoverySave(_ app: XCUIApplication, retryNavigation: Bool = false) async throws {
         let export = app.buttons["Export full backup"]
         try await reveal(export, app: app, navigation: "Settings")
         try check(export.isEnabled, app: app, "Free full-backup export is disabled")
@@ -1204,71 +1523,156 @@ final class BatchImportUITests: XCTestCase {
         ))
         // The first share on a fresh simulator starts a remote service. Its
         // container can be present while it has no actions yet; allow that one
-        // presentation to initialize without repeating Export or a share tap.
-        try await waitForStableShareAction(saveToFiles, app: app)
-        saveToFiles.element.tap()
+        // presentation to initialize without repeating Export or tapping an unready action.
+        let proof = try await waitForStableShareAction(saveToFiles, app: app)
+        if retryNavigation {
+            try await openRecoveryFilesFromShare(saveToFiles, app: app, first: proof)
+        } else {
+            proof.action.tap()
+        }
     }
 
-    private func waitForStableShareAction(_ actions: XCUIElementQuery, app: XCUIApplication) async throws {
+    private func recordRecoveryShareTransition(_ message: String) {
+        let attachment = XCTAttachment(string: message)
+        attachment.name = "Recovery Save to Files transition"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func openRecoveryFilesFromShare(_ actions: XCUIElementQuery, app: XCUIApplication,
+                                            first: (frames: [CGRect], identity: String, action: XCUIElement)) async throws {
+        let started = ContinuousClock.now
+        let retryAfter = started.advanced(by: .seconds(15))
+        let deadline = started.advanced(by: .seconds(30))
+        let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        var retryAvailable = true
+        var previous: (frames: [CGRect], identity: String, action: XCUIElement)?
+        var stableObservations = 0
+        func pickerHasNavigation(_ picker: XCUIElement) -> Bool {
+            guard ContinuousClock.now < deadline, let snapshot = try? picker.snapshot(),
+                  ContinuousClock.now < deadline,
+                  snapshot.elementType == .other, snapshot.identifier == "Browse View (Picker)" else { return false }
+            var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
+            var visited = 0
+            var pickerCount = 0
+            var navigationFrames: [CGRect] = []
+            while let (node, depth) = pending.popLast() {
+                guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else { return false }
+                visited += 1
+                if node.elementType == .other, node.identifier == "Browse View (Picker)" { pickerCount += 1 }
+                if node.elementType == .navigationBar,
+                   node.identifier == "FullDocumentManagerViewControllerNavigationBar" {
+                    navigationFrames.append(node.frame)
+                }
+                let children = node.children
+                guard children.count <= 4_096 - visited - pending.count else { return false }
+                pending.append(contentsOf: children.map { ($0, depth + 1) })
+            }
+            guard pickerCount == 1, navigationFrames.count == 1 else { return false }
+            let bounds = snapshot.frame
+            return ContinuousClock.now < deadline && ([bounds] + navigationFrames).allSatisfy { frame in
+                frame.minX.isFinite && frame.minY.isFinite && frame.width.isFinite && frame.height.isFinite
+                    && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
+            }
+        }
+        func matches(_ left: (frames: [CGRect], identity: String, action: XCUIElement),
+                     _ right: (frames: [CGRect], identity: String, action: XCUIElement)) -> Bool {
+            left.identity == right.identity && left.frames.count == right.frames.count
+                && zip(left.frames, right.frames).allSatisfy { a, b in
+                    abs(a.minX - b.minX) <= 0.5 && abs(a.minY - b.minY) <= 0.5
+                        && abs(a.width - b.width) <= 0.5 && abs(a.height - b.height) <= 0.5
+                }
+        }
+        func record(_ message: String) {
+            recordRecoveryShareTransition("elapsed=\(started.duration(to: ContinuousClock.now)); \(message)")
+        }
+        func disableRetry(_ reason: String) {
+            if retryAvailable { record("retry disabled: " + reason) }
+            retryAvailable = false
+        }
+        record("dispatch intent 1; identity=\(first.identity); frames=\(first.frames)")
+        if ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if ContinuousClock.now < deadline { first.action.tap() }
+        }
+        while ContinuousClock.now < deadline {
+            let foreground = app.state == .runningForeground
+            guard ContinuousClock.now < deadline else { break }
+            // Bind the remote picker once. Separate global navigation and picker
+            // queries can each rebuild the remote hierarchy and exhaust this window.
+            let boundPickers = pickers.allElementsBoundByAccessibilityElement
+            guard ContinuousClock.now < deadline else { break }
+            if foreground && boundPickers.count == 1 && pickerHasNavigation(boundPickers[0]) {
+                let stillForeground = app.state == .runningForeground
+                guard ContinuousClock.now < deadline else { break }
+                if stillForeground { return }
+            }
+            guard ContinuousClock.now < deadline else { break }
+            if !boundPickers.isEmpty {
+                // Partial, ambiguous or unreadable Files presence is never proof
+                // that the original share action may safely be tapped again.
+                disableRetry("foreground/share-only precondition changed")
+            } else if retryAvailable {
+                let count = navigations.count
+                guard ContinuousClock.now < deadline else { break }
+                if !foreground || count != 0 {
+                    disableRetry("foreground/share-only precondition changed")
+                } else if let proof = shareActionObservation(actions, app: app, before: deadline) {
+                    guard ContinuousClock.now < deadline else { break }
+                    if !matches(proof, first) || previous.map({ !matches(proof, $0) }) == true {
+                        disableRetry("action/header identity or geometry changed")
+                    } else {
+                        previous = proof
+                        if ContinuousClock.now >= retryAfter { stableObservations += 1 }
+                        if stableObservations >= 3 {
+                            // Recheck after the final complete share observation. A partial
+                            // picker, changed foreground state or late query forbids a tap.
+                            let stillForeground = app.state == .runningForeground
+                            guard ContinuousClock.now < deadline else { break }
+                            let remainingPickers = pickers.allElementsBoundByAccessibilityElement
+                            guard ContinuousClock.now < deadline else { break }
+                            let remainingNavigations = remainingPickers.isEmpty ? navigations.count : -1
+                            guard ContinuousClock.now < deadline else { break }
+                            let stillShareOnly = stillForeground && remainingNavigations == 0 && remainingPickers.isEmpty
+                            retryAvailable = false
+                            if stillShareOnly {
+                                record("dispatch intent 2; identity=\(proof.identity); frames=\(proof.frames)")
+                                guard ContinuousClock.now < deadline else { break }
+                                try Task.checkCancellation()
+                                guard ContinuousClock.now < deadline else { break }
+                                proof.action.tap()
+                            } else {
+                                record("retry disabled: final share-only precondition changed")
+                            }
+                        }
+                    }
+                } else {
+                    disableRetry("share observation missing, ambiguous, unavailable or incomplete")
+                }
+            }
+            guard ContinuousClock.now < deadline else { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        record("polling deadline reached; in-flight XCTest work may have overrun")
+        capture(app, "Files did not present its navigation", batchDiagnostic: true)
+        throw BatchTestFailure(message: "Files did not present its navigation")
+    }
+
+    private func waitForStableShareAction(_ actions: XCUIElementQuery, app: XCUIApplication) async throws
+        -> (frames: [CGRect], identity: String, action: XCUIElement) {
         let deadline = ContinuousClock.now.advanced(by: .seconds(40))
         var previousFrames: [CGRect]?
         var previousIdentity: String?
         var stableObservations = 0
+        var ready: (frames: [CGRect], identity: String, action: XCUIElement)?
         // A single snapshot supplies a coherent action/header observation without
         // repeating remote attribute queries. Hittability still uses the live
         // query, constrained to that snapshot's exact action identity.
         try await wait("Share sheet action did not stabilize", app: app, timeout: .seconds(40)) {
-            var frames: [CGRect]?
-            var identity: String?
-            if ContinuousClock.now < deadline, let snapshot = try? app.snapshot(),
-               ContinuousClock.now < deadline {
-                var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
-                var visited = 0
-                var complete = true
-                var matchingActions: [XCUIElementSnapshot] = []
-                var matchingHeaders: [XCUIElementSnapshot] = []
-                while let (node, depth) = pending.popLast() {
-                    guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else {
-                        complete = false
-                        break
-                    }
-                    visited += 1
-                    if node.label == "Save to Files",
-                       node.elementType == .button
-                        || (node.elementType == .cell && node.identifier == "actionGroupCell") {
-                        matchingActions.append(node)
-                    }
-                    if node.elementType == .navigationBar, node.identifier == "UIActivityContentView" {
-                        matchingHeaders.append(node)
-                    }
-                    let children = node.children
-                    // Never accept a truncated tree: a later node may be a duplicate.
-                    guard children.count <= 4_096 - visited - pending.count else {
-                        complete = false
-                        break
-                    }
-                    pending.append(contentsOf: children.map { ($0, depth + 1) })
-                }
-                if complete, matchingActions.count == 1, matchingHeaders.count == 1 {
-                    let action = matchingActions[0]
-                    let bounds = snapshot.frame
-                    let candidate = [action.frame, matchingHeaders[0].frame]
-                    if action.isEnabled, ([bounds] + candidate).allSatisfy({ frame in
-                        frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite
-                            && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
-                    }) {
-                        let liveAction = actions.matching(NSPredicate(
-                            format: "elementType == %@ AND identifier == %@ AND label == %@",
-                            NSNumber(value: action.elementType.rawValue), action.identifier, action.label
-                        )).element
-                        if ContinuousClock.now < deadline, liveAction.isHittable, ContinuousClock.now < deadline {
-                            frames = candidate
-                            identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
-                        }
-                    }
-                }
-            }
-            if let frames, let identity {
+            if let proof = shareActionObservation(actions, app: app, before: deadline) {
+                let frames = proof.frames
+                let identity = proof.identity
                 let unchanged = previousFrames.map { old in
                     zip(old, frames).allSatisfy { a, b in
                         abs(a.minX - b.minX) <= 0.5 && abs(a.minY - b.minY) <= 0.5
@@ -1278,17 +1682,80 @@ final class BatchImportUITests: XCTestCase {
                 stableObservations = unchanged && identity == previousIdentity ? stableObservations + 1 : 1
                 previousFrames = frames
                 previousIdentity = identity
-                return stableObservations >= 3
+                if stableObservations >= 3 { ready = proof; return true }
+                return false
             }
             previousFrames = nil
             previousIdentity = nil
             stableObservations = 0
             return false
         }
+        guard let ready else { throw BatchTestFailure(message: "Share action proof is missing") }
+        return ready
+    }
+
+    private func shareActionObservation(_ actions: XCUIElementQuery, app: XCUIApplication,
+                                        before deadline: ContinuousClock.Instant)
+        -> (frames: [CGRect], identity: String, action: XCUIElement)? {
+        if ContinuousClock.now < deadline, let snapshot = try? app.snapshot(),
+           ContinuousClock.now < deadline {
+            var pending: [(XCUIElementSnapshot, Int)] = [(snapshot, 0)]
+            var visited = 0
+            var complete = true
+            var matchingActions: [XCUIElementSnapshot] = []
+            var matchingHeaders: [XCUIElementSnapshot] = []
+            while let (node, depth) = pending.popLast() {
+                guard visited < 4_096, depth <= 64, ContinuousClock.now < deadline else {
+                    complete = false
+                    break
+                }
+                visited += 1
+                if node.label == "Save to Files",
+                   node.elementType == .button
+                    || (node.elementType == .cell && node.identifier == "actionGroupCell") {
+                    matchingActions.append(node)
+                }
+                if node.elementType == .navigationBar, node.identifier == "UIActivityContentView" {
+                    matchingHeaders.append(node)
+                }
+                let children = node.children
+                // Never accept a truncated tree: a later node may be a duplicate.
+                guard children.count <= 4_096 - visited - pending.count else {
+                    complete = false
+                    break
+                }
+                pending.append(contentsOf: children.map { ($0, depth + 1) })
+            }
+            if complete, matchingActions.count == 1, matchingHeaders.count == 1 {
+                let action = matchingActions[0]
+                let bounds = snapshot.frame
+                let candidate = [action.frame, matchingHeaders[0].frame]
+                if action.isEnabled, ([bounds] + candidate).allSatisfy({ frame in
+                    frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite
+                        && frame.width > 0 && frame.height > 0 && bounds.contains(frame)
+                }) {
+                    let liveAction = actions.matching(NSPredicate(
+                        format: "elementType == %@ AND identifier == %@ AND label == %@",
+                        NSNumber(value: action.elementType.rawValue), action.identifier, action.label
+                    )).element
+                    if ContinuousClock.now < deadline, liveAction.isHittable, ContinuousClock.now < deadline {
+                        let header = matchingHeaders[0]
+                        let identity = "\(action.elementType.rawValue):\(action.identifier):\(action.label)"
+                            + "|header:\(header.elementType.rawValue):\(header.identifier):\(header.label)"
+                        return (candidate, identity, liveAction)
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     func testRecoveryExportFullBackupThroughFiles() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "export")
+        // recoveryConfiguration has already validated the matching hosted opt-in.
+        let saveCompletionTimeout: Duration =
+            Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
+                ? .seconds(60) : .seconds(15)
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -1308,10 +1775,23 @@ final class BatchImportUITests: XCTestCase {
         let alert = app.alerts["Add a person"]
         let name = alert.textFields["Name or nickname"]
         try await wait("Add-person dialog did not open", app: app) { name.isHittable }
+        var keyboardIntroductionAcknowledged = false
         name.tap()
+        let emptyName = name.value as? String
+        try check(emptyName == "" || emptyName == "Name or nickname", app: app,
+                  "Add-person name field was not empty before typing")
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(
+            app, expectedName: emptyName ?? "", acknowledged: &keyboardIntroductionAcknowledged
+        )
         name.typeText("Recovery Sentinel")
+        try await acknowledgeRecoveryPersonKeyboardIntroduction(
+            app, expectedName: "Recovery Sentinel", acknowledged: &keyboardIntroductionAcknowledged
+        )
         let confirm = alert.buttons["Add"]
-        try check(confirm.isEnabled && confirm.isHittable, app: app, "Add person cannot be confirmed")
+        try check(confirm.isEnabled && confirm.isHittable
+                  && name.value as? String == "Recovery Sentinel"
+                  && app.otherElements.matching(identifier: "UIContinuousPathIntroductionView").count == 0,
+                  app: app, "Add person cannot be confirmed")
         confirm.tap()
         try await wait("The unassigned person was not saved", app: app) {
             app.staticTexts["Recovery Sentinel"].exists && app.staticTexts["Alex Example"].exists
@@ -1319,7 +1799,7 @@ final class BatchImportUITests: XCTestCase {
         try await recoveryTab("Settings", app: app)
         try await recoveryFreeCard(app)
         try await recoveryCounts(trips: 1, people: 2, documents: 1, app: app)
-        try await presentRecoverySave(app)
+        try await presentRecoverySave(app, retryNavigation: true)
         let picker = try await openLocalFilesFolder(recoveryFolder, app: app)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         let save = fileNavigation.buttons["Save"]
@@ -1331,7 +1811,7 @@ final class BatchImportUITests: XCTestCase {
         try check(isRecoveryFolder(recoveryFolder, navigation: fileNavigation), app: app,
                   "Files left the confirmed owned destination before Save")
         save.tap()
-        try await wait("Save to Files did not return to Settings", app: app) {
+        try await wait("Save to Files did not return to Settings", app: app, timeout: saveCompletionTimeout) {
             !picker.exists && app.navigationBars["Settings"].exists
         }
         capture(app, "Recovery export — UI completed, host file verification still required")
@@ -1341,6 +1821,10 @@ final class BatchImportUITests: XCTestCase {
 
     func testRecoveryRestoreIntoEmptyFreeLibraryAndOpenOriginal() async throws {
         let recoveryFolder = try recoveryConfiguration(phase: "restore")
+        // The existing configuration validation admits this hosted-only policy.
+        let previewObservationTimeout = Self.recoveryPreviewObservationTimeout(
+            hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
+        )
         let app = XCUIApplication()
         app.terminate()
         defer { app.terminate() }
@@ -1362,7 +1846,7 @@ final class BatchImportUITests: XCTestCase {
         try await reveal(restore, app: app, navigation: "Settings")
         try check(restore.isEnabled, app: app, "Free backup restore is disabled")
         restore.tap()
-        let picker = try await openLocalFilesFolder(recoveryFolder, app: app, retryRecoveryFolderEntry: true)
+        let picker = try await openLocalFilesFolder(recoveryFolder, app: app, initialNavigationTimeout: .seconds(30), retryRecoveryFolderEntry: true)
         let fileNavigation = try await recoveryFilesNavigation(recoveryFolder, picker: picker, app: app)
         // Folder was created empty and host-verified to contain exactly this
         // one UI-exported file. Match a complete display name, never a prefix.
@@ -1447,7 +1931,7 @@ final class BatchImportUITests: XCTestCase {
         try await wait("Restored original preview did not open", app: app) {
             app.navigationBars["Original document"].exists && app.otherElements["QLPreviewControllerView"].exists
         }
-        let rendered = try await waitForRenderedSyntheticOriginal(app)
+        let rendered = try await waitForRenderedSyntheticOriginal(app, timeout: previewObservationTimeout)
         let renderedScreenshot = XCTAttachment(screenshot: rendered.screenshot)
         renderedScreenshot.name = "Recovery restored original — accepted preview pixels"
         renderedScreenshot.lifetime = .keepAlways
@@ -1464,19 +1948,227 @@ final class BatchImportUITests: XCTestCase {
         // its pre-reset snapshot. UI counts and a preview container are not it.
     }
 
+    private struct NativeFolderTextRecord: Encodable {
+        var number = 0
+        var startedSeconds = 0.0
+        var finishedSeconds = 0.0
+        var stage = "started"
+        var valueKind = "unobserved"
+        var valueBytes: Int?
+        var valuePrefixUTF8Hex: String?
+        var valueTruncated = false
+    }
+
+    private struct NativeFolderTextTrace: Encodable {
+        let version = 1
+        var outcome = "running"
+        var totalObservations = 0
+        var truncated = false
+        var observations: [NativeFolderTextRecord] = []
+
+        mutating func append(_ record: NativeFolderTextRecord) {
+            totalObservations += 1
+            if observations.count < 8 {
+                var numbered = record
+                numbered.number = totalObservations
+                observations.append(numbered)
+            } else { truncated = true }
+        }
+
+        func json() -> String {
+            guard let data = try? JSONEncoder().encode(self), data.count <= 8192,
+                  let text = String(data: data, encoding: .utf8) else {
+                return "{\"version\":1,\"diagnosticEncodingFailed\":true}"
+            }
+            return text
+        }
+    }
+
+    private enum NativeFolderTextError: Error {
+        case deadline, ownership, unexpectedValue
+    }
+
+    private static func nativeFolderTextValue(
+        picker: XCUIElementSnapshot, application: XCUIElementSnapshot
+    ) throws -> String {
+        // Keep the remote picker and its application environment separate.
+        // A frozen app snapshot need not contain the remote Files subtree.
+        var pending: [(XCUIElementSnapshot, Int)] = [(picker, 0)]
+        var visited = 0
+        var editors: [XCUIElementSnapshot] = []
+        while let (node, depth) = pending.popLast() {
+            guard depth <= 96, visited < 4096 else { throw NativeFolderTextError.ownership }
+            visited += 1
+            if node.elementType == .textView && node.identifier == "DOC.inlineRenameField" {
+                editors.append(node)
+            }
+            let children = node.children
+            guard children.count <= 4096 - visited - pending.count else {
+                throw NativeFolderTextError.ownership
+            }
+            pending.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+        guard editors.count == 1, let value = editors[0].value as? String,
+              nativeFolderEditorFrame(in: picker, applicationSnapshot: application,
+                                      expectedName: value, localTitle: "On My iPhone",
+                                      observationAllowsEmptyName: true) != nil else {
+            throw NativeFolderTextError.ownership
+        }
+        return value
+    }
+
+    private static func recoveryFolderTextObservationTimeout(hosted: Bool) -> Duration {
+        hosted ? .seconds(60) : .seconds(15)
+    }
+
+    private static func observeNativeFolderTextCompletion(
+        expectedName: String,
+        timeout: Duration = .seconds(15),
+        foreground: () -> Bool,
+        pickerSnapshot: () throws -> XCUIElementSnapshot,
+        applicationSnapshot: () throws -> XCUIElementSnapshot,
+        now: () -> ContinuousClock.Instant = { ContinuousClock.now },
+        pause: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        trace: inout NativeFolderTextTrace
+    ) async throws {
+        let started = now()
+        let deadline = started.advanced(by: timeout)
+        func seconds() -> Double {
+            let value = started.duration(to: now()).components
+            return Double(value.seconds) + Double(value.attoseconds) / 1e18
+        }
+        func boundary() throws {
+            try Task.checkCancellation()
+            guard now() < deadline else { throw NativeFolderTextError.deadline }
+        }
+        do {
+            while true {
+                var record = NativeFolderTextRecord()
+                record.startedSeconds = seconds()
+                defer {
+                    record.finishedSeconds = seconds()
+                    trace.append(record)
+                }
+                try boundary()
+                record.stage = "foreground"
+                let isForeground = foreground()
+                try boundary()
+                guard isForeground else { throw NativeFolderTextError.ownership }
+                record.stage = "picker-snapshot"
+                try boundary()
+                let picker = try pickerSnapshot()
+                try boundary()
+                record.stage = "application-snapshot"
+                let application = try applicationSnapshot()
+                try boundary()
+                record.stage = "classification"
+                let value = try nativeFolderTextValue(picker: picker, application: application)
+                record.valueBytes = value.utf8.count
+                record.valuePrefixUTF8Hex = value.utf8.prefix(128).map { String(format: "%02x", $0) }.joined()
+                record.valueTruncated = value.utf8.count > 128
+                record.valueKind = value == expectedName ? "exact" : value.isEmpty ? "empty"
+                    : value == "untitled folder" ? "default" : expectedName.hasPrefix(value) ? "prefix" : "unexpected"
+                try boundary()
+                if record.valueKind == "exact" {
+                    record.stage = "completed"
+                    trace.outcome = "completed"
+                    return
+                }
+                guard record.valueKind != "unexpected" else { throw NativeFolderTextError.unexpectedValue }
+                record.stage = "pending"
+                let remaining = now().duration(to: deadline)
+                try boundary()
+                try await pause(min(.milliseconds(100), remaining))
+            }
+        } catch {
+            if error is CancellationError { trace.outcome = "cancelled" }
+            else if let failure = error as? NativeFolderTextError {
+                switch failure {
+                case .deadline: trace.outcome = "deadline"
+                case .ownership: trace.outcome = "ownership-rejected"
+                case .unexpectedValue: trace.outcome = "unexpected-value"
+                }
+            } else { trace.outcome = "query-error" }
+            throw error
+        }
+    }
+
     private struct RenderedOriginalEvidence {
         let screenshot: XCUIScreenshot
         let lines: [String]
     }
 
-    private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication) async throws -> RenderedOriginalEvidence {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
+    private static func recoveryPreviewObservationTimeout(hosted: Bool) -> Duration {
+        hosted ? .seconds(60) : .seconds(40)
+    }
+
+    private struct PreviewAttempt: Encodable {
+        enum Outcome: String, Encodable {
+            case queryRejected, captureRejected, ocrError, ocrLate, markersRejected, accepted
+        }
+        var number = 0
+        var startedSeconds = 0.0
+        var querySeconds: Double?
+        var captureSeconds: Double?
+        var ocrSeconds: Double?
+        var totalSeconds = 0.0
+        var outcome = Outcome.queryRejected
+    }
+
+    private struct PreviewAttemptTrace: Encodable {
+        let version = 1
+        var totalAttempts = 0
+        var truncated = false
+        var attempts: [PreviewAttempt] = []
+
+        mutating func append(_ attempt: PreviewAttempt) {
+            totalAttempts += 1
+            if attempts.count < 8 {
+                var numbered = attempt
+                numbered.number = totalAttempts
+                attempts.append(numbered)
+            } else { truncated = true }
+        }
+
+        func json() -> String {
+            // Fixed fields, six enum values and at most eight records. Never cut
+            // serialized JSON bytes; unexpected encoding failure is explicit.
+            guard let data = try? JSONEncoder().encode(self), data.count <= 8192,
+                  let text = String(data: data, encoding: .utf8) else {
+                return "{\"version\":1,\"diagnosticEncodingFailed\":true}"
+            }
+            return text
+        }
+    }
+
+    private static func previewSeconds(from start: ContinuousClock.Instant,
+                                       to end: ContinuousClock.Instant) -> Double {
+        let value = start.duration(to: end).components
+        return Double(value.seconds) + Double(value.attoseconds) / 1e18
+    }
+
+    private func waitForRenderedSyntheticOriginal(_ app: XCUIApplication,
+                                                  timeout: Duration = .seconds(40)) async throws -> RenderedOriginalEvidence {
+        let started = ContinuousClock.now
+        let deadline = started.advanced(by: timeout)
+        var trace = PreviewAttemptTrace()
+        defer {
+            let timing = XCTAttachment(string: trace.json())
+            timing.name = "Recovery original preview — attempt timings"
+            timing.lifetime = .keepAlways
+            add(timing)
+        }
         var lastObservation = "No preview observation completed"
         while ContinuousClock.now < deadline {
+            let attemptStarted = ContinuousClock.now
             if let rendered = renderedSyntheticOriginal(app, before: deadline, observe: { message in
                 var bytes = Array(message.utf8.prefix(2048))
                 while !bytes.isEmpty, String(bytes: bytes, encoding: .utf8) == nil { bytes.removeLast() }
                 lastObservation = String(decoding: bytes, as: UTF8.self)
+            }, record: { attempt in
+                var relative = attempt
+                relative.startedSeconds = Self.previewSeconds(from: started, to: attemptStarted)
+                trace.append(relative)
             }) { return rendered }
             if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
         }
@@ -1490,7 +2182,15 @@ final class BatchImportUITests: XCTestCase {
 
     private func renderedSyntheticOriginal(_ app: XCUIApplication,
                                            before deadline: ContinuousClock.Instant,
-                                           observe: (String) -> Void = { _ in }) -> RenderedOriginalEvidence? {
+                                           observe: (String) -> Void = { _ in },
+                                           record: (PreviewAttempt) -> Void = { _ in }) -> RenderedOriginalEvidence? {
+        let started = ContinuousClock.now
+        var attempt = PreviewAttempt()
+        defer {
+            attempt.totalSeconds = Self.previewSeconds(from: started, to: ContinuousClock.now)
+            if attempt.querySeconds == nil { attempt.querySeconds = attempt.totalSeconds }
+            record(attempt)
+        }
         func read<T>(_ value: @autoclosure () -> T) -> T? {
             guard ContinuousClock.now < deadline else { return nil }
             return value()
@@ -1507,7 +2207,12 @@ final class BatchImportUITests: XCTestCase {
               let appFrame = read(app.frame), appFrame.contains(frame) else { return nil }
         // Some Quick Look versions render the PDF without exposing its text to
         // accessibility. Read only fresh pixels from the visible preview itself.
-        guard let screenshot = read(preview.screenshot()) else { return nil }
+        attempt.querySeconds = Self.previewSeconds(from: started, to: ContinuousClock.now)
+        attempt.outcome = .captureRejected
+        let captureStarted = ContinuousClock.now
+        let captured = read(preview.screenshot())
+        attempt.captureSeconds = Self.previewSeconds(from: captureStarted, to: ContinuousClock.now)
+        guard let screenshot = captured else { return nil }
         observe("Preview screenshot unavailable or capture exceeded the observation deadline")
         guard let image = screenshot.image.cgImage, ContinuousClock.now < deadline else { return nil }
         let request = VNRecognizeTextRequest()
@@ -1515,12 +2220,17 @@ final class BatchImportUITests: XCTestCase {
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = false
         request.revision = VNRecognizeTextRequestRevision3
+        let ocrStarted = ContinuousClock.now
         do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([request]) }
         catch {
+            attempt.ocrSeconds = Self.previewSeconds(from: ocrStarted, to: ContinuousClock.now)
+            attempt.outcome = .ocrError
             let failure = error as NSError
             observe("Vision error: domain=\(failure.domain), code=\(failure.code)")
             return nil
         }
+        attempt.ocrSeconds = Self.previewSeconds(from: ocrStarted, to: ContinuousClock.now)
+        attempt.outcome = .ocrLate
         // A synchronous Vision call can overrun; late success is not accepted.
         observe("Vision completed after the observation deadline")
         guard ContinuousClock.now < deadline else { return nil }
@@ -1532,9 +2242,11 @@ final class BatchImportUITests: XCTestCase {
         let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
             .flatMap { $0.components(separatedBy: .newlines) }.map(normalized)
         observe("Recognized preview lines:\n" + lines.joined(separator: "\n"))
+        attempt.outcome = .markersRejected
         let markers = ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL", "Sample reservation ABC-000"]
         guard markers.allSatisfy({ marker in lines.filter { $0 == marker }.count == 1 }),
               ContinuousClock.now < deadline else { return nil }
+        attempt.outcome = .accepted
         return RenderedOriginalEvidence(screenshot: screenshot, lines: lines)
     }
 
@@ -1574,7 +2286,8 @@ final class BatchImportUITests: XCTestCase {
                 }
             }
         }
-        try await wait("Files preparation did not reach the local root", app: app) { atRoot() }
+        try await wait("Files preparation did not reach the local root", app: app,
+                       timeout: .seconds(30)) { atRoot() }
     }
 
     private func isRecoveryFolder(_ folder: String, navigation: XCUIElement) -> Bool {
@@ -1600,7 +2313,8 @@ final class BatchImportUITests: XCTestCase {
     }
 
     private var recoveryArguments: [String] {
-        ["--ui-testing-unlocked", "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+        ["--ui-testing-unlocked", "--ui-testing-share-diagnostics",
+         "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
          "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
     }
 
@@ -1608,14 +2322,58 @@ final class BatchImportUITests: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_UI"] == "1", "Recovery UI phases require explicit opt-in")
         try XCTSkipUnless(env["TRIPDOCKET_RECOVERY_PHASE"] == phase, "Run exactly the admitted recovery phase")
+        guard env["TRIPDOCKET_RECOVERY_CREATE_FOLDER"] == nil || phase == "prepare" else {
+            throw BatchTestFailure(message: "Native Recovery folder creation is confined to prepare")
+        }
         guard let value = env["TRIPDOCKET_RECOVERY_FOLDER"],
               value.hasPrefix("TripDocket-Recovery-"), value.count <= 100,
               value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else {
             throw BatchTestFailure(message: "Recovery requires a unique owned TripDocket-Recovery-* Files folder")
         }
-        executionTimeAllowance = phase == "prepare" ? 180 : 300
+        #if DEBUG && targetEnvironment(simulator) && arch(x86_64)
+        let debugIntelSimulator = true
+        #else
+        let debugIntelSimulator = false
+        #endif
+        #if DEBUG && targetEnvironment(simulator) && arch(arm64)
+        let debugARMSimulator = true
+        #else
+        let debugARMSimulator = false
+        #endif
+        executionTimeAllowance = try Self.recoveryExecutionTimeAllowance(
+            env, phase: phase, debugIntelSimulator: debugIntelSimulator, debugARMSimulator: debugARMSimulator
+        )
         continueAfterFailure = false
         return value
+    }
+
+    private static func recoveryExecutionTimeAllowance(
+        _ environment: [String: String], phase: String, debugIntelSimulator: Bool, debugARMSimulator: Bool = false
+    ) throws -> TimeInterval {
+        guard ["prepare", "export", "restore"].contains(phase) else {
+            throw BatchTestFailure(message: "Unknown Recovery execution phase")
+        }
+        guard let profile = environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"] else {
+            return phase == "prepare" ? 180 : 300
+        }
+        let matchingHost = (profile == "hosted-intel-v1" && debugIntelSimulator && !debugARMSimulator)
+            || (profile == "hosted-arm-v1" && debugARMSimulator && !debugIntelSimulator)
+        guard matchingHost,
+              environment["TRIPDOCKET_RECOVERY_UI"] == "1",
+              environment["TRIPDOCKET_RECOVERY_PHASE"] == phase,
+              let folder = environment["TRIPDOCKET_RECOVERY_FOLDER"],
+              folder.hasPrefix("TripDocket-Recovery-"),
+              let identity = UUID(uuidString: String(folder.dropFirst("TripDocket-Recovery-".count))),
+              folder == "TripDocket-Recovery-" + identity.uuidString.lowercased() else {
+            throw BatchTestFailure(message: "Hosted Recovery execution profile is not admitted")
+        }
+        return phase == "prepare" ? 300 : 600
+    }
+
+    // Observation callers use this only after recoveryConfiguration validates
+    // the exact Debug Simulator architecture, phase and owned folder.
+    private static func isHostedRecoveryProfile(_ profile: String?) -> Bool {
+        profile == "hosted-intel-v1" || profile == "hosted-arm-v1"
     }
 
     private func recoveryTab(_ title: String, app: XCUIApplication) async throws {
@@ -1664,6 +2422,61 @@ final class BatchImportUITests: XCTestCase {
         }
     }
 
+
+    // The first-use introduction can arrive when focus opens the keyboard or
+    // while XCTest types. Acknowledge it only for this exact synthetic form,
+    // sharing one action budget across both observations.
+    private func acknowledgeRecoveryPersonKeyboardIntroduction(
+        _ app: XCUIApplication, expectedName: String, acknowledged: inout Bool
+    ) async throws {
+        let introduction = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        guard introduction.count != 0 else { return }
+        let alerts = app.alerts.matching(identifier: "Add a person")
+        let names = alerts.element.textFields.matching(identifier: "Name or nickname")
+        let explanation = introduction.element.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Speed up your typing by sliding your finger across the letters to compose a word."
+        ))
+        let acknowledge = introduction.element.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+        @MainActor func expectedForm() -> Bool {
+            app.state == .runningForeground && app.alerts.count == 1 && alerts.count == 1
+                && alerts.element.textFields.count == 1 && names.count == 1
+                && names.element.isEnabled && names.element.value as? String == expectedName
+        }
+        @MainActor func ready() -> Bool {
+            !acknowledged && introduction.count == 1 && expectedForm()
+                && explanation.count == 1 && explanation.element.isHittable
+                && acknowledge.count == 1 && acknowledge.element.isEnabled && acknowledge.element.isHittable
+        }
+        @MainActor func geometry() throws -> (root: CGRect, introduction: CGRect, button: CGRect) {
+            let root = app.frame, introductionFrame = introduction.element.frame
+            let button = acknowledge.element.frame
+            let valid = [root, introductionFrame, button].allSatisfy { frame in
+                !frame.isEmpty && !frame.isNull && !frame.isInfinite
+                    && [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            }
+            try check(valid && root.contains(introductionFrame) && introductionFrame.contains(button),
+                      app: app, "Keyboard Continue has no contained finite frame")
+            return (root, introductionFrame, button)
+        }
+        try check(ready(), app: app, "Native keyboard introduction has no unique expected person form")
+        let original = try geometry()
+        capture(app, "Recovery person keyboard introduction before the single Continue")
+        try check(ready(), app: app, "Recovery person form changed before Continue")
+        let current = try geometry()
+        try check(current.root == original.root && current.introduction == original.introduction
+                    && current.button == original.button, app: app, "Keyboard Continue moved before the single action")
+        // An element tap can make XCTest cancel the expected Add-person alert
+        // as an interruption. Target only the freshly proved button's center
+        // from the app origin; disappearance of the form still fails below.
+        let target = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+            dx: current.button.midX - current.root.minX, dy: current.button.midY - current.root.minY))
+        try Task.checkCancellation()
+        acknowledged = true
+        target.tap()
+        try await wait("Native keyboard introduction did not return to the expected person form", app: app) {
+            introduction.count == 0 && expectedForm() && names.element.isHittable
+        }
+    }
 
     private func localStoreSession() async throws -> SKTestSession {
         let configuration = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "Tripfolio", withExtension: "storekit"))
@@ -1857,6 +2670,7 @@ final class BatchImportUITests: XCTestCase {
             navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
+        let initialDeadline = ContinuousClock.now.advanced(by: initialTimeout)
         try await wait("Native root Files browser or supported Recents screen is missing", app: app,
                        timeout: initialTimeout) {
             // Classify one observation instead of rereading a changing browser
@@ -1868,6 +2682,8 @@ final class BatchImportUITests: XCTestCase {
             return recents.count == 1 && recents.element.exists
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
+        try check(ContinuousClock.now < initialDeadline, app: app,
+                  "Native root Files initial readiness exceeded its deadline")
         if !browserReady() {
             try check(recentsReady(), app: app, "Native root Files Recents route changed")
             browse.element.tap()
@@ -1951,10 +2767,11 @@ final class BatchImportUITests: XCTestCase {
 
 
     private func openLocalFilesFolder(_ folder: String, app: XCUIApplication,
+                                      initialNavigationTimeout: Duration = .seconds(15),
                                       retryRecoveryFolderEntry: Bool = false) async throws -> XCUIElement {
         let navigations = app.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
         let navigation = navigations.element
-        try await wait("Files did not present its navigation", app: app) {
+        try await wait("Files did not present its navigation", app: app, timeout: initialNavigationTimeout) {
             navigations.count == 1 && navigation.exists
         }
         let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
