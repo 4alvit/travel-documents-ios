@@ -58,6 +58,17 @@ these separate paths. Batch qualification covers a preinitialized provider,
 not cold first use. The first result bundle must contain both exact
 passed cases, with the hosted pass before preparation starts, and match the
 captured device and runtime before the driver starts.
+After relaunch, each saved synthetic original must render its own four exact
+fixture markers inside the visible Quick Look preview. A single 20-second
+post-tap deadline covers both presentation and pixel observation, replacing the
+former 15-second container wait plus five-second sleep. The shared observer
+rejects blank, partial, duplicate, wrong-document and late OCR results; it keeps
+the exact screenshot that satisfied the checks. Later screenshot/AX captures
+are separate observations. Recovery retains its existing marker set and timing.
+There is no preview reopening or action retry. This closes the test-acceptance
+gap in [issue #44](https://github.com/4alvit/travel-documents-ios/issues/44);
+it does not establish the cause of the historical blank Quick Look rendering.
+
 The direct preparation case uses a 45-second initial readiness polling
 deadline for the supported Files browser or Recents screen. An in-flight
 synchronous XCTest query can return after that deadline, but a late positive
