@@ -199,6 +199,14 @@ class CloudTests(unittest.TestCase):
             self.assertFalse(any(path.endswith('/zip') for _, path in self.api.calls))
             self.f.jobs = before
 
+    def test_change_scope_job_is_required_before_artifact_download(self):
+        self.assertIn("Change scope", p.JOBS)
+        self.f.jobs = [job for job in self.f.jobs if job["name"] != "Change scope"]
+        with self.assertRaises(p.InvalidRelease):
+            self.prepare()
+        self.assertFalse(any(path.endswith('/zip') for _, path in self.api.calls))
+        self.assertFalse((self.out / 'inputs').exists())
+
     def test_corrupt_download_stops_before_extracting_or_native_tools(self):
         self.f.outer += b'corrupt'
         with self.assertRaisesRegex(ValueError, 'digest mismatch'): self.prepare()
@@ -370,7 +378,7 @@ class OrdinaryLaunchTests(unittest.TestCase):
         processes = load('recovery_process.py', 'launch_budget_processes')
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
+        root = Path(temporary.name).resolve()
         owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
         owner.out = root
         owner.repo = root
@@ -582,7 +590,7 @@ class OrdinaryLaunchTests(unittest.TestCase):
     def test_diagnostic_tree_rejects_symlinks_and_total_cap(self):
         with tempfile.TemporaryDirectory() as temporary:
             owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
-            owner.out = Path(temporary)
+            owner.out = Path(temporary).resolve()
             owner.check = lambda: None
             root = owner.diagnostic_root()
             link = root / 'link'
