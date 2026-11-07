@@ -2501,6 +2501,7 @@ struct XCUIScreenshot {
     var captures = 0
     var requests = 0
     var queryReads = 0
+    var navigationPresent = true
     var reads: [String] = []
     var costs: [String: Duration] = [:]
     func read(_ name: String) { reads.append(name); ContinuousClock.elapsed += costs[name] ?? .zero }
@@ -2512,7 +2513,7 @@ struct XCUIScreenshot {
     var present = true
     var hittable = true
     var bounds = CGRect(x: 0, y: 100, width: 402, height: 600)
-    var exists: Bool { world.read("exists"); return present }
+    var exists: Bool { world.read(identifier == "Original document" ? "navigation" : "exists"); return present }
     var isHittable: Bool { world.read("hittable"); return hittable }
     var frame: CGRect { world.read("frame"); return bounds }
     init(_ identifier: String, _ world: World) { self.identifier = identifier; self.world = world }
@@ -2530,6 +2531,10 @@ struct XCUIScreenshot {
     init(_ elements: [XCUIElement], _ world: World) { self.elements = elements; self.world = world }
     var count: Int { world.read("count"); return elements.count }
     var element: XCUIElement { precondition(elements.count == 1); return elements[0] }
+    subscript(identifier: String) -> XCUIElement {
+        let matches = elements.filter { $0.identifier == identifier }
+        precondition(matches.count == 1); return matches[0]
+    }
     func matching(identifier: String) -> XCUIElementQuery {
         XCUIElementQuery(elements.filter { $0.identifier == identifier }, world)
     }
@@ -2540,6 +2545,11 @@ struct XCUIScreenshot {
     init(_ nodes: [XCUIElement], _ world: World) { self.nodes = nodes; self.world = world }
     var frame: CGRect { world.read("app.frame"); return CGRect(x: 0, y: 0, width: 402, height: 874) }
     var otherElements: XCUIElementQuery { world.queryReads += 1; return XCUIElementQuery(nodes, world) }
+    var navigationBars: XCUIElementQuery {
+        let navigation = XCUIElement("Original document", world)
+        navigation.present = world.navigationPresent
+        return XCUIElementQuery([navigation], world)
+    }
 }
 struct FakeCandidate { let string: String }
 struct FakeObservation {
@@ -2585,12 +2595,75 @@ final class XCTAttachment {
     var attachments: [XCTAttachment] = []
     func add(_ attachment: XCTAttachment) { attachments.append(attachment) }
     func failure(_ message: String, app: XCUIApplication) -> FixtureFailure {
-        precondition(message == "Restored original PDF content did not render")
+        precondition(["Restored original PDF content did not render", "Batch ticket original preview did not render",
+                      "Batch insurance original preview did not render"].contains(message))
         failures += 1
         return FixtureFailure()
     }
     // ACTUAL_HELPER
+    func runBatch(_ name: String) async throws {
+        let ticket = ["SYNTHETIC TICKET", "TripDocket batch UI QA",
+                      "SYNTHETIC - NOT VALID FOR TRAVEL", "No personal data"]
+        let insurance = ["SYNTHETIC INSURANCE", "TripDocket batch UI QA",
+                         "SYNTHETIC - NOT VALID FOR TRAVEL", "No personal data"]
+        let started = ContinuousClock.now
+        let world = World([FakeImage(lines: ticket)])
+        VNImageRequestHandler.world = world
+        let app = XCUIApplication([XCUIElement("QLPreviewControllerView", world)], world)
+        var fixture = OriginalPreviewFixture.ticket
+        var expected = false
+        switch name {
+        case "batch-ticket": expected = true
+        case "batch-insurance": fixture = .insurance; world.images[0].lines = insurance; expected = true
+        case "batch-blank": world.images[0] = FakeImage(lines: [], ocrTime: .seconds(1))
+        case "batch-wrong-document": world.images[0] = FakeImage(lines: insurance, ocrTime: .seconds(1))
+        case "batch-demo": world.images[0] = FakeImage(lines: ["SYNTHETIC DEMO - NOT VALID FOR TRAVEL",
+                                                               "Sample reservation ABC-000"], ocrTime: .seconds(1))
+        case "batch-partial": world.images[0] = FakeImage(lines: Array(ticket.dropLast()), ocrTime: .seconds(1))
+        case "batch-duplicate": world.images[0] = FakeImage(lines: ticket + [ticket[0]], ocrTime: .seconds(1))
+        case "batch-wrong-case": world.images[0] = FakeImage(lines: ticket.map { $0.lowercased() }, ocrTime: .seconds(1))
+        case "batch-blank-then-rendered":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(5)), FakeImage(lines: ticket)]
+            expected = true
+        case "batch-presentation-budget":
+            world.costs["navigation"] = .seconds(12); world.images[0].ocrTime = .seconds(7); expected = true
+        case "batch-late-presentation": world.costs["navigation"] = .seconds(20)
+        case "batch-missing-navigation": world.navigationPresent = false
+        case "batch-late-capture": world.images[0].captureTime = .seconds(20)
+        case "batch-late-ocr": world.images[0].ocrTime = .seconds(20)
+        case "batch-shared-budget": world.costs["navigation"] = .seconds(12); world.images[0].ocrTime = .seconds(9)
+        case "batch-carried-start":
+            ContinuousClock.elapsed = .seconds(3)
+            world.costs["navigation"] = .seconds(10); world.images[0].ocrTime = .seconds(8)
+        case "batch-two-attempt-overrun":
+            world.images = [FakeImage(lines: [], ocrTime: .seconds(8)), FakeImage(lines: ticket, ocrTime: .seconds(13))]
+        case "batch-already-expired": ContinuousClock.elapsed = .seconds(20)
+        default: fatalError("Unknown Batch preview fixture")
+        }
+        var result: RenderedOriginalEvidence?
+        do { result = try await waitForRenderedSyntheticOriginal(app, timeout: .seconds(20),
+                                                                 startedAt: started, fixture: fixture) }
+        catch { precondition(!expected) }
+        precondition((result != nil) == expected)
+        precondition(failures == (expected ? 0 : 1))
+        precondition(attachments.last!.name == fixture.evidenceName + " — attempt timings")
+        if let result {
+            precondition(result.screenshot.token == (name == "batch-blank-then-rendered" ? 2 : 1))
+            precondition(result.lines == (fixture == .ticket ? ticket : insurance))
+            precondition(ContinuousClock.now < started.advanced(by: .seconds(20)))
+        }
+        if name == "batch-already-expired" { precondition(world.reads.isEmpty && world.captures == 0) }
+        if name == "batch-late-presentation" { precondition(world.reads == ["navigation"] && world.captures == 0) }
+        if name == "batch-missing-navigation" { precondition(world.captures == 0 && world.queryReads == 0) }
+        if name == "batch-late-capture" { precondition(world.captures == 1 && world.requests == 0) }
+        if ["batch-late-ocr", "batch-shared-budget", "batch-carried-start"].contains(name) {
+            precondition(world.requests == 1 && world.captures == 1)
+        }
+        if name == "batch-two-attempt-overrun" { precondition(world.captures == 2) }
+        print("PASS " + name)
+    }
     func run(_ name: String) async throws {
+        if name.hasPrefix("batch-") { try await runBatch(name); return }
         let warning = "SYNTHETIC DEMO — NOT VALID FOR TRAVEL"
         let booking = "Sample reservation ABC-000"
         let positive = FakeImage(lines: [warning, "Coast weekend", booking, "Alex Example"])
@@ -2750,6 +2823,32 @@ class PreviewReadinessTests(unittest.TestCase):
                                         text=True, check=True, timeout=5)
                 self.assertEqual(result.stdout.strip(), 'PASS ' + name)
 
+    def test_batch_preview_uses_exact_markers_and_one_shared_deadline(self):
+        for name in ['batch-ticket', 'batch-insurance', 'batch-blank', 'batch-wrong-document',
+                     'batch-demo', 'batch-partial', 'batch-duplicate', 'batch-wrong-case',
+                     'batch-blank-then-rendered', 'batch-presentation-budget', 'batch-late-presentation',
+                     'batch-missing-navigation', 'batch-late-capture', 'batch-late-ocr', 'batch-shared-budget', 'batch-carried-start',
+                     'batch-two-attempt-overrun', 'batch-already-expired']:
+            with self.subTest(name=name):
+                result = subprocess.run([str(self.binary), name], capture_output=True,
+                                        text=True, check=True, timeout=5)
+                self.assertEqual(result.stdout.strip(), 'PASS ' + name)
+
+    def test_batch_attaches_accepted_pixels_without_an_additional_presentation_wait(self):
+        source = SOURCE.read_text()
+        start = source.index('        let savedOriginals: [(String, OriginalPreviewFixture)]')
+        end = source.index('    private static func recoveryNativeFolderCreation(', start)
+        body = source[start:end]
+        self.assertEqual(body.count('row.tap()'), 1)
+        self.assertLess(body.index('row.tap()'), body.index('let previewStarted = ContinuousClock.now'))
+        self.assertIn('app, timeout: .seconds(20), startedAt: previewStarted, fixture: fixture', body)
+        self.assertIn('XCTAttachment(screenshot: rendered.screenshot)', body)
+        self.assertIn('XCTAttachment(string: rendered.lines.joined', body)
+        self.assertLess(body.index('add(renderedScreenshot)'), body.index('capture(app,'))
+        self.assertNotIn('try await wait(', body)
+        self.assertNotIn('Task.sleep(', body)
+        self.assertIn('("QA corrected ticket", .ticket), ("QA reviewed insurance", .insurance)', body)
+
     def test_hosted_preview_deadline_and_bounded_attempt_diagnostics(self):
         for name in ['hosted-45', 'default-45', 'hosted-at-deadline', 'hosted-overrun',
                      'hosted-two-attempts', 'hosted-trace-bound', 'hosted-trace-truncated',
@@ -2768,6 +2867,7 @@ class PreviewReadinessTests(unittest.TestCase):
         self.assertEqual(helper.count(old_policy), 1)
         mutations = [
             ('old-hosted-window', helper.replace(old_policy, 'hosted ? .seconds(40) : .seconds(40)'), 'hosted-45'),
+            ('batch-deadline-reset', helper.replace('startedAt ?? ContinuousClock.now', 'ContinuousClock.now'), 'batch-carried-start'),
             ('late-acceptance', helper.replace('guard ContinuousClock.now < deadline else { return nil }',
                                                'guard true else { return nil }')
                                       .replace('ContinuousClock.now < deadline else { return nil }',
