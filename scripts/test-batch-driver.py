@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Offline checks of actual batch selection, results and ordered log evidence."""
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -355,6 +357,111 @@ class BatchDriverTests(unittest.TestCase):
             with self.subTest(settings=settings), patch.object(driver.subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
                 run.run_test()
             spawn.assert_not_called(); run.native_root_identity.assert_not_called()
+
+class OwnedStopTests(unittest.TestCase):
+    """Exercise both actual stop methods with fake clocks/processes/signals only."""
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("privacy_stop_driver", Path(__file__).with_name("test-privacy-simulator.py"))
+        cls.privacy = importlib.util.module_from_spec(spec)
+        with patch("subprocess.Popen", side_effect=AssertionError("NO NATIVE CHILD")), patch("os.killpg", side_effect=AssertionError("NO NATIVE SIGNAL")):
+            spec.loader.exec_module(cls.privacy)
+
+    def exercise(self, module, method, *, reaped=False, absent=False, term_exit=True,
+                 kill_exit=True, lingering=False, probe_error=None, late_poll=0,
+                 late_probe=0, signal_seconds=0):
+        run = module.Driver.__new__(module.Driver)
+        run.record = Mock()
+        clock, group_absent, calls = [0.0], [absent], []
+        process = SimpleNamespace(pid=1234, returncode=0 if reaped else None)
+        def poll():
+            calls.append(('poll', clock[0]));clock[0] += late_poll
+            return process.returncode
+        process.poll = poll
+        process.wait = Mock(side_effect=AssertionError("Only bounded observation is allowed"))
+        run.process = process
+        def killpg(pid, sig):
+            self.assertEqual(pid,1234);calls.append((int(sig),clock[0]))
+            if sig == 0:
+                clock[0] += late_probe
+                if probe_error:raise probe_error
+                if group_absent[0]:raise ProcessLookupError(errno.ESRCH,'absent')
+            else:
+                clock[0] += signal_seconds
+                if (sig == signal.SIGTERM and term_exit) or (sig == signal.SIGKILL and kill_exit):
+                    process.returncode = -int(sig);group_absent[0] = not lingering
+        def sleep(seconds):
+            self.assertGreaterEqual(seconds,0);self.assertLessEqual(seconds,0.05)
+            clock[0] += seconds
+        error = None
+        with patch.object(module.time,'monotonic',side_effect=lambda:clock[0]), patch.object(module.time,'sleep',side_effect=sleep), patch.object(module.os,'killpg',side_effect=killpg), patch.object(module.subprocess,'Popen',side_effect=AssertionError('NO NATIVE CHILD')):
+            try:getattr(run,method)()
+            except Exception as caught:error=caught
+        process.wait.assert_not_called()
+        return run,clock[0],calls,error
+
+    def variants(self):
+        return [(driver,'stop_process',10),(self.privacy,'stop_tests',20)]
+
+    def test_reaped_leader_with_absent_group_never_receives_a_signal(self):
+        for module,method,_ in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,reaped=True,absent=True)
+                self.assertIsNone(error);self.assertEqual(calls,[('poll',0), (0,0)])
+                self.assertEqual(elapsed,0);self.assertTrue(run.record.call_args.kwargs['group_absent'])
+
+    def test_reaped_leader_with_present_group_fails_closed_without_signals(self):
+        for module,method,budget in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,reaped=True)
+                self.assertIn('deadline',str(error));self.assertEqual(elapsed,budget)
+                self.assertFalse(any(sig in (15,9) for sig,_ in calls));run.record.assert_not_called()
+
+    def test_reap_after_term_with_present_group_never_sends_kill(self):
+        for module,method,budget in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,lingering=True)
+                self.assertIn('deadline',str(error));self.assertEqual(elapsed,budget)
+                self.assertEqual([sig for sig,_ in calls if sig in (15,9)],[15]);run.record.assert_not_called()
+
+    def test_live_leader_still_gets_term_then_kill_inside_original_phases(self):
+        for module,method,budget in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,term_exit=False)
+                self.assertIsNone(error);self.assertEqual(elapsed,budget/2)
+                self.assertEqual([(sig,t) for sig,t in calls if sig in (15,9)],[(15,0),(9,budget/2)])
+                self.assertEqual(run.record.call_args.kwargs['returncode'],-9)
+
+    def test_permission_and_unclassified_lookup_errors_are_not_absence(self):
+        for module,method,_ in self.variants():
+            for failure in [PermissionError(errno.EPERM,'denied'),ProcessLookupError('unclassified')]:
+                with self.subTest(method=method,error=type(failure).__name__):
+                    run,_,calls,error=self.exercise(module,method,reaped=True,probe_error=failure)
+                    self.assertIs(error,failure);self.assertFalse(any(sig in (15,9) for sig,_ in calls));run.record.assert_not_called()
+
+    def test_late_poll_or_absence_cannot_prove_closure_after_deadline(self):
+        for module,method,budget in self.variants():
+            for delay in ['late_poll','late_probe']:
+                with self.subTest(method=method,delay=delay):
+                    run,elapsed,calls,error=self.exercise(module,method,reaped=True,absent=True,**{delay:budget})
+                    self.assertIn('deadline',str(error));self.assertEqual(elapsed,budget)
+                    self.assertFalse(any(sig in (15,9) for sig,_ in calls));run.record.assert_not_called()
+
+    def test_signal_return_after_deadline_admits_no_further_operation(self):
+        for module,method,budget in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,term_exit=False,signal_seconds=budget)
+                self.assertIn('deadline',str(error));self.assertEqual(elapsed,budget)
+                self.assertEqual(calls,[('poll',0),(0,0),(15,0)]);run.record.assert_not_called()
+
+    def test_group_absence_without_leader_reap_is_not_closure_or_signal_authority(self):
+        for module,method,budget in self.variants():
+            with self.subTest(method=method):
+                run,elapsed,calls,error=self.exercise(module,method,absent=True)
+                self.assertIn('deadline',str(error));self.assertEqual(elapsed,budget)
+                self.assertEqual(sum(sig==0 for sig,_ in calls),1)
+                self.assertFalse(any(sig in (15,9) for sig,_ in calls));run.record.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

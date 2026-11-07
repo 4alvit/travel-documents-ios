@@ -174,6 +174,10 @@ class Smoke:
                     check()
                     sent = None
                     if not stop['group_absent']:
+                        # A reaped leader no longer reserves its numeric PID.
+                        # Group presence alone cannot authorize another signal.
+                        require(not stop['leader_reaped'] and p.returncode is None,
+                                'Reaped leader leaves uncertain process group identity')
                         sent = observed(self, record, 'stop', 'signal_' + str(int(sig)),
                                         lambda: self.ops.send(p, sig))
                         stop['signals'].append(int(sig))

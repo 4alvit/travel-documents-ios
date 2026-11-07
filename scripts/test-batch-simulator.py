@@ -17,6 +17,7 @@ by this functional UI test; its result is not privacy or rendered-PDF proof.
 
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -446,23 +447,56 @@ class Driver:
     def stop_process(self):
         if self.process is None:
             return
-        # Descendants can outlive the leader or ignore TERM. Always finish the
-        # same private group created with start_new_session=True (PID = PGID).
-        process_group = self.process.pid
-        try:
-            os.killpg(process_group, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(process_group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        self.process.wait(timeout=5)
-        self.record("xcodebuild_stopped", process_group=process_group, returncode=self.process.returncode)
+        # Reaping releases the leader PID. Its numeric PGID then permits only
+        # observation, even when a descendant or a reused group is still present.
+        process = self.process
+        process_group = process.pid
+        started = time.monotonic()
+        deadline = started + 10
+        group_absent = False
+        confirmed_stopped = False
+
+        def stopped():
+            nonlocal group_absent, confirmed_stopped
+            if confirmed_stopped:
+                return True
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Owned process stop deadline expired")
+            leader_exited = process.poll() is not None
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Owned process stop deadline expired")
+            if not group_absent:
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError as error:
+                    if error.errno != errno.ESRCH:
+                        raise
+                    group_absent = True
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Owned process stop deadline expired")
+            confirmed_stopped = leader_exited and group_absent
+            return confirmed_stopped
+
+        for sig, phase_end in ((signal.SIGTERM, started + 5), (signal.SIGKILL, deadline)):
+            if stopped():
+                break
+            if process.returncode is None and not group_absent:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Owned process stop deadline expired")
+                try:
+                    os.killpg(process_group, sig)
+                except ProcessLookupError as error:
+                    if error.errno != errno.ESRCH:
+                        raise
+                    group_absent = True
+            while not stopped():
+                if time.monotonic() >= phase_end:
+                    break
+                time.sleep(min(0.05, max(0, phase_end - time.monotonic())))
+        if not stopped():
+            raise RuntimeError("Owned process group disappearance not confirmed")
+        self.record("xcodebuild_stopped", process_group=process_group,
+                    returncode=process.returncode, group_absent=True)
 
     def verify_fixtures(self):
         fixtures = self.summary.get("fixtures")

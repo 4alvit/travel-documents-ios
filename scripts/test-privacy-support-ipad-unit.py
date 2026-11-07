@@ -1676,6 +1676,41 @@ class DriverTests(unittest.TestCase):
         self.assertTrue(driver.active); self.assertFalse(driver.confirmed_absent_groups)
         self.assert_finished(driver)
 
+    def test_reaped_leader_present_group_never_receives_a_destructive_signal(self):
+        driver, world = self.driver(lingering=True)
+        with self.assertRaisesRegex(RuntimeError, 'Reaped leader.*group identity'):
+            driver.command(['synthetic'], 'reaped')
+        self.assertTrue(driver.active)
+        self.assertFalse(any(name.startswith('signal_') for name, _ in world.calls))
+        self.assertEqual(driver.report['process_stops'][0]['leader_returncode'], 0)
+        self.assertFalse(driver.report['process_stops'][0]['group_absent'])
+        # A later read-only absence proof may finish cleanup; never signal a
+        # numeric group whose original leader has already been reaped.
+        world.plan['lingering'] = False
+        driver.cleanup()
+        self.assertFalse(driver.active)
+        self.assertTrue(driver.report['cleanup']['verified'])
+        self.assertFalse(any(name.startswith('signal_') for name, _ in world.calls))
+        self.assertIn('Reaped leader', self.row(driver)['stop_error'])
+        self.assert_finished(driver)
+
+    def test_reaped_after_TERM_does_not_allow_KILL_of_uncertain_group(self):
+        driver, world = self.driver(delay=float('inf'))
+        original = world.killpg
+        def present_group(pid, sig):
+            if sig == 0:
+                world.calls.append(('probe', world.t))
+                return  # May be descendants or a reused numeric group.
+            return original(pid, sig)
+        with patch('os.killpg', side_effect=present_group):
+            with self.assertRaisesRegex(RuntimeError, 'finite timeout'):
+                driver.command(['synthetic'], 'reaped-after-term')
+        self.assertTrue(driver.active)
+        self.assertEqual([name for name, _ in world.calls if name.startswith('signal_')], ['signal_15'])
+        self.assertIn('Reaped leader', self.row(driver)['stop_error'])
+        self.assertFalse(driver.report['process_stops'][0]['group_absent'])
+        self.assert_finished(driver)
+
     def test_signal_ESRCH_is_recorded_as_exception_without_fake_delivery(self):
         driver, world = self.driver(delay=float('inf'), signal_esrch=True)
         with self.assertRaisesRegex(RuntimeError, 'finite timeout'): driver.command(['synthetic'], 'esrch')

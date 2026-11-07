@@ -15,7 +15,7 @@ from types import MappingProxyType
 import uuid
 
 HERE = Path(__file__).resolve().parent
-HELPER_SHA = 'a56462471af54a95085b0484e1c7f0ca54e801101548d63addc0d1b66a7e5e7d'
+HELPER_SHA = '8b139202dc0e4ab4dbd1aaa8f8a0496b7393dc6654d8025051985873856f8944'
 if hashlib.sha256((HERE/'recovery_process.py').read_bytes()).hexdigest() != HELPER_SHA:
     raise RuntimeError('Process helper changed before import')
 spec = importlib.util.spec_from_file_location('recovery_functional_v1', HERE / 'recovery_process.py')
