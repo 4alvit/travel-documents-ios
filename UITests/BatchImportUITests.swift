@@ -673,8 +673,8 @@ final class BatchImportUITests: XCTestCase {
                   app: app, "Direct preparation has no unique live native export source")
         capture(app, "Batch preparation — native exporter before opening Files; no Save performed")
         source.element.tap()
-        // Cold Files service navigation appeared after the default 15s wait on Intel.
-        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+        // A cold Files service presented after 33–35s in the retained Arm run.
+        let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(45))
         let saved = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "nativeSeed.saved."))
         try check(isNativeFilesRoot(app) && picker.cells.matching(identifier: absentFolder + ", Folder").count == 0
                   && saved.count == 0 && !failed.exists,
@@ -2670,6 +2670,7 @@ final class BatchImportUITests: XCTestCase {
             navigations.count == 1 && pickers.count == 0 && recents.count == 1 && recents.element.exists
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
+        let initialDeadline = ContinuousClock.now.advanced(by: initialTimeout)
         try await wait("Native root Files browser or supported Recents screen is missing", app: app,
                        timeout: initialTimeout) {
             // Classify one observation instead of rereading a changing browser
@@ -2681,6 +2682,8 @@ final class BatchImportUITests: XCTestCase {
             return recents.count == 1 && recents.element.exists
                 && self.isRecoveryFolder("Recents", navigation: navigations.element) && browseReady()
         }
+        try check(ContinuousClock.now < initialDeadline, app: app,
+                  "Native root Files initial readiness exceeded its deadline")
         if !browserReady() {
             try check(recentsReady(), app: app, "Native root Files Recents route changed")
             browse.element.tap()

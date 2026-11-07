@@ -229,6 +229,12 @@ typealias XCUIApplication = Node
     func capture(_ app: Node, _ message: String, springboard: Node?, batchDiagnostic: Bool) {
         precondition(batchDiagnostic); script.captures += 1
     }
+    func check(_ condition: Bool, app: Node, _ message: String) throws {
+        if !condition {
+            capture(app, message, springboard: nil, batchDiagnostic: true)
+            throw BatchTestFailure(message: message)
+        }
+    }
     // ACTUAL_WAIT
     func run(oldBranching: Bool, initialTimeout: Duration) async throws {
         let app = Node(script, "app")
@@ -296,16 +302,49 @@ class InitialNativeRootReadiness(unittest.TestCase):
         samples = {"navigation.count": [(0, 3996.98), (1, 12967.8)],
                    "picker.count": [(1, 2846.04)], "picker.exists": [(1, 10)]}
         old = self.run_predicate(samples, old=True)
-        current = self.run_predicate(samples)
+        current = self.run_predicate(samples, timeout=30)
         self.assertFalse(old["accepted"])
         self.assertEqual(old["captures"], 1)
         self.assertTrue(current["accepted"])
         self.assertEqual(current["captures"], 0)
         self.assertEqual(old["calls"], ["navigation.count", "navigation.count", "picker.count"])
         self.assertEqual(current["calls"], old["calls"] + ["picker.exists"])
-        # An in-flight synchronous query may finish after the existing 15s
-        # deadline. The unchanged wait already accepts a true result then.
+        # This coherent observation fits the selected 30s initial budget.
         self.assertGreater(current["milliseconds"], 15000)
+        self.assertLess(current["milliseconds"], 30000)
+
+    def test_initial_readiness_rejects_a_positive_query_returned_at_or_after_deadline(self):
+        for elapsed in (45000, 45001):
+            browser = {"navigation.count": [(1, 0)], "picker.count": [(1, 0)],
+                       "picker.exists": [(1, elapsed)]}
+            recents = {"navigation.count": [(1, 0)], "picker.count": [(0, 0)],
+                       "recents.count": [(1, 0)], "recents.exists": [(1, 0)],
+                       "folder.recents": [(1, 0)], "tabs.count": [(1, 0)],
+                       "browse.count": [(1, 0)], "browse.enabled": [(1, 0)],
+                       "browse.hittable": [(1, elapsed)]}
+            for samples in (browser, recents):
+                with self.subTest(milliseconds=elapsed, route="browser" if samples is browser else "recents"):
+                    result = self.run_predicate(samples, timeout=45)
+                    self.assertFalse(result["accepted"])
+                    self.assertEqual(result["captures"], 1)
+                    self.assertEqual(result["calls"], list(samples))
+
+    def test_direct_cold_preparation_allows_measured_late_service_readiness(self):
+        # The retained service appeared 33–35s after tap. Acceptance still
+        # requires the actual navigation/picker checks, not lifecycle events.
+        samples = {"navigation.count": [(0, 900)] * 35 + [(1, 1)],
+                   "picker.count": [(1, 1)], "picker.exists": [(1, 1)]}
+        previous = self.run_predicate(samples, timeout=30)
+        current = self.run_predicate(samples, timeout=45)
+        self.assertFalse(previous["accepted"])
+        self.assertTrue(current["accepted"])
+        self.assertGreater(current["milliseconds"], 35000)
+        self.assertLess(current["milliseconds"], 36000)
+        direct = helper("    func testBatchPrepareFilesProviderDirectly", "    private static func directPreparationToken")
+        self.assertIn("openNativeFilesRoot(app, initialTimeout: .seconds(45))", direct)
+        self.assertIn("executionTimeAllowance = 180", direct)
+        self.assertIn("saved.count == 0 && !failed.exists", direct)
+        self.assertEqual(direct.count("source.element.tap()"), 1)
 
     def test_cold_initial_wait_observes_ready_picker_after_default_budget(self):
         # A true predicate arrives at18s; service lifecycle alone is not modeled
@@ -326,13 +365,13 @@ class InitialNativeRootReadiness(unittest.TestCase):
     def test_cold_initial_wait_does_not_poll_again_at_its_deadline(self):
         # A valid next observation must remain unread once the same fixed
         # deadline expires; no rolling retry or indefinite cold-start wait.
-        samples = {"navigation.count": [(0, 0)] * 300 + [(1, 0)],
+        samples = {"navigation.count": [(0, 0)] * 450 + [(1, 0)],
                    "picker.count": [(1, 0)], "picker.exists": [(1, 0)]}
-        result = self.run_predicate(samples, timeout=30)
+        result = self.run_predicate(samples, timeout=45)
         self.assertFalse(result["accepted"])
         self.assertEqual(result["captures"], 1)
-        self.assertEqual(result["milliseconds"], 30000)
-        self.assertEqual(result["calls"], ["navigation.count"] * 300)
+        self.assertEqual(result["milliseconds"], 45000)
+        self.assertEqual(result["calls"], ["navigation.count"] * 450)
 
     def test_browser_branch_reads_each_count_once_and_requires_existence(self):
         samples = {"navigation.count": [(1, 1)], "picker.count": [(1, 1)], "picker.exists": [(1, 1)]}
