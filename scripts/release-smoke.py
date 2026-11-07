@@ -430,11 +430,40 @@ class OrdinarySmoke:
         finally:
             self.commands.limit = original
         self.command('boot', ['xcrun', 'simctl', 'boot', self.owned], 60)
-        self.command('boot-ready', ['xcrun', 'simctl', 'bootstatus', self.owned, '-b'], 180)
-        self.command('install', ['xcrun', 'simctl', 'install', self.owned, self.app], 60)
+        self.prepare_install()
         self.installed = self.installed_path()
         self.verify_installed('installed-before')
         self.save()
+
+    def prepare_install(self):
+        self.check()
+        require('boot_install_phase' not in self.report, 'Boot/install preparation may run only once')
+        original = self.commands.limit
+        started = time.monotonic()
+        # Share the existing 188s ready + 68s install allocation. The one
+        # install can use unused readiness time, never a new parent window.
+        deadline = min(original, self.work_deadline, started + 256)
+        phase = self.report['boot_install_phase'] = {
+            'started_seconds': started - self.started,
+            'deadline_seconds': deadline - self.started,
+            'maximum_seconds': 256, 'ready_command_maximum_seconds': 188,
+            'stop_reserve_seconds': 8, 'install_attempts': 0,
+        }
+        self.commands.limit = deadline
+        try:
+            self.command('boot-ready', ['xcrun', 'simctl', 'bootstatus', self.owned, '-b'], 180)
+            self.check()
+            remaining = deadline - time.monotonic()
+            require(remaining > 8, 'No shared install/stop budget remains')
+            phase['install_work_seconds'] = remaining - 8
+            phase['install_attempts'] += 1
+            self.command('install', ['xcrun', 'simctl', 'install', self.owned, self.app], remaining - 8)
+            self.check()
+            require(time.monotonic() < deadline, 'Shared boot/install deadline expired')
+            phase['completed'] = True
+        finally:
+            phase['finished_seconds'] = time.monotonic() - self.started
+            self.commands.limit = original
 
     def installed_path(self):
         value = self.command('installed-container', ['xcrun', 'simctl', 'get_app_container', self.owned, APP_ID, 'app'], 60).strip()

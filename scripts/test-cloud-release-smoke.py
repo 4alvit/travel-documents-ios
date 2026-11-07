@@ -449,6 +449,114 @@ class CacheTests(unittest.TestCase):
             if 'now' in options: self.assertEqual(calls[-1][3:], (900, 900))
 
 
+class SharedInstallBudgetTests(unittest.TestCase):
+    def run_phase(self, ready=108., install=100., start=150., cancelled=None,
+                  install_code=0, post_install_delay=0.):
+        # Execute both real orchestration and process ownership with a fake OS.
+        processes = load('recovery_process.py', 'install_budget_processes')
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        owner = s.OrdinarySmoke.__new__(s.OrdinarySmoke)
+        owner.out = owner.repo = Path(temporary.name).resolve()
+        owner.app = owner.out / 'Tripfolio.app'
+        owner.started, owner.work_deadline, owner.cleanup_deadline = 0., 900., 1080.
+        owner.cleaning = owner.interrupted = False
+        owner.owned = '11111111-1111-4111-8111-111111111111'
+        owner.report = {}
+        clock, calls = [start], []
+        class Process:
+            def __init__(self, kind):
+                self.kind, self.pid, self.returncode = kind, 1000 + len(calls), None
+                self.ready = clock[0] + (ready if kind == 'bootstatus' else install)
+            def poll(self):
+                if self.returncode is None and clock[0] >= self.ready:
+                    self.returncode = 0 if self.kind == 'bootstatus' else install_code
+                return self.returncode
+        class Ops:
+            def now(self): return clock[0]
+            def sleep(self, seconds): clock[0] += seconds
+            def spawn(self, argv):
+                calls.append(argv)
+                return Process(argv[2])
+            def prepare(self, _): pass
+            def read(self, process):
+                if cancelled == process.kind: owner.interrupted = True
+                return []
+            def absent(self, process): return process.poll() is not None
+            def send(self, process, sig):
+                process.returncode = -sig
+                return 'syscall_returned'
+            def close(self, process):
+                if process.kind == 'install': clock[0] += post_install_delay
+        ops = Ops()
+        api = SimpleNamespace(Smoke=processes.Smoke, RealOps=lambda *_: ops)
+        owner.commands = s.make_commands_class(api)(owner)
+        failure = None
+        with patch.object(s.time, 'monotonic', side_effect=ops.now):
+            try: owner.prepare_install()
+            except RuntimeError as error: failure = error
+        self.assertEqual(owner.commands.limit, 900.)
+        return owner, calls, failure
+
+    def test_unused_ready_allocation_allows_one_install_over_sixty_seconds(self):
+        owner, calls, error = self.run_phase()
+        self.assertIsNone(error)
+        self.assertEqual([row[2] for row in calls], ['bootstatus', 'install'])
+        phase = owner.report['boot_install_phase']
+        self.assertEqual(phase['deadline_seconds'], 406.)
+        self.assertTrue(phase['completed'])
+        self.assertEqual(phase['install_attempts'], 1)
+        self.assertAlmostEqual(phase['install_work_seconds'], 140., places=2)
+        records = owner.commands.report['commands']
+        self.assertEqual(records[0]['requested_cap_seconds'], 188.)
+        self.assertEqual(records[1]['command_deadline'], 406.)
+        self.assertTrue(all(row['stop']['group_absent'] and row['stop']['leader_reaped'] for row in records))
+        with patch.object(s.time, 'monotonic', return_value=360.):
+            with self.assertRaisesRegex(RuntimeError, 'only once'): owner.prepare_install()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((s.WORK_SECONDS, s.CLEANUP_SECONDS), (900, 180))
+
+    def test_slow_ready_reduces_install_window_and_timeout_is_not_accepted(self):
+        owner, calls, error = self.run_phase(ready=179., install=70.)
+        self.assertIsNotNone(error)
+        self.assertEqual([row[2] for row in calls], ['bootstatus', 'install'])
+        self.assertNotIn('completed', owner.report['boot_install_phase'])
+        install = owner.commands.report['commands'][-1]
+        self.assertEqual(install['command_deadline'], 406.)
+        self.assertEqual(install['work_deadline'], 398.)
+        self.assertTrue(install['stop']['group_absent'] and install['stop']['leader_reaped'])
+
+    def test_ready_still_has_original_180_second_work_limit(self):
+        owner, calls, error = self.run_phase(ready=181.)
+        self.assertIsNotNone(error)
+        self.assertEqual([row[2] for row in calls], ['bootstatus'])
+        self.assertEqual(owner.report['boot_install_phase']['install_attempts'], 0)
+
+    def test_parent_deadline_clips_shared_phase_without_renewing_it(self):
+        owner, calls, error = self.run_phase(start=850., ready=10., install=33.)
+        self.assertIsNotNone(error)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(owner.report['boot_install_phase']['deadline_seconds'], 900.)
+        self.assertEqual(owner.commands.report['commands'][-1]['work_deadline'], 892.)
+        self.assertNotIn('completed', owner.report['boot_install_phase'])
+
+    def test_cancellation_prevents_install_or_stops_its_only_attempt(self):
+        for phase in ('bootstatus', 'install'):
+            with self.subTest(phase=phase):
+                owner, calls, error = self.run_phase(cancelled=phase)
+                self.assertIsNotNone(error)
+                self.assertEqual(len(calls), 1 if phase == 'bootstatus' else 2)
+                self.assertNotIn('completed', owner.report['boot_install_phase'])
+
+    def test_install_nonzero_and_late_completion_cannot_pass(self):
+        for options in ({'install_code': 1}, {'post_install_delay': 100.}):
+            with self.subTest(options=options):
+                owner, calls, error = self.run_phase(**options)
+                self.assertIsNotNone(error)
+                self.assertEqual(len(calls), 2)
+                self.assertNotIn('completed', owner.report['boot_install_phase'])
+
+
 class OrdinaryLaunchTests(unittest.TestCase):
     def run_capture(self, delay, start=200., cancelled=False, sample_delay=0.,
                     sample_unresolved=False, observe_failure=False, sigchld=signal.SIG_DFL,

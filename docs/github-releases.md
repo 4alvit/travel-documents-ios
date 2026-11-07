@@ -862,6 +862,23 @@ Keep the underlying screenshots, command/result records and manifest accessible
 for review. The preparer checks receipt identities and conclusions; it does not
 interpret screenshots or replace the test drivers' independent verification.
 
+The separate diagnostic workflow shares its existing 256-second boot-readiness
+and installation allocation: readiness keeps its 180-second work cap plus eight
+seconds for stopping, and one installation can use the remaining original phase
+with the same eight-second stop reserve. The phase is also clipped by the
+unchanged 900-second work deadline; cleanup retains its separate 180-second cap.
+Cancellation, nonzero exit, late completion or unproved process closure still
+fails the attempt. There is no installation retry or second launch.
+
+This allocation follows [a cold hosted smoke failure](https://github.com/4alvit/travel-documents-ios/actions/runs/42352663157):
+runtime-cache preparation took 143.6 seconds, boot readiness took 108.1 seconds,
+and the sole installation remained pending at its former 60-second work limit,
+without error output. The earlier accepted smoke installed in 17.5 seconds.
+The failed attempt never launched the app and completed owned-device cleanup.
+Sharing unused readiness time does not establish why installation was slow or
+prove the new attempt will succeed. Exact installed bytes, ordinary launch,
+screenshots and independent acceptance remain mandatory before publication.
+
 For `batch-import` and `privacy-biometric`, use `configuration: "Debug"` and the
 actual tested Debug product's file-manifest hash. The top-level
 `release_artifact_sha256` associates source-equivalent test evidence with the
