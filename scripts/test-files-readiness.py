@@ -2230,9 +2230,14 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
     var captures = 0
     var observations = 0
     var eligibleObservations = 0
+    var pickerResolutions = 0
+    var navigationQueries = 0
+    var boundSnapshotGenerations: [Int] = []
     init(_ mode: String) { self.mode = mode }
     var navigation: Int {
+        navigationQueries += 1
         let now = ContinuousClock.elapsed
+        if mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(8); return 0 }
         if mode == "slow-navigation-count" { ContinuousClock.elapsed += .seconds(31); return 1 }
         if mode == "ambiguous-navigation" && now >= .seconds(1) && now < .seconds(2) { return 2 }
         if mode == "immediate" || mode == "slow-navigation-exists" { return 1 }
@@ -2240,6 +2245,18 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
         if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return 1 }
         if mode == "retry-opens" && taps.count == 2 { return 1 }
         return 0
+    }
+    var pickerPresent: Bool {
+        if ["slow-picker-ready", "late-picker-snapshot", "wrong-picker-identity", "duplicate-picker-navigation",
+            "unrelated-picker-navigation", "partial-picker-snapshot", "duplicate-picker", "omitted-app-subtree"].contains(mode)
+            || mode.hasPrefix("picker-") { return true }
+        if mode == "immediate" { return true }
+        if mode == "delayed-first" && ContinuousClock.elapsed >= .seconds(10) { return true }
+        if mode == "navigation-during-retry-proof" && eligibleObservations >= 3 { return true }
+        if mode == "retry-opens" && taps.count == 2 { return true }
+        if mode == "partial-picker" && ContinuousClock.elapsed >= .seconds(1)
+            && ContinuousClock.elapsed < .seconds(2) { return true }
+        return false
     }
     func observation() -> Proof? {
         observations += 1
@@ -2260,9 +2277,21 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
         return initial
     }
 }
+@MainActor final class XCUIElementSnapshot {
+    let elementType: XCUIElement.ElementType
+    let identifier: String
+    let frame: CGRect
+    let children: [XCUIElementSnapshot]
+    init(_ type: XCUIElement.ElementType, _ identifier: String, _ frame: CGRect,
+         _ children: [XCUIElementSnapshot] = []) {
+        self.elementType = type; self.identifier = identifier; self.frame = frame; self.children = children
+    }
+}
 @MainActor final class XCUIElement {
+    enum ElementType { case other, navigationBar, button }
     let world: World
-    init(_ world: World) { self.world = world }
+    let generation: Int
+    init(_ world: World, generation: Int = 0) { self.world = world; self.generation = generation }
     var exists: Bool {
         if world.mode == "slow-navigation-exists" { ContinuousClock.elapsed += .seconds(31) }
         return true
@@ -2270,6 +2299,36 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
     func tap() {
         world.taps.append(ContinuousClock.elapsed)
         if world.mode == "slow-first-tap" { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(7) }
+    }
+    func snapshot() throws -> XCUIElementSnapshot {
+        precondition(generation > 0 && generation == world.pickerResolutions, "stale or unbound picker")
+        world.boundSnapshotGenerations.append(generation)
+        if world.mode == "picker-snapshot-error" { throw BatchTestFailure(message: "snapshot unavailable") }
+        if world.mode == "late-picker-snapshot" { ContinuousClock.elapsed += .seconds(31) }
+        if world.mode == "picker-exact-deadline" { ContinuousClock.elapsed = .seconds(30) }
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(1) }
+        let navigationFrame = world.mode == "picker-navigation-outside" ? CGRect(x: 800, y: 88, width: 402, height: 114)
+            : world.mode == "picker-navigation-invalid" ? .infinite : CGRect(x: 0, y: 88, width: 402, height: 114)
+        let navigation = XCUIElementSnapshot(.navigationBar,
+            world.mode == "unrelated-picker-navigation" ? "Settings" : "FullDocumentManagerViewControllerNavigationBar",
+            navigationFrame)
+        var children = ["partial-picker", "partial-picker-snapshot"].contains(world.mode) ? []
+            : world.mode == "duplicate-picker-navigation" ? [navigation, navigation] : [navigation]
+        if world.mode == "picker-duplicate-subtree" {
+            children.append(XCUIElementSnapshot(.other, "Browse View (Picker)", .zero))
+        }
+        if world.mode == "picker-node-overflow" {
+            children += Array(repeating: XCUIElementSnapshot(.other, "", .zero), count: 4096)
+        }
+        if world.mode == "picker-depth-overflow" {
+            var node = XCUIElementSnapshot(.other, "", .zero)
+            for _ in 0..<65 { node = XCUIElementSnapshot(.other, "", .zero, [node]) }
+            children.append(node)
+        }
+        return XCUIElementSnapshot(world.mode == "picker-wrong-type" ? .button : .other,
+            world.mode == "wrong-picker-identity" ? "Other view" : "Browse View (Picker)",
+            world.mode == "picker-empty-frame" ? .zero : CGRect(x: 0, y: 72, width: 402, height: 802), children)
     }
 }
 @MainActor final class XCUIElementQuery {
@@ -2278,8 +2337,18 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
     init(_ world: World, kind: String = "actions") { self.world = world; self.kind = kind }
     func matching(identifier: String) -> XCUIElementQuery { self }
     var element: XCUIElement { XCUIElement(world) }
+    var allElementsBoundByAccessibilityElement: [XCUIElement] {
+        precondition(kind == "picker")
+        world.pickerResolutions += 1
+        if world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(17) }
+        if world.mode == "picker-late-binding" { ContinuousClock.elapsed += .seconds(31) }
+        guard world.pickerPresent else { return [] }
+        let picker = XCUIElement(world, generation: world.pickerResolutions)
+        return world.mode == "duplicate-picker" ? [picker, picker] : [picker]
+    }
     var count: Int {
         if kind == "navigation" { return world.navigation }
+        if kind == "picker" && world.mode == "slow-picker-ready" { ContinuousClock.elapsed += .seconds(17); return 1 }
         if kind == "picker" && world.mode == "partial-picker"
             && ContinuousClock.elapsed >= .seconds(1) && ContinuousClock.elapsed < .seconds(2) { return 1 }
         return 0
@@ -2325,7 +2394,8 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
         Task.cancelled = mode == "cancel-before-first"
         do { try await Harness(world).run() } catch { failed = true; cancelled = error is CancellationError }
         precondition(cancelled == mode.hasPrefix("cancel-"))
-        let succeeds = ["immediate", "delayed-first", "retry-opens", "navigation-during-retry-proof"].contains(mode)
+        let succeeds = ["immediate", "delayed-first", "retry-opens", "navigation-during-retry-proof",
+                        "slow-picker-ready", "omitted-app-subtree"].contains(mode)
         precondition(failed != succeeds, "Wrong result for " + mode)
         let twoTaps = ["retry-opens", "retry-still-pending"].contains(mode)
         precondition(world.taps.count == (mode == "cancel-before-first" ? 0 : (twoTaps ? 2 : 1)), "Wrong tap count for " + mode)
@@ -2337,6 +2407,11 @@ typealias Proof = (frames: [CGRect], identity: String, action: XCUIElement)
             precondition(world.records.filter { $0.contains("retry disabled:") }.count == 1)
         }
         precondition(world.captures == (succeeds || cancelled ? 0 : 1))
+        if mode == "slow-picker-ready" {
+            precondition(ContinuousClock.elapsed == .seconds(25) && world.navigationQueries == 0)
+            precondition(world.pickerResolutions == 1 && world.boundSnapshotGenerations == [1])
+        }
+        if mode == "picker-late-binding" { precondition(world.boundSnapshotGenerations.isEmpty) }
         print("PASS " + mode)
     }
 }
@@ -2366,7 +2441,13 @@ class ShareTransitionTests(unittest.TestCase):
                      'background', 'partial-picker', 'ambiguous-navigation', 'slow-snapshot',
                      'slow-third-proof', 'slow-navigation-count', 'slow-navigation-exists', 'slow-dispatch-record',
                      'slow-first-tap', 'exact-deadline-snapshot', 'exact-deadline-third',
-                     'slow-final-state', 'cancel-before-first', 'cancel-before-retry']:
+                     'slow-final-state', 'cancel-before-first', 'cancel-before-retry',
+                     'slow-picker-ready', 'late-picker-snapshot', 'wrong-picker-identity',
+                     'duplicate-picker-navigation', 'unrelated-picker-navigation',
+                     'partial-picker-snapshot', 'duplicate-picker', 'omitted-app-subtree',
+                     'picker-snapshot-error', 'picker-exact-deadline', 'picker-navigation-outside',
+                     'picker-navigation-invalid', 'picker-duplicate-subtree', 'picker-node-overflow',
+                     'picker-depth-overflow', 'picker-wrong-type', 'picker-empty-frame', 'picker-late-binding']:
             with self.subTest(name=name):
                 result = subprocess.run([str(self.binary), name], capture_output=True,
                                         text=True, check=True, timeout=5)
