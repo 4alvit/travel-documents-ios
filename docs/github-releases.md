@@ -726,8 +726,8 @@ The script requires:
 - A completed successful `.github/workflows/ci.yml` main push or main manual
   dispatch run whose `head_sha` is exactly that commit. PR synthetic merge
   artifacts are deliberately not treated as the PR head.
-- All six expected jobs successful in the same run attempt: core/purchase,
-  guidance, iPad EN, iPad RU, recovery, and the final CI gate.
+- All seven expected jobs successful in the same run attempt: change scope,
+  core/purchase, guidance, iPad EN, iPad RU, recovery, and the final CI gate.
 - The exact nonexpired `TripDocket-simulator-COMMIT-RUN-ATTEMPT` artifact, its
   GitHub digest, original checksums/provenance, and valid Simulator bundle.
 - Operator-reviewed execution receipts described below.
