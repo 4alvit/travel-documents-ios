@@ -34,10 +34,57 @@ not complete the separate application RC/device/distribution gates. If code or
 payload changes, create and qualify a new beta candidate; do not overwrite an
 old tag or relabel an old binary as fixed.
 
+## Capture an ordinary Release launch
+
+The existing `Release qualification` dispatcher also accepts the explicit
+`ordinary-smoke` mode. It acquires an existing successful **main-push** CI artifact;
+it does not rebuild, re-sign, publish, approve a release, or run batch/biometrics.
+The `batch` and `biometrics` routes retain their original drivers and gates.
+Select the exact reviewed source SHA, successful CI run ID and Simulator artifact ID:
+
+```sh
+gh workflow run release-qualification.yml --ref main \
+  -f mode=ordinary-smoke -f runner=macos-15 \
+  -f commit=REVIEWED_MAIN_SHA -f ci_run_id=SUCCESSFUL_CI_RUN_ID \
+  -f artifact_id=EXACT_SIMULATOR_ARTIFACT_ID
+```
+
+For a reviewed pre-merge tooling check, select its named branch with `--ref`;
+the application artifact must still come from successful main history. The
+orchestrator commit/workflow identity and the artifact's application source are
+recorded separately. A dispatcher branch is never described as the app's source.
+The architecture must match the payload: ordinary main CI currently produces an
+Arm Simulator app, so `macos-15` is the normal choice. There is no architecture,
+SDK/runtime or device fallback. The selected hosted image must provide the exact
+Xcode 26.2 (17C52) and iOS 26.2 runtime build 23C54; unavailable tools fail closed.
+
+`prepare-cloud-smoke.py` validates the whole successful CI graph and producer
+attempt, source/tree/parents, artifact ID/digest and untouched original payload.
+It grants no release acceptance. Only its acquisition step receives the existing
+job-scoped token with read-only Actions access. The inherited GitHub reader uses
+a `gh api --hostname github.com --method GET` child: only fixed own-repository
+metadata/archive routes and bounded pagination may receive that token. Git,
+Xcode and application subprocesses remain credential- and injection-free. `release-smoke.py --run` uses one newly owned disposable hosted
+Simulator, installs the existing ZIP, verifies the actual installed app bytes
+against that ZIP, launches once without test/development flags, captures three
+screenshots, rechecks identity and removes only its owned device. It keeps the
+900-second work and 180-second cleanup ceilings; acquisition has its separate
+300-second bounded envelope. It never operates a physical device or local Mac app.
+
+The 14-day evidence artifact retains the original inputs, acquisition record,
+installed-product identities, command/cleanup records and screenshots. A
+`captured_pending_review` receipt is raw capture success, **not** a beta/RC/final
+approval: inspect the rendered app, warnings and cleanup before preparing any
+public acceptance receipt. Historical Files/StoreKit/platform issues are not
+closed by this smoke. Without `--run`, the smoke CLI is inert;
+`python3 -B scripts/release-smoke.py --self-check` imports the current helpers and
+reports zero native calls. Its offline transport, identity, cancellation and
+process-ownership regressions run in ordinary `verify.sh`.
+
 ## Prepare without publishing
 
 The explicit `Release qualification` workflow captures the selected suite once.
-Both modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
+The batch and biometrics modes use Xcode 26.2 (17C52), with SDK and Simulator runtime 26.2.
 The default Arm profile uses the budgets below; the Intel batch contingency
 is described separately.
 Batch qualification checks the complete path from selecting existing files to

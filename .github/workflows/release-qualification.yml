@@ -7,13 +7,28 @@ on:
         description: Capture one opt-in suite for independent release review
         type: choice
         required: true
-        options: [batch, biometrics]
+        options: [batch, biometrics, ordinary-smoke]
       runner:
         description: Hosted runner architecture (Intel is an explicit contingency)
         type: choice
         required: true
         default: macos-15
         options: [macos-15, macos-15-intel]
+      commit:
+        description: Ordinary-smoke only; exact reviewed successful-main source SHA
+        type: string
+        required: false
+        default: ''
+      ci_run_id:
+        description: Ordinary-smoke only; complete successful main-push CI run ID
+        type: string
+        required: false
+        default: ''
+      artifact_id:
+        description: Ordinary-smoke only; exact Release Simulator artifact ID from that CI run
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -21,6 +36,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify:
+    if: ${{ inputs.mode != 'ordinary-smoke' }}
     runs-on: ${{ fromJSON('{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"}')[inputs.runner || 'macos-15'] }}
     timeout-minutes: ${{ inputs.mode == 'batch' && inputs.runner == 'macos-15-intel' && 68 || 58 }}
     # A successful capture still requires independent xcresult and visual review.
@@ -87,5 +103,65 @@ jobs:
             build/PrivacySimulator-*/xcresult-*.json
             build/PrivacySimulator-*/xcodebuild.log
             build/PrivacySimulator-*/Tests.xcresult/
+          if-no-files-found: error
+          retention-days: 14
+
+  ordinary-smoke:
+    permissions:
+      contents: read
+      actions: read
+    if: ${{ inputs.mode == 'ordinary-smoke' }}
+    runs-on: ${{ fromJSON('{"macos-15":"macos-15","macos-15-intel":"macos-15-intel"}')[inputs.runner || 'macos-15'] }}
+    timeout-minutes: 32
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - name: Set isolated smoke output directory
+        id: smoke_directory
+        timeout-minutes: 1
+        run: >-
+          printf 'SMOKE_DIR=%s/release-smoke-%s-%s\n'
+          "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify and acquire exact successful-main artifact
+        id: prepare
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_RUNNER: ${{ inputs.runner || 'macos-15' }}
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.ci_run_id }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.artifact_id }}
+        run: >-
+          python3 -B scripts/prepare-cloud-smoke.py
+          --commit "$CANDIDATE_COMMIT" --run-id "$CANDIDATE_RUN_ID"
+          --artifact-id "$CANDIDATE_ARTIFACT_ID" --out "$SMOKE_DIR"
+      - name: Capture one ordinary Release launch for independent review
+        timeout-minutes: 20
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_TREE: ${{ steps.prepare.outputs.tree }}
+        run: >-
+          python3 -B scripts/release-smoke.py --run
+          --repo "$GITHUB_WORKSPACE" --commit "$CANDIDATE_COMMIT" --tree "$CANDIDATE_TREE"
+          --app-dir "$SMOKE_DIR/inputs/Tripfolio.app"
+          --zip "$SMOKE_DIR/inputs/TripDocket-Simulator.zip" --out "$SMOKE_DIR/capture"
+          --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --runtime-build 23C54
+      - name: Retain original payload and source-bound success or failure evidence
+        if: ${{ always() && steps.smoke_directory.outcome == 'success' }}
+        timeout-minutes: 4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TripDocket-release-smoke-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SMOKE_DIR }}/acquisition.json
+            ${{ env.SMOKE_DIR }}/inputs/TripDocket-Simulator.zip
+            ${{ env.SMOKE_DIR }}/inputs/provenance.json
+            ${{ env.SMOKE_DIR }}/inputs/SHA256SUMS
+            ${{ env.SMOKE_DIR }}/capture/
           if-no-files-found: error
           retention-days: 14
