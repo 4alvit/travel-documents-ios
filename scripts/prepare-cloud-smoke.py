@@ -125,6 +125,7 @@ class Commands:
             try:
                 os.killpg(process.pid, sig)
             except ProcessLookupError:
+                # The group exited between the absence check and this signal.
                 pass
             except OSError as error:
                 cleanup_error = cleanup_error or error
@@ -133,6 +134,7 @@ class Commands:
                     try:
                         process.send_signal(sig)
                     except ProcessLookupError:
+                        # Our unreaped child exited before this fallback signal.
                         pass
                     except OSError as error:
                         cleanup_error = cleanup_error or error
