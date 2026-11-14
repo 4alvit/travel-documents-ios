@@ -15,6 +15,8 @@ python3 -B scripts/test-native-folder-geometry.py
 python3 -B scripts/test-native-folder-direct.py
 python3 -B scripts/test-native-folder-control.py
 python3 -B scripts/test-biometric-handshake.py
+python3 -B scripts/test-cloud-release-smoke.py
+python3 -B scripts/release-smoke.py --self-check
 swift test
 xcodegen generate
 xcodebuild -project Tripfolio.xcodeproj -scheme Tripfolio \
