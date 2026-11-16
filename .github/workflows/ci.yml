@@ -210,8 +210,8 @@ jobs:
             step_minutes: 40
             job_minutes: 52
           - locale: ru-RU
-            step_minutes: 40
-            job_minutes: 52
+            step_minutes: 45
+            job_minutes: 57
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
@@ -232,8 +232,8 @@ jobs:
           swift --version
           brew install xcodegen
       - name: Owned iPad guidance (${{ matrix.locale }})
-        # 35m ARM work + 3m cleanup + 2m startup/finalization headroom.
-        # Job: checkout 2 + toolchain 3 + driver 40 + upload 2 + cancellation 5.
+        # ARM work: EN 35m / RU 40m, plus 3m cleanup + 2m finalization headroom.
+        # Job: checkout 2 + toolchain 3 + driver 40/45 + upload 2 + cancellation 5.
         timeout-minutes: ${{ matrix.step_minutes }}
         run: |
           args=(--locale '${{ matrix.locale }}')
