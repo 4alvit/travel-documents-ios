@@ -521,7 +521,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn('TRIPDOCKET_IPAD_XCODE_VERSION=$(xcodebuild -version)', ipad_job)
         self.assertIn("test \"$TRIPDOCKET_IPAD_XCODE_VERSION\" = $'Xcode 26.2\\nBuild version 17C52'", ipad_job)
         self.assertEqual([case[3] for case in ipad.CASES], [900, 900])
-        self.assertEqual(ipad.WORK_SECONDS, {'en-US': 2100, 'ru-RU': 2100})
+        self.assertEqual(ipad.WORK_SECONDS, {'en-US': 2160, 'ru-RU': 2400})
         self.assertEqual(ipad.CLEANUP_SECONDS, 180)
 
     def test_selected_locale_is_required_and_invalid_locale_creates_no_output(self):
@@ -530,11 +530,11 @@ class DriverTests(unittest.TestCase):
         self.assertFalse((self.root/'build').exists())
 
     def test_host_profiles_are_immutable_and_unknown_architecture_creates_no_output(self):
-        for architecture,work,boot in [('arm64',2100,180),('x86_64',4500,600)]:
+        for architecture,work,boot in [('arm64',2160,180),('x86_64',4500,600)]:
             for locale in ('en-US','ru-RU'):
                 profile=ipad.execution_profile(architecture,locale)
                 self.assertEqual((profile['architecture'],profile['work_seconds'],profile['boot_seconds']),
-                                 (architecture,work,boot))
+                                 (architecture,4500 if architecture == 'x86_64' else {'en-US':2160,'ru-RU':2400}[locale],boot))
                 self.assertEqual((profile['build_seconds'],profile['cleanup_seconds']),
                                  (1200,360) if architecture == 'x86_64' else (480,180))
                 self.assertEqual(profile['aut_install_seconds'],90 if architecture == 'x86_64' else 60)
@@ -586,10 +586,42 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(driver.report['expected_case_count'],1)
                 self.assertEqual(driver.out,self.root.resolve()/'build/PrivacySupport-iPad'/locale)
                 self.assertEqual(driver.derived,self.root.resolve()/('build/PrivacySupport-iPad-DerivedData-'+locale))
-                work = 2100
+                work = {'en-US':2160,'ru-RU':2400}[locale]
                 self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+180))
                 self.assertEqual(driver.report['work_seconds'],work)
                 self.assertEqual(driver.report['cleanup_reserve_seconds'],180)
+                self.assertEqual(world.processes,[])
+
+    def test_observed_RU_658_second_preparation_admits_full_unchanged_case(self):
+        driver,world=self.driver(locale='ru-RU');world.t=658
+        driver.owned='synthetic-owned-device'
+        with patch.object(driver,'product_snapshot',side_effect=RuntimeError('synthetic admission reached')):
+            with self.assertRaisesRegex(RuntimeError,'synthetic admission reached'):
+                driver.run_case(*driver.case)
+        entry=driver.report['cases'][0]
+        self.assertEqual(entry['status'],'started')
+        self.assertEqual(entry['admission']['required_seconds'],1487)
+        self.assertEqual(entry['admission']['remaining_seconds'],1742)
+        self.assertEqual(driver.case[3],900)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2400,2580))
+        self.assertEqual(world.processes,[])
+
+    def test_english_observed_and_declared_preparation_admit_full_fixed_case(self):
+        original_root=self.root
+        for elapsed in (619.329838,658):
+            with self.subTest(elapsed=elapsed):
+                self.root=original_root/str(elapsed)
+                driver,world=self.driver(locale='en-US');world.t=elapsed
+                driver.owned='synthetic-owned-device'
+                with patch.object(driver,'product_snapshot',side_effect=RuntimeError('synthetic admission reached')):
+                    with self.assertRaisesRegex(RuntimeError,'synthetic admission reached'):
+                        driver.run_case(*driver.case)
+                entry=driver.report['cases'][0]
+                self.assertEqual(entry['status'],'started')
+                self.assertEqual(entry['admission']['required_seconds'],1487)
+                self.assertAlmostEqual(entry['admission']['remaining_seconds'],2160-elapsed)
+                self.assertEqual(driver.case[3],900)
+                self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
                 self.assertEqual(world.processes,[])
 
     def test_observed_RU_remaining357_is_not_admitted_or_spawned(self):
@@ -612,7 +644,7 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(world.processes,[]);self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
 
     def test_actual_test_command_rechecks_full_wait_stop_and_post_budget_before_spawn(self):
-        for locale,allowance,work in [('en-US',900,2100),('ru-RU',900,2100)]:
+        for locale,allowance,work in [('en-US',900,2160),('ru-RU',900,2400)]:
             with self.subTest(locale=locale):
                 driver,world=self.driver(locale=locale,delay=1)
                 world.t=work-allowance-7-ipad.CASE_POST_SECONDS
@@ -667,13 +699,13 @@ class DriverTests(unittest.TestCase):
         self.assertGreater(world.t, 201 + 360)
         self.assertLess(world.t, 201 + 480)
         self.assertFalse(any(call[0].startswith('signal_') for call in world.calls))
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2400, 2580))
         self.assertEqual(driver.case[3], 900)
         self.assertGreater(driver.work_deadline - world.t, 1487)
 
     def test_extended_build_does_not_admit_case_without_full_remaining_budget(self):
         driver, world = self.driver(locale='ru-RU', delay=420)
-        world.t = 201
+        world.t = 501  # Same 1479s remaining after the build under the RU window.
         driver.owned = 'synthetic-owned-device'
         actual = driver.command
         def command(argv, label, **kwargs):
@@ -689,11 +721,11 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(world.processes), 1)  # Build only: no partial native case.
         self.assertEqual(driver.report['cases'][0]['status'], 'not_admitted')
         self.assertEqual(driver.report['cases'][0]['admission']['required_seconds'], 1487)
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2400, 2580))
 
     def test_extended_build_still_stops_at_global_work_boundary(self):
         driver, world = self.driver(locale='ru-RU', delay=1000)
-        world.t = 1700
+        world.t = 2000
         driver.owned = 'synthetic-owned-device'
         actual = driver.command
         def command(argv, label, **kwargs):
@@ -703,9 +735,9 @@ class DriverTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'build-for-testing exceeded its finite timeout'):
                 driver.build_once()
         discover.assert_not_called()
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2093)
-        self.assertLessEqual(world.t, 2100)
-        self.assertEqual(driver.final_deadline, 2280)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2393)
+        self.assertLessEqual(world.t, 2400)
+        self.assertEqual(driver.final_deadline, 2580)
         self.assertEqual(driver.report['cases'], [])
         self.assertTrue(driver.report['process_stops'][-1]['group_absent'])
         self.assertEqual(len(world.processes), 1)
@@ -830,7 +862,7 @@ class DriverTests(unittest.TestCase):
             self.assertRegex(independent_lane,r'(?m)^    needs: \[scope\]$')
             self.assertIn("if: ${{ !cancelled() && (needs.scope.outputs.run != 'false' || needs.scope.outputs.reason != 'documentation-only') }}",independent_lane)
         self.assertIn('fail-fast: false',lane);self.assertIn('max-parallel: 2',lane)
-        for locale,step,job in [('en-US',40,52),('ru-RU',40,52)]:
+        for locale,step,job in [('en-US',41,53),('ru-RU',45,57)]:
             self.assertIn(f'- locale: {locale}\n            step_minutes: {step}\n            job_minutes: {job}',lane)
             profile=ipad.execution_profile('arm64',locale)
             self.assertEqual(step*60-profile['work_seconds']-profile['cleanup_seconds'],120)
@@ -885,7 +917,7 @@ class DriverTests(unittest.TestCase):
         self.assertGreaterEqual(world.t,45);self.assertLess(world.t,60)
         self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
         self.assertEqual(driver.report['cases'],[])
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
         self.assert_finished(driver)
 
     def test_installed_lookup60_applies_only_to_the_existing_four_lookup_calls(self):
@@ -910,12 +942,12 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.report['cases'],[]);self.assert_finished(driver)
 
     def test_installed_lookup60_is_clipped_to_global_work_and_preserves_cleanup(self):
-        driver,world,_=self.installed_fixture(delay=50);world.t=2060
+        driver,world,_=self.installed_fixture(delay=50);world.t=2120
         with self.assertRaisesRegex(RuntimeError,'exceeded its finite timeout'):
             driver.installed('ru-RU/installed-before',required=True)
-        self.assertEqual((self.row(driver)['timeout_seconds'],self.row(driver)['wait_deadline_monotonic']),(60,2093))
-        self.assertEqual(world.t,2093);self.assertFalse(driver.active)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((self.row(driver)['timeout_seconds'],self.row(driver)['wait_deadline_monotonic']),(60,2153))
+        self.assertEqual(world.t,2153);self.assertFalse(driver.active)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
         self.assertEqual(len(world.processes),1);self.assert_finished(driver)
 
     def test_installed_lookup60_still_rejects_wrong_bundle_or_changed_bytes(self):
@@ -947,12 +979,12 @@ class DriverTests(unittest.TestCase):
         self.root=original
 
     def test_installed_lookup60_with_only_stop_reserve_never_spawns(self):
-        driver,world,_=self.installed_fixture();world.t=2093
+        driver,world,_=self.installed_fixture();world.t=2153
         with self.assertRaisesRegex(RuntimeError,'Insufficient command/stop budget'):
             driver.installed('ru-RU/installed-before',required=True)
         self.assertEqual(world.processes,[]);self.assertFalse(driver.active)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
-        self.assertEqual(world.t,2093);self.assert_finished(driver)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
+        self.assertEqual(world.t,2153);self.assert_finished(driver)
 
     def test_generated_runner_requires_the_exact_built_bundle_identifier(self):
         driver,world=self.driver()
@@ -1189,7 +1221,7 @@ class DriverTests(unittest.TestCase):
         args=row['argv'];self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')
         self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
         self.assertEqual(args[args.index('-parallel-testing-enabled')+1],'NO')
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
         self.assert_finished(driver)
 
     def test_first_EN_timeout_keeps_one_attempt_and_existing_stop_reserve(self):
@@ -1219,7 +1251,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(args[args.index('-maximum-test-execution-time-allowance')+1],'480')
         self.assertEqual(args[args.index('-default-test-execution-time-allowance')+1],'180')
         self.assertEqual(args[args.index('-parallel-testing-enabled')+1],'NO')
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2160,2340))
         with self.assertRaisesRegex(RuntimeError,'no retry'):driver.run_case(*driver.case)
         self.assertEqual(len(world.processes),1)
 
@@ -1230,7 +1262,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.row(driver)['timeout_seconds'],900)
         self.assertEqual(driver.report['cases'][0]['system_content_size_expected'],
                          'accessibility-extra-extra-extra-large')
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2400,2580))
         self.assert_finished(driver)
 
     def test_RU_recorded_cold_start_plus_full_XCTest_ceiling_reaches_result_validation(self):
@@ -1271,28 +1303,28 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.report['cases'][0]['xcodebuild_exit_code'],0)
 
     def test_RU_ordinary_command_is_clipped_by_its_absolute_work_deadline(self):
-        driver,world=self.driver(locale='ru-RU',delay=float('inf'));world.t=2000
+        driver,world=self.driver(locale='ru-RU',delay=float('inf'));world.t=2300
         with self.assertRaisesRegex(RuntimeError,'finite timeout'):
             driver.command(['synthetic'],'bounded-tail',timeout=900)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],2093)
-        self.assertEqual(world.t,2093)
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'],2393)
+        self.assertEqual(world.t,2393)
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2400,2580))
         self.assertEqual(len(world.processes),1);self.assertFalse(driver.active)
         self.assert_finished(driver)
 
     def test_RU_cleanup_retains_180_seconds_and_does_not_renew_work(self):
-        driver,world=self.driver(locale='ru-RU');world.t=2100
+        driver,world=self.driver(locale='ru-RU');world.t=2400
         with self.assertRaisesRegex(RuntimeError,'Work deadline expired'):driver.checkpoint()
         driver.cleanup()
         self.assertTrue(driver.report['cleanup']['verified'])
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
-        world.t=2279.999;driver.checkpoint()
-        world.t=2280
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2400,2580))
+        world.t=2579.999;driver.checkpoint()
+        world.t=2580
         with self.assertRaisesRegex(RuntimeError,'Cleanup deadline expired'):driver.checkpoint()
         self.assertEqual(world.processes,[])
 
     def cleanup_with_new_shutdown_group(self, unconfirmed=False):
-        driver,world=self.driver(locale='ru-RU');world.t=2100
+        driver,world=self.driver(locale='ru-RU');world.t=2400
         driver.owned='11111111-2222-4333-8444-555555555555'
         self.assertFalse(driver.active)
         def spawn(argv, **kwargs):
@@ -1317,7 +1349,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.report['cleanup']['process_stop_errors'],[])
         self.assertEqual(driver.report['cleanup']['delete_exit_code'],0)
         self.assertTrue(driver.report['cleanup']['owned_uuid_absent'])
-        self.assertEqual((driver.work_deadline,driver.final_deadline),(2100,2280))
+        self.assertEqual((driver.work_deadline,driver.final_deadline),(2400,2580))
         self.assertFalse(any(name.startswith('signal_') for name,_ in world.calls))
         self.assert_finished(driver)
         return driver,world,failure
@@ -1369,7 +1401,7 @@ class DriverTests(unittest.TestCase):
         world.plan['delay'] = 0
         driver.command(['synthetic'], 'default')
         self.assertEqual(self.row(driver)['timeout_seconds'], 30)
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2160, 2340))
         self.assert_finished(driver)
 
     def initial_runtime(self, driver):
@@ -1395,7 +1427,7 @@ class DriverTests(unittest.TestCase):
                 driver.prepare()
         self.assertIsNone(driver.owned); self.assertIsNone(driver.intent)
         self.assertEqual(driver.report['cases'], [])
-        work=2100
+        work={'en-US':2160,'ru-RU':2400}[driver.case[0]]
         self.assertEqual((driver.work_deadline, driver.final_deadline), (work, work+180))
         self.assert_finished(driver)
         return failure.exception, reached, choose.called
@@ -1421,25 +1453,25 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(driver.active)
 
     def test_initial_runtime_wait_clips_to_work_minus_7_without_spending_cleanup(self):
-        driver, world = self.driver(delay=float('inf'), ignore_term=True); world.t = 2030
+        driver, world = self.driver(delay=float('inf'), ignore_term=True); world.t = 2090
         failure, reached, selected = self.initial_runtime(driver)
         self.assertIn('finite timeout', str(failure)); self.assertFalse(selected)
         self.assertEqual(reached, ['runtimes']); self.assertEqual(len(world.processes), 1)
         self.assertEqual(self.row(driver)['timeout_seconds'], 300)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2093)
-        self.assertEqual(driver.report['process_stops'][0]['deadline_monotonic'], 2100)
-        self.assertLessEqual(world.t, 2100); self.assertFalse(driver.active)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2153)
+        self.assertEqual(driver.report['process_stops'][0]['deadline_monotonic'], 2160)
+        self.assertLessEqual(world.t, 2160); self.assertFalse(driver.active)
 
     def test_initial_runtime_exact_clipped_deadline_is_not_inventory_success(self):
-        driver, world = self.driver(delay=63, output=b'{"runtimes": []}'); world.t = 2030
+        driver, world = self.driver(delay=63, output=b'{"runtimes": []}'); world.t = 2090
         failure, reached, selected = self.initial_runtime(driver)
         self.assertIn('finite timeout', str(failure))
-        self.assertEqual(world.t, 2093); self.assertFalse(selected)
+        self.assertEqual(world.t, 2153); self.assertFalse(selected)
         self.assertEqual(reached, ['runtimes']); self.assertFalse(driver.active)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2093)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2153)
 
     def test_initial_runtime_exact_7_remaining_never_spawns(self):
-        driver, world = self.driver(); world.t = 2093
+        driver, world = self.driver(); world.t = 2153
         failure, reached, selected = self.initial_runtime(driver)
         self.assertIn('Insufficient command/stop budget', str(failure))
         self.assertEqual(reached, ['runtimes']); self.assertFalse(selected)
@@ -1472,12 +1504,12 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(reached, ['runtimes', 'device-types'])
         self.assertGreaterEqual(world.t, 289); self.assertLess(world.t, 290)
         # Fixed synthetic intervening work; no native preparation is claimed.
-        world.t += 600
+        world.t += 900  # Preserve the same insufficient remaining case budget.
         with self.assertRaisesRegex(RuntimeError, 'no case started'):
             driver.run_case(*driver.case)
         self.assertEqual([case[3] for case in ipad.CASES], [900, 900])
         self.assertEqual(driver.report['cases'][0]['status'],'not_admitted')
-        self.assertEqual((driver.work_deadline, driver.final_deadline), (2100, 2280))
+        self.assertEqual((driver.work_deadline, driver.final_deadline), (2400, 2580))
         self.assertEqual(len(world.processes), 1); self.assertFalse(driver.active)
         self.assert_finished(driver)
 
@@ -1532,7 +1564,7 @@ class DriverTests(unittest.TestCase):
             try:driver.prepare()
             except RuntimeError as failure:error=failure
         self.assertIsNone(driver.discovery_deadline)
-        work = 4500 if architecture == 'x86_64' else 2100
+        work = 4500 if architecture == 'x86_64' else 2160
         self.assertEqual((driver.work_deadline,driver.final_deadline),(work,work+(360 if architecture == 'x86_64' else 180)))
         return driver,world,reached,error
 
@@ -1777,13 +1809,13 @@ class DriverTests(unittest.TestCase):
         self.assertTrue(driver.active)
 
     def test_remaining_exactly_7_refuses_spawn_and_finishes_metadata(self):
-        driver, world = self.driver(); world.t = 2093
+        driver, world = self.driver(); world.t = 2153
         with self.assertRaisesRegex(RuntimeError, 'Insufficient'): driver.command(['synthetic'], 'edge')
         self.assertEqual(world.processes, []); self.assertNotIn('owned_process_group', self.row(driver))
         self.assert_finished(driver)
 
     def test_receipt_time_before_spawn_cannot_consume_stop_reserve(self):
-        driver, world = self.driver(); world.t = 2092
+        driver, world = self.driver(); world.t = 2152
         original = driver.save
         def slow_save():
             original(); world.t += 1
@@ -1793,31 +1825,31 @@ class DriverTests(unittest.TestCase):
 
     def test_just_more_than_7_and_timeout_plus_7_preserve_global_reserve(self):
         driver, world = self.driver(delay=float('inf'))
-        world.t = 2092.99
+        world.t = 2152.99
         with self.assertRaisesRegex(RuntimeError, 'finite timeout'):
             driver.command(['synthetic'], 'tiny', timeout=60)
-        self.assertAlmostEqual(world.t, 2093)
+        self.assertAlmostEqual(world.t, 2153)
         self.assertLessEqual(world.t, driver.work_deadline); self.assertFalse(driver.active)
-        world.t = 2033
+        world.t = 2093
         with self.assertRaisesRegex(RuntimeError, 'finite timeout'):
             driver.command(['synthetic'], 'full', timeout=60)
-        self.assertEqual(world.t, 2093); self.assertEqual(len(world.processes), 2)
-        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2093)
+        self.assertEqual(world.t, 2153); self.assertEqual(len(world.processes), 2)
+        self.assertEqual(self.row(driver)['wait_deadline_monotonic'], 2153)
 
     def test_deadline_between_TERM_and_KILL_withholds_later_operations(self):
         driver, world = self.driver(delay=float('inf'), ignore_all=True, signal_seconds=7)
-        world.t = 2092
+        world.t = 2152
         with self.assertRaisesRegex(RuntimeError, 'finite timeout'): driver.command(['synthetic'], 'deadline')
-        self.assertEqual(world.t, 2100); self.assertTrue(driver.active)
+        self.assertEqual(world.t, 2160); self.assertTrue(driver.active)
         self.assertIn('stop deadline', self.row(driver)['stop_error'])
-        self.assertEqual(world.calls[-1], ('signal_15', 2093))
+        self.assertEqual(world.calls[-1], ('signal_15', 2153))
         self.assertFalse(any(name == 'signal_9' for name, _ in world.calls))
         self.assert_finished(driver)
 
     def test_cleanup_final_deadline_allows_no_probe_or_signal(self):
         driver, world = self.driver(delay=float('inf'), probe_error=PermissionError(errno.EPERM, 'denied'))
         with self.assertRaises(RuntimeError): driver.command(['synthetic'], 'hold')
-        before = list(world.calls); world.t = 2280
+        before = list(world.calls); world.t = 2340
         with self.assertRaisesRegex(RuntimeError, 'cleanup could not be confirmed'): driver.cleanup()
         self.assertEqual(world.calls, before); self.assertTrue(driver.active)
         self.assertFalse(driver.report['cleanup']['verified'])
