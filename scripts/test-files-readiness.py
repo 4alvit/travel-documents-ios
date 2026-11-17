@@ -696,7 +696,9 @@ final class Harness {
         if world.scenario == "changed-at-capture" { world.count = 2 }
     }
     func openNativeFilesRoot(_ app: XCUIApplication, initialTimeout: Duration) async throws -> Element {
-        precondition(initialTimeout == .seconds(30)); world.events.append("root")
+        let hosted = ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"]
+        let expected: Duration = ["hosted-intel-v1", "hosted-arm-v1"].contains(hosted ?? "") ? .seconds(45) : .seconds(30)
+        precondition(initialTimeout == expected); world.events.append("root")
         if world.scenario == "root-failed" { throw BatchTestFailure(message: "root") }
         if world.scenario == "saved-at-root" { world.saved = 1 }
         return Element(world, "picker")
@@ -774,7 +776,7 @@ class DirectRecoveryPreparationTests(unittest.TestCase):
         self.assertEqual(value['folderObservationSeconds'], ['30'])
         self.assertEqual(value['textObservationSeconds'], ['15'])
 
-    def test_validated_hosted_profile_selects_only_folder_observation_window(self):
+    def test_validated_hosted_profile_selects_bounded_root_and_folder_observation_windows(self):
         value = self.probe('ready', 'hosted-intel-v1')
         self.assertEqual(value['status'], ['passed'])
         self.assertEqual(value['folderObservationSeconds'], ['60'])

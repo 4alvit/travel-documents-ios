@@ -581,6 +581,9 @@ final class BatchImportUITests: XCTestCase {
             // recoveryConfiguration already validated the matching hosted opt-in.
             let initialObservationTimeout: Duration = Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
                 ? .seconds(60) : .seconds(30)
+            let rootObservationTimeout = Self.recoveryInitialRootObservationTimeout(
+                hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
+            )
             let textCompletionTimeout = Self.recoveryFolderTextObservationTimeout(
                 hosted: Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])
             )
@@ -599,7 +602,7 @@ final class BatchImportUITests: XCTestCase {
                       && source.element.isEnabled && source.element.isHittable,
                       app: app, "Recovery preparation has no unique live, unsaved export source")
             source.element.tap()
-            let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds(30))
+            let picker = try await openNativeFilesRoot(app, initialTimeout: rootObservationTimeout)
             try check(saved.count == 0 && !failed.exists, app: app,
                       "Recovery preparation unexpectedly exported a destination")
             try await createNativeEmptyFilesFolder(app, picker: picker, ownedFolder: recoveryFolder,
@@ -2030,6 +2033,11 @@ final class BatchImportUITests: XCTestCase {
 
     private static func recoveryFolderTextObservationTimeout(hosted: Bool) -> Duration {
         hosted ? .seconds(60) : .seconds(15)
+    }
+
+    private static func recoveryInitialRootObservationTimeout(hosted: Bool) -> Duration {
+        // A hosted AX observation took about 33.5s; retain the strict post-read deadline guard.
+        hosted ? .seconds(45) : .seconds(30)
     }
 
     private static func observeNativeFolderTextCompletion(

@@ -128,15 +128,23 @@ class SeedGuards(unittest.TestCase):
                     UI.index("    // Batch-only provider initialization.")]
         create, provider_only = recovery.split("        } else {",1)
         create = create.split("        if createFolder {",1)[1]
-        # Only direct cold preparation gets 45s; folder creation keeps 30s.
+        # Batch cold preparation keeps 45s; batchfolder keeps 30s.
+        # Recovery uses only its already-validated hosted 45s/manual 30s policy.
         # Provider-only preparation keeps its iPad-aware route and initial wait.
         remaining = UI
-        for name, caller, seconds in (("batch prepare",case,45),("batch folder",folder,30),("recovery create",create,30)):
+        for name, caller, seconds in (("batch prepare",case,45),("batch folder",folder,30)):
             with self.subTest(caller=name):
                 initial_call = f"let picker = try await openNativeFilesRoot(app, initialTimeout: .seconds({seconds}))"
                 self.assertEqual(caller.count(initial_call),1)
                 self.assertLess(caller.index("source.element.tap()"),caller.index(initial_call))
                 remaining = remaining.replace(caller,"",1)
+        recovery_call = "let picker = try await openNativeFilesRoot(app, initialTimeout: rootObservationTimeout)"
+        self.assertEqual(create.count(recovery_call), 1)
+        self.assertLess(create.index("source.element.tap()"), create.index(recovery_call))
+        self.assertIn("Self.recoveryInitialRootObservationTimeout(", create)
+        self.assertIn('Self.isHostedRecoveryProfile(ProcessInfo.processInfo.environment["TRIPDOCKET_RECOVERY_EXECUTION_PROFILE"])', create)
+        self.assertLess(recovery.index('try recoveryConfiguration(phase: "prepare")'), recovery.index("let rootObservationTimeout"))
+        remaining = remaining.replace(create, "", 1)
         self.assertNotIn("initialTimeout: .seconds(30)",remaining)
         self.assertNotIn("initialTimeout: .seconds(45)",remaining)
         self.assertNotIn("openNativeFilesRoot(",provider_only)
