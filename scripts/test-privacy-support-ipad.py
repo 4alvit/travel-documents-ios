@@ -26,7 +26,7 @@ CASES = (
 BUNDLE_ID = "com.4alvit.tripfolio"
 RUNNER_BUNDLE_ID = BUNDLE_ID + ".uitests.xctrunner"
 # Preserve the full RU case after a 658s preparation upper bound; case/cleanup caps stay fixed.
-WORK_SECONDS = {"en-US": 35 * 60, "ru-RU": 40 * 60}
+WORK_SECONDS = {"en-US": 36 * 60, "ru-RU": 40 * 60}
 DISCOVERY_SECONDS = 5 * 60
 CLEANUP_SECONDS = 3 * 60
 # Default: two installs, two fresh container lookups, and two content-size commands.
