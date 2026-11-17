@@ -276,3 +276,13 @@ Source is a Debug candidate, not acceptance of any Release binary.
 Offline self-check only:
 `python3 -B scripts/test-verify-recovery-evidence.py`.
 These synthetic temporary-byte tests do not run XCTest or validate PDF pixels.
+
+### Hosted initial Files observation
+
+Recovery preparation keeps a 45-second initial native Files observation only for
+the existing validated hosted Intel/ARM profiles; manual preparation keeps 30s.
+A hosted iOS 26.2 run spent about 33.5s in the initial AX observations, including
+a single slow final picker read. The strict post-observation deadline check,
+unique native navigation/picker checks and no-action-on-late-read rule remain.
+Other native routes, the 300-second hosted prepare XCTest allowance, 1200-second
+command cap and owned-device cleanup bounds are unchanged.

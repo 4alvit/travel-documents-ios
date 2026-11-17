@@ -235,6 +235,10 @@ typealias XCUIApplication = Node
             throw BatchTestFailure(message: message)
         }
     }
+    // ACTUAL_RECOVERY_POLICY
+    static func recoveryTimeout(_ profile: String?) -> Duration {
+        recoveryInitialRootObservationTimeout(hosted: isHostedRecoveryProfile(profile))
+    }
     // ACTUAL_WAIT
     func run(oldBranching: Bool, initialTimeout: Duration) async throws {
         let app = Node(script, "app")
@@ -259,11 +263,14 @@ typealias XCUIApplication = Node
         let samples = try JSONDecoder().decode([String: [Sample]].self, from: Data(args[0].utf8))
         let script = Script(samples)
         var accepted = false
-        let initialTimeout = Duration.seconds(Int(args[2])!)
+        let initialTimeout = args[2].hasPrefix("profile:")
+            ? Harness.recoveryTimeout(String(args[2].dropFirst(8)))
+            : Duration.seconds(Int(args[2])!)
         do { try await Harness(script).run(oldBranching: args[1] == "old",
                                           initialTimeout: initialTimeout); accepted = true }
         catch {}
-        let result: [String: Any] = ["accepted": accepted, "milliseconds": ContinuousClock.now.milliseconds,
+        let result: [String: Any] = ["accepted": accepted, "selectedSeconds": initialTimeout.components.seconds,
+                                    "milliseconds": ContinuousClock.now.milliseconds,
                                     "calls": script.calls, "captures": script.captures]
         print(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self))
     }
@@ -282,19 +289,51 @@ class InitialNativeRootReadiness(unittest.TestCase):
         initial_wait = route[start:route.index("        if !browserReady()", start)]
         predicates = route[route.index("        let browseReady ="):start]
         actual_wait = helper("    private func wait(", "    private func check(")
-        source = (READINESS_FIXTURE.replace("    // ACTUAL_WAIT", actual_wait)
+        policy = helper("    private static func recoveryInitialRootObservationTimeout(",
+                        "    private static func observeNativeFolderTextCompletion(")
+        policy += helper("    private static func isHostedRecoveryProfile(", "    private func recoveryTab(")
+        source = (READINESS_FIXTURE.replace("    // ACTUAL_RECOVERY_POLICY", policy)
+                  .replace("    // ACTUAL_WAIT", actual_wait)
                   .replace("        // ACTUAL_PREDICATES", predicates)
                   .replace("            // ACTUAL_INITIAL_WAIT", initial_wait))
         swift = temp / "Readiness.swift"; swift.write_text(source)
         subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(cls.binary)],
                        check=True, capture_output=True, text=True, timeout=60)
 
-    def run_predicate(self, samples, old=False, timeout=15):
+    def run_predicate(self, samples, old=False, timeout=15, profile=None):
         encoded = {key: [{"value": value, "milliseconds": cost} for value, cost in values]
                    for key, values in samples.items()}
-        result = subprocess.run([str(self.binary), json.dumps(encoded), "old" if old else "current", str(timeout)],
+        result = subprocess.run([str(self.binary), json.dumps(encoded), "old" if old else "current",
+                                 "profile:" + profile if profile is not None else str(timeout)],
                                 check=True, capture_output=True, text=True, timeout=5)
         return json.loads(result.stdout)
+
+    def test_hosted_recovery_policy_admits_measured_slow_query_without_late_action(self):
+        # Exact a2 query-start intervals include polling overhead, so replaying
+        # them as RPC costs plus sleeps is deliberately conservative (~33.8s).
+        samples = {"navigation.count": [(0, 600), (0, 430), (0, 7350), (1, 3130)],
+                   "picker.count": [(1, 7030)], "picker.exists": [(1, 14950)]}
+        manual = self.run_predicate(samples, timeout=30)
+        self.assertFalse(manual["accepted"])
+        for profile in ("hosted-intel-v1", "hosted-arm-v1"):
+            with self.subTest(profile=profile):
+                value = self.run_predicate(samples, profile=profile)
+                self.assertEqual(value["selectedSeconds"], 45)
+                self.assertTrue(value["accepted"])
+                self.assertGreater(value["milliseconds"], 33000)
+                self.assertLess(value["milliseconds"], 45000)
+                for late in (45000, 45001):
+                    boundary = {"navigation.count": [(1, 0)], "picker.count": [(1, 0)],
+                                "picker.exists": [(1, late)]}
+                    refused = self.run_predicate(boundary, profile=profile)
+                    self.assertFalse(refused["accepted"])
+                    self.assertEqual(refused["captures"], 1)
+                ambiguous = {"navigation.count": [(1, 0)], "picker.count": [(2, 45000)]}
+                self.assertFalse(self.run_predicate(ambiguous, profile=profile)["accepted"])
+        for profile in ("", "manual-intel-v1", "hosted", "unknown"):
+            value = self.run_predicate(samples, profile=profile)
+            self.assertEqual(value["selectedSeconds"], 30)
+            self.assertFalse(value["accepted"])
 
     def test_late_browser_transition_is_not_misclassified_as_recents(self):
         # C26's last nav0 then slow nav1/picker1 observations, with measured
